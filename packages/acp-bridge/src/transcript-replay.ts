@@ -486,13 +486,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload && typeof payload['displayText'] === 'string'
           ? payload['displayText']
           : undefined;
+      const backgroundTask =
+        payload && isObjectRecord(payload['backgroundTask'])
+          ? payload['backgroundTask']
+          : undefined;
       if (displayText) {
+        const isNotification = record.subtype === 'notification';
         yield emit(
           createTranscriptMessageUpdate({
             role: 'user',
             text: displayText,
             ...meta,
-            ...(record.subtype === 'cron' ? { extra: { source: 'cron' } } : {}),
+            ...(isNotification
+              ? {
+                  extra: {
+                    source: 'background_notification',
+                    qwenDiscreteMessage: true,
+                    ...(backgroundTask ? { backgroundTask } : {}),
+                  },
+                }
+              : record.subtype === 'cron'
+                ? { extra: { source: 'cron' } }
+                : {}),
           }),
         );
         return;

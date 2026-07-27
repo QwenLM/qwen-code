@@ -62,6 +62,75 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
+// Spawns the real proxy against a streaming upstream (20 chunks, 200 ms
+// apart = 4 s total) and a stalling upstream (headers + one chunk, then
+// silence), with the proxy's 120 s watchdog shortened to 1.5 s. The healthy
+// stream spans longer than the idle window while each gap stays under it, so
+// it arrives in full only if the watchdog is idle (refreshed per chunk) and
+// not a total cap; and a mid-body stall must CLOSE the downstream response,
+// not strand the client on a silent socket until its own timeout.
+function runProxyWatchdogTest(proxy) {
+  const dir = mkdtempSync(join(tmpdir(), 'proxy-watchdog-'));
+  try {
+    writeFileSync(
+      join(dir, 'proxy.js'),
+      proxy.replace(/^ {10}/gm, '').replaceAll('120_000', '1500'),
+    );
+    writeFileSync(
+      join(dir, 'stream.js'),
+      [
+        "const http = require('node:http');",
+        "const fs = require('node:fs');",
+        'const NL = String.fromCharCode(10);',
+        'const ticks = Number(process.argv[3]);',
+        'const tickMs = Number(process.argv[4]);',
+        'const s = http.createServer((q, r) => {',
+        "  r.writeHead(200, { 'content-type': 'text/event-stream' });",
+        '  let i = 0;',
+        '  const iv = setInterval(() => {',
+        "    r.write('data: ' + i++ + NL + NL);",
+        '    if (i >= ticks) { clearInterval(iv); r.end(); }',
+        '  }, tickMs);',
+        '});',
+        "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'stall.js'),
+      [
+        "const http = require('node:http');",
+        "const fs = require('node:fs');",
+        'const NL = String.fromCharCode(10);',
+        'const s = http.createServer((q, r) => {',
+        "  r.writeHead(200, { 'content-type': 'text/event-stream' });",
+        "  r.write('data: 0' + NL + NL);",
+        '});',
+        "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+      ].join('\n'),
+    );
+    const driver = [
+      'set -u',
+      'node "$1/stream.js" "$1/stream.port" 20 200 & STREAM=$!',
+      'node "$1/stall.js" "$1/stall.port" & STALL=$!',
+      'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/stream.port" ] && [ -s "$1/stall.port" ] && break; sleep 0.3; done',
+      'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/stream.port")/v1" REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken node "$1/proxy.js" "$1/px.port" & PX=$!',
+      'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/stall.port")/v1" REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken node "$1/proxy.js" "$1/px2.port" & PX2=$!',
+      'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px.port" ] && [ -s "$1/px2.port" ] && break; sleep 0.3; done',
+      'P="$(cat "$1/px.port")"; P2="$(cat "$1/px2.port")"',
+      'echo "chunks=$(curl -sS --max-time 15 -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P/v1/chat/completions" | grep -c "^data:")"',
+      'curl -sS -o /dev/null --max-time 10 -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P2/v1/chat/completions"',
+      'echo "stall_exit=$?"',
+      'kill $STREAM $STALL $PX $PX2 2>/dev/null',
+    ].join('\n');
+    return spawnSync('bash', ['-c', driver, '_', dir], {
+      encoding: 'utf8',
+      timeout: 60000,
+    }).stdout;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe('qwen-triage tmux workflow', () => {
   it('does not require fork PR authors to have write permission for automatic triage', () => {
     const precheckJob = job('precheck-pr');
@@ -110,7 +179,10 @@ describe('qwen-triage tmux workflow', () => {
     expect(postStep).toContain('html_escape()');
     expect(postStep).toContain("tr -d '\\000'");
     expect(postStep).toContain('Log could not be rendered');
-    expect(postStep).toContain('if ! content="$(');
+    // The escape now writes to a file and the cap is applied afterwards, so
+    // the guarantee is "a render failure is caught", not the old inline
+    // capture shape. See the tmux-lane-parity suite for the cap itself.
+    expect(postStep).toContain('html_escape > "$esc_file"');
     expect(postStep).toContain('set -o pipefail');
     expect(postStep).toContain('::warning::emit_block failed');
     expect(postStep).toContain(
@@ -2025,6 +2097,18 @@ describe('qwen-triage verify maintainer-review round', () => {
           "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
         ].join('\n'),
       );
+      writeFileSync(
+        join(dir, 'deadport.js'),
+        [
+          "const net = require('node:net');",
+          "const fs = require('node:fs');",
+          'const s = net.createServer();',
+          "s.listen(0, '127.0.0.1', () => {",
+          '  const p = s.address().port;',
+          '  s.close(() => fs.writeFileSync(process.argv[2], String(p)));',
+          '});',
+        ].join('\n'),
+      );
       const driver = [
         'set -u',
         'node "$1/upstream.js" "$1/up.port" & UP=$!',
@@ -2040,7 +2124,16 @@ describe('qwen-triage verify maintainer-review round', () => {
         'echo "wrong=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer nope" -d {} "$U")"',
         'echo "right=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "$U")"',
         'echo "otherpath=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P/v1/models")"',
-        'kill $UP $PX 2>/dev/null',
+        'node "$1/deadport.js" "$1/dead.port"',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/dead.port" ] && break; sleep 0.3; done',
+        'DEAD="$(cat "$1/dead.port")"',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$DEAD/v1" REVIEW_OPENAI_API_KEY=realkey \\',
+        '  QWEN_PROXY_NONCE=nonce123 PROXY_TOKEN=tok456 node "$1/proxy.js" "$1/px2.port" & PX2=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px2.port" ] && break; sleep 0.3; done',
+        'P2="$(cat "$1/px2.port")"',
+        'echo "dead=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'echo "dead2=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'kill $UP $PX $PX2 2>/dev/null',
       ].join('\n');
       const out = spawnSync('bash', ['-c', driver, '_', dir], {
         encoding: 'utf8',
@@ -2054,9 +2147,34 @@ describe('qwen-triage verify maintainer-review round', () => {
       // ...and reachable with it, on the one allowed route.
       expect(out).toContain('right=200');
       expect(out).toContain('otherpath=403');
+      // A dead upstream must surface as a 502 the agent can read, not crash
+      // the proxy: the outer catch clears the hoisted timer (a ReferenceError
+      // here would kill the process and turn qwen's next completion into a
+      // false fail verdict), and the process serves the following request.
+      expect(out).toContain('dead=502');
+      expect(out).toContain('dead2=502');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The watchdog must be an IDLE timer, not a total one: fetch() resolves on
+  // headers and a completion can stream for minutes (qwen tolerates 240 s of
+  // silence, DEFAULT_STREAM_IDLE_TIMEOUT_MS). A total cap truncated healthy
+  // long completions, and firing it mid-body never terminated the downstream
+  // response, so the client sat on a silent socket.
+  it('treats the verify proxy watchdog as idle and ends a stalled response', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+    const out = runProxyWatchdogTest(proxy);
+    // 20 chunks at 200 ms span 4 s, longer than the 1.5 s idle window, yet
+    // all arrive: the watchdog refreshes per chunk, so a healthy stream is
+    // not cut.
+    expect(out).toContain('chunks=20');
+    // A mid-body stall closes the response (curl 18), not a hang until the
+    // client's own timeout (curl 28).
+    expect(out).toContain('stall_exit=18');
   });
 
   // GitHub cancels the OLDER pending run in a concurrency group, so the
@@ -2070,6 +2188,12 @@ describe('qwen-triage verify maintainer-review round', () => {
     // The fallback has to live where the value is READ.
     expect(publishJob).toContain(
       'needs.verify.outputs.pr_number || github.event.issue.number',
+    );
+    // Same one-line class in the tmux sibling: a job cancelled while
+    // pending never evaluates its outputs either, so without the fallback
+    // publish-tmux hits the same null guard and posts nothing.
+    expect(job('publish-tmux')).toContain(
+      'needs.tmux-testing.outputs.pr_number || github.event.issue.number',
     );
     // ...and the step that warned on the inverted premise is gone.
     expect(job('authorize')).not.toContain('Report saturated verify queue');
@@ -2200,8 +2324,338 @@ describe('qwen-triage verify maintainer-review round', () => {
   // Upstream failure text can name resolved hosts and TLS detail; the agent
   // only needs to know the call failed.
   it('does not forward upstream error text to the agent', () => {
-    const runStep = stepIn('verify', 'Run verification agent');
-    expect(runStep).toContain("res.end('proxy error: upstream request failed");
-    expect(runStep).not.toContain('proxy error: ${error instanceof Error');
+    // Both lanes share the proxy design and must both keep upstream
+    // topology out of the agent's error text.
+    for (const [jobName, stepName] of [
+      ['verify', 'Run verification agent'],
+      ['tmux-testing', 'Run tmux real-user testing'],
+    ]) {
+      const runStep = stepIn(jobName, stepName);
+      expect(runStep).toContain(
+        "res.end('proxy error: upstream request failed",
+      );
+      expect(runStep).not.toContain('proxy error: ${error instanceof Error');
+    }
+  });
+});
+
+describe('qwen-triage tmux lane parity', () => {
+  // The verify lane earned these controls the hard way; the tmux lane
+  // executes the same untrusted PR code on the same persistent pool, so
+  // leaving them out was a gap rather than a scope boundary.
+
+  // A fixed proxy port is squattable by a detached lifecycle process: the
+  // real proxy dies EADDRINUSE while the health probe succeeds against the
+  // squatter, and the agent takes ITS chat completions.
+  it('binds the tmux model proxy to an ephemeral port and authenticates it', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    expect(runStep).not.toContain('proxy_port=8787');
+    expect(runStep).toContain("server.listen(0, '127.0.0.1'");
+    expect(runStep).toContain('QWEN_PROXY_NONCE');
+    expect(runStep).toContain('!= "$proxy_nonce"');
+    expect(runStep).toContain('kill -0 "$OPENAI_PROXY_PID"');
+    expect(runStep).toContain('PROXY_TOKEN');
+    expect(runStep).toContain('proxy: unauthorized');
+    // The agent must actually present this run's token: reverting the env
+    // wire to a literal makes every completion 401 and turns the verdict
+    // into a false 'fail'. Assert the wire, not just the gate's presence.
+    expect(runStep).toContain('"OPENAI_API_KEY=$PROXY_TOKEN"');
+
+    // Execute the real proxy and prove the nonce + bearer token work.
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-proxy-'));
+    try {
+      writeFileSync(join(dir, 'proxy.js'), proxy.replace(/^ {10}/gm, ''));
+      writeFileSync(
+        join(dir, 'upstream.js'),
+        [
+          "const http = require('node:http');",
+          "const fs = require('node:fs');",
+          "const s = http.createServer((q, r) => { r.writeHead(200); r.end('{}'); });",
+          "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(dir, 'deadport.js'),
+        [
+          "const net = require('node:net');",
+          "const fs = require('node:fs');",
+          'const s = net.createServer();',
+          "s.listen(0, '127.0.0.1', () => {",
+          '  const p = s.address().port;',
+          '  s.close(() => fs.writeFileSync(process.argv[2], String(p)));',
+          '});',
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        'node "$1/upstream.js" "$1/up.port" & UP=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/up.port" ] && break; sleep 0.3; done',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/up.port")/v1" \\',
+        '  REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken \\',
+        '  node "$1/proxy.js" "$1/px.port" & PX=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px.port" ] && break; sleep 0.3; done',
+        'P="$(cat "$1/px.port")"',
+        'echo "port=$P"',
+        'echo "health=$(curl -sS "http://127.0.0.1:$P/__health")"',
+        'echo "unauth=$(curl -sS -o /dev/null -w %{http_code} -X POST "http://127.0.0.1:$P/v1/chat/completions")"',
+        'echo "auth=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P/v1/chat/completions")"',
+        'echo "wrong=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer nope" "http://127.0.0.1:$P/v1/chat/completions")"',
+        'node "$1/deadport.js" "$1/dead.port"',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/dead.port" ] && break; sleep 0.3; done',
+        'DEAD="$(cat "$1/dead.port")"',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$DEAD/v1" \\',
+        '  REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken \\',
+        '  node "$1/proxy.js" "$1/px2.port" & PX2=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px2.port" ] && break; sleep 0.3; done',
+        'P2="$(cat "$1/px2.port")"',
+        'echo "dead=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'echo "dead2=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'kill $UP $PX $PX2 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 60000,
+      }).stdout;
+      // An OS-chosen port, identity proven by the nonce, and bearer-token
+      // gate rejecting unauthenticated callers.
+      expect(out).toMatch(/port=\d+/);
+      expect(out).toContain('health=n0nce');
+      expect(out).toContain('unauth=401');
+      expect(out).toContain('auth=200');
+      // The gate exists for the wrong-token case: a prefix match would let
+      // any 'Bearer ...' caller spend the real key.
+      expect(out).toContain('wrong=401');
+      // A dead upstream is a 502, not a crashed proxy: the outer catch must
+      // clear the hoisted timer without a ReferenceError and survive to serve
+      // the next call, or qwen's next completion hangs and the run maps the
+      // infrastructure fault to a false fail verdict.
+      expect(out).toContain('dead=502');
+      expect(out).toContain('dead2=502');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Same regression as the verify lane, asserted here because this PR carries
+  // the proxy across to tmux: the watchdog is idle (refreshed per chunk) and a
+  // mid-body stall terminates the response instead of stranding the client.
+  it('treats the tmux proxy watchdog as idle and ends a stalled response', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+    const out = runProxyWatchdogTest(proxy);
+    expect(out).toContain('chunks=20');
+    expect(out).toContain('stall_exit=18');
+  });
+
+  // PR lifecycle scripts run before the agent and can plant a
+  // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
+  // collector would hand to the publisher.
+  it('sweeps planted tmux artifacts before the agent starts', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    const sweep =
+      "find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} +";
+    const sweepAt = runStep.indexOf(sweep);
+    expect(sweepAt).toBeGreaterThan(-1);
+    // Before the proxy and the agent launch, after the build.
+    expect(sweepAt).toBeLessThan(runStep.indexOf('start_openai_proxy'));
+    // The sweep must not descend through a PR-planted `tmp` symlink: the
+    // same root-owned escape the .qwen cleanup guards against.
+    const guardAt = runStep.indexOf('if [ -L tmp ]; then');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(sweepAt);
+  });
+
+  // The global install must not read the previous PR's .npmrc: a --registry
+  // flag does not override script-shell or hooks.
+  it('runs the tmux global install away from the checked-out tree', () => {
+    expect(stepIn('tmux-testing', 'Install tmux runner tools')).toContain(
+      '(cd "${RUNNER_TEMP:?}" && npm install -g',
+    );
+  });
+
+  // Cleanup must not descend through a PR-writable parent. Both the
+  // pre-checkout step and the end-of-job step need the guard: the
+  // pre-checkout site runs as root against the previous run's PR-written
+  // tree before actions/checkout cleans anything.
+  it('unlinks tmux-lane symlinks instead of globbing through them', () => {
+    const preCheckout = stepIn('tmux-testing', 'Clean stale review worktrees');
+    expect(preCheckout).toContain('[ -L .qwen ] && rm -f .qwen');
+    expect(preCheckout).toContain('if [ -L .qwen/tmp ]; then');
+    const endOfJob = stepIn('tmux-testing', 'Clean up runner workspace');
+    expect(endOfJob).toContain('[ -L .qwen ] && rm -f .qwen');
+    expect(endOfJob).toContain('if [ -L .qwen/tmp ]; then');
+  });
+
+  // cp -r copies symlinks as symlinks, but actions/upload-artifact follows
+  // them — a node-planted link would exfiltrate its target into the artifact
+  // and then into the public PR comment.
+  it('strips symlinks from collected tmux artifacts', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    const collect = runStep.indexOf('cp -r {} "$RUNNER_TEMP/tmux-results/"');
+    expect(collect).toBeGreaterThan(-1);
+    const strip = runStep.indexOf(
+      'find "$RUNNER_TEMP/tmux-results" -type l -delete',
+    );
+    expect(strip).toBeGreaterThan(collect);
+  });
+
+  // Escaping inflates & < > by 4-5 bytes each, so a raw-side cap can push
+  // the assembled comment past GitHub's 65,536-char limit and 422 the post.
+  it('caps the tmux comment after escaping, on a character boundary', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    const escFirst = publish.indexOf('html_escape > "$esc_file"');
+    expect(escFirst).toBeGreaterThan(-1);
+    expect(publish).toContain('TextDecoder');
+    expect(publish).not.toContain('head -c "$max" "$file" | tr -d');
+
+    // Execute it: dense metacharacter content must stay under the cap and
+    // remain valid UTF-8.
+    const script = publish
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    const helpers = script.slice(
+      script.indexOf('html_escape()'),
+      script.indexOf('if [ "${TMUX_RESULT:-}"'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-emit-'));
+    try {
+      const dense = join(dir, 'dense.log');
+      writeFileSync(dense, '<T<U>>&'.repeat(7300));
+      const utf8 = join(dir, 'utf8.log');
+      // One ASCII byte of padding so the cut lands inside a 3-byte char.
+      writeFileSync(utf8, `x${'验证证据链路测试'.repeat(8000)}`);
+      const emit = (file) => {
+        const proc = spawnSync(
+          'bash',
+          ['-c', `${helpers}\nemit_block 'Log' "$1" 20000`, '_', file],
+          { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 },
+        );
+        expect(proc.status).toBe(0);
+        return proc.stdout;
+      };
+      const capped = emit(dense);
+      expect(Buffer.byteLength(capped)).toBeLessThan(65536);
+      expect(capped).toContain('truncated');
+      const cut = emit(utf8);
+      expect(cut).not.toContain('\ufffd');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A detached lifecycle child can outlive the build step and the one-shot
+  // sweep, re-planting artifacts or scanning localhost for the model proxy.
+  // The verify lane kills the build user's processes before any cleanup; the
+  // tmux lane runs the same untrusted code on the same pool and must too.
+  it('kills surviving build-user processes before the tmux agent starts', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    expect(runStep).toContain('pkill -KILL -u node');
+    expect(runStep).toContain(
+      'Processes owned by the build user survived; refusing to start the agent.',
+    );
+    // Before the sweep and the proxy: the cleanup must not race a live
+    // process, and no leftover child may be alive when the proxy binds.
+    const killAt = runStep.indexOf('pkill -KILL -u node');
+    expect(killAt).toBeGreaterThan(-1);
+    expect(killAt).toBeLessThan(
+      runStep.indexOf("find tmp -maxdepth 2 -type d -name '*-tmux-*'"),
+    );
+    expect(killAt).toBeLessThan(runStep.indexOf('start_openai_proxy'));
+  });
+
+  // publish-verify bounds itself so a hung gh call cannot hold a hosted
+  // runner for the 360-minute default; publish-tmux posts the same way.
+  it('bounds the publish-tmux job with a timeout', () => {
+    const publish = job('publish-tmux');
+    expect(publish).toMatch(/timeout-minutes: \d+/);
+    const minutes = Number(publish.match(/timeout-minutes: (\d+)/)?.[1]);
+    expect(minutes).toBeGreaterThan(0);
+    expect(minutes).toBeLessThanOrEqual(30);
+  });
+
+  // A per-RUN concurrency group (not per-PR) stops two publish-tmux jobs in
+  // the same run racing the post, while never letting a newer run cancel a
+  // completed run's pending publisher and drop its report. Parity with
+  // publish-verify.
+  it('serializes publish-tmux with a per-run concurrency group', () => {
+    const publish = job('publish-tmux');
+    expect(publish).toContain('concurrency:');
+    expect(publish).toContain('publish-tmux-{1}');
+    expect(publish).toContain('cancel-in-progress: false');
+  });
+
+  // The publisher must select the agent's report by TYPE and anchored PATH,
+  // not a loose `-name report.md | head -1`: a planted DIRECTORY named
+  // report.md that sorted ahead of the real one won the old predicate, and
+  // emit_block's [ -f ] guard then dropped the report silently while the
+  // non-empty REPORT string suppressed the missing-artifact note. Parity
+  // with the verify lane's predicate.
+  it('selects tmux artifacts by type and path, ignoring planted directories', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    expect(publish).toContain(
+      "find tmux-results -mindepth 2 -type f -path '*-tmux-*/report.md' 2>/dev/null | sort | head -1",
+    );
+    expect(publish).toContain(
+      "find tmux-results -mindepth 2 -type f -path '*-tmux-*/tmux-readable-full.log' 2>/dev/null | sort | head -1",
+    );
+
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-select-'));
+    try {
+      // A planted directory named report.md that sorts FIRST.
+      mkdirSync(join(dir, 'tmux-results/AAA-planted-tmux-0/report.md'), {
+        recursive: true,
+      });
+      mkdirSync(join(dir, 'tmux-results/real-tmux-1'), { recursive: true });
+      writeFileSync(
+        join(dir, 'tmux-results/real-tmux-1/report.md'),
+        '## real report\n',
+      );
+      const out = spawnSync(
+        'bash',
+        [
+          '-c',
+          "find tmux-results -mindepth 2 -type f -path '*-tmux-*/report.md' 2>/dev/null | sort | head -1",
+        ],
+        { encoding: 'utf8', cwd: dir },
+      ).stdout.trim();
+      expect(out).toBe('tmux-results/real-tmux-1/report.md');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Dedup must PATCH only a BOT-OWNED comment STARTING with the marker.
+  // contains() with no author filter let a human reviewer who quoted the
+  // marker have their comment overwritten by the bot's PAT (#7723). Fail
+  // closed on identity, same as publish-verify.
+  it('dedups the tmux comment on a bot-owned prefix match, fail-closed', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    expect(publish).toContain('startswith("<!-- qwen-triage:tmux -->")');
+    expect(publish).toContain('.user.login == $bot');
+    expect(publish).not.toContain('contains("<!-- qwen-triage:tmux -->")');
+    expect(publish).toContain("gh api user --jq '.login'");
+  });
+
+  // GitHub 422s a comment over 65,536 chars and posts nothing. The invariant
+  // is the SUM of the two block caps plus the envelope, not any single block:
+  // a single-block assertion passes for any cap under ~65,000, so bumping the
+  // transcript cap from 30000 to 60000 would 422 the post undetected.
+  it('keeps the sum of the tmux block caps under the comment limit', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    const reportCap = Number(
+      publish.match(/emit_block 'E2E test report' "\$REPORT" (\d+)/)?.[1],
+    );
+    const transcriptCap = Number(
+      publish.match(
+        /emit_block 'Full tmux transcript' "\$TRANSCRIPT" (\d+)/,
+      )?.[1],
+    );
+    expect(reportCap).toBeGreaterThan(0);
+    expect(transcriptCap).toBeGreaterThan(0);
+    const envelope = 4096; // verdict header, description, markers, signature
+    expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
 });

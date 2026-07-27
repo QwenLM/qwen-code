@@ -134,6 +134,45 @@ describe('createTranscriptReplayMachine', () => {
     );
   });
 
+  it('preserves task notification metadata during replay', () => {
+    const machine = createTranscriptReplayMachine();
+    const projected = updates(
+      machine,
+      record('notification-1', 'user', {
+        subtype: 'notification',
+        message: {
+          role: 'user',
+          parts: [{ text: '<task-notification />' }],
+        },
+        systemPayload: {
+          displayText: 'Background agent completed.',
+          backgroundTask: {
+            taskId: 'task-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'Background agent completed.' },
+        _meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'task-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+          qwenTranscript: { sourceRecordIds: ['notification-1'] },
+        },
+      },
+    ]);
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(

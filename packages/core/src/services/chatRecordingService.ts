@@ -393,6 +393,12 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+  backgroundTask?: {
+    taskId: string;
+    status: string;
+    kind: 'agent' | 'monitor' | 'shell';
+    toolUseId?: string;
+  };
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -1293,7 +1299,13 @@ export class ChatRecordingService {
     displayText?: string,
     goalContext?: GoalTurnPermit,
   ): void {
-    this.recordNotificationLike(message, 'cron', displayText, goalContext);
+    this.recordNotificationLike(
+      message,
+      'cron',
+      displayText,
+      undefined,
+      goalContext,
+    );
   }
 
   /**
@@ -1304,12 +1316,14 @@ export class ChatRecordingService {
   recordNotification(
     message: PartListUnion,
     displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
   ): void {
     this.recordNotificationLike(
       message,
       'notification',
       displayText,
+      backgroundTask,
       goalContext,
     );
   }
@@ -1318,6 +1332,7 @@ export class ChatRecordingService {
     message: PartListUnion,
     subtype: 'notification' | 'cron',
     displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
   ): void {
     try {
@@ -1328,7 +1343,7 @@ export class ChatRecordingService {
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         systemPayload: displayText
-          ? ({ displayText } as NotificationRecordPayload)
+          ? ({ displayText, backgroundTask } as NotificationRecordPayload)
           : undefined,
       };
       this.appendRecord(record);

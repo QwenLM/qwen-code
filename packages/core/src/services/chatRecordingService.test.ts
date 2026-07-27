@@ -305,6 +305,11 @@ describe('ChatRecordingService', () => {
       chatRecordingService.recordNotification(
         [{ text: 'dependency completed' }],
         'Dependency completed',
+        {
+          taskId: 'task-1',
+          status: 'completed',
+          kind: 'agent',
+        },
         permit,
       );
       permit.turnId = 'mutated';
@@ -318,6 +323,14 @@ describe('ChatRecordingService', () => {
           goalId: 'goal-1',
           revision: 2,
           turnId: 'turn-notification',
+        },
+        systemPayload: {
+          displayText: 'Dependency completed',
+          backgroundTask: {
+            taskId: 'task-1',
+            status: 'completed',
+            kind: 'agent',
+          },
         },
       });
     });
