@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   LEGACY_MARKER_PREFIX,
+  MAX_BODY_TESTS,
   MAX_OCCURRENCES,
+  MAX_SEARCH_MARKERS,
   OCCURRENCE_MARKER,
   TEST_MARKER_PREFIX,
   analyzeLogs,
@@ -40,6 +42,17 @@ test('extracts pytest node ids without the varying error message', () => {
   ].join('\n');
   assert.deepEqual(extractFailingTests(log), [
     'packages/sdk-python/tests/test_client.py::test_stream',
+  ]);
+});
+
+test('keeps the full pytest node id when parameters contain spaces', () => {
+  const log = [
+    'FAILED tests/t.py::test_x[case one] - AssertionError: boom',
+    'FAILED tests/t.py::test_x[case two] - AssertionError: boom',
+  ].join('\n');
+  assert.deepEqual(extractFailingTests(log), [
+    'tests/t.py::test_x[case one]',
+    'tests/t.py::test_x[case two]',
   ]);
 });
 
@@ -157,6 +170,29 @@ test('creates a body carrying every dedupe marker and the first recurrence', () 
     body.includes(
       '- `af7a9ec12722` · 2026-07-27T02:42:08Z · [run 301](https://github.com/QwenLM/qwen-code/actions/runs/301)',
     ),
+  );
+});
+
+test('the body stays bounded on a total-suite failure', () => {
+  const log = Array.from(
+    { length: 400 },
+    (_unused, index) => ` FAIL  cli/suite.test.ts > case ${index}`,
+  ).join('\n');
+  const analysis = analyzeLogs('E2E Tests', [log]);
+  assert.equal(analysis.tests.length, 400);
+
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(
+    body.length < 65536,
+    `body is ${body.length} chars, must stay under GitHub's 65,536 limit`,
+  );
+  assert.ok(body.includes(`- …and ${400 - MAX_BODY_TESTS} more`));
+  const markerCount = (
+    body.match(new RegExp(TEST_MARKER_PREFIX, 'g')) ?? []
+  ).length;
+  assert.ok(
+    markerCount <= MAX_SEARCH_MARKERS,
+    `body carries ${markerCount} markers, at most ${MAX_SEARCH_MARKERS}`,
   );
 });
 
@@ -291,6 +327,41 @@ The assertion depends on model output.
   // The kept prose sits above the refreshed block, so the trailer stays last.
   assert.ok(
     merged.indexOf('## Investigation') < merged.indexOf(OCCURRENCE_MARKER),
+  );
+  // The heading is stripped from kept prose and re-emitted once with the
+  // machine block — repeated merges must not accumulate duplicate headings.
+  assert.equal(merged.split('## Recurrences').length, 2);
+  // Markers are deduped: the body carries each one exactly once.
+  assert.equal(
+    (merged.match(new RegExp(TEST_MARKER_PREFIX, 'g')) ?? []).length,
+    analysis.tests.length,
+  );
+});
+
+test('repeated merges do not accumulate headings or duplicate markers', () => {
+  const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  let body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  for (let index = 2; index <= 6; index += 1) {
+    body = renderIssueBody({
+      analysis,
+      existingBody: body,
+      occurrence: {
+        ...OCCURRENCE,
+        runId: String(300 + index),
+        runUrl: `https://github.com/QwenLM/qwen-code/actions/runs/${300 + index}`,
+      },
+    });
+  }
+
+  assert.equal(
+    body.split('## Recurrences').length,
+    2,
+    'exactly one Recurrences heading after five merges',
+  );
+  assert.equal(
+    (body.match(new RegExp(TEST_MARKER_PREFIX, 'g')) ?? []).length,
+    analysis.tests.length,
+    'each marker appears exactly once',
   );
 });
 

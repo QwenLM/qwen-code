@@ -27,6 +27,11 @@ export const MAX_OCCURRENCES = 10;
  * with dozens of failures is an infra break, not a per-test regression. */
 export const MAX_SEARCH_MARKERS = 5;
 
+/** Failing tests listed in the issue body. A total-suite failure (expired
+ * provider key, model outage) can fail every test at once; the body must stay
+ * under GitHub's 65,536-character limit or `gh issue create` hard-fails. */
+export const MAX_BODY_TESTS = 20;
+
 // Vitest and pytest colourise their output and Actions stores the escapes
 // verbatim, so failure lines arrive wrapped in SGR sequences.
 // eslint-disable-next-line no-control-regex -- matches the ESC that opens one
@@ -34,7 +39,9 @@ const ANSI_PATTERN = /\u001B\[[0-9;?]*[A-Za-z]/g;
 // Actions prefixes every log line with an RFC3339 timestamp.
 const LOG_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?/;
 const VITEST_FAIL_PATTERN = /^FAIL\s+(.+)$/;
-const PYTEST_FAIL_PATTERN = /^FAILED\s+(\S+)/;
+// Anchoring on ` - ` rather than the first space keeps parametrized node ids
+// whose parameters contain spaces (`test_x[case one]`).
+const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 
 function cleanLine(line) {
@@ -201,6 +208,15 @@ export function renderIssueTitle({ analysis, occurrence }) {
   return analysis.title;
 }
 
+function cappedTestLines(tests) {
+  const lines = tests
+    .slice(0, MAX_BODY_TESTS)
+    .map((test) => `- \`${test.id}\``);
+  if (tests.length > MAX_BODY_TESTS)
+    lines.push(`- …and ${tests.length - MAX_BODY_TESTS} more`);
+  return lines;
+}
+
 /**
  * Build the issue body: the create path when `existingBody` is empty, otherwise
  * a merge that keeps the existing prose (an agent's or a human's notes live
@@ -212,8 +228,6 @@ export function renderIssueBody({
   maxOccurrences = MAX_OCCURRENCES,
   existingBody = '',
 }) {
-  const testLines = analysis.tests.map((test) => `- \`${test.id}\``);
-
   if (!analysis.tests.length) {
     // Nothing to merge into: the per-commit path opens one issue per commit and
     // an existing body means the same commit was already filed.
@@ -222,10 +236,16 @@ export function renderIssueBody({
       : renderPerCommitBody({ analysis, occurrence });
   }
 
+  // Search only ever uses the first MAX_SEARCH_MARKERS markers, so the body
+  // need not carry more — a total-suite failure can fail every test at once and
+  // an unbounded body crosses GitHub's 65,536-character limit.
+  const bodyMarkers = analysis.markers.slice(0, MAX_SEARCH_MARKERS);
+  const testLines = cappedTestLines(analysis.tests);
+
   if (!existingBody.trim()) {
     const head = [
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
-      ...analysis.markers.map((marker) => `<!-- ${marker} -->`),
+      ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
       `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
       '',
@@ -261,7 +281,7 @@ export function renderIssueBody({
 
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
-  const missingMarkers = analysis.markers.filter(
+  const missingMarkers = bodyMarkers.filter(
     (marker) => !strippedProse.includes(marker),
   );
   const missingTests = testLines.filter(

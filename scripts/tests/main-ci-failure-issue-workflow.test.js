@@ -71,6 +71,15 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('--existing "${existing_body}"');
   });
 
+  it('uses a random heredoc delimiter for the multiline body output', () => {
+    // A constant delimiter lets issue-body prose (which the autofix agent
+    // writes into) end the heredoc early and inject fresh GITHUB_OUTPUT keys.
+    expect(workflow).toContain('openssl rand -hex 16');
+    expect(workflow).toContain('echo "body<<${delim}"');
+    expect(workflow).toContain('echo "${delim}"');
+    expect(workflow).not.toContain('body<<QWEN_MAIN_CI_FAILURE_BODY\n');
+  });
+
   const privilegedJobs = Object.entries(jobs).filter(([, job]) =>
     JSON.stringify(job).includes('CI_DEV_BOT_PAT'),
   );

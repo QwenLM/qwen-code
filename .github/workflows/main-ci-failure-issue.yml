@@ -127,12 +127,15 @@ jobs:
               > "${plan}"
           fi
 
+          # A random delimiter keeps issue-body prose from ending the heredoc
+          # early and injecting fresh outputs (GitHub's own hardening guidance).
+          delim="QWEN_MAIN_CI_FAILURE_BODY_$(openssl rand -hex 16)"
           {
             echo "issue_number=${existing_issue}"
             echo "title=$(jq -r '.title' "${plan}")"
-            echo 'body<<QWEN_MAIN_CI_FAILURE_BODY'
+            echo "body<<${delim}"
             jq -r '.body' "${plan}"
-            echo 'QWEN_MAIN_CI_FAILURE_BODY'
+            echo "${delim}"
           } >> "${GITHUB_OUTPUT}"
 
   # Every GitHub write happens here, as the autofix bot. This job deliberately
