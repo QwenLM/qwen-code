@@ -84,6 +84,7 @@ import {
 } from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -845,6 +846,7 @@ describe('CoreToolScheduler', () => {
       promptId: 'unrelated-prompt',
     };
     let observedContext: InvocationContextV1 | undefined;
+    let observedPromptId: string | undefined;
     const tool = new MockTool({
       name: 'approval-context-tool',
       getDefaultPermission: async () => 'ask',
@@ -856,6 +858,7 @@ describe('CoreToolScheduler', () => {
       }),
       execute: async () => {
         observedContext = getInvocationContext();
+        observedPromptId = promptIdContext.getStore();
         return { llmContent: 'ok', returnDisplay: 'ok' };
       },
     });
@@ -890,6 +893,7 @@ describe('CoreToolScheduler', () => {
     );
 
     expect(observedContext).toEqual(invocationContext);
+    expect(observedPromptId).toBe(invocationContext.promptId);
   });
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {

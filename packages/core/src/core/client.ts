@@ -256,6 +256,7 @@ export class GeminiClient {
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
+  private activeTodoWorkChainPromptId: string | undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private recentCompletedToolNames: string[] = [];
@@ -2085,6 +2086,23 @@ export class GeminiClient {
     // Notifications start a fresh Turn with a new prompt_id, so the loop
     // detector must reset — otherwise a prior turn's count can trip
     // LoopDetected early on the notification turn.
+    if (messageType === SendMessageType.UserQuery) {
+      this.config.startActiveTodoWorkChain(prompt_id);
+      this.activeTodoWorkChainPromptId = prompt_id;
+    } else if (messageType === SendMessageType.Retry) {
+      this.config.startActiveTodoWorkChain(
+        prompt_id,
+        this.activeTodoWorkChainPromptId,
+      );
+      this.activeTodoWorkChainPromptId = prompt_id;
+    } else if (
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
+    ) {
+      this.config.startActiveTodoWorkChain(prompt_id);
+      this.activeTodoWorkChainPromptId = prompt_id;
+    }
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
@@ -2523,6 +2541,10 @@ export class GeminiClient {
           // intact under native Gemini; the OpenAI converter then emits the
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
+        }
+        const activeTodoReminder = this.config.getActiveTodoReminder(prompt_id);
+        if (activeTodoReminder) {
+          requestToSend = [...requestToSend, activeTodoReminder];
         }
         await this.microcompactHistoryBeforeSend(null, {
           sizeOnly: true,

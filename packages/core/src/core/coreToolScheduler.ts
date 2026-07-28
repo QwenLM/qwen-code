@@ -70,6 +70,7 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -4136,20 +4137,24 @@ export class CoreToolScheduler {
           );
         };
         this.safelyAddToolArgumentsAttributes(span, invocation.params);
-        promise = invocation.execute(
-          execSignal,
-          liveOutputCallback,
-          shellExecutionConfig,
-          setPidCallback,
-          setPromoteAbortControllerCallback,
-          canPromoteForegroundShell,
+        promise = promptIdContext.run(scheduledCall.request.prompt_id, () =>
+          invocation.execute(
+            execSignal,
+            liveOutputCallback,
+            shellExecutionConfig,
+            setPidCallback,
+            setPromoteAbortControllerCallback,
+            canPromoteForegroundShell,
+          ),
         );
       } else {
         this.safelyAddToolArgumentsAttributes(span, invocation.params);
-        promise = invocation.execute(
-          execSignal,
-          liveOutputCallback,
-          shellExecutionConfig,
+        promise = promptIdContext.run(scheduledCall.request.prompt_id, () =>
+          invocation.execute(
+            execSignal,
+            liveOutputCallback,
+            shellExecutionConfig,
+          ),
         );
       }
 

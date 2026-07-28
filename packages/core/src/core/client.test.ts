@@ -559,6 +559,9 @@ describe('Gemini Client (client.ts)', () => {
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      startActiveTodoWorkChain: vi.fn(),
+      startAutomaticActiveTodoWorkChain: vi.fn(),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -1708,6 +1711,59 @@ describe('Gemini Client (client.ts)', () => {
         // drain
       }
     }
+
+    it('carries active todos after tool results and clears them for new work', async () => {
+      const reminder =
+        '<system-reminder>unfinished todo: run tests</system-reminder>';
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-tool-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      const functionResponseIndex = request.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'functionResponse' in part,
+      );
+      expect(functionResponseIndex).toBeGreaterThanOrEqual(0);
+      expect(request.indexOf(reminder)).toBeGreaterThan(functionResponseIndex);
+      expect(mockConfig.getActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-tool-result',
+      );
+
+      await runTurn(SendMessageType.UserQuery);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-userQuery',
+      );
+
+      await runTurn(SendMessageType.Retry);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-retry',
+        'prompt-userQuery',
+      );
+
+      await runTurn(SendMessageType.Cron);
+
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-cron',
+      );
+    });
 
     it('queues and drains a reminder for newly registered MCP deferred tools', async () => {
       const reg = getRegistryMock();
