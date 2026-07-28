@@ -651,6 +651,32 @@ describe('qwen-triage tmux workflow', () => {
       expect(noHead.comment).toContain('could not be read');
     },
   );
+
+  it('includes high-risk path detection in the triage skill', () => {
+    expect(prSkill).toContain('1e. High-risk path');
+    expect(prSkill).toContain('openaiContentGenerator');
+    expect(prSkill).toContain('streamingToolCallParser');
+    expect(prSkill).toContain('geminiChat');
+    expect(prSkill).toContain('acpConnection');
+    expect(prSkill).toContain('(^|/)shell\\.ts$');
+    expect(prSkill).toContain('shellExecutionService');
+    expect(prSkill).toContain('mcp-client');
+    expect(prSkill).toContain('mcp-pool');
+    expect(prSkill).toContain('LspServer');
+    expect(prSkill).toContain('acp-integration');
+    expect(prSkill).toContain('(^|/)relaunch\\.ts$');
+    expect(prSkill).toContain('(^|/)sandbox\\.ts$');
+    expect(prSkill).toContain('electron-run-as-node');
+    expect(prSkill).toContain('p = 0.006');
+    expect(prSkill).toContain('do not skip any Stage 2 enrichment');
+    expect(prSkill).toContain('gh api --paginate');
+    expect(prSkill).toContain('|| true');
+    expect(prSkill).toContain('WARNING: could not fetch PR files');
+  });
+
+  it('includes Risk field in the Stage 1 comment template', () => {
+    expect(prSkill).toContain('Risk: <if Stage 1e matched');
+  });
 });
 
 describe('qwen-triage verify workflow', () => {
