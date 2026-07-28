@@ -117,11 +117,16 @@ function makeGeminiHistoryItem(text: string, id: number): HistoryItem {
   };
 }
 
-function makeUserHistoryItem(text: string, id: number): HistoryItem {
+function makeUserHistoryItem(
+  text: string,
+  id: number,
+  sentToModel?: boolean,
+): HistoryItem {
   return {
     type: 'user',
     id,
     text,
+    ...(sentToModel === undefined ? {} : { sentToModel }),
   };
 }
 
@@ -227,7 +232,23 @@ describe('getStickyTodos', () => {
       makeTodoToolGroup('task from turn N', 2),
       makeGeminiHistoryItem('Working on it', 3),
       makeGeminiHistoryItem('Done with turn N', 4),
-      makeUserHistoryItem('/stats', 5),
+      makeUserHistoryItem('Next question', 5),
+    ] as HistoryItem[];
+
+    expect(getStickyTodos(history, [])).toBeNull();
+  });
+
+  it('hides sticky todos when a local slash command starts after the snapshot', () => {
+    // Local slash commands (/stats, /about, /exit) are handled without entering
+    // API history and carry sentToModel: false, yet they are still a new user
+    // interaction that must hide stale todos. Guarding hasUserMessageAfter on
+    // sentToModel !== false would silently regress this case (#7061).
+    const history = [
+      makeUserHistoryItem('Do the tasks', 1),
+      makeTodoToolGroup('task from turn N', 2),
+      makeGeminiHistoryItem('Working on it', 3),
+      makeGeminiHistoryItem('Done with turn N', 4),
+      makeUserHistoryItem('/stats', 5, false),
     ] as HistoryItem[];
 
     expect(getStickyTodos(history, [])).toBeNull();
