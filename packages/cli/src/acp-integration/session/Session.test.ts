@@ -15175,6 +15175,98 @@ describe('Session', () => {
       expect(selections.every((accepted) => accepted)).toBe(true);
     });
 
+    it('keeps a full-turn model selected in a Stop hook continuation', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: [
+          { text: 'captured screen' },
+          { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+        ],
+        returnDisplay: 'captured screen',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('screenshot_tool', execute),
+      );
+      const selections: boolean[] = [];
+      bridgeToolResultImagesSpy.mockImplementation(
+        async ({
+          responseParts,
+          onFullTurnModel: selectFullTurnModel,
+        }: {
+          responseParts: Part[];
+          onFullTurnModel?: (model: string) => boolean;
+        }) => {
+          selections.push(selectFullTurnModel?.('qwen3-vl-plus\0') ?? false);
+          return responseParts;
+        },
+      );
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockResolvedValueOnce({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Inspect another screen',
+            },
+          })
+          .mockResolvedValueOnce({ success: true, output: {} }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((eventName: string) => eventName === 'Stop');
+      mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
+      mockChat.getLastModelMessageText = vi
+        .fn()
+        .mockReturnValue('captured screen');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-screen-main',
+                    name: 'screenshot_tool',
+                    args: {},
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-screen-stop',
+                    name: 'screenshot_tool',
+                    args: {},
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'capture screens until done' }],
+      });
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(selections).toEqual([true, true]);
+    });
+
     it('uses the provider tool-call id for the GenAI field only', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'read',
