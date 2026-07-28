@@ -159,7 +159,7 @@ export function startAgentViewWorkerHeartbeat(
 ): AgentViewWorkerHeartbeat | undefined {
   if (!readAgentViewWorkerSidebandEnv(env)) return undefined;
   const interval = setInterval(() => {
-    void sendAgentViewWorkerEvent({ type: 'heartbeat' }, env);
+    void sendAgentViewWorkerEvent({ type: 'heartbeat' }, env).catch(() => {});
   }, intervalMs);
   interval.unref?.();
   return {

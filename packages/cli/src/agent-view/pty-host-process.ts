@@ -87,7 +87,13 @@ export async function launchAgentViewPtyHostProcess(
   );
   child.unref?.();
 
-  const status = await waitForSpawnedPtyHost(socketPath, child, authToken);
+  let status: { pid: number; workerPid: number };
+  try {
+    status = await waitForSpawnedPtyHost(socketPath, child, authToken);
+  } catch (error) {
+    child.kill?.('SIGKILL');
+    throw error;
+  }
   return createRemotePtyHostHandle({
     socketPath,
     launch,
@@ -157,8 +163,10 @@ function createRemotePtyHostHandle({
       attachSocket?.write(data);
     },
     onData(callback: (data: string) => void): AgentViewPtyDisposable {
+      attachSocket?.destroy();
       const socket = net.createConnection(socketPath);
       attachSocket = socket;
+      socket.setEncoding('utf8');
       socket.write(
         `${JSON.stringify({
           id: createRequestId(),
@@ -168,9 +176,7 @@ function createRemotePtyHostHandle({
       );
       let attached = false;
       let buffer = '';
-      const onData = (chunk: Buffer | string) => {
-        const textChunk =
-          typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      const onData = (textChunk: string) => {
         if (attached) {
           output.append(textChunk);
           callback(textChunk);
@@ -179,7 +185,15 @@ function createRemotePtyHostHandle({
         buffer += textChunk;
         const newline = buffer.indexOf('\n');
         if (newline === -1) return;
-        const response = parseHostResponse(buffer.slice(0, newline));
+        let response: AgentViewPtyHostResponse;
+        try {
+          response = parseHostResponse(buffer.slice(0, newline));
+        } catch (error) {
+          socket.destroy(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          return;
+        }
         if (!response.ok) {
           socket.destroy(new Error(response.error.message));
           return;
@@ -251,9 +265,10 @@ function createChildExitTracker(child: ChildProcess): {
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
       resolve({
         exitCode: typeof code === 'number' ? code : 1,
+        ...(signal ? { signal: os.constants.signals[signal] ?? 1 } : {}),
       });
     });
   });
@@ -298,7 +313,12 @@ export async function runAgentViewPtyHostProcess({
   const server = createAgentViewPtyHostServer(host, socketPath, {
     authToken: authToken ?? process.env[PTY_HOST_AUTH_TOKEN_ENV],
   });
-  await server.listen();
+  try {
+    await server.listen();
+  } catch (error) {
+    host.dispose();
+    throw error;
+  }
   await host.exited.finally(async () => {
     host.dispose();
     await server.close();
@@ -422,7 +442,9 @@ export function createAgentViewPtyHostServer(
         attachState,
         leftover,
         options.authToken,
-      );
+      ).catch(() => {
+        socket.destroy();
+      });
     });
   });
 
@@ -442,6 +464,7 @@ export function createAgentViewPtyHostServer(
       });
     },
     async close() {
+      attachState.activeAttachSocket?.destroy();
       await new Promise<void>((resolve, reject) => {
         if (!server.listening) {
           resolve();
