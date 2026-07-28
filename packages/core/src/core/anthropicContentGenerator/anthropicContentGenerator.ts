@@ -530,6 +530,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // The `prompt-caching-scope-2026-01-05` beta is meaningful only when
     // the body actually carries a `cache_control: { …, scope: 'global' }`
     // entry. The converter emits those entries on the system text block
+    // (the static-prefix block when the system prompt is split)
     // and the last tool entry when `useGlobalCacheScope` is true (gated
     // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
     // Scan the assembled request body for that field rather than
@@ -704,6 +705,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
         stripAssistantThinking,
         enableCacheControl,
         useGlobalCacheScope,
+        // Read per request (not latched at construction): the client
+        // re-records the prefix whenever it rebuilds the system prompt
+        // (memory refresh, model change), and the converter fails open to
+        // the single-block layout when the request's system text doesn't
+        // start with it (subagent prompts, stale prefix).
+        staticSystemPrefix: this.cliConfig.getStaticSystemPrefix(),
       },
     );
 

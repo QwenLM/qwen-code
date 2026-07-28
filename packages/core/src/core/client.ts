@@ -175,6 +175,8 @@ export enum SendMessageType {
 
 export interface SendMessageOptions {
   type: SendMessageType;
+  /** User-submitted text captured before prompt expansion. */
+  submittedPrompt?: string;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -890,10 +892,22 @@ export class GeminiClient {
           undefined,
           resolveInteractionMode(this.config),
         );
-    return assembleSystemPrompt({
+    const stableLayers = {
       base,
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
+    };
+    // Record the stable → context layers (everything before the volatile
+    // gitStatus/autoMemory tail) as the cross-session-stable system prefix.
+    // The Anthropic converter splits the outgoing system prompt at this
+    // boundary and puts an early cache breakpoint on the stable part, so
+    // new sessions (different git status) and in-session memory saves
+    // don't re-bill it. Recorded on every rebuild so it tracks
+    // memory/model/mode changes; consumers match via `startsWith` and fail
+    // open when it goes stale.
+    this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
+    return assembleSystemPrompt({
+      ...stableLayers,
       gitStatus: this.getCachedGitStatus(),
       autoMemory: this.config.getAutoMemoryPrompt(),
     });
@@ -2017,6 +2031,12 @@ export class GeminiClient {
       this.config.hasHooksForEvent('UserPromptSubmit')
     ) {
       const promptText = partToString(request);
+      const submittedPrompt =
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string' &&
+        options.submittedPrompt.trim().length > 0
+          ? options.submittedPrompt
+          : undefined;
       const response = await messageBus.request<
         HookExecutionRequest,
         HookExecutionResponse
@@ -2026,6 +2046,9 @@ export class GeminiClient {
           eventName: 'UserPromptSubmit',
           input: {
             prompt: promptText,
+            ...(submittedPrompt !== undefined
+              ? { submitted_prompt: submittedPrompt }
+              : {}),
           },
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2753,6 +2776,7 @@ export class GeminiClient {
               {
                 ...options,
                 type: SendMessageType.Steer,
+                submittedPrompt: undefined,
                 steerInput,
               },
               steerTurnBudget,
@@ -3078,6 +3102,7 @@ export class GeminiClient {
                 type: pendingSteer
                   ? SendMessageType.Steer
                   : SendMessageType.Hook,
+                submittedPrompt: undefined,
                 steerInput: pendingSteer,
               },
               continueTurnBudget,

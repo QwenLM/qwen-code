@@ -34,6 +34,46 @@ test('renders the textarea backend instead of CodeMirror on touch devices', asyn
   await expect(page.locator('.cm-editor')).toHaveCount(0);
 });
 
+test('keeps voice controls reachable on an extra-narrow touch viewport', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 240, height: 700 });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: () => new Promise(() => undefined),
+      },
+    });
+  });
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: ['voice_transcribe', 'workspace_voice'],
+    },
+    voice: { enabled: true },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const model = page.locator('[data-web-shell-model-button]');
+  const more = page.getByRole('button', { name: 'more actions' });
+  const voice = page.getByRole('button', { name: 'Start voice dictation' });
+  const send = page.locator('[data-web-shell-composer-submit]');
+  await expect(model).toBeVisible();
+  await expect(more).toBeVisible();
+  await expect(voice).toBeVisible();
+  await expect(send).toBeVisible();
+
+  await voice.tap();
+
+  const activeToolbar = page.locator('[data-mobile-voice-active="true"]');
+  await expect(activeToolbar).toBeVisible();
+  await expect(model).toBeHidden();
+  await expect(more).toBeHidden();
+  await expect(send).toBeVisible();
+  await expect(activeToolbar.locator('button:visible')).toHaveCount(2);
+});
+
 test('tap, type, and Send submit through the shared prompt pipeline', async ({
   page,
 }, testInfo) => {
