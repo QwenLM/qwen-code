@@ -55,16 +55,16 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
-const ARTIFACT_LIKE_EXTENSIONS = new Set([
-  '.htm',
-  '.html',
-  '.ipynb',
-  '.jpeg',
-  '.jpg',
-  '.pdf',
-  '.png',
-  '.svg',
-  '.webp',
+const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
+  ['.htm', 'html'],
+  ['.html', 'html'],
+  ['.ipynb', 'notebook'],
+  ['.jpeg', 'image'],
+  ['.jpg', 'image'],
+  ['.pdf', 'pdf'],
+  ['.png', 'image'],
+  ['.svg', 'image'],
+  ['.webp', 'image'],
 ]);
 
 /**
@@ -570,11 +570,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         file_path,
         postWriteSizeBytes,
       );
-      const artifactReminder = artifact
-        ? buildRecordArtifactReminder(this.config, file_path)
-        : null;
-      if (artifactReminder) {
-        llmSuccessMessageParts.push(artifactReminder);
+      if (artifact) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
       }
 
       // Log file operation for telemetry (without diff_stat to avoid double-counting)
@@ -671,6 +670,10 @@ export function buildRecordArtifactReminder(
   if (!workspacePath) {
     return null;
   }
+  return formatRecordArtifactReminder(workspacePath);
+}
+
+function formatRecordArtifactReminder(workspacePath: string): string {
   return (
     `This file was automatically recorded as a workspace artifact with ` +
     `workspacePath "${workspacePath}". No extra artifact registration step ` +
@@ -704,7 +707,7 @@ function getRecordArtifactWorkspacePath(
   if (!config.isRecordArtifactEnabled()) {
     return null;
   }
-  if (!ARTIFACT_LIKE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+  if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
     return null;
   }
   // The daemon's file-read route resolves workspacePath against the
@@ -730,23 +733,10 @@ function getRecordArtifactWorkspacePath(
 }
 
 function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
-  switch (path.extname(filePath).toLowerCase()) {
-    case '.htm':
-    case '.html':
-      return 'html';
-    case '.ipynb':
-      return 'notebook';
-    case '.pdf':
-      return 'pdf';
-    case '.jpeg':
-    case '.jpg':
-    case '.png':
-    case '.svg':
-    case '.webp':
-      return 'image';
-    default:
-      return 'file';
-  }
+  return (
+    ARTIFACT_KIND_BY_EXTENSION.get(path.extname(filePath).toLowerCase()) ??
+    'file'
+  );
 }
 
 /**
