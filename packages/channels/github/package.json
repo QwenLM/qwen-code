@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-github",
-  "version": "0.21.0",
+  "version": "0.21.1-preview.0",
   "description": "GitHub polling channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
