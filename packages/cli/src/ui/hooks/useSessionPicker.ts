@@ -33,7 +33,7 @@ import {
 export interface UseSessionPickerOptions {
   sessionService: SessionService | null;
   currentBranch?: string;
-  onSelect: (sessionId: string) => void;
+  onSelect: (sessionId: string, session?: SessionListItem) => void;
   onCancel: () => void;
   maxVisibleItems: number;
   /**
@@ -48,6 +48,8 @@ export interface UseSessionPickerOptions {
    * match the given title.
    */
   initialSessions?: SessionListItem[];
+  extraSessions?: SessionListItem[];
+  excludeSessionIds?: readonly string[];
   /**
    * Enable/disable input handling.
    */
@@ -127,6 +129,8 @@ export function useSessionPicker({
   maxVisibleItems,
   centerSelection = false,
   initialSessions,
+  extraSessions,
+  excludeSessionIds,
   isActive = true,
   enablePreview = false,
   enableMultiSelect = false,
@@ -181,6 +185,10 @@ export function useSessionPicker({
     () => new Set(disabledIds ?? []),
     [disabledIds],
   );
+  const excludeSessionIdSet = useMemo(
+    () => new Set(excludeSessionIds ?? []),
+    [excludeSessionIds],
+  );
 
   const toggleChecked = useCallback(
     (sessionId: string) => {
@@ -214,16 +222,18 @@ export function useSessionPicker({
     useSessionSearchInput({ onExitToList });
 
   const isLoadingMoreRef = useRef(false);
+  const allSessions = useMemo(
+    () =>
+      mergeSessionItems(sessionState.sessions, extraSessions ?? []).filter(
+        (session) => !excludeSessionIdSet.has(session.sessionId),
+      ),
+    [sessionState.sessions, extraSessions, excludeSessionIdSet],
+  );
 
   const filteredSessions = useMemo(
     () =>
-      filterSessions(
-        sessionState.sessions,
-        filterByBranch,
-        currentBranch,
-        searchQuery,
-      ),
-    [sessionState.sessions, filterByBranch, currentBranch, searchQuery],
+      filterSessions(allSessions, filterByBranch, currentBranch, searchQuery),
+    [allSessions, filterByBranch, currentBranch, searchQuery],
   );
 
   const scrollOffset = useMemo(() => {
@@ -416,7 +426,7 @@ export function useSessionPicker({
           // Order by the full session list so the receiver can present
           // "Deleted N sessions" feedback in display order, even for
           // items that were filtered out at commit time.
-          const orderedIds = sessionState.sessions
+          const orderedIds = allSessions
             .map((s) => s.sessionId)
             .filter((id) => checkedIds.has(id) && !disabledIdSet.has(id));
           if (orderedIds.length > 0) {
@@ -434,7 +444,7 @@ export function useSessionPicker({
         // that here so a stray Enter on the active session doesn't close
         // the dialog and leave the receiver to bounce back with an error.
         if (session && !disabledIdSet.has(session.sessionId)) {
-          onSelect(session.sessionId);
+          onSelect(session.sessionId, session);
         }
         return;
       }
@@ -569,4 +579,42 @@ export function useSessionPicker({
     searchQuery,
     isSearchActive: viewMode === 'search',
   };
+}
+
+function mergeSessionItems(
+  primary: SessionListItem[],
+  extra: SessionListItem[],
+): SessionListItem[] {
+  if (extra.length === 0) return primary;
+  const byId = new Map(primary.map((session) => [session.sessionId, session]));
+  for (const session of extra) {
+    const existing = byId.get(session.sessionId);
+    byId.set(
+      session.sessionId,
+      existing ? mergeSessionItem(existing, session) : session,
+    );
+  }
+  return Array.from(byId.values()).sort(
+    (left, right) => right.mtime - left.mtime,
+  );
+}
+
+function mergeSessionItem(
+  existing: SessionListItem,
+  incoming: SessionListItem,
+): SessionListItem {
+  const merged = {
+    ...existing,
+    ...incoming,
+    prompt: existing.prompt || incoming.prompt,
+    customTitle: existing.customTitle ?? incoming.customTitle,
+    titleSource: existing.titleSource ?? incoming.titleSource,
+    gitBranch: existing.gitBranch ?? incoming.gitBranch,
+    filePath: existing.filePath || incoming.filePath,
+    messageCount: existing.messageCount ?? incoming.messageCount,
+    parentSessionId: existing.parentSessionId ?? incoming.parentSessionId,
+    isArchived: existing.isArchived ?? incoming.isArchived,
+    mtime: Math.max(existing.mtime, incoming.mtime),
+  };
+  return merged;
 }

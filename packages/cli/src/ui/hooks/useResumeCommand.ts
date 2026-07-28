@@ -23,6 +23,13 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import {
+  AGENT_VIEW_WORKER_RESUME_MESSAGE,
+  isAgentViewWorkerResumeCommandBlocked,
+  isManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+} from '../../startup/agent-view-resume-guard.js';
+import { getAgentViewProjectSessionService } from '../../startup/agent-view-resume-sessions.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -91,6 +98,18 @@ export function useResumeCommand(
         return;
       }
 
+      if (isAgentViewWorkerResumeCommandBlocked()) {
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: AGENT_VIEW_WORKER_RESUME_MESSAGE,
+          } as HistoryItemWithoutId,
+          Date.now(),
+        );
+        closeResumeDialog();
+        return;
+      }
+
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
@@ -104,15 +123,37 @@ export function useResumeCommand(
       // Close dialog immediately to prevent input capture during async operations.
       closeResumeDialog();
 
+      if (await isManagedAgentViewResumeBlocked(sessionId)) {
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+          } as HistoryItemWithoutId,
+          Date.now(),
+        );
+        return;
+      }
+
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
-        const cwd = config.getTargetDir();
-        const sessionService = new SessionService(cwd);
-        const sessionData = await sessionService.loadSession(sessionId);
+        let sessionService = new SessionService(config.getTargetDir());
+        let sessionData = await sessionService.loadSession(sessionId);
+        if (!sessionData) {
+          const projectSessionService =
+            await getAgentViewProjectSessionService();
+          if (projectSessionService) {
+            const projectSessionData =
+              await projectSessionService.loadSession(sessionId);
+            if (projectSessionData) {
+              sessionService = projectSessionService;
+              sessionData = projectSessionData;
+            }
+          }
+        }
 
         if (!sessionData) {
           return;

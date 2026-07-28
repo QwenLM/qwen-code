@@ -11,7 +11,10 @@ import { t } from '../../i18n/index.js';
 import {
   AGENT_VIEW_WORKER_RESUME_MESSAGE,
   isAgentViewWorkerResumeCommandBlocked,
+  isManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE,
 } from '../../startup/agent-view-resume-guard.js';
+import { getAgentViewProjectSessionService } from '../../startup/agent-view-resume-sessions.js';
 
 export const resumeCommand: SlashCommand = {
   name: 'resume',
@@ -48,8 +51,17 @@ export const resumeCommand: SlashCommand = {
 
     // Try as session UUID
     if (isValidSessionId(arg)) {
+      if (await isManagedAgentViewResumeBlocked(arg)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+        };
+      }
       const sessionService = config.getSessionService();
-      const exists = await sessionService.sessionExists(arg);
+      const exists =
+        (await sessionService.sessionExists(arg)) ||
+        Boolean(await getAgentViewProjectSessionExists(arg));
       if (exists) {
         return { type: 'dialog', dialog: 'resume', sessionId: arg };
       }
@@ -84,3 +96,10 @@ export const resumeCommand: SlashCommand = {
     };
   },
 };
+
+async function getAgentViewProjectSessionExists(
+  sessionId: string,
+): Promise<boolean> {
+  const sessionService = await getAgentViewProjectSessionService();
+  return sessionService ? sessionService.sessionExists(sessionId) : false;
+}
