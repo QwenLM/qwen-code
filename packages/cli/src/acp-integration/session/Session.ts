@@ -1553,6 +1553,7 @@ export class Session implements SessionContext {
         response['claimed'] === false &&
         response['hasQueuedPrompt'] === true
       ) {
+        if (this.closing || this.disposed) return 'unavailable';
         if (this.todoStopGuardReleasedDuringClaim.has(ownerPromptId)) {
           return 'unavailable';
         }
@@ -3273,7 +3274,7 @@ export class Session implements SessionContext {
 
     while (true) {
       if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
-        return { stopReason: 'end_turn' };
+        return { stopReason: 'cancelled' };
       }
       if (pendingSend.signal.aborted) {
         this.todoStopGuard.suspend();
@@ -3577,18 +3578,32 @@ export class Session implements SessionContext {
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
+    const preservePendingMessage = (message: Content) => {
+      if (initialSend) return;
+      const preservedParts = (message.parts ?? []).filter(
+        (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+      );
+      this.#preserveUnsentMessageHistory(
+        preservedParts.length > 0
+          ? { ...message, parts: preservedParts }
+          : null,
+        true,
+      );
+    };
 
     while (nextMessage !== null) {
       if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
+        preservePendingMessage(nextMessage);
         return {
           kind: 'terminal',
-          stopReason: 'end_turn',
+          stopReason: 'cancelled',
           ...(supersededAutomaticContinuation
             ? { supersededAutomaticContinuation: true }
             : {}),
         };
       }
       if (pendingSend.signal.aborted) {
+        preservePendingMessage(nextMessage);
         this.todoStopGuard.suspend();
         return {
           kind: 'terminal',

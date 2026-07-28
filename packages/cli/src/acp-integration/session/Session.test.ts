@@ -18960,6 +18960,43 @@ describe('Session', () => {
       ).toBe(false);
     });
 
+    it('does not restore queued-prompt priority while the session is closing', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      let claimStarted!: () => void;
+      const claimStartedPromise = new Promise<void>((resolve) => {
+        claimStarted = resolve;
+      });
+      let releaseClaim!: () => void;
+      const claimGate = new Promise<void>((resolve) => {
+        releaseClaim = resolve;
+      });
+      mockGuardBridge(
+        async () => ({ messages: [], hasQueuedPrompt: false }),
+        async () => {
+          claimStarted();
+          await claimGate;
+          return { claimed: false, hasQueuedPrompt: true };
+        },
+      );
+
+      const prompt = runGuardPrompt();
+      await claimStartedPromise;
+      const releaseClose = session.beginClose();
+      session.hardSuspendTodoStopGuard();
+      releaseClaim();
+      await prompt;
+
+      const internals = session as unknown as {
+        todoStopGuardQueuedPromptPriority: boolean;
+        todoStopGuardQueuedPromptOwnerPromptId?: string;
+      };
+      expect(internals.todoStopGuardQueuedPromptPriority).toBe(false);
+      expect(internals.todoStopGuardQueuedPromptOwnerPromptId).toBeUndefined();
+      releaseClose();
+    });
+
     it('consumes a queued-prompt release that arrives before the claim response', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
@@ -21200,6 +21237,120 @@ describe('Session', () => {
       );
     });
 
+    it.each([
+      { label: 'a newer prompt supersedes the turn', cancel: false },
+      { label: 'the user cancels the turn', cancel: true },
+    ])(
+      'preserves combined continuation tool responses when $label',
+      async ({ cancel }) => {
+        rebuildSessionWithGuard();
+        const execute = installPendingTodoTool();
+        const toolResult = {
+          llmContent: JSON.stringify(pendingTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: pendingTodos,
+            changes: {},
+          },
+        };
+        let secondToolStarted!: () => void;
+        const secondToolStart = new Promise<void>((resolve) => {
+          secondToolStarted = resolve;
+        });
+        let releaseSecondTool!: () => void;
+        const secondToolGate = new Promise<void>((resolve) => {
+          releaseSecondTool = resolve;
+        });
+        let toolCallCount = 0;
+        execute.mockImplementation(async () => {
+          if (++toolCallCount === 2) {
+            secondToolStarted();
+            await secondToolGate;
+          }
+          return toolResult;
+        });
+        const toolCallStream = (id: string) =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id,
+                    name: core.ToolNames.TODO_WRITE,
+                    args: { todos: pendingTodos },
+                  },
+                ],
+              },
+            },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(toolCallStream('todo-before-supersession'))
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            toolCallStream('combined-tool-before-supersession'),
+          )
+          .mockResolvedValue(createEmptyStream());
+        let stopCalls = 0;
+        const messageBus = {
+          request: vi.fn().mockImplementation(async (request) => {
+            if (request.eventName !== 'Stop') {
+              return { success: true, output: {} };
+            }
+            return ++stopCalls === 1
+              ? {
+                  success: true,
+                  output: {
+                    decision: 'block',
+                    reason: 'external continuation before supersession',
+                  },
+                }
+              : { success: true, output: {} };
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((name: string) => name === 'Stop');
+
+        const firstPrompt = runGuardPrompt();
+        await secondToolStart;
+        let secondPrompt: ReturnType<typeof session.prompt> | undefined;
+        if (cancel) {
+          await session.cancelPendingPrompt();
+        } else {
+          const internals = session as unknown as {
+            pendingPrompt: AbortController | null;
+          };
+          const firstOwner = internals.pendingPrompt;
+          secondPrompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'superseding prompt' }],
+          });
+          await vi.waitFor(() => {
+            expect(internals.pendingPrompt).not.toBe(firstOwner);
+          });
+        }
+        releaseSecondTool();
+
+        const firstResult = await firstPrompt;
+        await secondPrompt;
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'combined-tool-before-supersession',
+              }),
+            }),
+          ],
+        });
+        expect(firstResult).toEqual({ stopReason: 'cancelled' });
+      },
+    );
+
     it('preserves newer prompt state and includes tasks created while the superseded prompt unwinds', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
@@ -21275,7 +21426,8 @@ describe('Session', () => {
       expect(internals.todoStopGuardDrainAutomaticQueuesWhenIdle).toBe(true);
       releaseSecondSend();
 
-      await Promise.all([firstPrompt, secondPrompt]);
+      const [firstResult] = await Promise.all([firstPrompt, secondPrompt]);
+      expect(firstResult).toEqual({ stopReason: 'cancelled' });
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(5);
     });
 
