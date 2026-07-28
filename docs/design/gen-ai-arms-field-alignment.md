@@ -6,6 +6,7 @@ This design aligns the first set of Qwen Code span attributes whose names,
 types, and meanings agree between OpenTelemetry GenAI semantic conventions and
 Alibaba Cloud ARMS LLM Trace. It does not change span names, span kinds,
 parenting, or retry topology.
+It also documents the opt-in ARMS-only end-user identity extension.
 
 The OpenTelemetry GenAI convention is still Development status. This change is
 pinned to commit
@@ -183,6 +184,25 @@ ARMS automatic GenAI application recognition requires this resource attribute:
 Qwen Code does not inject that vendor-specific resource attribute or
 `gen_ai.span.kind`. ARMS can infer LLM, Tool, and Agent roles from
 `gen_ai.operation.name`.
+
+### ARMS end-user identity extension
+
+`gen_ai.user.id` is an ARMS Span common attribute, not part of the pinned
+OpenTelemetry GenAI baseline above. Qwen Code emits it only when the operator
+explicitly configures `telemetry.userId` or `QWEN_TELEMETRY_USER_ID`. The value
+is placed on the interaction Span at creation and propagated through the
+existing in-process context to LLM, Tool, and Agent spans, including linked-root
+fork/background agents. Tool-result continuations resolve the same logical
+interaction by prompt ID without changing Span parenting; that minimal identity
+entry expires with the existing 30-minute Span safety-net TTL.
+
+The value is never inferred, generated, written to Resource/logs/metrics, or
+placed in outbound Baggage. Qwen Code does not dual-write `enduser.id` or
+`user.id`. A previous `telemetry.resourceAttributes.user.id` remains a generic
+Resource dimension and must be removed explicitly when migrating. Because the
+setting is process-wide, it is supported only when one process represents one
+end user; request-scoped identity for shared daemon and channel deployments is
+deferred until their trusted caller identity can be wired end to end.
 
 ## Deferred work
 

@@ -2378,6 +2378,7 @@ export class CoreToolScheduler {
             tool_name: canonicalName,
           },
           toolCall.tool.description,
+          reqInfo.prompt_id,
         );
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchState.callIds.add(reqInfo.callId);
@@ -3759,6 +3760,7 @@ export class CoreToolScheduler {
           tool_name: canonical, // legacy alias — see _schedule for context
         },
         scheduledCall.tool.description,
+        scheduledCall.request.prompt_id,
       );
       this.toolSpans.set(callId, toolSpan);
     }

@@ -15655,6 +15655,7 @@ describe('Session', () => {
           'gen_ai.tool.call.id': 'provider-call',
         }),
         'read_file',
+        'prompt-tool-span',
       );
       expect(addToolArgumentsAttributesSpy).toHaveBeenCalledWith(
         mockConfig,
@@ -15688,6 +15689,7 @@ describe('Session', () => {
           'gen_ai.tool.call.id': 'internal-call',
         }),
         'read_file',
+        'prompt-tool-span-fallback',
       );
     });
 

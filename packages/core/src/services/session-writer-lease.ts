@@ -15,6 +15,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const LOCK_SCHEMA_VERSION = 1;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
+const RELEASE_PRECHECK_ATTEMPTS = 3;
+const RELEASE_PRECHECK_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
 const debugLogger = createDebugLogger('SESSION_WRITER_LEASE');
 
@@ -118,6 +120,7 @@ export interface AcquireSessionWriterLeaseOptions {
   transcriptPath: string;
   processKind?: SessionWriterProcessKind;
   qwenVersion?: string | null;
+  reclaimPolicy?: 'local' | 'never';
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
 }
 
@@ -467,6 +470,8 @@ export class SessionWriterLease {
   private expectedTranscriptState: TranscriptState | undefined;
   private released = false;
   private releasePromise: Promise<void> | undefined;
+  private readonly lockRecordRaw: string;
+  private readonly retiredPath: string;
 
   private constructor(
     private readonly lockPath: string,
@@ -477,6 +482,8 @@ export class SessionWriterLease {
     this.sessionId = options.sessionId;
     this.runtimeBaseDir = options.runtimeBaseDir;
     this.transcriptPath = options.transcriptPath;
+    this.lockRecordRaw = JSON.stringify(lockRecord);
+    this.retiredPath = `${lockPath}.released.${encodeURIComponent(this.ownerId)}`;
   }
 
   get transcriptExistedAtAcquire(): boolean {
@@ -572,6 +579,9 @@ export class SessionWriterLease {
         throw new SessionWriterUnavailableError({
           cause: new Error('Existing session writer lock is malformed'),
         });
+      }
+      if (normalizedOptions.reclaimPolicy === 'never') {
+        throw new SessionWriterConflictError();
       }
 
       const staleOwnerId = state.record.owner_id;
@@ -740,7 +750,11 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError();
     }
     const record = parseLockRecord(raw);
-    if (!record || record.owner_id !== this.ownerId) {
+    if (
+      !record ||
+      record.owner_id !== this.ownerId ||
+      raw !== this.lockRecordRaw
+    ) {
       throw new SessionWriterLostError();
     }
     return record;
@@ -831,29 +845,77 @@ export class SessionWriterLease {
   }
 
   release(): Promise<void> {
-    this.releasePromise ??= this.releaseOnce().catch((error: unknown) => {
-      if (!this.released) this.releasePromise = undefined;
-      throw error;
-    });
+    this.releasePromise ??= this.releaseOnce();
     return this.releasePromise;
+  }
+
+  get isReleased(): boolean {
+    return this.released;
   }
 
   private async releaseOnce(): Promise<void> {
     if (this.released) return;
+    await this.readOwnedLockForRelease();
     try {
-      await removeOwnedLock(this.lockPath, this.ownerId);
+      await fs.rename(this.lockPath, this.retiredPath);
       this.released = true;
+      await fs.unlink(this.retiredPath).catch((error) => {
+        debugLogger.debug(
+          `Session writer retired lock cleanup failed path=${JSON.stringify(this.retiredPath)} ` +
+            `error=${describeDiagnosticError(error)}`,
+        );
+      });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const [primaryState, retiredState] = await Promise.all([
+        this.inspectReleasePath(this.lockPath),
+        this.inspectReleasePath(this.retiredPath),
+      ]);
+      if (primaryState === 'missing' || primaryState === 'other') {
         this.released = true;
+        if (retiredState === 'owned') {
+          await fs.unlink(this.retiredPath).catch(() => {});
+          throw new SessionWriterUnavailableError({
+            cause: error instanceof Error ? error : undefined,
+          });
+        }
         throw new SessionWriterLostError();
       }
-      if (error instanceof SessionWriterLostError) {
-        this.released = true;
-        throw error;
-      }
       if (error instanceof SessionWriterError) throw error;
-      throw new SessionWriterUnavailableError();
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+  }
+
+  private async readOwnedLockForRelease(): Promise<void> {
+    for (let attempt = 0; attempt < RELEASE_PRECHECK_ATTEMPTS; attempt++) {
+      try {
+        await this.readOwnedLock();
+        return;
+      } catch (error) {
+        if (
+          !(error instanceof SessionWriterUnavailableError) ||
+          attempt + 1 === RELEASE_PRECHECK_ATTEMPTS
+        ) {
+          throw error;
+        }
+      }
+      await delay(RELEASE_PRECHECK_RETRY_DELAY_MS);
+    }
+  }
+
+  private async inspectReleasePath(
+    candidatePath: string,
+  ): Promise<'owned' | 'missing' | 'other' | 'unknown'> {
+    try {
+      const stat = await fs.lstat(candidatePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return 'other';
+      const raw = await fs.readFile(candidatePath, 'utf8');
+      return raw === this.lockRecordRaw ? 'owned' : 'other';
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'missing'
+        : 'unknown';
     }
   }
 }
