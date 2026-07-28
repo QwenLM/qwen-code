@@ -17,6 +17,9 @@ type TelemetryRecord = {
   name?: string;
   attributes?: Record<string, unknown>;
   events?: Array<{ name?: string }>;
+  resource?: {
+    _rawAttributes?: Array<[string, unknown]>;
+  };
 };
 
 const SKIP =
@@ -133,6 +136,7 @@ describeLocal('GenAI telemetry fields', () => {
           },
         },
         ui: { enableFollowupSuggestions: false },
+        outboundCorrelation: { propagateTraceContext: true },
       },
     });
 
@@ -153,6 +157,7 @@ describeLocal('GenAI telemetry fields', () => {
       all_proxy: undefined,
       DASHSCOPE_PROXY_BASE_URL: undefined,
       QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'true',
+      QWEN_TELEMETRY_USER_ID: 'integration-user-079458',
     });
 
     try {
@@ -173,7 +178,14 @@ describeLocal('GenAI telemetry fields', () => {
 
     const firstLlm = llmSpans[0]!.attributes!;
     const secondLlm = llmSpans[1]!.attributes!;
+    const interactionSpan = records.find(
+      (record) => record.name === 'qwen-code.interaction',
+    );
+    expect(interactionSpan?.attributes?.['gen_ai.user.id']).toBe(
+      'integration-user-079458',
+    );
     expect(firstLlm).toMatchObject({
+      'gen_ai.user.id': 'integration-user-079458',
       'gen_ai.operation.name': 'chat',
       'gen_ai.provider.name': 'openai',
       'gen_ai.request.model': 'request-model',
@@ -191,6 +203,7 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.usage.cache_read.input_tokens': 3,
     });
     expect(secondLlm).toMatchObject({
+      'gen_ai.user.id': 'integration-user-079458',
       'gen_ai.operation.name': 'chat',
       'gen_ai.provider.name': 'openai',
       'gen_ai.request.choice.count': 2,
@@ -335,6 +348,7 @@ describeLocal('GenAI telemetry fields', () => {
         record.attributes?.['gen_ai.tool.name'] === 'run_shell_command',
     );
     expect(toolSpan?.attributes).toMatchObject({
+      'gen_ai.user.id': 'integration-user-079458',
       'gen_ai.operation.name': 'execute_tool',
       'gen_ai.tool.name': 'run_shell_command',
       'gen_ai.tool.type': 'function',
@@ -355,6 +369,88 @@ describeLocal('GenAI telemetry fields', () => {
     expect(toolSpan?.attributes).not.toHaveProperty('tool.name');
     expect(toolSpan?.attributes).not.toHaveProperty('tool_input');
     expect(toolSpan?.attributes).not.toHaveProperty('tool_result');
+
+    const canonicalSpanNames = new Set([
+      'qwen-code.interaction',
+      'qwen-code.llm_request',
+      'qwen-code.tool',
+    ]);
+    for (const record of records) {
+      const attributes = record.attributes ?? {};
+      const resourceAttributes = new Map(record.resource?._rawAttributes ?? []);
+      expect(resourceAttributes.has('gen_ai.user.id')).toBe(false);
+      expect(attributes).not.toHaveProperty('enduser.id');
+      expect(attributes).not.toHaveProperty('user.id');
+      if (!record.name || !canonicalSpanNames.has(record.name)) {
+        expect(attributes).not.toHaveProperty('gen_ai.user.id');
+      }
+    }
+
+    expect(server.requests).toHaveLength(2);
+    for (const request of server.requests) {
+      expect(request.headers['traceparent']).toEqual(expect.any(String));
+      expect(String(request.headers['baggage'] ?? '')).not.toContain(
+        'integration-user-079458',
+      );
+    }
+  });
+
+  it('omits the ARMS user ID when it is not configured', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      model: 'provider-model',
+      content: 'Done.',
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        total_tokens: 12,
+      },
+    }));
+
+    rig = new TestRig();
+    rig.setup('gen-ai-telemetry-no-user', {
+      settings: {
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'request-model' },
+        ui: { enableFollowupSuggestions: false },
+      },
+    });
+
+    const restoreEnvironment = setEnvironment({
+      HOME: rig.testDir!,
+      QWEN_HOME: join(rig.testDir!, '.qwen'),
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: server.baseUrl,
+      OPENAI_MODEL: 'request-model',
+      QWEN_MODEL: 'request-model',
+      QWEN_TELEMETRY_USER_ID: undefined,
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+      HTTP_PROXY: undefined,
+      HTTPS_PROXY: undefined,
+      ALL_PROXY: undefined,
+      http_proxy: undefined,
+      https_proxy: undefined,
+      all_proxy: undefined,
+      DASHSCOPE_PROXY_BASE_URL: undefined,
+    });
+
+    try {
+      await rig.run('Reply with done.', '--output-format', 'json');
+    } finally {
+      restoreEnvironment();
+    }
+
+    const records = parseTelemetry(rig.readFile('telemetry.log'));
+    const interactionSpan = records.find(
+      (record) => record.name === 'qwen-code.interaction',
+    );
+    const llmSpan = records.find(
+      (record) => record.name === 'qwen-code.llm_request',
+    );
+    expect(interactionSpan?.attributes ?? {}).not.toHaveProperty(
+      'gen_ai.user.id',
+    );
+    expect(llmSpan?.attributes ?? {}).not.toHaveProperty('gen_ai.user.id');
   });
 
   it('omits the default choice count and sensitive tool payloads', async () => {
