@@ -192,7 +192,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       debugLogger.debug('miss', { path: absPath, state: status.state });
     }
 
-    const preparePdfForVisionBridge = shouldRunVisionBridge(this.config);
+    const prepareForVisionBridge = shouldRunVisionBridge(this.config);
     let result = await processSingleFileContent(
       this.params.file_path,
       this.config,
@@ -200,7 +200,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         offset: this.params.offset,
         limit: this.params.limit,
         pages: this.params.pages,
-        preparePdfForVisionBridge,
+        preserveUnsupportedImage: prepareForVisionBridge,
+        preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
       },
     );
