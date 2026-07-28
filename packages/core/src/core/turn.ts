@@ -141,6 +141,7 @@ export interface ToolCallResponseInfo {
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
+  visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
 }
 
