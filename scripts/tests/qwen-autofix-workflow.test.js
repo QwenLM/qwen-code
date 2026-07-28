@@ -3324,6 +3324,156 @@ describe('qwen-autofix workflow', () => {
     expect(countInline(false)).toBe(5);
     expect(countInline(true)).toBe(3);
 
+    // Deferred queries: extract and execute against fixture data,
+    // mirroring the actionable inline filter test above.
+    const deferredReviewsFilter = prepareBranchAndFeedbackStep.match(
+      /## Deferred non-Critical feedback[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+    )?.[1];
+    expect(deferredReviewsFilter).toBeTruthy();
+    const deferredReviews = [
+      ...reviews,
+      {
+        id: 21,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:00Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'Looks good overall',
+        html_url: 'https://github.com/test/pull/1#review-21',
+      },
+      {
+        id: 22,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** memory leak in the owner route',
+        html_url: 'https://github.com/test/pull/1#review-22',
+      },
+    ];
+    const countDeferredReviews = Number(
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-01-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'pr_url',
+          'https://github.com/test/pull/1',
+          `[${deferredReviewsFilter}] | length`,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
+      ),
+    );
+    // COMMENTED non-Critical review is deferred; CHANGES_REQUESTED and
+    // COMMENTED Critical reviews are not.
+    expect(countDeferredReviews).toBe(1);
+
+    const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(deferredInlineFilter).toBeTruthy();
+    const countDeferredInline = Number(
+      execFileSync(
+        'jq',
+        [
+          '-s',
+          '--arg',
+          'wm',
+          '2026-01-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'pr_url',
+          'https://github.com/test/pull/1',
+          '--argjson',
+          'reviews',
+          JSON.stringify([reviews]),
+          `[\n${deferredInlineFilter}\n] | length`,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
+      ),
+    );
+    // Suggestion (id 12) and unclassified (id 13) are deferred; Critical
+    // (11), reply-to-Critical (14), and CHANGES_REQUESTED-associated (15)
+    // are not.
+    expect(countDeferredInline).toBe(2);
+
+    const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
+      /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+    )?.[1];
+    expect(deferredIssueFilter).toBeTruthy();
+    const issueComments = [
+      {
+        id: 30,
+        created_at: '2026-01-02T00:00:00Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'Please also update the docs.',
+        html_url: 'https://github.com/test/pull/1#issuecomment-30',
+      },
+      {
+        id: 31,
+        created_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** data loss on concurrent writes',
+        html_url: 'https://github.com/test/pull/1#issuecomment-31',
+      },
+      {
+        id: 32,
+        created_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: '@qwen-code /review',
+        html_url: 'https://github.com/test/pull/1#issuecomment-32',
+      },
+    ];
+    const countDeferredIssue = Number(
+      execFileSync(
+        'jq',
+        [
+          '--arg',
+          'wm',
+          '2026-01-01T00:00:00Z',
+          '--arg',
+          'rb',
+          'qwen-code-ci-bot',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--argjson',
+          'trust',
+          '["OWNER","MEMBER","COLLABORATOR"]',
+          '--arg',
+          'pr_url',
+          'https://github.com/test/pull/1',
+          `[${deferredIssueFilter}] | length`,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(issueComments) },
+      ),
+    );
+    // Normal comment is deferred; Critical and command-style comments are
+    // not.
+    expect(countDeferredIssue).toBe(1);
+
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
     // associated inline details remain actionable even without the marker.
     expect(prepareBranchAndFeedbackStep).toContain(
