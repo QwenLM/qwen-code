@@ -134,12 +134,34 @@
 .platformCard {
   display: flex;
   min-width: 0;
+  cursor: pointer;
   align-items: center;
   gap: 11px;
   padding: 13px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--card);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.platformCard:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--foreground) 38%, var(--border));
+  background: color-mix(in srgb, var(--muted) 46%, var(--card));
+}
+
+.platformCard:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--ring) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.platformCard:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .platformMark {
@@ -193,7 +215,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .channelCard,
-  .channelCard * {
+  .channelCard *,
+  .platformCard {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
