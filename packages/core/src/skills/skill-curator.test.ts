@@ -591,4 +591,80 @@ describe('auto-skill curator', () => {
       ),
     ).rejects.toThrow('Archived auto-skill not found');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked state file',
+    async () => {
+      const now = new Date('2026-07-27T00:00:00.000Z');
+      await writeSkill(
+        'auto-skill-old',
+        'auto-skill',
+        new Date(now.getTime() - 100 * DAY_MS),
+      );
+      const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+      const external = path.join(projectRoot, 'external-state.json');
+      await fs.writeFile(external, JSON.stringify({ version: 1, skills: {} }));
+      await fs.symlink(external, statePath);
+
+      // The target is valid JSON, so this only rejects because the read path
+      // refuses to follow the symlink at all.
+      await expect(getAutoSkillCuratorStatus(projectRoot, now)).rejects.toThrow(
+        'refuses unsafe path',
+      );
+    },
+  );
+
+  it('refuses a non-regular-file state file', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    await writeSkill(
+      'auto-skill-old',
+      'auto-skill',
+      new Date(now.getTime() - 100 * DAY_MS),
+    );
+    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+    await fs.mkdir(statePath, { recursive: true });
+
+    await expect(
+      runAutoSkillCurator(projectRoot, { dryRun: true, now }),
+    ).rejects.toThrow('refuses unsafe path');
+  });
+
+  it('fails closed on an oversized state file', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    await writeSkill(
+      'auto-skill-old',
+      'auto-skill',
+      new Date(now.getTime() - 100 * DAY_MS),
+    );
+    const statePath = path.join(projectRoot, '.qwen', 'skill-curator.json');
+    // A regular file just over the 1 MiB read cap.
+    await fs.writeFile(
+      statePath,
+      `{"version":1,"skills":{},"pad":"${'x'.repeat(1024 * 1024)}"}`,
+    );
+
+    await expect(getAutoSkillCuratorStatus(projectRoot, now)).rejects.toThrow(
+      'Invalid auto-skill curator state',
+    );
+  });
+
+  it('distinguishes a present but ineligible archived skill from a missing one', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const archivedDir = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-broken',
+    );
+    await fs.mkdir(archivedDir, { recursive: true });
+    // A manifest that lost its frontmatter is present but not eligible.
+    await fs.writeFile(path.join(archivedDir, 'SKILL.md'), '# no frontmatter');
+
+    await expect(
+      restoreArchivedAutoSkill(projectRoot, 'auto-skill-broken', now),
+    ).rejects.toThrow('is not an eligible managed skill');
+    await expect(
+      restoreArchivedAutoSkill(projectRoot, 'auto-skill-absent', now),
+    ).rejects.toThrow('Archived auto-skill not found');
+  });
 });

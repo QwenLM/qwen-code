@@ -26,6 +26,9 @@ const AUTO_SKILL_PREFIX = 'auto-skill-';
 const CURATOR_STATE_VERSION = 1;
 const CURATOR_STATE_FILE = 'skill-curator.json';
 const CURATOR_LOCK_FILE = 'skill-curator.lock';
+// A real state file is a few KB even with hundreds of skills. Cap the read so
+// a crafted oversized regular file cannot drive an unbounded JSON parse.
+const MAX_STATE_FILE_BYTES = 1024 * 1024;
 
 type AutoSkillState = 'active' | 'stale' | 'archived';
 
@@ -221,6 +224,23 @@ function parseState(raw: unknown, statePath: string): AutoSkillCuratorState {
 }
 
 async function readState(statePath: string): Promise<AutoSkillCuratorState> {
+  let stat: import('node:fs').Stats;
+  try {
+    stat = await fs.lstat(statePath);
+  } catch (error) {
+    if (isMissing(error)) return emptyState();
+    throw error;
+  }
+  // Mirror the noFollow/lstat guards every write already uses: a state file
+  // that is a symlink (committable via git mode 120000, e.g. pointing at
+  // /dev/zero or a path outside .qwen/) or a FIFO would otherwise be followed,
+  // driving an unbounded read (OOM) or blocking the CLI boot indefinitely.
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Auto-skill curator refuses unsafe path ${statePath}.`);
+  }
+  if (stat.size > MAX_STATE_FILE_BYTES) {
+    throw new Error(`Invalid auto-skill curator state at ${statePath}.`);
+  }
   try {
     const content = await fs.readFile(statePath, 'utf8');
     return parseState(JSON.parse(content), statePath);
@@ -751,7 +771,22 @@ export async function restoreArchivedAutoSkill(
     }
     const archived = await readManagedSkill(paths.archiveRoot, directoryName);
     if (!archived) {
-      throw new Error(`Archived auto-skill not found: ${directoryName}.`);
+      // readManagedSkill returns undefined both when the directory is absent
+      // and when it exists but is not an eligible archived skill (e.g. a
+      // hand-edited manifest that lost its frontmatter). Distinguish the two so
+      // a plainly-present directory is not reported as missing.
+      let directoryExists = true;
+      try {
+        await fs.lstat(path.join(paths.archiveRoot, directoryName));
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        directoryExists = false;
+      }
+      throw new Error(
+        directoryExists
+          ? `Archived auto-skill ${directoryName} is not an eligible managed skill.`
+          : `Archived auto-skill not found: ${directoryName}.`,
+      );
     }
     const destination = path.join(paths.skillsRoot, directoryName);
     try {
