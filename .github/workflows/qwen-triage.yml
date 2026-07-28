@@ -1023,7 +1023,8 @@ jobs:
 
       - name: 'Restore npm cache'
         if: "steps.pr.outputs.decision == 'run'"
-        uses: 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
           key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
@@ -2204,7 +2205,8 @@ jobs:
 
       - name: 'Restore npm cache'
         if: "steps.pr.outputs.decision == 'run'"
-        uses: 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
           key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
