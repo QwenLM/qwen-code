@@ -167,6 +167,12 @@ describe('Agent View supervisor runner', () => {
             result: { subscribed: true },
           })}\n`,
         );
+        socket.write(
+          `${JSON.stringify({
+            type: 'changed',
+            at: '2026-07-17T00:00:00.000Z',
+          })}\n`,
+        );
       }),
       dispatch: vi.fn(() => ({ sessionId: 'session-2' })),
       adopt: vi.fn(() => ({ sessionId: 'session-2', adopted: true })),
@@ -199,8 +205,14 @@ describe('Agent View supervisor runner', () => {
     ]);
     expect(handler.list).toHaveBeenCalledWith({ cwd: '/workspace/project' });
 
-    const subscription = handle.subscribe(() => {});
+    const eventCallback = vi.fn();
+    const subscription = handle.subscribe(eventCallback);
     await waitFor(() => handler.subscribe.mock.calls.length === 1);
+    await waitFor(() => eventCallback.mock.calls.length === 1);
+    expect(eventCallback).toHaveBeenCalledWith({
+      type: 'changed',
+      at: '2026-07-17T00:00:00.000Z',
+    });
     subscription.dispose();
 
     await expect(

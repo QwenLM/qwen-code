@@ -502,27 +502,13 @@ function normalizeWorker(
   return {
     ...raw,
     schemaVersion: 1,
-    ...(numberValue(raw['hostPid'])
-      ? { hostPid: numberValue(raw['hostPid']) }
-      : {}),
-    ...(numberValue(raw['workerPid'])
-      ? { workerPid: numberValue(raw['workerPid']) }
-      : {}),
-    ...(stringValue(raw['endpoint'])
-      ? { endpoint: stringValue(raw['endpoint']) }
-      : {}),
-    ...(stringValue(raw['hostEndpoint'])
-      ? { hostEndpoint: stringValue(raw['hostEndpoint']) }
-      : {}),
-    ...(stringValue(raw['hostAuthToken'])
-      ? { hostAuthToken: stringValue(raw['hostAuthToken']) }
-      : {}),
-    ...(stringValue(raw['tokenDigest'])
-      ? { tokenDigest: stringValue(raw['tokenDigest']) }
-      : {}),
-    ...(stringValue(raw['lastHeartbeatAt'])
-      ? { lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']) }
-      : {}),
+    hostPid: numberValue(raw['hostPid']),
+    workerPid: numberValue(raw['workerPid']),
+    endpoint: stringValue(raw['endpoint']),
+    hostEndpoint: stringValue(raw['hostEndpoint']),
+    hostAuthToken: stringValue(raw['hostAuthToken']),
+    tokenDigest: stringValue(raw['tokenDigest']),
+    lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']),
     protocolVersion: numberValue(raw['protocolVersion']) ?? 1,
     platform: platformValue(raw['platform']),
     recentOutputBytes: numberValue(raw['recentOutputBytes']) ?? 0,
@@ -609,8 +595,18 @@ function terminalValue(value: unknown): AgentViewLaunchFile['terminal'] {
   };
 }
 
+const KNOWN_PLATFORMS: ReadonlySet<string> = new Set([
+  'aix',
+  'darwin',
+  'freebsd',
+  'linux',
+  'openbsd',
+  'sunos',
+  'win32',
+]);
+
 function platformValue(value: unknown): NodeJS.Platform {
-  return typeof value === 'string'
+  return typeof value === 'string' && KNOWN_PLATFORMS.has(value)
     ? (value as NodeJS.Platform)
     : process.platform;
 }

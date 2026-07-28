@@ -121,6 +121,7 @@ async function pumpInputToPty(
       }
       await pty.write(toBuffer(next.value));
     }
+    detached = true;
     return 'detached';
   } finally {
     const returned = iterator.return?.();

@@ -378,8 +378,15 @@ export function subscribeAgentViewSupervisor(
         let response: AgentViewSupervisorResponse;
         try {
           response = parseSupervisorResponse(line);
-        } catch {
-          continue;
+        } catch (parseError) {
+          notifySubscriptionError(
+            new AgentViewSupervisorClientError(
+              `Invalid subscription response: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+              'invalid_response',
+            ),
+          );
+          socket.destroy();
+          return;
         }
         if (!response.ok) {
           notifySubscriptionError(
