@@ -7828,7 +7828,18 @@ export function App({
                     setGitDialog({ workspaceCwd, view: 'diff' })
                   }
                   onOpenCommit={(workspaceCwd) =>
-                    setGitDialog({ workspaceCwd, view: 'commit' })
+                    setGitDialog({
+                      workspaceCwd,
+                      // A worktree session commits in the worktree checkout,
+                      // not the base workspace cwd — but only for the active
+                      // session's own workspace chip; another workspace's chip
+                      // has no association with this session's worktree.
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'commit',
+                    })
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported

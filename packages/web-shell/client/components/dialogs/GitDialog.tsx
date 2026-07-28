@@ -498,7 +498,7 @@ export function GitDialog({
   }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd, t, loadPrBranches]);
 
   const doCreatePr = useCallback(async () => {
-    if (!prTitle.trim() || prGenerating) return;
+    if (!prTitle.trim() || prGenerating || prBusy) return;
     setPrBusy(true);
     setPrStatus(null);
     if (prHeadInfoRef.current && !prHeadInfoRef.current.hasUpstream) {
@@ -550,6 +550,7 @@ export function GitDialog({
     prBase,
     prBranches,
     prGenerating,
+    prBusy,
     t,
   ]);
 

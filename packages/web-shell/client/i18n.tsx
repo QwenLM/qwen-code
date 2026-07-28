@@ -43,6 +43,8 @@ const EN: Messages = {
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
   'branchPicker.newBranchPlaceholder': 'Branch name',
+  'branchPicker.invalidBranchName':
+    'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
   'branchPicker.checkoutRefPlaceholder': 'Tag name or commit SHA',
   'branchPicker.section.recent': 'Recent',
   'branchPicker.section.local': 'Local',
@@ -2481,6 +2483,8 @@ const ZH: Messages = {
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
   'branchPicker.newBranchPlaceholder': '分支名称',
+  'branchPicker.invalidBranchName':
+    '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
   'branchPicker.checkoutRefPlaceholder': '标签名或提交 SHA',
   'branchPicker.section.recent': '最近',
   'branchPicker.section.local': '本地',

@@ -139,7 +139,15 @@ export function BranchPickerPopover({
   );
 
   const handleNewBranch = useCallback(async () => {
-    if (busyAction || !validateBranchName(newBranchName)) return;
+    if (busyAction) return;
+    if (!validateBranchName(newBranchName)) {
+      // An empty name just means "not typed yet"; only explain the rejection
+      // once the user has actually entered something invalid.
+      if (newBranchName) {
+        showStatus(t('branchPicker.invalidBranchName'), 'error');
+      }
+      return;
+    }
     setBusyAction('newBranch');
     try {
       await ws.workspaceGitCreateBranch(newBranchName, undefined, gitCwd);

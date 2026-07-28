@@ -79,6 +79,51 @@ describe('workspace Git branch routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_rebase');
   });
+
+  it('rejects a checkout with a missing ref with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('missing_ref');
+  });
+
+  it('rejects a checkout with an invalid ref with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({ ref: 'bad ref' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_ref');
+  });
+
+  it('rejects a wrong-typed setUpstream with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/push')
+      .send({ setUpstream: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_set_upstream');
+  });
+
+  it('rejects a commit with a missing message with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/commit')
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('missing_message');
+  });
+
+  it('rejects a wrong-typed all with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/commit')
+      .send({ message: 'x', all: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_all');
+  });
 });
 
 describe('legacy route trust guard', () => {
