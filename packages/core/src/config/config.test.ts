@@ -8819,6 +8819,15 @@ describe('Model Switching and Config Updates', () => {
     expect(config.getActiveTodoReminder('prompt-related-notification')).toBe(
       'unfinished user work',
     );
+    expect(
+      config.getActiveTodoWorkChainOwner(
+        'prompt-related-notification',
+        'stale-owner',
+      ),
+    ).toBe('prompt-user');
+    expect(
+      config.getActiveTodoWorkChainOwner('prompt-unmapped', 'inherited-owner'),
+    ).toBe('inherited-owner');
     expect(config.getActiveTodoReminder('prompt-unrelated')).toBe('other work');
 
     config.endAutomaticActiveTodoWorkChain('prompt-cron');

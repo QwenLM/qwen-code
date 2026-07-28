@@ -4148,11 +4148,14 @@ export class CoreToolScheduler {
         }
       }
 
+      const inheritedTodoWorkChainId = todoWorkChainContext.getStore();
       const todoWorkChainId =
-        todoWorkChainContext.getStore() ??
-        this.config.getActiveTodoWorkChainOwner(
+        this.config.getActiveTodoWorkChainOwner?.(
           scheduledCall.request.prompt_id,
-        );
+          inheritedTodoWorkChainId,
+        ) ??
+        inheritedTodoWorkChainId ??
+        scheduledCall.request.prompt_id;
 
       if (invocation instanceof ShellToolInvocation) {
         const setPidCallback = (pid: number) => {

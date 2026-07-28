@@ -6030,8 +6030,13 @@ export class Config {
     return this.activeTodoWorkChainOwners;
   }
 
-  getActiveTodoWorkChainOwner(promptId: string): string {
-    return this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? promptId;
+  getActiveTodoWorkChainOwner(
+    promptId: string,
+    fallbackOwner = promptId,
+  ): string {
+    return (
+      this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? fallbackOwner
+    );
   }
 
   getActiveTodoReminder(promptId: string): string | undefined {

@@ -2640,16 +2640,6 @@ export class Session implements SessionContext {
           (params as { retry?: boolean }).retry === true ||
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
           promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true;
-        if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
-          this.#resetTodoStopGuardBackgroundLineage();
-        }
-        this.config.startActiveTodoWorkChain(
-          promptId,
-          continuesCurrentWorkChain
-            ? this.activeTodoWorkChainPromptId
-            : undefined,
-        );
-        this.activeTodoWorkChainPromptId = promptId;
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -2868,6 +2858,17 @@ export class Session implements SessionContext {
                 parts = [...parts, { text: additionalContext }];
               }
             }
+
+            if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
+              this.#resetTodoStopGuardBackgroundLineage();
+            }
+            this.config.startActiveTodoWorkChain(
+              promptId,
+              continuesCurrentWorkChain
+                ? this.activeTodoWorkChainPromptId
+                : undefined,
+            );
+            this.activeTodoWorkChainPromptId = promptId;
 
             // Snapshot file state before this turn (mirrors the makeSnapshot
             // block in GeminiClient.sendMessageStream). Placed after
