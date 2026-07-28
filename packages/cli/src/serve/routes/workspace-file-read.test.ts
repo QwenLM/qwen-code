@@ -557,18 +557,18 @@ describe('capability advertisement', () => {
   });
 });
 
-// The `record_artifact` hint that `write_file` appends to a successful write
-// names a `workspacePath`, and the model hands that exact string back to this
-// route. Producer and consumer live in different packages, each with its own
-// notion of what the path is relative to — `write_file` starts from the session
-// cwd, the route resolves against the bound workspace root. They agree for an
-// ordinary session and drifted apart for a worktree one, where every artifact
-// preview 404'd. Neither side's unit tests could catch that: both were
-// internally consistent. These pin the round trip instead, over real HTTP.
-describe('record_artifact workspacePath contract (write_file ⇄ GET /file)', () => {
+// The artifact metadata that `write_file` returns for successful writes names a
+// `workspacePath`, and this route later resolves that exact string. Producer and
+// consumer live in different packages, each with its own notion of what the path
+// is relative to — `write_file` starts from the session cwd, the route resolves
+// against the bound workspace root. They agree for an ordinary session and
+// drifted apart for a worktree one, where every artifact preview 404'd. Neither
+// side's unit tests could catch that: both were internally consistent. These pin
+// the round trip instead, over real HTTP.
+describe('artifact workspacePath contract (write_file ⇄ GET /file)', () => {
   const ARTIFACT = '<!doctype html><h1>Quarterly Chart</h1>';
 
-  /** The workspacePath the model is told to send, from the real producer. */
+  /** The workspacePath emitted by the real producer. */
   function emittedWorkspacePath(sessionCwd: string, filePath: string): string {
     const reminder = buildRecordArtifactReminder(
       {

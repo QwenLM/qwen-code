@@ -447,24 +447,34 @@ describe('WriteFileTool', () => {
       );
     });
 
-    it('reminds the model to record artifact-like workspace files', async () => {
+    it('records artifact-like workspace files in the tool result', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'reports', 'weather.html');
+      const content = '<!doctype html><html><body>Weather</body></html>';
       const params = {
         file_path: filePath,
-        content: '<!doctype html><html><body>Weather</body></html>',
+        content,
       };
 
       const result = await tool.build(params).execute(abortSignal);
 
-      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain('automatically recorded');
       expect(result.llmContent).toContain(
         'workspacePath "reports/weather.html"',
       );
-      expect(result.artifacts).toBeUndefined();
+      expect(result.artifacts).toEqual([
+        {
+          title: 'weather.html',
+          kind: 'html',
+          storage: 'workspace',
+          workspacePath: 'reports/weather.html',
+          mimeType: 'text/html',
+          sizeBytes: Buffer.byteLength(content),
+        },
+      ]);
     });
 
-    it('reminds for case-insensitive artifact extensions', async () => {
+    it('records case-insensitive artifact extensions', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'reports', 'dashboard.HTML');
       const params = {
@@ -474,13 +484,34 @@ describe('WriteFileTool', () => {
 
       const result = await tool.build(params).execute(abortSignal);
 
-      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain('automatically recorded');
       expect(result.llmContent).toContain(
         'workspacePath "reports/dashboard.HTML"',
       );
+      expect(result.artifacts?.[0]).toMatchObject({
+        title: 'dashboard.HTML',
+        kind: 'html',
+        storage: 'workspace',
+        workspacePath: 'reports/dashboard.HTML',
+        mimeType: 'text/html',
+      });
     });
 
-    it('does not remind for ordinary source files', async () => {
+    it('does not record artifact-like files when artifact recording is disabled', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
+      const filePath = path.join(rootDir, 'reports', 'weather.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Weather</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record ordinary source files as artifacts', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'src', 'index.ts');
       const params = {
@@ -490,10 +521,11 @@ describe('WriteFileTool', () => {
 
       const result = await tool.build(params).execute(abortSignal);
 
-      expect(result.llmContent).not.toContain('record_artifact');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
     });
 
-    it('does not remind for files outside the workspace', async () => {
+    it('does not record files outside the workspace as artifacts', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(tempDir, 'outside.html');
       const params = {
@@ -503,10 +535,11 @@ describe('WriteFileTool', () => {
 
       const result = await tool.build(params).execute(abortSignal);
 
-      expect(result.llmContent).not.toContain('record_artifact');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
     });
 
-    it('suggests workspace-root-relative path inside a worktree', async () => {
+    it('records workspace-root-relative path inside a worktree', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const worktreeDir = path.join(
         rootDir,
@@ -526,10 +559,17 @@ describe('WriteFileTool', () => {
 
         const result = await tool.build(params).execute(abortSignal);
 
-        expect(result.llmContent).toContain('record_artifact');
+        expect(result.llmContent).toContain('automatically recorded');
         expect(result.llmContent).toContain(
           'workspacePath ".qwen/worktrees/my-feature/report.html"',
         );
+        expect(result.artifacts?.[0]).toMatchObject({
+          title: 'report.html',
+          kind: 'html',
+          storage: 'workspace',
+          workspacePath: '.qwen/worktrees/my-feature/report.html',
+          mimeType: 'text/html',
+        });
       } finally {
         mockConfigInternal.getTargetDir = originalGetTargetDir;
       }

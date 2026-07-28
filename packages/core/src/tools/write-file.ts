@@ -12,6 +12,8 @@ import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
+  ToolArtifact,
+  ToolArtifactKind,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -520,8 +522,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // pre-write placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will re-stat
       // and either see fresh content or treat the entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
         const postWriteStats = fs.statSync(file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config.getFileReadCache().recordWrite(file_path, postWriteStats);
       } catch {
         // Non-fatal: leaving a stale entry is preferable to failing
@@ -561,10 +565,14 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           `User modified the \`content\` to be: ${content}`,
         );
       }
-      const artifactReminder = buildRecordArtifactReminder(
+      const artifact = buildWorkspaceArtifactMetadata(
         this.config,
         file_path,
+        postWriteSizeBytes,
       );
+      const artifactReminder = artifact
+        ? buildRecordArtifactReminder(this.config, file_path)
+        : null;
       if (artifactReminder) {
         llmSuccessMessageParts.push(artifactReminder);
       }
@@ -601,6 +609,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       // Capture detailed error information for debugging
@@ -644,17 +653,51 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * Builds the `record_artifact` hint appended to a successful write.
+ * Builds the artifact-recording note appended to a successful write.
  *
- * Exported because the string it produces is a CONTRACT with the daemon's
+ * Exported because the workspacePath it produces is a CONTRACT with the daemon's
  * `GET /file` route: the `workspacePath` computed here is later resolved by
  * `resolveWithinWorkspace` against the bound workspace root. The two sides live
  * in different packages and drifted apart once already (a worktree session
- * emitted a worktree-relative path that the route resolved against the
+ * emitted a session-cwd-relative path that the route resolved against the
  * workspace root, so every artifact preview 404'd). `workspace-file-read.test.ts`
  * pins the round-trip; keep this exported so it can keep doing so.
  */
 export function buildRecordArtifactReminder(
+  config: Config,
+  filePath: string,
+): string | null {
+  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
+  if (!workspacePath) {
+    return null;
+  }
+  return (
+    `This file was automatically recorded as a workspace artifact with ` +
+    `workspacePath "${workspacePath}". No extra artifact registration step ` +
+    `is needed.`
+  );
+}
+
+function buildWorkspaceArtifactMetadata(
+  config: Config,
+  filePath: string,
+  sizeBytes?: number,
+): ToolArtifact | null {
+  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
+  if (!workspacePath) {
+    return null;
+  }
+  return {
+    title: path.basename(filePath),
+    kind: inferWorkspaceArtifactKind(filePath),
+    storage: 'workspace',
+    workspacePath,
+    mimeType: getSpecificMimeType(filePath),
+    sizeBytes,
+  };
+}
+
+function getRecordArtifactWorkspacePath(
   config: Config,
   filePath: string,
 ): string | null {
@@ -683,12 +726,27 @@ export function buildRecordArtifactReminder(
   ) {
     return null;
   }
-  const workspacePath = relativePath.split(path.sep).join('/');
-  return (
-    `If this file is a reusable user-facing artifact, call ` +
-    `record_artifact with workspacePath "${workspacePath}" before telling ` +
-    `the user it is available in the artifacts panel.`
-  );
+  return relativePath.split(path.sep).join('/');
+}
+
+function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.htm':
+    case '.html':
+      return 'html';
+    case '.ipynb':
+      return 'notebook';
+    case '.pdf':
+      return 'pdf';
+    case '.jpeg':
+    case '.jpg':
+    case '.png':
+    case '.svg':
+    case '.webp':
+      return 'image';
+    default:
+      return 'file';
+  }
 }
 
 /**
