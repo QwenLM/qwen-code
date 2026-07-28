@@ -18,6 +18,7 @@ import {
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
+import type { RipgrepFailureKind } from '../utils/ripgrepUtils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
@@ -437,12 +438,7 @@ export class RipgrepFallbackEvent implements BaseTelemetryEvent {
   }
 }
 
-export type RipgrepRuntimeRecoveryFailureKind =
-  | 'eagain'
-  | 'timeout'
-  | 'max_buffer'
-  | 'exit'
-  | 'spawn';
+export type RipgrepRuntimeRecoveryFailureKind = RipgrepFailureKind;
 
 export class RipgrepRuntimeRecoveryEvent implements BaseTelemetryEvent {
   'event.name': 'ripgrep_runtime_recovery';

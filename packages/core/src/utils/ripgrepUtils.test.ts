@@ -314,6 +314,28 @@ describe('ripgrepUtils', () => {
       });
     });
 
+    it('treats exit code 1 with both stdout and stderr as an exit error', async () => {
+      const error = createExecError('Command failed', { code: 1 });
+      mockRipgrepAttempt({
+        error,
+        stdout: 'file.ts:1:match\n',
+        stderr: 'rg: ./restricted: Permission denied\n',
+      });
+
+      const result = await runRipgrep(['--threads', '4']);
+
+      expect(result).toMatchObject({
+        stdout: 'file.ts:1:match\n',
+        incomplete: false,
+        error,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'exit',
+        },
+      });
+    });
+
     it('retries a confirmed internal thread EAGAIN with one thread', async () => {
       mockRipgrepAttempt({
         error: createExecError('Command failed', { code: 2 }),
@@ -373,6 +395,34 @@ describe('ripgrepUtils', () => {
           failureKind: 'exit',
         },
       });
+    });
+
+    it('marks retry result as incomplete when retry produces partial output', async () => {
+      mockRipgrepAttempt({
+        error: createExecError('Command failed', { code: 2 }),
+        stderr:
+          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
+      });
+      const retryError = createExecError('Command timed out', {
+        signal: 'SIGTERM',
+      });
+      mockRipgrepAttempt({
+        error: retryError,
+        stdout: 'file.ts:1:partial\nfile.ts:2:incomplete-line',
+      });
+
+      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+
+      expect(result).toMatchObject({
+        incomplete: true,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: true,
+          retrySucceeded: false,
+          failureKind: 'timeout',
+        },
+      });
+      expect(result.stdout).toBe('file.ts:1:partial');
     });
 
     it('does not retry a spawn EAGAIN because ripgrep never started', async () => {

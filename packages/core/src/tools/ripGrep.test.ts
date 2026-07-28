@@ -349,7 +349,11 @@ describe('RipGrepTool', () => {
     it('does not emit telemetry for a clean successful search', async () => {
       (runRipgrep as Mock).mockResolvedValue({
         stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
-        truncated: false,
+        incomplete: false,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+        },
       });
 
       const invocation = grepTool.build({ pattern: 'hello' });
