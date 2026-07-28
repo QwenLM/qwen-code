@@ -1194,6 +1194,49 @@ describe('SessionWriterLease', () => {
     }
   });
 
+  it('resizes the hash buffer when an empty transcript grows between retries', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '');
+    const initial = await fs.stat(fixture.transcriptPath);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      stat: typeof probe.stat;
+    };
+    await probe.close();
+    const originalStat = fileHandlePrototype.stat;
+    let statCalls = 0;
+    let lease: SessionWriterLease | undefined;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const call = ++statCalls;
+        if (call === 3) {
+          await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+        }
+        const result = await originalStat.apply(this, args);
+        if (call === 2) {
+          await fs.utimes(
+            fixture.transcriptPath,
+            initial.atime,
+            new Date(initial.mtimeMs + 1_000),
+          );
+        }
+        return result;
+      });
+
+    try {
+      lease = await SessionWriterLease.acquire(fixture.options);
+      expect(statCalls).toBeGreaterThanOrEqual(4);
+      await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+        '{"seed":true}\n',
+      );
+    } finally {
+      stat.mockRestore();
+      await lease?.release();
+    }
+  });
+
   it('requires a stable scan when an already-read prefix changes', async () => {
     const fixture = await createFixture();
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });

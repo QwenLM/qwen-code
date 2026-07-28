@@ -5,8 +5,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import * as nodeConstants from 'node:constants';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
-import { constants as fsConstants, type Stats } from 'node:fs';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,13 +21,13 @@ const RELEASE_PRECHECK_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
 const TRANSCRIPT_SNAPSHOT_ATTEMPTS = 3;
 const TRANSCRIPT_HASH_BUFFER_BYTES = 1024 * 1024;
-const TRANSCRIPT_NO_FOLLOW_FLAG = fsConstants.O_NOFOLLOW ?? 0;
-const TRANSCRIPT_NONBLOCK_FLAG = fsConstants.O_NONBLOCK ?? 0;
+const TRANSCRIPT_NO_FOLLOW_FLAG = nodeConstants.O_NOFOLLOW ?? 0;
+const TRANSCRIPT_NONBLOCK_FLAG = nodeConstants.O_NONBLOCK ?? 0;
 const TRANSCRIPT_READ_FLAGS =
-  fsConstants.O_RDONLY | TRANSCRIPT_NO_FOLLOW_FLAG | TRANSCRIPT_NONBLOCK_FLAG;
+  nodeConstants.O_RDONLY | TRANSCRIPT_NO_FOLLOW_FLAG | TRANSCRIPT_NONBLOCK_FLAG;
 const TRANSCRIPT_APPEND_FLAGS =
-  fsConstants.O_APPEND |
-  fsConstants.O_RDWR |
+  nodeConstants.O_APPEND |
+  nodeConstants.O_RDWR |
   TRANSCRIPT_NO_FOLLOW_FLAG |
   TRANSCRIPT_NONBLOCK_FLAG;
 const debugLogger = createDebugLogger('SESSION_WRITER_LEASE');
@@ -519,7 +520,7 @@ async function openTranscriptForAppend(
   try {
     const flags = expectedState.exists
       ? TRANSCRIPT_APPEND_FLAGS
-      : TRANSCRIPT_APPEND_FLAGS | fsConstants.O_CREAT | fsConstants.O_EXCL;
+      : TRANSCRIPT_APPEND_FLAGS | nodeConstants.O_CREAT | nodeConstants.O_EXCL;
     return await fs.open(filePath, flags, 0o600);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -575,9 +576,13 @@ async function captureOpenTranscriptSnapshot(
       throw new SessionTranscriptChangedError();
     }
 
-    buffer ??= Buffer.allocUnsafe(
-      Math.min(TRANSCRIPT_HASH_BUFFER_BYTES, beforeState.byteLength),
+    const bufferBytes = Math.min(
+      TRANSCRIPT_HASH_BUFFER_BYTES,
+      beforeState.byteLength,
     );
+    if (!buffer || buffer.byteLength < bufferBytes) {
+      buffer = Buffer.allocUnsafe(bufferBytes);
+    }
     const hasher = createHash('sha256');
     let position = 0;
     while (position < beforeState.byteLength) {
@@ -586,6 +591,7 @@ async function captureOpenTranscriptSnapshot(
         buffer.byteLength,
         beforeState.byteLength - position,
       );
+      if (length === 0) throw new SessionWriterUnavailableError();
       let chunkBytesRead = 0;
       while (chunkBytesRead < length) {
         if (shouldAbort()) throw new SessionWriterLostError();
