@@ -66,7 +66,7 @@ export interface AgentViewSupervisorClientOptions {
 }
 
 export interface AgentViewSupervisorSubscriptionOptions
-  extends AgentViewSupervisorClientOptions {
+  extends Omit<AgentViewSupervisorClientOptions, 'timeoutMs'> {
   onError?: (error: Error) => void;
 }
 

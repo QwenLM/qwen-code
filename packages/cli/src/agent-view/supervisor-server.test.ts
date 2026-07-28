@@ -102,6 +102,37 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('allows worker sideband operations without auth', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      workerEvent: vi.fn(() => ({ received: true })),
+    };
+    const server = createAgentViewSupervisorServer(handler, {
+      socketPath,
+      authToken: 'secret-token',
+    });
+
+    await server.listen();
+    try {
+      await expect(
+        callAgentViewSupervisor(socketPath, 'workerEvent', {
+          type: 'heartbeat',
+          sessionId: 'session-1',
+        }),
+      ).resolves.toEqual({ received: true });
+      expect(handler.workerEvent).toHaveBeenCalledWith({
+        type: 'heartbeat',
+        sessionId: 'session-1',
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
   it('returns not_implemented for dispatch without a handler', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);
