@@ -158,6 +158,13 @@ import {
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import {
+  createGoalRuntime,
+  GoalPersistenceUnavailableError,
+  type GoalRuntime,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
+import { createGoalVerifier } from '../goals/goal-verifier.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -191,6 +198,7 @@ import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
+  type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -1819,6 +1827,11 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
+  private goalRuntime: GoalRuntime | undefined;
+  private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  private goalTurnHost: GoalTurnHost | undefined;
+  private goalTurnHostUnbind: (() => void) | undefined;
+  private goalTurnHostGeneration = 0;
   private readonly chatRecordingFailureListeners =
     new Set<ChatRecordingFailureListener>();
   private fileCheckpointingEnabled: boolean;
@@ -2332,6 +2345,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     this.extensionManager = new ExtensionManager({
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
@@ -3510,6 +3524,11 @@ export class Config {
     if (this.chatRecordingService?.hasWriteOwnership()) {
       throw new SessionWriterUnavailableError();
     }
+    if (Object.hasOwn(this, 'goalRuntime')) {
+      this.goalTurnHostUnbind?.();
+      this.goalTurnHostUnbind = undefined;
+      this.goalRuntime?.dispose();
+    }
     // Finalize the outgoing session before switching.
     const outgoingChatRecordingService = this.chatRecordingService;
     try {
@@ -3536,6 +3555,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
     // earlier in the *current* conversation. Carrying entries across
@@ -4497,6 +4517,11 @@ export class Config {
       // Stop the settings watcher regardless of initialization state —
       // it is started before Config.initialize() and would leak otherwise.
       this.settingsWatcher?.stopWatching();
+      if (Object.hasOwn(this, 'goalRuntime')) {
+        this.goalTurnHostUnbind?.();
+        this.goalTurnHostUnbind = undefined;
+        this.goalRuntime?.dispose();
+      }
 
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
@@ -6683,6 +6708,63 @@ export class Config {
     return this.chatRecordingService;
   }
 
+  getGoalRuntime(): GoalRuntime {
+    if (
+      !Object.hasOwn(this, 'goalRuntime') ||
+      !this.chatRecordingEnabled ||
+      !this.chatRecordingService ||
+      !this.goalRuntime
+    ) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    return this.goalRuntime;
+  }
+
+  getGoalRuntimeReady(): Promise<GoalRuntime> {
+    const runtime = this.getGoalRuntime();
+    if (!Object.hasOwn(this, 'goalRuntimeReady') || !this.goalRuntimeReady) {
+      return Promise.reject(new GoalPersistenceUnavailableError());
+    }
+    return this.goalRuntimeReady.then(() => runtime);
+  }
+
+  async rebaseGoalRuntimeFromActiveTranscript(): Promise<void> {
+    const runtime = this.getGoalRuntime();
+    const recordingService = this.chatRecordingService;
+    if (!recordingService) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const records = await recordingService.readActiveTranscriptChain();
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    runtime.dispose();
+    this.initializeGoalRuntime(records);
+    await this.goalRuntimeReady;
+  }
+
+  bindGoalTurnHost(host: GoalTurnHost): () => void {
+    if (!Object.hasOwn(this, 'goalRuntime')) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const generation = this.goalTurnHostGeneration + 1;
+    this.goalTurnHostGeneration = generation;
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHost = host;
+    this.goalTurnHostUnbind = this.goalRuntime?.bindHost(host);
+
+    return () => {
+      if (
+        this.goalTurnHostGeneration !== generation ||
+        this.goalTurnHost !== host
+      ) {
+        return;
+      }
+      this.goalTurnHostUnbind?.();
+      this.goalTurnHostUnbind = undefined;
+      this.goalTurnHost = undefined;
+    };
+  }
+
   onChatRecordingFailure(listener: ChatRecordingFailureListener): () => void {
     this.chatRecordingFailureListeners.add(listener);
     return () => {
@@ -6698,6 +6780,27 @@ export class Config {
       },
       this.experimentalZedIntegration,
     );
+  }
+
+  private initializeGoalRuntime(records?: readonly ChatRecord[]): void {
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    if (!this.chatRecordingService) {
+      this.goalRuntime = undefined;
+      this.goalRuntimeReady = undefined;
+      return;
+    }
+    const runtime = createGoalRuntime({
+      journal: this.chatRecordingService,
+      evidenceSource: this.chatRecordingService,
+      verifier: createGoalVerifier(this),
+    });
+    this.goalRuntime = runtime;
+    if (this.goalTurnHost) {
+      this.goalTurnHostUnbind = runtime.bindHost(this.goalTurnHost);
+    }
+    this.goalRuntimeReady = runtime.restore(records ?? []).then(() => runtime);
+    void this.goalRuntimeReady.catch(() => undefined);
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
@@ -7098,6 +7201,18 @@ export class Config {
       });
     };
 
+    const registerGoalWorkerTools = async (): Promise<void> => {
+      if (options?.forSubAgent) return;
+      await registerLazy(ToolNames.GET_GOAL, async () => {
+        const { GetGoalTool } = await import('../goals/goal-tools.js');
+        return new GetGoalTool(this);
+      });
+      await registerLazy(ToolNames.UPDATE_GOAL, async () => {
+        const { UpdateGoalTool } = await import('../goals/goal-tools.js');
+        return new UpdateGoalTool(this);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -7115,6 +7230,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
@@ -7123,6 +7239,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);

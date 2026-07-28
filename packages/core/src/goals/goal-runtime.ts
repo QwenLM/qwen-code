@@ -63,6 +63,13 @@ export interface GoalEvidenceSource {
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
 }
 
+export class GoalPersistenceUnavailableError extends Error {
+  constructor() {
+    super('Goal persistence is unavailable for this session');
+    this.name = 'GoalPersistenceUnavailableError';
+  }
+}
+
 export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
