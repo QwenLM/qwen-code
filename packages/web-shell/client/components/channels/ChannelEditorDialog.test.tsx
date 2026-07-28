@@ -36,6 +36,13 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: DINGTALK.fields.map((field) =>
+    field.key === 'clientSecret' ? { ...field, required: false } : field,
+  ),
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -110,6 +117,7 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Edit DingTalk');
     expect(document.body.textContent).toContain('Stored in environment');
+    expect(document.body.textContent).not.toContain('Clear');
     expect(inputByLabel('Client Secret')).toBeNull();
 
     const replace = Array.from(document.querySelectorAll('button')).find(
@@ -120,6 +128,15 @@ describe('ChannelEditorDialog', () => {
     });
 
     expect(inputByLabel('Client Secret')).not.toBeNull();
+  });
+
+  it('offers Clear for an optional stored secret', async () => {
+    await renderDialog({ descriptor: OPTIONAL_SECRET, instance: INSTANCE });
+
+    const clear = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Clear',
+    );
+    expect(clear).toBeDefined();
   });
 
   it('submits a new instance with typed fields and the current revision', async () => {

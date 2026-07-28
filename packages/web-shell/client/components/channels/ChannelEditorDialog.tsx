@@ -232,6 +232,9 @@ export function ChannelEditorDialog({
     };
     const error = errors[field.key];
     const showInput = secret.operation === 'replace';
+    const operations = field.required
+      ? (['preserve', 'replace'] as const)
+      : (['preserve', 'replace', 'clear'] as const);
     return (
       <FieldShell
         key={field.key}
@@ -254,7 +257,7 @@ export function ChannelEditorDialog({
                 : t('channels.editor.secret.stored')}
             </span>
             <div className={styles.secretActions}>
-              {(['preserve', 'replace', 'clear'] as const).map((operation) => (
+              {operations.map((operation) => (
                 <Button
                   key={operation}
                   type="button"
