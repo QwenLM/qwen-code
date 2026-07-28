@@ -236,18 +236,14 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     iid: number,
   ): Promise<string> {
     try {
-      // gitbeaker types require numeric projectId; GitLab API accepts path strings at runtime
-      const pid = chatId as unknown as number;
       if (targetType === 'mr') {
+        // gitbeaker types require numeric projectId; GitLab API accepts path strings at runtime
+        const pid = chatId as unknown as number;
         const mr = await this.api.MergeRequests.show(pid, iid);
         return (mr as { description?: string }).description || '';
       }
-      const show = this.api.Issues.show as (
-        p: number,
-        iid: number,
-      ) => Promise<{ description?: string }>;
-      const issue = await show(pid, iid);
-      return issue.description || '';
+      const issue = await this.api.Issues.show(iid, { projectId: chatId });
+      return (issue as { description?: string }).description || '';
     } catch {
       return '';
     }
