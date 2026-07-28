@@ -134,7 +134,7 @@ Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public pr
 
 ## Mention Detection
 
-The adapter detects mentions by scanning the text for `@bot-username` using a case-insensitive regex with word-boundary checks. The `isMentioned` flag is set on the envelope; the `GroupGate` (`requireMention` config) decides whether to process it.
+The adapter always sets `isMentioned = true` on dispatched envelopes, because GitLab has already determined the mention when creating the todo. The `action_prompt_template` config is the real event filter — only actions with a configured template are processed. The `GroupGate` `requireMention` setting has no effect on this adapter (it is effectively bypassed). The `@bot` mention is stripped from the message text before dispatch via `stripBotMention`.
 
 ## How It Works
 
