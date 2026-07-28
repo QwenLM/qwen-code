@@ -85,6 +85,13 @@ describe('Interactive file system', () => {
         printDebugInfo(rig, rig._interactiveOutput, { toolCall, updated });
       }
 
+      if (toolCall) {
+        expect(
+          updated,
+          'Expected file content to contain 1.0.1 after tool call',
+        ).toBe(true);
+      }
+
       expect(
         toolCall || updated,
         'Expected a write_file/edit tool call or file content containing 1.0.1',
