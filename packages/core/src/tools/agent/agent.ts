@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import { extractParentToolNames } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -34,7 +34,7 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -1681,23 +1681,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // current ToolRegistry. This preserves the parent's tool surface and
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
-      const parentToolNames = Array.from(
-        new Set(
-          (
-            generationConfig.tools as Array<{
-              functionDeclarations?: FunctionDeclaration[];
-            }>
-          )
-            ?.flatMap((t) => t.functionDeclarations ?? [])
-            .map((declaration) => declaration.name)
-            .filter(
-              (name): name is string =>
-                typeof name === 'string' &&
-                name.length > 0 &&
-                !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(name),
-            ) ?? [],
-        ),
-      );
+      const parentToolNames = extractParentToolNames(generationConfig);
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as

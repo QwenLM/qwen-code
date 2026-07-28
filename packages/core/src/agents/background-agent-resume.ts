@@ -61,7 +61,10 @@ import {
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from './runtime/agent-core.js';
+import {
+  EXCLUDED_TOOLS_FOR_SUBAGENTS,
+  extractParentToolNames,
+} from './runtime/agent-core.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
@@ -1588,23 +1591,7 @@ export class BackgroundAgentResumeService {
         return undefined;
       }
 
-      const advertisedNames = Array.from(
-        new Set(
-          (
-            generationConfig.tools as Array<{
-              functionDeclarations?: FunctionDeclaration[];
-            }>
-          )
-            ?.flatMap((tool) => tool.functionDeclarations ?? [])
-            .map((declaration) => declaration.name)
-            .filter(
-              (name): name is string =>
-                typeof name === 'string' &&
-                name.length > 0 &&
-                !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(name),
-            ) ?? [],
-        ),
-      );
+      const advertisedNames = extractParentToolNames(generationConfig);
       if (advertisedNames.length === 0) {
         return undefined;
       }

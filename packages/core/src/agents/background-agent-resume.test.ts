@@ -21,6 +21,7 @@ import {
   readAgentMeta,
   writeAgentMeta,
 } from './agent-transcript.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
 import { getCurrentAgentDepth } from './runtime/agent-context.js';
@@ -2303,6 +2304,135 @@ describe('BackgroundAgentResumeService', () => {
     expect(registry.get(agentId)?.resumeBlockedReason).toContain(
       'current parent system prompt or tool surface is unavailable',
     );
+    expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  // Seeds a resumable fork task with a complete bootstrap transcript so
+  // resumeBackgroundAgent reaches resolveCurrentForkRuntime — the branch under
+  // test — rather than short-circuiting earlier on a missing transcript.
+  function seedResumableForkTask(sessionId: string, agentId: string) {
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: 'Fork task pending capability rebind',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'sys1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          systemPayload: {
+            kind: 'fork',
+            history: [{ role: 'user', parts: [{ text: 'bootstrap env' }] }],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: 'sys1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Fork task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'sys2',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'system',
+          subtype: 'agent_launch_prompt',
+          systemPayload: {
+            displayText: buildChildMessage('Fork task'),
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Fork task pending capability rebind',
+      subagentType: FORK_SUBAGENT_TYPE,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Fork task',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    return { metaPath, outputFile };
+  }
+
+  it('keeps fork tasks paused when every advertised parent tool is excluded from subagents', async () => {
+    const sessionId = 'session-fork-cap-excluded';
+    const agentId = 'agent-fork-cap-excluded';
+    seedResumableForkTask(sessionId, agentId);
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    const { service } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        // Every advertised tool is in EXCLUDED_TOOLS_FOR_SUBAGENTS, so the
+        // filtered advertised-name set collapses to empty and the fork must
+        // stay paused instead of resuming with no tools.
+        advertisedTools: [
+          { name: ToolNames.WORKFLOW },
+          { name: ToolNames.AGENT },
+        ],
+      },
+    });
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+      'current parent system prompt or tool surface is unavailable',
+    );
+    expect(registry.get(agentId)?.error).toBeUndefined();
+    expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  it('keeps fork tasks paused when no advertised parent tool is still registered', async () => {
+    const sessionId = 'session-fork-cap-unregistered';
+    const agentId = 'agent-fork-cap-unregistered';
+    seedResumableForkTask(sessionId, agentId);
+
+    const createSpy = vi.spyOn(AgentHeadless, 'create');
+    const { service } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        advertisedTools: [{ name: 'mcp__removed__search' }],
+        // The advertised tool is no longer in the live registry, so the
+        // registry filter yields no resolvable tool and the fork stays paused.
+        registeredTools: [],
+      },
+    });
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeUndefined();
+    expect(registry.get(agentId)?.status).toBe('paused');
+    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+      'current parent system prompt or tool surface is unavailable',
+    );
+    expect(registry.get(agentId)?.error).toBeUndefined();
     expect(createSpy).not.toHaveBeenCalled();
     createSpy.mockRestore();
   });
