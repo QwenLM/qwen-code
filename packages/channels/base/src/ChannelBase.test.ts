@@ -1172,6 +1172,136 @@ describe('ChannelBase', () => {
       };
     }
 
+    const inputCorrelationCases = (
+      ['user', 'thread', 'chat_thread', 'single'] as const
+    ).flatMap((sessionScope) =>
+      (['collect', 'steer', 'followup'] as const).map((dispatchMode) => ({
+        sessionScope,
+        dispatchMode,
+        first: {
+          chatId: 'matrix-chat',
+          threadId: 'matrix-thread',
+          senderId: 'alice',
+          isGroup: true,
+          isMentioned: true,
+        },
+        second: {
+          chatId: 'matrix-chat',
+          threadId: 'matrix-thread',
+          senderId: sessionScope === 'user' ? 'alice' : 'bob',
+          isGroup: true,
+          isMentioned: true,
+        },
+      })),
+    );
+
+    it.each(inputCorrelationCases)(
+      'keeps input correlation for $sessionScope + $dispatchMode',
+      async ({ sessionScope, dispatchMode, first, second }) => {
+        const promptResolvers: Array<(value: string) => void> = [];
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          () =>
+            new Promise<string>((resolve) => {
+              promptResolvers.push(resolve);
+            }),
+        );
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+          () => {
+            promptResolvers[0]?.('');
+            return Promise.resolve();
+          },
+        );
+        const ch = createChannel({
+          sessionScope,
+          dispatchMode,
+          groupPolicy: 'open',
+        });
+        ch.userInputPresentationResult = { kind: 'presented' };
+
+        const firstTurn = ch.handleInbound(
+          envelope({ ...first, messageId: 'matrix-1', text: 'first' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const firstSessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+        emitUserQuestion(firstSessionId, 'matrix-request-1');
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(1),
+        );
+        const firstContext = ch.userInputPresentations[0]!;
+        const firstSettled = vi.fn();
+        firstContext.onSettled(firstSettled);
+        const cancellationVisibleAtSettlement = vi.fn(() =>
+          ch.taskEvents.some(
+            (event) =>
+              event.type === 'cancelled' &&
+              event.runId === firstContext.runId &&
+              event.reason === 'steer',
+          ),
+        );
+        firstContext.onSettled(cancellationVisibleAtSettlement);
+
+        const secondTurn = ch.handleInbound(
+          envelope({ ...second, messageId: 'matrix-2', text: 'second' }),
+        );
+        if (dispatchMode !== 'steer') {
+          await firstContext.respond({
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+            answers: { '0': 'Beijing' },
+          });
+          promptResolvers[0]?.('');
+        }
+        await firstTurn;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const secondSessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[1]![0] as string;
+        emitUserQuestion(secondSessionId, 'matrix-request-2');
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(2),
+        );
+        const secondContext = ch.userInputPresentations[1]!;
+
+        expect(secondSessionId).toBe(firstSessionId);
+        expect(secondContext.runId).not.toBe(firstContext.runId);
+        expect(firstContext.owner.id).toBe(first.senderId);
+        expect(secondContext.owner.id).toBe(second.senderId);
+        expect(firstContext.target).toMatchObject({
+          chatId: first.chatId,
+          threadId: first.threadId,
+          senderId: first.senderId,
+          isGroup: first.isGroup,
+        });
+        expect(secondContext.target).toMatchObject({
+          chatId: second.chatId,
+          threadId: second.threadId,
+          senderId: second.senderId,
+          isGroup: second.isGroup,
+        });
+        if (dispatchMode === 'steer') {
+          expect(firstSettled).toHaveBeenCalledWith('run_cancelled');
+          expect(cancellationVisibleAtSettlement).toHaveReturnedWith(true);
+          await expect(
+            firstContext.respond({
+              outcome: { outcome: 'selected', optionId: 'proceed_once' },
+              answers: { '0': 'late' },
+            }),
+          ).resolves.toBe(false);
+        } else {
+          expect(respondToPermissionMock()).toHaveBeenCalledWith(
+            'matrix-request-1',
+            expect.objectContaining({ answers: { '0': 'Beijing' } }),
+          );
+        }
+        expect(respondToPermissionMock()).not.toHaveBeenCalledWith(
+          'matrix-request-2',
+          expect.anything(),
+        );
+
+        promptResolvers[1]?.('');
+        await secondTurn;
+      },
+    );
+
     it('presents canonical semantic user input with normalized questions', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };

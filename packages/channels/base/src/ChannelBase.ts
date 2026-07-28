@@ -5209,6 +5209,7 @@ export abstract class ChannelBase {
             // turn at the channel level (cancelled is already set above), so
             // the event reflects that intent, not the bridge RPC outcome.
             this.emitTaskCancellation(active, sessionId, 'steer');
+            this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
           }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
           // after the wind-down bound, this steered turn is wedged behind a hung
