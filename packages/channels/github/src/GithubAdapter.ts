@@ -273,6 +273,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
+      const allowed = this.gate.isAllowed(senderId);
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -288,12 +289,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       };
 
       if (!(await this.dispatchEnvelope(envelope, ctx.issueNumber))) {
-        dispatched = true;
-        break;
+        if (hasMention && allowed) dispatched = true;
+        continue;
       }
-      if (this.gate.isAllowed(senderId)) {
+      if (allowed) {
         this.recordDispatchedComment(key);
-        dispatched = true;
+        if (hasMention) dispatched = true;
       }
     }
 
@@ -342,17 +343,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.processCommentLane(ctx, false);
       return;
     }
-    const comments = (await this.fetchNewComments(ctx))
-      .filter((comment) => {
-        const key = comment.node_id || String(comment.id);
-        const sender = (comment.user?.login || 'unknown').toLowerCase();
-        return (
-          !this.cursor.dispatchedComments?.includes(key) &&
-          this.gate.isAllowed(sender)
-        );
-      })
-      .slice(-MAX_AGGREGATE_COMMENTS);
+    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+      const key = comment.node_id || String(comment.id);
+      const sender = (comment.user?.login || 'unknown').toLowerCase();
+      return (
+        !this.cursor.dispatchedComments?.includes(key) &&
+        this.gate.isAllowed(sender)
+      );
+    });
+    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
     if (comments.length === 0) return;
+
+    for (const comment of allComments) {
+      this.recordDispatchedComment(comment.node_id || String(comment.id));
+    }
 
     const first = comments[0]!;
     const summary = comments
@@ -397,6 +401,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `listEvents(${ctx.threadId})`,
     )) as GithubIssueEvent[];
+    events.sort((a, b) =>
+      (a.created_at || '').localeCompare(b.created_at || ''),
+    );
     const bot = this.botUsername?.toLowerCase();
     const lowerBound = ctx.lastReadAt || ctx.windowSince;
     const event = events.findLast((candidate) => {
