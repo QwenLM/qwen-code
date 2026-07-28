@@ -124,4 +124,26 @@ describe('installTerminalRedrawOptimizer', () => {
     restore();
     expect(stdout.write).toBe(write);
   });
+
+  it('is skipped on WSL via WSL_DISTRO_NAME (#7634)', () => {
+    vi.stubEnv('WSL_DISTRO_NAME', 'Ubuntu');
+    const write = vi.fn(() => true);
+    const stdout = { write } as unknown as NodeJS.WriteStream;
+    const restore = installTerminalRedrawOptimizer(stdout);
+
+    expect(stdout.write).toBe(write);
+    restore();
+    expect(stdout.write).toBe(write);
+  });
+
+  it('is skipped on Windows Terminal via WT_SESSION (#7634)', () => {
+    vi.stubEnv('WT_SESSION', 'console-12345');
+    const write = vi.fn(() => true);
+    const stdout = { write } as unknown as NodeJS.WriteStream;
+    const restore = installTerminalRedrawOptimizer(stdout);
+
+    expect(stdout.write).toBe(write);
+    restore();
+    expect(stdout.write).toBe(write);
+  });
 });

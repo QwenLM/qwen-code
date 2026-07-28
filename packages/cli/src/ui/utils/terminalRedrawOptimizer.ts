@@ -125,6 +125,19 @@ export function installTerminalRedrawOptimizer(
     return () => {};
   }
 
+  // The batching optimizer emits cursor-up sequences in bulk, which ConPTY
+  // (Windows Console Pseudo Terminal) processes differently from individual
+  // per-line erases — the cursor ends up at the wrong row, and each streaming
+  // frame overlaps remnants of the previous one, causing duplicate text.
+  // Skip the optimizer when WSL or Windows Terminal is detected. #7634.
+  if (
+    process.env['WSL_DISTRO_NAME'] ||
+    process.env['WSL_INTEROP'] ||
+    process.env['WT_SESSION']
+  ) {
+    return () => {};
+  }
+
   const originalWrite = stdout.write;
 
   const optimizedWrite = function (
