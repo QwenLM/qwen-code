@@ -2701,7 +2701,7 @@ export class Config {
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
-      if (this.getAutoSkillEnabled()) {
+      if (this.getAutoSkillEnabled() && this.isTrustedFolder()) {
         try {
           const curatorResult = await maybeRunAutoSkillCurator(
             this.getProjectRoot(),

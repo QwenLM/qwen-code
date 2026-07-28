@@ -19,7 +19,7 @@ Add a small, deterministic lifecycle manager for project auto-skills:
   of `.qwen/skills/` into `.qwen/archived-skills/`.
 - Allow individual managed skills to be pinned out of automatic transitions.
 - Run the deterministic pass at most once every 7 days during configuration
-  initialization when Auto Skill is enabled.
+  initialization when Auto Skill is enabled and the workspace is trusted.
 - Expose `/curator`, `/curator status`, `/curator run [--dry-run]`, and
   `/curator pin|unpin|restore <directory>` in interactive, non-interactive,
   and ACP command surfaces.
@@ -57,8 +57,9 @@ A directory is curator-managed only when every condition holds:
 This double marker prevents the curator from moving hand-authored, learned,
 extension, bundled, personal, malformed, or symlinked content. Archive and
 restore never overwrite an existing skill. A destination collision skips only
-that package so unrelated maintenance can continue, and archived directory
-names are reserved when the review agent chooses a name for a new auto-skill.
+that package so unrelated maintenance can continue. Archived directory names
+are shown as reserved in the review prompt and rejected by its write permission
+guard, while confirmation staging still snapshots active skills only.
 If state persistence fails after moves, the pass attempts to move every package
 back before surfacing the error.
 

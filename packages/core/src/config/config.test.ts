@@ -2710,6 +2710,16 @@ describe('Server Config (config.ts)', () => {
       expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
     });
 
+    it('does not run auto-skill curation in an untrusted folder', async () => {
+      await new Config({
+        ...baseParams,
+        enableAutoSkill: true,
+        trustedFolder: false,
+      }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
     it('continues loading skills when auto-skill curation fails', async () => {
       vi.mocked(maybeRunAutoSkillCurator).mockRejectedValueOnce(
         new Error('corrupt curator state'),

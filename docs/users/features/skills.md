@@ -74,7 +74,7 @@ Qwen Code tracks successful uses of generated project Skills locally, including 
 
 - After 30 days without a successful use or `SKILL.md` edit, an auto-skill is marked stale.
 - After 90 days, its complete directory is moved to `.qwen/archived-skills/`. Nothing is permanently deleted.
-- Automatic maintenance runs at most once every 7 days. Each newly observed auto-skill gets a full grace period before maintenance begins.
+- Automatic maintenance runs at most once every 7 days in trusted workspaces. Each newly observed auto-skill gets a full grace period before maintenance begins.
 - A pinned auto-skill is excluded from automatic stale and archive transitions until it is unpinned.
 - Archived directory names remain reserved, and an existing archive destination skips only that collision rather than stopping maintenance for other skills.
 

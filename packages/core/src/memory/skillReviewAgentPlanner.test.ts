@@ -143,6 +143,28 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
     expect(decision).toBe('allow');
   });
 
+  it('denies write_file when the directory name is already archived', async () => {
+    const directoryName = 'auto-skill-retired';
+    await fs.mkdir(
+      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+      { recursive: true },
+    );
+    const target = path.join(
+      projectRoot,
+      '.qwen',
+      'skills',
+      directoryName,
+      'SKILL.md',
+    );
+
+    expect(
+      await scopedPm(projectRoot).evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: target,
+      }),
+    ).toBe('deny');
+  });
+
   it('still allows edit on an existing auto-skill (update path preserved)', async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
     const pm = scopedPm(projectRoot);
@@ -292,7 +314,7 @@ describe('listExistingSkillDirNames', () => {
     ]);
   });
 
-  it('reserves archived skill directory names', async () => {
+  it('does not treat archive-only directory names as live skills', async () => {
     const archived = path.join(
       projectRoot,
       '.qwen',
@@ -304,7 +326,6 @@ describe('listExistingSkillDirNames', () => {
 
     expect(await listExistingSkillDirNames(projectRoot)).toEqual([
       'auto-skill-live',
-      'auto-skill-retired',
     ]);
   });
 
@@ -360,6 +381,16 @@ describe('buildTaskPrompt', () => {
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
     expect(prompt).toMatch(/do NOT reuse/i);
+  });
+
+  it('lists archived directory names as reserved', async () => {
+    const directoryName = 'auto-skill-retired';
+    await fs.mkdir(
+      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+      { recursive: true },
+    );
+
+    expect(await buildTaskPrompt(projectRoot)).toContain(directoryName);
   });
 
   it('falls back to a placeholder line when no skills exist yet', async () => {

@@ -169,6 +169,15 @@ async function evaluateScopedDecision(
       } catch {
         return 'deny';
       }
+      const directoryName = path.basename(path.dirname(ctx.filePath));
+      try {
+        await fs.lstat(
+          path.join(getArchivedSkillsRoot(projectRoot), directoryName),
+        );
+        return 'deny';
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return 'deny';
+      }
       // ENOENT → file does not exist → allow creation.
       // Anything else (file present, EACCES, EISDIR, ...) → deny so we
       // never overwrite something we cannot prove is safe to clobber.
@@ -283,9 +292,7 @@ function buildAgentHistory(history: Content[]): Content[] {
 }
 
 /**
- * Enumerate directory names already used by active or archived project skills.
- * Archived names stay reserved so a new auto-skill cannot collide with a
- * recoverable older package.
+ * Enumerate active project skill directory names.
  *
  * Best-effort: an unreadable root contributes no names, so a temporary read
  * failure downgrades enumeration rather than aborting the task. Exported for
@@ -294,35 +301,44 @@ function buildAgentHistory(history: Content[]): Content[] {
 export async function listExistingSkillDirNames(
   projectRoot: string,
 ): Promise<string[]> {
-  const names = new Set<string>();
-  for (const [root, requireManifest] of [
-    [getProjectSkillsRoot(projectRoot), true],
-    [getArchivedSkillsRoot(projectRoot), false],
-  ] as const) {
-    let entries: Array<import('node:fs').Dirent>;
+  const skillsRoot = getProjectSkillsRoot(projectRoot);
+  let entries: Array<import('node:fs').Dirent>;
+  try {
+    entries = await fs.readdir(skillsRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of entries) {
+    // Skill dirs can be symlinked — `skill-load.ts` and `skill-manager.ts`
+    // both treat `isDirectory() || isSymbolicLink()` as "consider this a
+    // skill candidate". Mirror that here so symlinked skills appear in
+    // the enumeration and the agent steers clear of their names.
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     try {
-      entries = await fs.readdir(root, { withFileTypes: true });
+      await fs.stat(path.join(skillsRoot, entry.name, SKILL_FILE_NAME));
+      names.push(entry.name);
     } catch {
-      continue;
+      // No SKILL.md (or unreadable) — skip; half-built directories
+      // shouldn't reserve a name.
     }
+  }
+  return names.sort();
+}
+
+async function listReservedSkillDirNames(
+  projectRoot: string,
+): Promise<string[]> {
+  const names = new Set(await listExistingSkillDirNames(projectRoot));
+  try {
+    const entries = await fs.readdir(getArchivedSkillsRoot(projectRoot), {
+      withFileTypes: true,
+    });
     for (const entry of entries) {
-      // Skill dirs can be symlinked — `skill-load.ts` and `skill-manager.ts`
-      // both treat `isDirectory() || isSymbolicLink()` as "consider this a
-      // skill candidate". Mirror that here so symlinked skills appear in
-      // the enumeration and the agent steers clear of their names.
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      if (!requireManifest) {
-        names.add(entry.name);
-        continue;
-      }
-      try {
-        await fs.stat(path.join(root, entry.name, SKILL_FILE_NAME));
-        names.add(entry.name);
-      } catch {
-        // No SKILL.md (or unreadable) — skip; half-built directories
-        // shouldn't reserve a name.
-      }
+      if (entry.isDirectory() || entry.isSymbolicLink()) names.add(entry.name);
     }
+  } catch {
+    // An unavailable archive contributes no reserved names.
   }
   return [...names].sort();
 }
@@ -338,7 +354,7 @@ export async function listExistingSkillDirNames(
  */
 export async function buildTaskPrompt(projectRoot: string): Promise<string> {
   const skillsRoot = getProjectSkillsRoot(projectRoot);
-  const existing = await listExistingSkillDirNames(projectRoot);
+  const existing = await listReservedSkillDirNames(projectRoot);
   const existingLine =
     existing.length === 0
       ? '(no skills exist yet — any name is available)'
