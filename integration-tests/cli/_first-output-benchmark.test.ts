@@ -11,6 +11,7 @@ import {
   FirstOutputTracker,
   classifyFirstOutputEvent,
   evaluateSingleBundlePrototypeGate,
+  findInvalidTimings,
   measuredPairCountForDwell,
   nullablePercentiles,
   parseBenchmarkPostSessionDwell,
@@ -20,7 +21,8 @@ import {
   validateExpectedFinalText,
   validatePromptAcceptance,
   type BenchmarkDaemonEvent,
-  type FirstOutputBenchmarkArtifactV1,
+  type FirstOutputBenchmarkArtifactV2,
+  type FirstOutputSessionTimings,
   type PairedMetricSample,
 } from './_first-output-benchmark.js';
 
@@ -418,6 +420,50 @@ describe('FirstOutputTracker', () => {
   });
 });
 
+describe('findInvalidTimings', () => {
+  function makeTimings(
+    overrides: Partial<FirstOutputSessionTimings> = {},
+  ): FirstOutputSessionTimings {
+    return {
+      processToSessionReadyMs: 10,
+      sseReadyToPromptMs: 5,
+      promptToProviderRequestArrivalMs: 20,
+      promptToFirstModelOutputMs: 30,
+      promptToFirstAnswerTextMs: 35,
+      providerReadyToFirstModelOutputMs: 8,
+      processToFirstModelOutputMs: 40,
+      promptToTerminalMs: 50,
+      ...overrides,
+    };
+  }
+
+  it('treats finite non-negative and null timings as valid', () => {
+    expect(findInvalidTimings(makeTimings())).toEqual([]);
+    expect(
+      findInvalidTimings(
+        makeTimings({
+          promptToFirstAnswerTextMs: null,
+          promptToTerminalMs: 0,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('collects every invalid timing instead of stopping at the first', () => {
+    const invalid = findInvalidTimings(
+      makeTimings({
+        sseReadyToPromptMs: -1,
+        promptToFirstModelOutputMs: Number.NaN,
+      }),
+    );
+    expect(invalid).toHaveLength(2);
+    expect(invalid).toEqual([
+      ['sseReadyToPromptMs', -1],
+      ['promptToFirstModelOutputMs', Number.NaN],
+    ]);
+  });
+});
+
 describe('statistics', () => {
   it('calculates predictable nearest-rank percentiles', () => {
     expect(percentiles([5, 1, 4, 2, 3])).toEqual({
@@ -622,38 +668,144 @@ describe('runner decision contracts', () => {
   });
 
   it('applies the absolute and relative prototype gates only to complete baselines', () => {
+    const tightAround = (centre: number) =>
+      Array.from({ length: 30 }, (_, index) => centre - 1 + (index % 3));
+
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
-        coldPromptToProviderRequestP50Ms: 125,
+        coldWarmPairedDeltasMs: [],
+        seed: 7264,
+        coldPromptToProviderRequestP50Ms: 200,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 400,
       }),
-    ).toMatchObject({ passed: true, providerDeltaMs: 25 });
+    ).toMatchObject({
+      passed: false,
+      pairedMedianDeltaMs: null,
+      bootstrapMedianCi95: null,
+    });
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
-        coldPromptToProviderRequestP50Ms: 110,
+        coldWarmPairedDeltasMs: tightAround(30),
+        seed: 7264,
+        coldPromptToProviderRequestP50Ms: 200,
+        warmPromptToProviderRequestP50Ms: 100,
+        coldPromptToFirstModelOutputP50Ms: 400,
+      }),
+    ).toMatchObject({
+      passed: true,
+      providerDeltaMs: 100,
+      pairedMedianDeltaMs: 30,
+    });
+    expect(
+      evaluateSingleBundlePrototypeGate({
+        complete: true,
+        coldWarmPairedDeltasMs: tightAround(12),
+        seed: 7264,
+        coldPromptToProviderRequestP50Ms: 112,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 100,
       }),
-    ).toMatchObject({ passed: true, providerDeltaMs: 10 });
+    ).toMatchObject({ passed: true, pairedMedianDeltaMs: 12 });
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
+        coldWarmPairedDeltasMs: tightAround(9),
+        seed: 7264,
         coldPromptToProviderRequestP50Ms: 109,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 100,
       }),
-    ).toMatchObject({ passed: false, providerDeltaMs: 9 });
+    ).toMatchObject({ passed: false, pairedMedianDeltaMs: 9 });
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: false,
+        coldWarmPairedDeltasMs: tightAround(30),
+        seed: 7264,
         coldPromptToProviderRequestP50Ms: 130,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 100,
       }),
     ).toMatchObject({ passed: false });
+  });
+
+  it('fails the prototype gate when a passing point estimate has a CI that crosses the threshold', () => {
+    // Median 30 ms, but the samples are bimodal at -40 and 100 ms.
+    const noisy = Array.from({ length: 30 }, (_, index) =>
+      index % 2 === 0 ? -40 : 100,
+    );
+    const gate = evaluateSingleBundlePrototypeGate({
+      complete: true,
+      coldWarmPairedDeltasMs: noisy,
+      seed: 7264,
+      coldPromptToProviderRequestP50Ms: 130,
+      warmPromptToProviderRequestP50Ms: 100,
+      coldPromptToFirstModelOutputP50Ms: 400,
+    });
+
+    expect(gate.providerDeltaMs).toBe(30);
+    expect(gate.pairedMedianDeltaMs).toBe(30);
+    expect(gate.bootstrapMedianCi95?.lowMs).toBeLessThan(25);
+    expect(gate.passed).toBe(false);
+  });
+
+  it('produces a deterministic prototype-gate interval for a fixed seed', () => {
+    const deltas = Array.from({ length: 30 }, (_, index) => index);
+    const input = {
+      complete: true,
+      coldWarmPairedDeltasMs: deltas,
+      seed: 7264,
+      bootstrapIterations: 200,
+      coldPromptToProviderRequestP50Ms: 130,
+      warmPromptToProviderRequestP50Ms: 100,
+      coldPromptToFirstModelOutputP50Ms: 400,
+    };
+
+    const first = evaluateSingleBundlePrototypeGate(input);
+    const second = evaluateSingleBundlePrototypeGate(input);
+    expect(first).toEqual(second);
+    expect(first.bootstrapMedianCi95).toMatchObject({
+      lowMs: 9,
+      highMs: 19.5,
+      iterations: 200,
+      seed: 7264,
+    });
+
+    const differentSeed = evaluateSingleBundlePrototypeGate({
+      ...input,
+      seed: 99,
+    });
+    expect(differentSeed.bootstrapMedianCi95).not.toEqual(
+      first.bootstrapMedianCi95,
+    );
+  });
+
+  it('rejects invalid prototype-gate inputs before sampling', () => {
+    const validInput = {
+      complete: true,
+      coldWarmPairedDeltasMs: [30, 31, 29],
+      seed: 7264,
+      coldPromptToProviderRequestP50Ms: 200,
+      warmPromptToProviderRequestP50Ms: 100,
+      coldPromptToFirstModelOutputP50Ms: 400,
+    };
+    expect(() =>
+      evaluateSingleBundlePrototypeGate({
+        ...validInput,
+        bootstrapIterations: 0,
+      }),
+    ).toThrow('bootstrapIterations must be a positive integer');
+    expect(() =>
+      evaluateSingleBundlePrototypeGate({ ...validInput, seed: Number.NaN }),
+    ).toThrow('seed must be finite');
+    expect(() =>
+      evaluateSingleBundlePrototypeGate({
+        ...validInput,
+        coldWarmPairedDeltasMs: [Number.NaN],
+      }),
+    ).toThrow('coldWarmPairedDeltasMs must all be finite');
   });
 
   it('maps a mismatched final answer to the stable failure code', () => {
@@ -704,7 +856,7 @@ describe('artifact rendering', () => {
         providerDelayMs: 50,
         providerConnection: 'close-per-response',
         postSessionDwellMs: 0,
-        prompt: 'reply',
+        promptShape: 'reply',
         expectedAnswer: 'ok',
         maxBufferedEvents: 256,
         providerRequestsPerSession: 1,
@@ -714,7 +866,6 @@ describe('artifact rendering', () => {
             cliPath: '/control',
             realpath: '/control',
             sha256: 'control-hash',
-            gitCommit: null,
             compileCache: {
               policy: 'fixed-private-per-variant-warmed',
               directory: '/cache/control',
@@ -724,7 +875,6 @@ describe('artifact rendering', () => {
             cliPath: '/candidate',
             realpath: '/candidate',
             sha256: 'candidate-hash',
-            gitCommit: null,
             compileCache: {
               policy: 'fixed-private-per-variant-warmed',
               directory: '/cache/candidate',
@@ -754,7 +904,7 @@ describe('artifact rendering', () => {
           reasons: ['Candidate is faster'],
         },
       },
-    } satisfies FirstOutputBenchmarkArtifactV1;
+    } satisfies FirstOutputBenchmarkArtifactV2;
     const before = JSON.stringify(artifact);
 
     const markdown = renderFirstOutputBenchmarkMarkdown(artifact);
@@ -797,7 +947,7 @@ describe('artifact rendering', () => {
           reasons: ['bundle path is missing'],
         },
       },
-    } satisfies FirstOutputBenchmarkArtifactV1;
+    } satisfies FirstOutputBenchmarkArtifactV2;
 
     expect(renderFirstOutputBenchmarkMarkdown(artifact)).toContain(
       'Failure: invalid_configuration',

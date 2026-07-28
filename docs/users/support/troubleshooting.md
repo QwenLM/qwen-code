@@ -59,6 +59,7 @@ This guide provides solutions to common issues and debugging tips, including top
   - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, and sandbox settings — for the session. Note: the CLI flags `--yolo` and `--approval-mode` still take effect in safe mode. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
     - Example: `qwen --safe-mode`
     - Alternative: set the environment variable `QWEN_CODE_SAFE_MODE=true` if the CLI cannot accept flags.
+    - Note: "MCP servers" here means servers configured in `settings.json` / project `.mcp.json` — local, ambient state that safe mode is meant to isolate against. MCP servers you explicitly supply for the current invocation (an embedding ACP client's `session/new` `mcpServers`, or `--mcp-config`) are not local/ambient state and are still honored under safe mode.
 
 ## Common error messages and solutions
 

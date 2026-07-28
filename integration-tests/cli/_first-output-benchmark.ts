@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const FIRST_OUTPUT_BENCHMARK_VERSION = 1 as const;
+export const FIRST_OUTPUT_BENCHMARK_VERSION = 2 as const;
 export const DEFAULT_BOOTSTRAP_ITERATIONS = 10_000;
 export const DEFAULT_MATERIAL_THRESHOLD_MS = 10;
 export const DEFAULT_ORDER_SENSITIVITY_THRESHOLD_MS = 10;
@@ -813,9 +813,15 @@ export function validateExpectedFinalText(
 
 export interface SingleBundlePrototypeGateInput {
   complete: boolean;
+  /** Per-process cold-minus-warm deltas. Cold and warm share a process, so
+   * they are paired; the gate is decided on their median, not on a difference
+   * of two independent P50s. */
+  coldWarmPairedDeltasMs: readonly number[];
+  seed: number;
   coldPromptToProviderRequestP50Ms: number | null;
   warmPromptToProviderRequestP50Ms: number | null;
   coldPromptToFirstModelOutputP50Ms: number | null;
+  bootstrapIterations?: number;
   absoluteThresholdMs?: number;
   relativeThresholdRatio?: number;
 }
@@ -823,6 +829,8 @@ export interface SingleBundlePrototypeGateInput {
 export interface SingleBundlePrototypeGateResult {
   passed: boolean;
   providerDeltaMs: number | null;
+  pairedMedianDeltaMs: number | null;
+  bootstrapMedianCi95: BootstrapMedianConfidenceInterval | null;
   absoluteThresholdMs: number;
   relativeThresholdRatio: number;
 }
@@ -832,6 +840,7 @@ export function evaluateSingleBundlePrototypeGate(
 ): SingleBundlePrototypeGateResult {
   const absoluteThresholdMs = input.absoluteThresholdMs ?? 25;
   const relativeThresholdRatio = input.relativeThresholdRatio ?? 0.1;
+  const iterations = input.bootstrapIterations ?? DEFAULT_BOOTSTRAP_ITERATIONS;
   if (
     !Number.isFinite(absoluteThresholdMs) ||
     absoluteThresholdMs < 0 ||
@@ -840,22 +849,41 @@ export function evaluateSingleBundlePrototypeGate(
   ) {
     throw new TypeError('gate thresholds must be finite and non-negative');
   }
+  if (!Number.isInteger(iterations) || iterations < 1) {
+    throw new TypeError('bootstrapIterations must be a positive integer');
+  }
+  if (!Number.isFinite(input.seed)) {
+    throw new TypeError('seed must be finite');
+  }
+  if (input.coldWarmPairedDeltasMs.some((value) => !Number.isFinite(value))) {
+    throw new TypeError('coldWarmPairedDeltasMs must all be finite');
+  }
   const providerDeltaMs =
     input.coldPromptToProviderRequestP50Ms === null ||
     input.warmPromptToProviderRequestP50Ms === null
       ? null
       : input.coldPromptToProviderRequestP50Ms -
         input.warmPromptToProviderRequestP50Ms;
+  const pairedMedianDeltaMs = median(input.coldWarmPairedDeltasMs);
+  const ci = bootstrapMedianCi95(
+    input.coldWarmPairedDeltasMs,
+    iterations,
+    input.seed,
+  );
+  // The lower CI bound, not the point estimate, must clear the threshold: a
+  // delta that only just exceeds it is not distinguishable from noise.
   const passed =
     input.complete &&
-    providerDeltaMs !== null &&
+    ci !== null &&
     input.coldPromptToFirstModelOutputP50Ms !== null &&
-    (providerDeltaMs >= absoluteThresholdMs ||
-      providerDeltaMs >=
+    (ci.lowMs >= absoluteThresholdMs ||
+      ci.lowMs >=
         relativeThresholdRatio * input.coldPromptToFirstModelOutputP50Ms);
   return {
     passed,
     providerDeltaMs,
+    pairedMedianDeltaMs,
+    bootstrapMedianCi95: ci,
     absoluteThresholdMs,
     relativeThresholdRatio,
   };
@@ -876,12 +904,29 @@ export interface FirstOutputSessionTimestamps {
 
 export interface FirstOutputSessionTimings {
   processToSessionReadyMs: number | null;
+  /** Idle window actually granted by the configured post-session dwell. */
+  sseReadyToPromptMs: number | null;
   promptToProviderRequestArrivalMs: number | null;
   promptToFirstModelOutputMs: number | null;
   promptToFirstAnswerTextMs: number | null;
   providerReadyToFirstModelOutputMs: number | null;
   processToFirstModelOutputMs: number | null;
   promptToTerminalMs: number | null;
+}
+
+export function findInvalidTimings(
+  timings: FirstOutputSessionTimings,
+): Array<[keyof FirstOutputSessionTimings, number]> {
+  const invalid: Array<[keyof FirstOutputSessionTimings, number]> = [];
+  for (const key of Object.keys(timings) as Array<
+    keyof FirstOutputSessionTimings
+  >) {
+    const value = timings[key];
+    if (value !== null && (!Number.isFinite(value) || value < 0)) {
+      invalid.push([key, value]);
+    }
+  }
+  return invalid;
 }
 
 export interface FirstOutputSessionRunResult {
@@ -942,7 +987,6 @@ export interface FirstOutputVariantDescriptor {
   cliPath: string;
   realpath: string;
   sha256: string;
-  gitCommit: string | null;
   compileCache: {
     policy: 'fixed-private-per-variant-warmed';
     directory: string;
@@ -952,6 +996,7 @@ export interface FirstOutputVariantDescriptor {
 export type FirstOutputMetricName =
   | 'processToListenMs'
   | 'processToSessionReadyMs'
+  | 'sseReadyToPromptMs'
   | 'promptToProviderRequestArrivalMs'
   | 'promptToFirstModelOutputMs'
   | 'promptToFirstAnswerTextMs'
@@ -969,7 +1014,7 @@ export interface FirstOutputPairedMetricSummary {
   bySession: Record<string, PairedCandidateControlStats>;
 }
 
-interface FirstOutputBenchmarkArtifactBaseV1 {
+interface FirstOutputBenchmarkArtifactBaseV2 {
   version: typeof FIRST_OUTPUT_BENCHMARK_VERSION;
   benchmark: 'daemon-first-output';
   capturedAt: string;
@@ -991,15 +1036,15 @@ interface FirstOutputBenchmarkCommonConfig {
   providerDelayMs: number;
   providerConnection: 'close-per-response';
   postSessionDwellMs: number;
-  prompt: string;
+  promptShape: string;
   expectedAnswer: string;
   maxBufferedEvents: number;
   providerRequestsPerSession: number;
   timeoutsMs: Record<string, number>;
 }
 
-export interface FirstOutputSingleBenchmarkArtifactV1
-  extends FirstOutputBenchmarkArtifactBaseV1 {
+export interface FirstOutputSingleBenchmarkArtifactV2
+  extends FirstOutputBenchmarkArtifactBaseV2 {
   mode: 'single';
   config: FirstOutputBenchmarkCommonConfig & {
     warmupRuns: number;
@@ -1023,6 +1068,8 @@ export interface FirstOutputSingleBenchmarkArtifactV1
         coldPromptToProviderRequestP50Ms: number | null;
         warmPromptToProviderRequestP50Ms: number | null;
         providerDeltaMs: number | null;
+        pairedMedianDeltaMs: number | null;
+        bootstrapMedianCi95: BootstrapMedianConfidenceInterval | null;
         coldPromptToFirstModelOutputP50Ms: number | null;
         absoluteThresholdMs: number;
         relativeThresholdRatio: number;
@@ -1032,8 +1079,8 @@ export interface FirstOutputSingleBenchmarkArtifactV1
   };
 }
 
-export interface FirstOutputPairedBenchmarkArtifactV1
-  extends FirstOutputBenchmarkArtifactBaseV1 {
+export interface FirstOutputPairedBenchmarkArtifactV2
+  extends FirstOutputBenchmarkArtifactBaseV2 {
   mode: 'paired';
   config: FirstOutputBenchmarkCommonConfig & {
     warmupPairs: number;
@@ -1067,8 +1114,8 @@ export interface FirstOutputPairedBenchmarkArtifactV1
   };
 }
 
-export interface FirstOutputFailedBenchmarkArtifactV1
-  extends FirstOutputBenchmarkArtifactBaseV1 {
+export interface FirstOutputFailedBenchmarkArtifactV2
+  extends FirstOutputBenchmarkArtifactBaseV2 {
   mode: 'failed';
   config: {
     requestedMode: 'single' | 'paired' | 'unknown';
@@ -1083,10 +1130,10 @@ export interface FirstOutputFailedBenchmarkArtifactV1
   };
 }
 
-export type FirstOutputBenchmarkArtifactV1 =
-  | FirstOutputSingleBenchmarkArtifactV1
-  | FirstOutputPairedBenchmarkArtifactV1
-  | FirstOutputFailedBenchmarkArtifactV1;
+export type FirstOutputBenchmarkArtifactV2 =
+  | FirstOutputSingleBenchmarkArtifactV2
+  | FirstOutputPairedBenchmarkArtifactV2
+  | FirstOutputFailedBenchmarkArtifactV2;
 
 function formatMilliseconds(value: number | null): string {
   return value === null ? 'n/a' : value.toFixed(1);
@@ -1109,7 +1156,7 @@ function formatDistribution(distribution: PercentileSummary | null): string {
 }
 
 export function renderFirstOutputBenchmarkMarkdown(
-  artifact: FirstOutputBenchmarkArtifactV1,
+  artifact: FirstOutputBenchmarkArtifactV2,
 ): string {
   const decisionLabel =
     artifact.mode === 'paired' ? 'Primary metric decision' : 'Decision';
