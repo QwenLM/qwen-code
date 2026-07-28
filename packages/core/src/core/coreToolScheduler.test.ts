@@ -14519,6 +14519,18 @@ describe('extractToolFilePaths', () => {
     ]);
   });
 
+  it('extracts the source path from zoom_image', () => {
+    expect(
+      extractToolFilePaths(ToolNames.ZOOM_IMAGE, {
+        file_path: '/proj/chart.png',
+        x1: 0,
+        y1: 0,
+        x2: 500,
+        y2: 500,
+      }),
+    ).toEqual(['/proj/chart.png']);
+  });
+
   it('extracts notebook_path for notebook_edit', () => {
     expect(
       extractToolFilePaths('notebook_edit', {

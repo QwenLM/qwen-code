@@ -682,6 +682,8 @@ export class BridgeClient implements Client {
       event: BridgeWorkspaceGenerationNotificationEvent,
     ) => void,
     private readonly onChannelDelivery?: ChannelDeliveryHandler,
+    /** Permits pre-registration client-MCP discovery without trusting its id. */
+    private readonly hasSessionSpawnInFlight: () => boolean = () => false,
   ) {}
 
   async requestPermission(
@@ -1300,7 +1302,37 @@ export class BridgeClient implements Client {
         `client-hosted MCP server '${server}' is not currently connected`,
       );
     }
-    const response = await send(payload);
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (typeof sessionId !== 'string' || sessionId.length === 0)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must be a non-empty string when provided',
+      );
+    }
+    const ownsSession =
+      typeof sessionId === 'string' && this.ownsSession(sessionId);
+    if (
+      typeof sessionId === 'string' &&
+      !ownsSession &&
+      !this.hasSessionSpawnInFlight()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session not owned by this channel: ${sessionId}`,
+      );
+    }
+    if (typeof sessionId === 'string' && !ownsSession) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=client_mcp_message action=forwarded_without_session reason=session_registration_pending`,
+      );
+    }
+    const response = await send(
+      payload,
+      typeof sessionId === 'string' && ownsSession ? { sessionId } : undefined,
+    );
     return { payload: response as Record<string, unknown> };
   }
 
