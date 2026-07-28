@@ -91,10 +91,18 @@ export async function sweepStaleWorktreeProjects(
     if (worktreePath === undefined) continue;
 
     if (!fs.existsSync(worktreePath)) {
-      await fsp.rm(path.join(projectsDir, entry), {
-        recursive: true,
-        force: true,
-      });
+      // One unreadable entry must not abort the sweep for the rest.
+      try {
+        await fsp.rm(path.join(projectsDir, entry), {
+          recursive: true,
+          force: true,
+        });
+      } catch (error) {
+        logger.debug(
+          `Failed to remove stale worktree project snapshot ${entry}: ${String(error)}`,
+        );
+        continue;
+      }
       removed.push(entry);
       logger.debug(
         `Removed stale worktree project snapshot ${entry} (worktree ${worktreePath} no longer exists)`,
