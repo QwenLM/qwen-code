@@ -72,6 +72,34 @@ describe('modelCommand', () => {
     expect(result).toEqual(['qwen-image-2.0']);
   });
 
+  it('should complete compaction-eligible models for --compaction flag', async () => {
+    mockContext.services.config = {
+      getAvailableModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        },
+        {
+          id: 'voice-model',
+          authType: AuthType.USE_OPENAI,
+          voiceOnly: true,
+        },
+        {
+          id: 'image-model',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const result = await modelCommand.completion!(
+      mockContext,
+      '--compaction qw',
+    );
+
+    expect(result).toEqual(['qwen-max']);
+  });
+
   it('should return error when config is not available', async () => {
     mockContext.services.config = null;
 

@@ -68,7 +68,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
       setIsVisionModelMode(
         compactionModelMode || imageModelMode ? false : visionModelMode,
       );
-      setIsCompactionModelMode(compactionModelMode);
+      setIsCompactionModelMode(imageModelMode ? false : compactionModelMode);
       setIsImageModelMode(imageModelMode);
       setModelDialogPersistScope(options?.persistScope);
       setIsModelDialogOpen(true);

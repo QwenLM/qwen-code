@@ -3821,6 +3821,7 @@ export class Config {
         !available.some(
           (m) =>
             m.id === selector.modelId &&
+            !m.fastOnly &&
             !m.voiceOnly &&
             !m.imageOnly &&
             !m.visionOnly,

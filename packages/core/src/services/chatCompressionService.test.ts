@@ -53,6 +53,7 @@ describe('ChatCompressionService', () => {
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
       getCompactionModel: vi.fn(),
+      getFastModel: vi.fn(),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -868,6 +869,46 @@ describe('ChatCompressionService', () => {
           thinkingConfig: { includeThoughts: false },
           maxOutputTokens: 20_000,
         }),
+      }),
+    );
+  });
+
+  it('falls back to fastModel when getCompactionModel returns undefined', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(undefined);
+    vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model-v1');
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'fast-model-v1',
       }),
     );
   });
