@@ -232,7 +232,7 @@ async function renderImageView(
     signal.throwIfAborted();
     throw new ImageViewError(
       'decode_failed',
-      `Failed to decode image: ${filePath}`,
+      `Failed to render image overview: ${filePath}`,
     );
   }
   signal.throwIfAborted();
