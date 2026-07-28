@@ -89,7 +89,6 @@ describe('ripgrepUtils', () => {
     vi.mocked(fileExists).mockReset();
     vi.mocked(execCommand).mockReset();
     vi.mocked(isCommandAvailable).mockReset();
-    vi.mocked(execCommand).mockReset();
     childProcessMock.execFile.mockReset();
     vi.mocked(execCommand).mockResolvedValue({
       stdout: 'ripgrep 14.1.0\n',

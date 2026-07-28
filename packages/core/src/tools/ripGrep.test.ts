@@ -346,6 +346,45 @@ describe('RipGrepTool', () => {
       );
     });
 
+    it('does not emit telemetry for a clean successful search', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: false,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(logRipgrepRuntimeRecovery).not.toHaveBeenCalled();
+    });
+
+    it('logs runtime recovery telemetry for a non-retry timeout failure', async () => {
+      const error = new Error('Command timed out');
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        incomplete: true,
+        error,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'timeout',
+        },
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      await invocation.execute(abortSignal);
+
+      expect(logRipgrepRuntimeRecovery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          selection_mode: 'builtin',
+          retry_triggered: false,
+          failure_kind: 'timeout',
+        }),
+      );
+    });
+
     it('does not report incomplete unparseable output as no matches', async () => {
       const error = new Error('ripgrep exited before JSON completed');
       (runRipgrep as Mock).mockResolvedValue({
