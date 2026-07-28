@@ -569,19 +569,31 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
-    // Mock contextWindowSize instead of tokenLimit
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      75_000,
+    );
+    // contextWindowSize bumped from the old 1000 toy value so the new
+    // computeCompactionOutputBudget gate has room (needs
+    // window - originalTokenCount - COMPACT_OUTPUT_SAFETY_MARGIN above
+    // COMPACT_MIN_OUTPUT_TOKENS). originalTokenCount bumped alongside it
+    // (75_000, above the resulting auto=67_000 threshold) so the cheap gate
+    // still treats this as "over threshold" — auto scales with window, so
+    // the old 900-over-a-1000-window relationship doesn't carry over as-is.
+    // promptTokenCount/candidatesTokenCount below are intentionally left at
+    // their original small values: the newTokenCount formula subtracts a
+    // fixed ~1000-token system-prompt overhead, not contextLimit, so they're
+    // independent of the window size.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 100_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    // newTokenCount = 900 - (1600 - 1000) + 50 = 900 - 600 + 50 = 350 <= 900 (success)
+    // newTokenCount = 75000 - (1600 - 1000) + 50 = 75000 - 600 + 50 = 74450
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
-        promptTokenCount: 1600,
+        promptTokenCount: 1_600,
         candidatesTokenCount: 50,
-        totalTokenCount: 1650,
+        totalTokenCount: 1_650,
       },
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -598,7 +610,7 @@ describe('ChatCompressionService', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.newTokenCount).toBe(350); // 900 - (1600 - 1000) + 50
+    expect(result.info.newTokenCount).toBe(74_450); // 75000 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
     // postProcessSummary appends the resume trailer to the summary body,
     // so it's "Summary\n\n<trailer>" rather than a strict equality.
@@ -641,18 +653,22 @@ describe('ChatCompressionService', () => {
       throw new Error('getHistory should not be called by compression');
     });
     vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+    // Scaled up from the old 1000/900/1600 toy numbers — see the identical
+    // comment in 'should compress if over token threshold' above.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 100_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      75_000,
+    );
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
-        promptTokenCount: 1600,
+        promptTokenCount: 1_600,
         candidatesTokenCount: 50,
-        totalTokenCount: 1650,
+        totalTokenCount: 1_650,
       },
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -934,9 +950,13 @@ describe('ChatCompressionService', () => {
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
       5_000,
     );
+    // contextWindowSize bumped from the old 6_000 toy value so
+    // originalTokenCount(5_000) + the compaction output safety margin still
+    // leaves room above COMPACT_MIN_OUTPUT_TOKENS — the remainder math this
+    // test asserts on depends on originalTokenCount, not on this window size.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 6_000,
+      contextWindowSize: 200_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
     const debug = vi.fn();
     (
@@ -1247,18 +1267,20 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      90_000,
+    );
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 100_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
-        promptTokenCount: 1600,
+        promptTokenCount: 1_600,
         candidatesTokenCount: 50,
-        totalTokenCount: 1650,
+        totalTokenCount: 1_650,
       },
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1428,11 +1450,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        75_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 100_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       mockFirePreCompactEvent.mockRejectedValue(
@@ -1442,9 +1464,9 @@ describe('ChatCompressionService', () => {
       const mockGenerateContent = vi.fn().mockResolvedValue({
         text: 'Summary',
         usage: {
-          promptTokenCount: 1600,
+          promptTokenCount: 1_600,
           candidatesTokenCount: 50,
-          totalTokenCount: 1650,
+          totalTokenCount: 1_650,
         },
       });
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1522,19 +1544,19 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        75_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 100_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
         text: 'Summary',
         usage: {
-          promptTokenCount: 1600,
+          promptTokenCount: 1_600,
           candidatesTokenCount: 50,
-          totalTokenCount: 1650,
+          totalTokenCount: 1_650,
         },
       });
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1622,19 +1644,19 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        75_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 100_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
         text: 'Auto Summary',
         usage: {
-          promptTokenCount: 1600,
+          promptTokenCount: 1_600,
           candidatesTokenCount: 50,
-          totalTokenCount: 1650,
+          totalTokenCount: 1_650,
         },
       });
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1707,11 +1729,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        75_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 100_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       mockFirePostCompactEvent.mockRejectedValue(
@@ -1721,9 +1743,9 @@ describe('ChatCompressionService', () => {
       const mockGenerateContent = vi.fn().mockResolvedValue({
         text: 'Summary',
         usage: {
-          promptTokenCount: 1600,
+          promptTokenCount: 1_600,
           candidatesTokenCount: 50,
-          totalTokenCount: 1650,
+          totalTokenCount: 1_650,
         },
       });
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1754,11 +1776,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        75_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 100_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const callOrder: string[] = [];
@@ -1772,9 +1794,9 @@ describe('ChatCompressionService', () => {
       const mockGenerateContent = vi.fn().mockResolvedValue({
         text: 'Summary',
         usage: {
-          promptTokenCount: 1600,
+          promptTokenCount: 1_600,
           candidatesTokenCount: 50,
-          totalTokenCount: 1650,
+          totalTokenCount: 1_650,
         },
       });
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1805,19 +1827,19 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        75_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 100_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
         text: 'Summary',
         usage: {
-          promptTokenCount: 1600,
+          promptTokenCount: 1_600,
           candidatesTokenCount: 50,
-          totalTokenCount: 1650,
+          totalTokenCount: 1_650,
         },
       });
       vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1872,9 +1894,14 @@ describe('ChatCompressionService.compress sideQuery config', () => {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
+      // 210_000 (rather than the round 200_000) so that after subtracting
+      // originalTokenCount(180_000) and COMPACT_OUTPUT_SAFETY_MARGIN(1_000),
+      // computeCompactionOutputBudget still has >= COMPACT_MAX_OUTPUT_TOKENS
+      // of headroom left and clamps to the expected 20_000 below, rather than
+      // silently returning a smaller dynamic budget.
       getContentGeneratorConfig: vi
         .fn()
-        .mockReturnValue({ contextWindowSize: 200_000 }),
+        .mockReturnValue({ contextWindowSize: 210_000 }),
       getHookSystem: vi.fn().mockReturnValue({
         fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
         firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
@@ -2380,9 +2407,9 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: 'TEST SUMMARY',
       usage: {
-        promptTokenCount: 220_000,
+        promptTokenCount: 190_000,
         candidatesTokenCount: 500,
-        totalTokenCount: 220_500,
+        totalTokenCount: 190_500,
       },
     } as never);
 
@@ -2412,6 +2439,12 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
         consecutiveFailures: 0,
         originalTokenCount: 180_000,
         trigger: 'auto',
+        // Sized so estimatedPromptTokens (originalTokenCount + this pending
+        // tool result's token estimate) stays comfortably inside the
+        // makeFakeConfig() 200_000 window after
+        // COMPACT_OUTPUT_SAFETY_MARGIN/COMPACT_MIN_OUTPUT_TOKENS are
+        // subtracted — otherwise compress() bails out before ever calling
+        // runSideQuery, which is not what this test is exercising.
         pendingUserMessage: {
           role: 'user',
           parts: [
@@ -2419,7 +2452,7 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
               functionResponse: {
                 id: 'tool-call-1',
                 name: 'read_file',
-                response: { output: 'x'.repeat(160_000) },
+                response: { output: 'x'.repeat(40_000) },
               },
             },
           ],
