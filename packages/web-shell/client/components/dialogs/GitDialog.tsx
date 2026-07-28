@@ -42,6 +42,7 @@ const TITLE_KEYS: Record<GitDialogView, string> = {
 
 /** Tabs visible in the tab bar — commit is a mode, not a regular tab. */
 const TAB_VIEWS: Exclude<GitDialogView, 'commit'>[] = ['diff', 'log', 'prs'];
+const MAX_SUMMARY_CHARS = 3500;
 
 export function GitDialog({
   workspaceCwd,
@@ -162,7 +163,6 @@ export function GitDialog({
             setGenerating(false);
             return;
           }
-          const MAX_SUMMARY_CHARS = 3500;
           const fileLines = diff.files.map((f: DaemonWorkspaceGitDiffFile) => {
             const status = f.isUntracked
               ? 'new'
