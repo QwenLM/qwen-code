@@ -31,9 +31,11 @@ import {
 } from './DingtalkConnectionManager.js';
 import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
 import {
+  parseDingtalkCardActorId,
   parseDingtalkCardCallback,
   parseDingtalkInteractiveCardConfig,
   type DingtalkCardCallback,
+  type DingtalkCardCallbackResult,
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
@@ -410,40 +412,57 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   private onCardCallback(client: DWClient, msg: DWClientDownStream): void {
-    const payload = parseDingtalkCardCallback(msg.data);
-    let action: (() => Promise<void>) | undefined;
-    if (payload) {
-      try {
-        action = this.routeCardCallback(payload);
-      } catch (err) {
-        process.stderr.write(
-          `[DingTalk:${this.name}] card callback routing failed: ${sanitizeLogText(String(err), 200)}\n`,
-        );
-      }
+    const callback = parseDingtalkCardCallback(msg.data);
+    const actorId = callback?.actorId ?? parseDingtalkCardActorId(msg.data);
+    let result: DingtalkCardCallbackResult;
+    try {
+      result = callback
+        ? this.routeCardCallback(callback)
+        : { kind: 'ignored', ...(actorId ? { actorId } : {}) };
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] card callback routing failed: ${sanitizeLogText(String(err), 200)}\n`,
+      );
+      result = { kind: 'ignored', ...(actorId ? { actorId } : {}) };
     }
     client.send(msg.headers.messageId, {
       status: EventAck.SUCCESS,
       message: 'ok',
     });
-    if (action) {
-      void action().catch((err) => {
+    if (result.kind === 'accepted') {
+      void result.execute().catch((err) => {
         process.stderr.write(
           `[DingTalk:${this.name}] card callback action failed: ${sanitizeLogText(String(err), 200)}\n`,
         );
       });
+    } else if (result.actorId) {
+      void this.sendCardInteractionFeedback(result.actorId, result.kind).catch(
+        (err) => {
+          process.stderr.write(
+            `[DingTalk:${this.name}] card interaction feedback failed: ${sanitizeLogText(String(err), 200)}\n`,
+          );
+        },
+      );
     }
   }
 
   protected routeCardCallback(
     callback: DingtalkCardCallback,
-  ): (() => Promise<void>) | undefined {
+  ): DingtalkCardCallbackResult {
     if (callback.actionId === 'btn_stop') {
-      return this.statusCardController?.claimStop(
-        callback.outTrackId,
-        callback.ownerId,
+      return (
+        this.statusCardController?.claimStop(
+          callback.outTrackId,
+          callback.actorId,
+        ) ?? { kind: 'ignored', actorId: callback.actorId }
       );
     }
-    return this.questionCardController?.claim(callback);
+    return (
+      this.questionCardController?.claim(callback) ?? {
+        kind: 'ignored',
+        actorId: callback.actorId,
+      }
+    );
   }
 
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
@@ -836,6 +855,27 @@ export class DingtalkChannel extends ChannelBase {
         Date.now() + Math.max(60, (data.expires_in ?? 7200) - 60) * 1000,
     };
     return data.access_token;
+  }
+
+  private sendCardInteractionFeedback(
+    actorId: string,
+    kind: 'forbidden' | 'ignored',
+  ): Promise<void> {
+    const text =
+      kind === 'forbidden'
+        ? '你无权操作这张卡片，仅任务发起人可以提交或停止。'
+        : '该卡片操作已失效或暂时无法处理。';
+    return this.sendProactiveChunk(
+      {
+        channelName: this.name,
+        senderId: actorId,
+        chatId: actorId,
+        isGroup: false,
+      },
+      '卡片操作',
+      text,
+      'card interaction feedback',
+    );
   }
 
   private async sendProactiveChunk(

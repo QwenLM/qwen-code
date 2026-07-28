@@ -12,6 +12,10 @@ import type {
   Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
+import type {
+  DingtalkCardCallback,
+  DingtalkCardCallbackResult,
+} from './interactive-card-types.js';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -281,12 +285,91 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
   ).toBeUndefined();
 });
 
+function createCallbackResultChannel(
+  result: DingtalkCardCallbackResult,
+): DingtalkChannelInstance {
+  class CallbackResultChannel extends DingtalkChannel {
+    protected override routeCardCallback(): DingtalkCardCallbackResult {
+      return result;
+    }
+  }
+  return new CallbackResultChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+      interactiveCards: {},
+    } as never,
+    {} as never,
+  );
+}
+
+function stubCardFeedbackFetch(options?: { rejectDirect?: boolean }) {
+  const spy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              errcode: 0,
+              access_token: 'feedback-token',
+              expires_in: 7200,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (
+        options?.rejectDirect &&
+        url.startsWith(
+          'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+        )
+      ) {
+        return Promise.reject(new Error('direct feedback failed'));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+  const calls = (prefix: string) =>
+    spy.mock.calls.filter(([input]) => String(input).startsWith(prefix));
+  return {
+    spy,
+    directSendCalls: () =>
+      calls('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'),
+    groupSendCalls: () =>
+      calls('https://api.dingtalk.com/v1.0/robot/groupMessages/send'),
+  };
+}
+
+function dispatchCardCallback(
+  client: MockDingtalkClient,
+  data: Record<string, unknown>,
+): void {
+  client.callbacks.get('card')?.({
+    headers: { messageId: 'card-message' },
+    data: JSON.stringify(data),
+  } as DWClientDownStream);
+}
+
 it('ACKs a parsed card callback before starting asynchronous handling', async () => {
   const events: string[] = [];
   class CallbackTestChannel extends DingtalkChannel {
-    protected override routeCardCallback(): (() => Promise<void>) | undefined {
-      return async () => {
-        events.push('action');
+    protected override routeCardCallback(): DingtalkCardCallbackResult {
+      return {
+        kind: 'accepted',
+        execute: async () => {
+          events.push('action');
+        },
       };
     }
   }
@@ -333,11 +416,170 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
   });
 });
 
+it('ACKs before sending forbidden feedback directly to the clicker', async () => {
+  createCallbackResultChannel({ kind: 'forbidden', actorId: 'other-user' });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'other-user',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
+    expect(groupSendCalls()).toHaveLength(0);
+    const requestBody = JSON.parse(
+      String((directSendCalls()[0]![1] as RequestInit).body),
+    );
+    expect(requestBody.userIds).toEqual(['other-user']);
+    expect(requestBody.openConversationId).toBeUndefined();
+    expect(JSON.parse(requestBody.msgParam).text).toContain('无权操作');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('sends generic direct feedback for an ignored callback', async () => {
+  createCallbackResultChannel({ kind: 'ignored', actorId: 'owner-1' });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'owner-1',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
+    expect(groupSendCalls()).toHaveLength(0);
+    const requestBody = JSON.parse(
+      String((directSendCalls()[0]![1] as RequestInit).body),
+    );
+    expect(requestBody.userIds).toEqual(['owner-1']);
+    expect(JSON.parse(requestBody.msgParam).text).toContain('已失效');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('uses the trusted top-level actor for malformed callback feedback', async () => {
+  createChannel();
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'actor-1',
+      value: JSON.stringify({ outTrackId: 'missing-action' }),
+    });
+
+    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
+    const requestBody = JSON.parse(
+      String((directSendCalls()[0]![1] as RequestInit).body),
+    );
+    expect(requestBody.userIds).toEqual(['actor-1']);
+    expect(JSON.parse(requestBody.msgParam).text).toContain('已失效');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('does not send feedback for a malformed callback without an actor', async () => {
+  createChannel();
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      value: JSON.stringify({ outTrackId: 'missing-action' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('logs failed direct feedback without falling back to the group', async () => {
+  createCallbackResultChannel({ kind: 'forbidden', actorId: 'other-user' });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch({
+    rejectDirect: true,
+  });
+  const stderr = vi
+    .spyOn(process.stderr, 'write')
+    .mockImplementation(() => true);
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'other-user',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() =>
+      expect(
+        stderr.mock.calls.map(([text]) => String(text)).join(''),
+      ).toContain('card interaction feedback failed'),
+    );
+    expect(directSendCalls()).toHaveLength(1);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    stderr.mockRestore();
+    spy.mockRestore();
+  }
+});
+
+it('does not send feedback for an accepted callback', async () => {
+  const action = vi.fn().mockResolvedValue(undefined);
+  createCallbackResultChannel({ kind: 'accepted', execute: action });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
+
+  try {
+    dispatchCardCallback(client, {
+      userId: 'owner-1',
+      value: JSON.stringify({
+        outTrackId: 'question-1',
+        actionValue: 'submit',
+      }),
+    });
+
+    await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it('ACKs duplicate card callbacks while executing one claimed action', async () => {
   const action = vi.fn().mockResolvedValue(undefined);
-  const claim = vi.fn().mockReturnValueOnce(action).mockReturnValue(undefined);
+  const claim = vi
+    .fn()
+    .mockReturnValueOnce({ kind: 'accepted', execute: action })
+    .mockReturnValue({ kind: 'ignored', actorId: 'owner-1' });
   class DuplicateCallbackTestChannel extends DingtalkChannel {
-    protected override routeCardCallback(): (() => Promise<void>) | undefined {
+    protected override routeCardCallback(): DingtalkCardCallbackResult {
       return claim();
     }
   }
@@ -360,6 +602,7 @@ it('ACKs duplicate card callbacks while executing one claimed action', async () 
     {} as never,
   );
   const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const { spy, directSendCalls } = stubCardFeedbackFetch();
   const callbackData = JSON.stringify({
     userId: 'owner-1',
     value: JSON.stringify({
@@ -368,37 +611,40 @@ it('ACKs duplicate card callbacks while executing one claimed action', async () 
     }),
   });
 
-  client.callbacks.get('card')?.({
-    headers: { messageId: 'card-message-1' },
-    data: callbackData,
-  } as DWClientDownStream);
-  client.callbacks.get('card')?.({
-    headers: { messageId: 'card-message-2' },
-    data: callbackData,
-  } as DWClientDownStream);
+  try {
+    client.callbacks.get('card')?.({
+      headers: { messageId: 'card-message-1' },
+      data: callbackData,
+    } as DWClientDownStream);
+    client.callbacks.get('card')?.({
+      headers: { messageId: 'card-message-2' },
+      data: callbackData,
+    } as DWClientDownStream);
 
-  expect(client.send).toHaveBeenNthCalledWith(1, 'card-message-1', {
-    status: 'success',
-    message: 'ok',
-  });
-  expect(client.send).toHaveBeenNthCalledWith(2, 'card-message-2', {
-    status: 'success',
-    message: 'ok',
-  });
-  expect(claim).toHaveBeenCalledTimes(2);
-  await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
+    expect(client.send).toHaveBeenNthCalledWith(1, 'card-message-1', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(client.send).toHaveBeenNthCalledWith(2, 'card-message-2', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(claim).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
+  } finally {
+    spy.mockRestore();
+  }
 });
 
 it('routes the built-in btn_stop action to the status card controller', () => {
-  const stopAction = vi.fn().mockResolvedValue(undefined);
-  const claimStop = vi.fn().mockReturnValue(stopAction);
+  const stopResult: DingtalkCardCallbackResult = {
+    kind: 'accepted',
+    execute: vi.fn().mockResolvedValue(undefined),
+  };
+  const claimStop = vi.fn().mockReturnValue(stopResult);
   class CallbackRoutingChannel extends DingtalkChannel {
-    route(callback: {
-      outTrackId: string;
-      actionId: string;
-      ownerId: string;
-      formData: Record<string, unknown>;
-    }) {
+    route(callback: DingtalkCardCallback) {
       return this.routeCardCallback(callback);
     }
   }
@@ -425,10 +671,10 @@ it('routes the built-in btn_stop action to the status card controller', () => {
     channel.route({
       outTrackId: 'status-1',
       actionId: 'btn_stop',
-      ownerId: 'owner-1',
+      actorId: 'owner-1',
       formData: {},
     }),
-  ).toBe(stopAction);
+  ).toBe(stopResult);
   expect(claimStop).toHaveBeenCalledWith('status-1', 'owner-1');
 });
 
