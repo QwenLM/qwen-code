@@ -1807,6 +1807,7 @@ export class Config {
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
+  private activeTodoReminders = new Map<string, string>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -3538,6 +3539,7 @@ export class Config {
     }
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
+    this.getOwnActiveTodoReminders().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -5845,6 +5847,44 @@ export class Config {
 
   getGeminiClient(): GeminiClient {
     return this.geminiClient;
+  }
+
+  private getOwnActiveTodoReminders(): Map<string, string> {
+    if (!Object.prototype.hasOwnProperty.call(this, 'activeTodoReminders')) {
+      this.activeTodoReminders = new Map();
+    }
+    return this.activeTodoReminders;
+  }
+
+  getActiveTodoReminder(promptId: string): string | undefined {
+    return this.getOwnActiveTodoReminders().get(promptId);
+  }
+
+  setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    if (reminder) {
+      reminders.set(promptId, reminder);
+    } else {
+      reminders.delete(promptId);
+    }
+  }
+
+  startActiveTodoWorkChain(promptId: string, continuedFrom?: string): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const reminder = continuedFrom ? reminders.get(continuedFrom) : undefined;
+    reminders.clear();
+    if (reminder) reminders.set(promptId, reminder);
+  }
+
+  startAutomaticActiveTodoWorkChain(
+    promptId: string,
+    continuedFrom?: string,
+  ): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const reminder = continuedFrom ? reminders.get(continuedFrom) : undefined;
+    if (continuedFrom) reminders.delete(continuedFrom);
+    reminders.delete(promptId);
+    if (reminder) reminders.set(promptId, reminder);
   }
 
   /**

@@ -2275,6 +2275,12 @@ describe('runNonInteractive', () => {
     expect(exitCode).toBe(1);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    const drainPromptIds = mockGeminiClient.sendMessageStream.mock.calls
+      .slice(1)
+      .map((call) => call[2]);
+    expect(new Set(drainPromptIds)).toEqual(
+      new Set(['prompt-id-drain-dup-loop/automatic/2']),
+    );
 
     const duplicateParts = mockGeminiClient.sendMessageStream.mock
       .calls[2][0] as Part[];
@@ -3468,7 +3474,7 @@ describe('runNonInteractive', () => {
       2,
       [{ text: notificationXml }],
       expect.any(AbortSignal),
-      'prompt-monitor',
+      'prompt-monitor/automatic/2',
       {
         type: SendMessageType.Notification,
         modelOverride: undefined,

@@ -1237,6 +1237,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
   /**
    * Running cumulative usage for this session, snapshotted onto each todo/plan
@@ -1346,14 +1347,8 @@ export class Session implements SessionContext {
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
-    this.todoStopGuardBackgroundBaseline = todoStopGuardEnabled
-      ? this.#captureTodoStopGuardBackgroundBaseline()
-      : {
-          agents: new Set(),
-          shells: new Set(),
-          monitors: new Set(),
-          wakeups: new Set(),
-        };
+    this.todoStopGuardBackgroundBaseline =
+      this.#captureTodoStopGuardBackgroundBaseline();
 
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
@@ -2635,6 +2630,22 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        const promptMetadata = (params as { _meta?: Record<string, unknown> })
+          ._meta;
+        const continuesCurrentWorkChain =
+          (params as { retry?: boolean }).retry === true ||
+          promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
+          promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true;
+        if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
+          this.#resetTodoStopGuardBackgroundLineage();
+        }
+        this.config.startActiveTodoWorkChain(
+          promptId,
+          continuesCurrentWorkChain
+            ? this.activeTodoWorkChainPromptId
+            : undefined,
+        );
+        this.activeTodoWorkChainPromptId = promptId;
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -3192,6 +3203,7 @@ export class Session implements SessionContext {
                     await this.#buildNextMessageAfterToolRun(
                       toolRun,
                       pendingSend.signal,
+                      promptId,
                       onFullTurnModel,
                     );
                   nextMessage = nextAfterTools.message;
@@ -4136,6 +4148,7 @@ export class Session implements SessionContext {
         const nextAfterTools = await this.#buildNextMessageAfterToolRun(
           toolRun,
           pendingSend.signal,
+          toolPromptId,
           options.onFullTurnModel,
         );
         nextMessage = nextAfterTools.message;
@@ -4539,6 +4552,7 @@ export class Session implements SessionContext {
   async #buildNextMessageAfterToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
+    promptId: string,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
@@ -4559,7 +4573,12 @@ export class Session implements SessionContext {
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
     }
-    const parts = [...toolRun.parts, ...drained.parts];
+    const activeTodoReminder = this.config.getActiveTodoReminder(promptId);
+    const parts = [
+      ...toolRun.parts,
+      ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+      ...drained.parts,
+    ];
     return {
       message: { role: 'user', parts },
       hadMidTurnUserInput,
@@ -5140,9 +5159,9 @@ export class Session implements SessionContext {
       async () => {
         const ac = new AbortController();
         this.cronAbortController = ac;
-        this.#prepareTodoStopGuardForAutomaticTurn(
-          this.#cronContinuesTodoStopGuardWorkChain(item),
-        );
+        const continuesCurrentWorkChain =
+          this.#cronContinuesTodoStopGuardWorkChain(item);
+        this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
@@ -5162,6 +5181,15 @@ export class Session implements SessionContext {
             try {
               await this.assertCanStartTurn();
               if (ac.signal.aborted) return;
+              this.config.startAutomaticActiveTodoWorkChain(
+                promptId,
+                continuesCurrentWorkChain
+                  ? this.activeTodoWorkChainPromptId
+                  : undefined,
+              );
+              if (continuesCurrentWorkChain) {
+                this.activeTodoWorkChainPromptId = promptId;
+              }
               // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
               // fire time into the loop.md task block — full on the first or a
               // changed fire, a short reminder when unchanged. Non-sentinel
@@ -5464,6 +5492,7 @@ export class Session implements SessionContext {
                     await this.#buildNextMessageAfterToolRun(
                       toolRun,
                       ac.signal,
+                      promptId,
                     );
                   nextMessage = nextAfterTools.message;
                   if (toolRun.loopDetected) {
@@ -5782,14 +5811,23 @@ export class Session implements SessionContext {
       async () => {
         const ac = new AbortController();
         this.notificationAbortController = ac;
-        this.#prepareTodoStopGuardForAutomaticTurn(
-          this.#notificationContinuesTodoStopGuardWorkChain(item),
-        );
+        const continuesCurrentWorkChain =
+          this.#notificationContinuesTodoStopGuardWorkChain(item);
+        this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) return;
+          this.config.startAutomaticActiveTodoWorkChain(
+            promptId,
+            continuesCurrentWorkChain
+              ? this.activeTodoWorkChainPromptId
+              : undefined,
+          );
+          if (continuesCurrentWorkChain) {
+            this.activeTodoWorkChainPromptId = promptId;
+          }
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
@@ -5962,6 +6000,7 @@ export class Session implements SessionContext {
               const nextAfterTools = await this.#buildNextMessageAfterToolRun(
                 toolRun,
                 ac.signal,
+                promptId,
               );
               nextMessage = nextAfterTools.message;
               if (toolRun.loopDetected) {
@@ -6386,6 +6425,7 @@ export class Session implements SessionContext {
     toolLoopState?: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
+    promptIdContext.enterWith(promptId);
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     const generatedCallIdBase = randomUUID();
     const executionCallIds = new Map(

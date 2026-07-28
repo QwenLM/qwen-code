@@ -8391,4 +8391,60 @@ describe('Model Switching and Config Updates', () => {
       expect(response.success).toBe(true);
     });
   });
+
+  it('moves only the continued work chain Todo reminder', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.setActiveTodoReminder('prompt-cron', 'unfinished cron work');
+
+    config.startActiveTodoWorkChain('prompt-retry', 'prompt-user');
+
+    expect(config.getActiveTodoReminder('prompt-retry')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+  });
+
+  it('moves related automatic work without clearing unrelated reminders', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.setActiveTodoReminder('prompt-unrelated', 'other work');
+
+    config.startAutomaticActiveTodoWorkChain('prompt-cron');
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-related-notification',
+      'prompt-user',
+    );
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-related-notification')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-unrelated')).toBe('other work');
+  });
+
+  it('isolates active Todo reminders inherited through child Configs', () => {
+    const parent = Object.create(Config.prototype) as Config;
+    const child = Object.create(parent) as Config;
+    parent.setActiveTodoReminder('parent-prompt', 'parent work');
+
+    child.setActiveTodoReminder('child-prompt', 'child work');
+    child.startActiveTodoWorkChain('child-retry', 'child-prompt');
+
+    expect(parent.getActiveTodoReminder('parent-prompt')).toBe('parent work');
+    expect(parent.getActiveTodoReminder('child-retry')).toBeUndefined();
+    expect(child.getActiveTodoReminder('parent-prompt')).toBeUndefined();
+    expect(child.getActiveTodoReminder('child-retry')).toBe('child work');
+  });
+
+  it('clears active Todo reminders for a new session', () => {
+    const config = new Config(baseParams);
+    config.setActiveTodoReminder('old-prompt', 'unfinished old work');
+
+    config.startNewSession('new-session-id');
+
+    expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
+  });
 });
