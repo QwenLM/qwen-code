@@ -3,7 +3,7 @@ export function escapeRegex(str: string): string {
 }
 
 const MENTION_LOOKBEHIND = '(?<=\\s|^|[([{<:;"\'])';
-const MENTION_LOOKAHEAD = '(?=[^a-zA-Z0-9_/-]|$)';
+const MENTION_LOOKAHEAD = '(?=[^a-zA-Z0-9_./-]|$)';
 
 export function testBotMention(text: string, username: string): boolean {
   const re = new RegExp(
