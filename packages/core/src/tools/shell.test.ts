@@ -1438,6 +1438,70 @@ describe('ShellTool', () => {
         );
         expect(deferred.end).not.toHaveBeenCalled();
       });
+
+      it('still waits when the stream has ended but not yet finished flushing', async () => {
+        // writableEnded flips true the moment `.end()` is called while
+        // bytes can still sit in the libuv queue — writableFinished
+        // only turns true with 'finish'. The short-circuit must NOT
+        // fire in this state: settling here is exactly the truncation
+        // window the flush wait exists to prevent.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = {
+          ...makeDeferredStream(),
+          writableEnded: true,
+          writableFinished: false,
+        };
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // Mid-flush: the transition is still held…
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        // …until the flush actually completes.
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('disarms the flush timer when stream.end() throws synchronously', async () => {
+        // The catch path settles immediately — but it must also clear
+        // the already-armed timer, or 10s later it fires and logs a
+        // misleading flush-timeout warning for a shell that settled
+        // long ago.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          deferred.end.mockImplementation(() => {
+            throw new Error('EBADF: bad file descriptor, close');
+          });
+          const { shellId } = await startBackgroundAndExit(deferred);
+
+          // Settled via the catch path, immediately.
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('closing output stream on settle threw'),
+          );
+
+          // The timer must be gone: advancing past the timeout fires
+          // nothing and logs nothing.
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+            expect.stringContaining('flush timed out'),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it('rejects a bare trailing & in managed background mode', async () => {
