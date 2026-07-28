@@ -1242,8 +1242,8 @@ describe('LoopDetectionService', () => {
       primeNonReadTool();
 
       // Mix of read-like tool names that either appear in the exact allowlist
-      // (read_file, read_many_files, list_directory) or match the read_/list_
-      // prefix fallback used for MCP-provided tools.
+      // (read_file, read_many_files, list_directory, zoom_image) or match the
+      // read_/list_ prefix fallback used for MCP-provided tools.
       service.addAndCheck(
         createToolCallRequestEvent('read_many_files', {
           paths: ['file1.txt'],
@@ -1256,7 +1256,13 @@ describe('LoopDetectionService', () => {
         createToolCallRequestEvent('read_resource', { uri: 'a' }),
       );
       service.addAndCheck(
-        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+        createToolCallRequestEvent('zoom_image', {
+          file_path: 'chart.png',
+          x1: 0,
+          y1: 0,
+          x2: 500,
+          y2: 500,
+        }),
       );
       service.addAndCheck(createToolCallRequestEvent('list_projects', {}));
       service.addAndCheck(

@@ -7952,6 +7952,47 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('fast-fails a mid-stream quota-exhaustion error instead of scheduling a rate-limit retry', async () => {
+      // A permanent quota-exhaustion 429 can arrive mid-stream as a
+      // StreamContentError while reading, bypassing the retryWithBackoff
+      // fast-fail that only wraps stream establishment. The stream-side
+      // catch must fast-fail it before the rate-limit branch; otherwise
+      // isRateLimitError (code 429) schedules a 1-5 minute delay on an
+      // error that cannot succeed until the reset time.
+      vi.useFakeTimers();
+
+      try {
+        const quotaError = new StreamContentError(
+          '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC."}}',
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            throw quotaError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-quota-fastfail',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+
+        // Fast-fail: the first pull rejects with the friendly message. No
+        // RETRY event is yielded and no rate-limit delay is scheduled.
+        await expect(iterator.next()).rejects.toThrow(/Quota exhausted/);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should use Retry-After delay for streamed rate-limit errors', async () => {
       vi.useFakeTimers();
 

@@ -5657,6 +5657,25 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('registers zoom_image unconditionally so it survives model switches', async () => {
+      const config = new Config(baseParams);
+      // A first-run / text-only session reports no image modality, yet the tool
+      // must still register: the gate moved to execute time so a hot /model
+      // switch to an image model picks it up without re-running initialize().
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({});
+
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.ZOOM_IMAGE);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
