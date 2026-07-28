@@ -28,6 +28,14 @@ function makeProjectSnapshot(
   return projectDir;
 }
 
+async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe('sweepStaleWorktreeProjects', () => {
   let base: string;
 
@@ -86,6 +94,26 @@ describe('sweepStaleWorktreeProjects', () => {
     ).resolves.toEqual([]);
   });
 
+  it('continues the sweep when one entry cannot be removed', async () => {
+    const stuck = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-aaa-stuck', {
+      worktreePath: path.join(base, 'gone-1'),
+      originalCwd: '/repo',
+    });
+    const gone = makeProjectSnapshot(base, '-tmp-qwen-exit-sess-bbb-gone', {
+      worktreePath: path.join(base, 'gone-2'),
+      originalCwd: '/repo',
+    });
+    fs.chmodSync(stuck, 0o000);
+    try {
+      const removed = await sweepStaleWorktreeProjects(base);
+      expect(removed).toEqual(['-tmp-qwen-exit-sess-bbb-gone']);
+      expect(fs.existsSync(stuck)).toBe(true);
+      expect(fs.existsSync(gone)).toBe(false);
+    } finally {
+      fs.chmodSync(stuck, 0o755);
+    }
+  });
+
   it('the Storage constructor schedules the sweep once per base dir', async () => {
     makeProjectSnapshot(base, '-tmp-qwen-exit-sess-ccc', {
       worktreePath: path.join(base, 'missing'),
@@ -94,10 +122,23 @@ describe('sweepStaleWorktreeProjects', () => {
 
     new Storage('/tmp/x', base);
     new Storage('/tmp/y', base);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    const firstSnapshot = path.join(
+      base,
+      'projects',
+      '-tmp-qwen-exit-sess-ccc',
+    );
+    await waitFor(() => !fs.existsSync(firstSnapshot));
+    expect(fs.existsSync(firstSnapshot)).toBe(false);
 
+    // A later construction on the same base must not sweep again.
+    makeProjectSnapshot(base, '-tmp-qwen-exit-sess-ddd', {
+      worktreePath: path.join(base, 'also-missing'),
+      originalCwd: '/repo',
+    });
+    new Storage('/tmp/z', base);
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(
-      fs.existsSync(path.join(base, 'projects', '-tmp-qwen-exit-sess-ccc')),
-    ).toBe(false);
+      fs.existsSync(path.join(base, 'projects', '-tmp-qwen-exit-sess-ddd')),
+    ).toBe(true);
   });
 });
