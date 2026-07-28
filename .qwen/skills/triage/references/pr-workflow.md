@@ -236,7 +236,7 @@ A revert-history analysis of this repo (111 revert commits, 46 unique reverted P
 ```bash
 FILES=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
 if [ -n "$FILES" ]; then
-  echo "$FILES" | grep -v '\.\(test\|spec\)\.' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
+  echo "$FILES" | grep -Ev '\.(test|spec)\.' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
 else
   echo "WARNING: could not fetch PR files"
 fi
