@@ -43,7 +43,10 @@ import {
   MODIFIER_ALT_BIT,
   MODIFIER_CTRL_BIT,
 } from '../utils/platformConstants.js';
-import { clipboardHasImage } from '../utils/clipboardUtils.js';
+import {
+  clipboardHasImage,
+  readClipboardFiles,
+} from '../utils/clipboardUtils.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 
@@ -907,9 +910,14 @@ export function KeypressProvider({
           });
         } else {
           let clipboardImageUnavailable = false;
-          const hasImage = await clipboardHasImage(() => {
+          const onUnavailable = () => {
             clipboardImageUnavailable = true;
-          });
+          };
+          const clipboardFiles = await readClipboardFiles(onUnavailable);
+          const hasImage =
+            clipboardFiles.length === 0 && !clipboardImageUnavailable
+              ? await clipboardHasImage(onUnavailable)
+              : false;
           broadcast({
             name: '',
             ctrl: false,
@@ -918,7 +926,7 @@ export function KeypressProvider({
             paste: true,
             pasteImage: hasImage,
             clipboardImageUnavailable,
-            sequence: buffered,
+            sequence: clipboardFiles.join('\n'),
           });
         }
         return;
@@ -1386,9 +1394,14 @@ export function KeypressProvider({
         // Mirror the keypress-level paste-end path: surface whether the
         // native clipboard module was unavailable.
         let clipboardImageUnavailable = false;
-        void clipboardHasImage(() => {
+        const onUnavailable = () => {
           clipboardImageUnavailable = true;
-        }).then((hasImage) => {
+        };
+        void readClipboardFiles(onUnavailable).then(async (clipboardFiles) => {
+          const hasImage =
+            clipboardFiles.length === 0 && !clipboardImageUnavailable
+              ? await clipboardHasImage(onUnavailable)
+              : false;
           broadcast({
             name: '',
             ctrl: false,
@@ -1397,7 +1410,7 @@ export function KeypressProvider({
             paste: true,
             pasteImage: hasImage,
             clipboardImageUnavailable,
-            sequence: '',
+            sequence: clipboardFiles.join('\n'),
           });
         });
       }

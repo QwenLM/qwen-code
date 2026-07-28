@@ -1424,6 +1424,7 @@ describe('InputPrompt', () => {
     const isWindows = process.platform === 'win32';
 
     beforeEach(() => {
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([]);
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
       vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
@@ -1478,6 +1479,27 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
       // Note: The new implementation adds images as attachments rather than inserting into buffer
+      unmount();
+    });
+
+    it('inserts copied non-image file paths on the clipboard shortcut', async () => {
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+        'C:\\Users\\mochi\\notes.txt',
+      ]);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        'C:\\Users\\mochi\\notes.txt',
+        { paste: false },
+      );
+      expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
       unmount();
     });
 
@@ -5697,6 +5719,14 @@ function clean(str: string | undefined): string {
 }
 
 describe('classifyPastedImagePaths', () => {
+  it('recognizes a Windows image path read from the file clipboard', () => {
+    const imagePath = 'C:\\Users\\mochi\\image.png';
+    expect(classifyPastedImagePaths(imagePath)).toEqual({
+      imagePaths: [imagePath],
+      allImages: true,
+    });
+  });
+
   it('treats a lone @-prefixed image path (terminal Cmd+V injection) as all-image', () => {
     const result = classifyPastedImagePaths(
       '@/var/folders/12/T/clipboard-2026-06-24-124142-18EC6DC9.png',

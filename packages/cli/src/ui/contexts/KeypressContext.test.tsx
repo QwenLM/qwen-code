@@ -22,10 +22,14 @@ import {
 import { useStdin } from 'ink';
 import { EventEmitter } from 'node:events';
 
-const mockClipboardHasImage = vi.hoisted(() => vi.fn());
+const { mockClipboardHasImage, mockReadClipboardFiles } = vi.hoisted(() => ({
+  mockClipboardHasImage: vi.fn(),
+  mockReadClipboardFiles: vi.fn(),
+}));
 
 vi.mock('../utils/clipboardUtils.js', () => ({
   clipboardHasImage: mockClipboardHasImage,
+  readClipboardFiles: mockReadClipboardFiles,
 }));
 
 // Mock the 'ink' module to control stdin
@@ -90,6 +94,7 @@ describe('KeypressContext - Kitty Protocol', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClipboardHasImage.mockResolvedValue(false);
+    mockReadClipboardFiles.mockResolvedValue([]);
     stdin = new MockStdin();
     (useStdin as Mock).mockReturnValue({
       stdin,
@@ -883,6 +888,29 @@ describe('KeypressContext - Kitty Protocol', () => {
           }),
         );
       });
+    });
+
+    it('turns copied Windows files into pasted paths', async () => {
+      const keyHandler = vi.fn();
+      mockReadClipboardFiles.mockResolvedValue([
+        'C:\\Users\\mochi\\image.png',
+        'C:\\Users\\mochi\\notes.txt',
+      ]);
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendPaste(''));
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            paste: true,
+            sequence:
+              'C:\\Users\\mochi\\image.png\nC:\\Users\\mochi\\notes.txt',
+          }),
+        );
+      });
+      expect(mockClipboardHasImage).not.toHaveBeenCalled();
     });
 
     describe('paste mode markers', () => {

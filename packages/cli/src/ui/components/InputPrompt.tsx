@@ -41,6 +41,7 @@ import {
   clipboardHasImage,
   saveClipboardImage,
   cleanupOldClipboardImages,
+  readClipboardFiles,
 } from '../utils/clipboardUtils.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
@@ -820,6 +821,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     },
     [config, buffer],
   );
+
+  const handleClipboardPaste = useCallback(async () => {
+    const clipboardFiles = await readClipboardFiles(reportClipboardUnavailable);
+    if (clipboardFiles.length === 0) {
+      await handleClipboardImage();
+      return;
+    }
+
+    const pasted = clipboardFiles.join('\n');
+    const pastedImagePaths = classifyPastedImagePaths(pasted);
+    if (pastedImagePaths.allImages) {
+      await promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
+    } else {
+      buffer.insert(pasted, { paste: false });
+    }
+  }, [
+    buffer,
+    handleClipboardImage,
+    promotePastedImagePaths,
+    reportClipboardUnavailable,
+  ]);
 
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {
@@ -1715,9 +1737,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      // Ctrl+V for clipboard image paste
+      // Clipboard shortcut for copied files or image data
       if (keyMatchers[Command.PASTE_CLIPBOARD_IMAGE](key)) {
-        handleClipboardImage();
+        void handleClipboardPaste();
         return true;
       }
 
@@ -1824,6 +1846,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      handleClipboardPaste,
       reportClipboardUnavailable,
       promotePastedImagePaths,
       resetCompletionState,

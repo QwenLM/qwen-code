@@ -340,6 +340,34 @@ export async function clipboardHasImage(
 }
 
 /**
+ * Reads file paths copied from Windows Explorer.
+ * @param onUnavailable Called when the native clipboard module cannot load.
+ */
+export async function readClipboardFiles(
+  onUnavailable?: () => void,
+): Promise<string[]> {
+  if (process.platform !== 'win32') {
+    return [];
+  }
+
+  try {
+    const mod = await getClipboardModule();
+    if (!mod) {
+      onUnavailable?.();
+      return [];
+    }
+    const clipboard = new mod.ClipboardManager();
+    if (!clipboard.hasFormat('files')) {
+      return [];
+    }
+    return clipboard.getFiles();
+  } catch (error) {
+    debugLogger.error('Error reading clipboard files:', error);
+    return [];
+  }
+}
+
+/**
  * Get the available image MIME types from wl-paste.
  * Uses cached result if available to avoid redundant calls.
  */

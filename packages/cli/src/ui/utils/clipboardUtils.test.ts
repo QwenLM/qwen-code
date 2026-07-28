@@ -11,7 +11,11 @@ import { EventEmitter } from 'node:events';
 const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockExecSync: vi.fn(),
-  clipboardMockState: { failLoad: false, loadDelayMs: 0 },
+  clipboardMockState: {
+    failLoad: false,
+    loadDelayMs: 0,
+    files: [] as string[],
+  },
 }));
 
 // Mock @teddyzhu/clipboard
@@ -27,12 +31,24 @@ vi.mock('@teddyzhu/clipboard', async () => {
   return {
     default: {
       ClipboardManager: vi.fn().mockImplementation(() => ({
-        hasFormat: vi.fn().mockReturnValue(false),
+        hasFormat: vi
+          .fn()
+          .mockImplementation(
+            (format: string) =>
+              format === 'files' && clipboardMockState.files.length > 0,
+          ),
+        getFiles: vi.fn().mockImplementation(() => clipboardMockState.files),
         getImageData: vi.fn().mockReturnValue({ data: null }),
       })),
     },
     ClipboardManager: vi.fn().mockImplementation(() => ({
-      hasFormat: vi.fn().mockReturnValue(false),
+      hasFormat: vi
+        .fn()
+        .mockImplementation(
+          (format: string) =>
+            format === 'files' && clipboardMockState.files.length > 0,
+        ),
+      getFiles: vi.fn().mockImplementation(() => clipboardMockState.files),
       getImageData: vi.fn().mockReturnValue({ data: null }),
     })),
   };
@@ -150,6 +166,7 @@ const originalPlatform = process.platform;
 
 describe('clipboardUtils', () => {
   let clipboardHasImage: () => Promise<boolean>;
+  let readClipboardFiles: () => Promise<string[]>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
@@ -166,6 +183,7 @@ describe('clipboardUtils', () => {
 
     clipboardMockState.failLoad = false;
     clipboardMockState.loadDelayMs = 0;
+    clipboardMockState.files = [];
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -173,6 +191,7 @@ describe('clipboardUtils', () => {
     // Top-level import would be stale after resetModules.
     const mod = await import('./clipboardUtils.js');
     clipboardHasImage = mod.clipboardHasImage;
+    readClipboardFiles = mod.readClipboardFiles;
     saveClipboardImage = mod.saveClipboardImage;
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
@@ -610,6 +629,22 @@ describe('clipboardUtils', () => {
         configurable: true,
         writable: true,
       });
+    });
+
+    it('returns copied file paths on Windows', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+        writable: true,
+      });
+      clipboardMockState.files = [
+        'C:\\Users\\mochi\\image.png',
+        'C:\\Users\\mochi\\notes.txt',
+      ];
+
+      await expect(readClipboardFiles()).resolves.toEqual(
+        clipboardMockState.files,
+      );
     });
   });
 
