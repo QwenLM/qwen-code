@@ -1,6 +1,6 @@
 # GitHub
 
-This guide covers setting up a Qwen Code channel that monitors GitHub notifications and responds to mentions on issues and pull requests.
+This guide covers setting up a Qwen Code channel that monitors GitHub notifications and responds to mentions, review requests, assignments, and followed-thread activity.
 
 ## Prerequisites
 
@@ -57,18 +57,18 @@ For GitHub Enterprise Server, set `baseUrl`:
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                          |
-| ------------------------- | ------------------------ | ---------------------------------------------------- |
-| `token`                   | (required)               | Classic PAT with `notifications` scope               |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                  |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                               |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow           |
-| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                              |
-| `groups.*.requireMention` | `true`                   | Only respond when @mentioned (nested under `groups`) |
+| Option                    | Default                  | Description                                                                      |
+| ------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
+| `token`                   | (required)               | Classic PAT with `notifications` scope                                           |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                              |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                           |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                       |
+| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                          |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run |
 
 ## ⚠️ Security
 
-On a **public repository**, setting `senderPolicy: "open"` allows **any GitHub user** who @mentions the bot to submit prompts that drive the agent in your `cwd`. This includes reading code, spending tokens, posting comments, and (subject to permission policy) running tools.
+On a **public repository**, setting `senderPolicy: "open"` allows **any GitHub user** who triggers a supported notification reason to submit prompts that drive the agent in your `cwd`. This includes reading code, spending tokens, posting comments, and (subject to permission policy) running tools.
 
 Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
 
@@ -76,7 +76,7 @@ Allowlist and pairing entries follow the **username**, not the immutable account
 
 ## Mention Detection
 
-The adapter detects mentions by scanning the **comment body** for `@bot-username` using a case-insensitive regex. It does NOT rely on GitHub's notification `reason` field, which is a sticky thread-level value that doesn't reflect per-comment mentions.
+The adapter detects mentions by scanning the **comment body** for `@bot-username` using a case-insensitive regex. It does not trust `reason: "mention"` alone because that value is sticky at the thread level. Other reasons select review, triage, followed-thread, or fallback prompts.
 
 ## How It Works
 
@@ -85,8 +85,8 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 1. **Poll** `GET /notifications` for unread threads
 2. **Mark read** via `markNotificationsAsRead` (best-effort cleanup, before processing)
 3. **Enumerate** comments via `listComments` within a cursor-based time window
-4. **Process** each new comment (mention detection, envelope building)
-5. **First-contact**: if no mention was dispatched and the thread is brand-new (no `last_read_at`), the issue/PR body is fetched and processed if it contains @bot
+4. **Dispatch** by notification reason: strict mention matching, pull request review, issue triage, followed-thread comment aggregation, or per-comment fallback
+5. **First-contact fallback**: for non-mention reasons, a brand-new unread issue/PR body can be processed when no comment was dispatched
 
 The comment window is `(previousCursor, currentMaxUpdatedAt]` — comments already eligible in a previous poll cycle are excluded by the cursor, preventing duplicate replies even when the async mark-read has not taken effect. If the process crashes mid-processing, the user can re-mention the bot to retry.
 
