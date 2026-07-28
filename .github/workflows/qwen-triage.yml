@@ -1021,6 +1021,14 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
+      - name: 'Restore npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        uses: 'actions/cache@v4'
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -1032,13 +1040,20 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
           {
             printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
             runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-              npm ci --prefer-offline --no-audit --progress=false
+              npm ci --prefer-offline --no-audit --progress=false \
+              --cache "$RUNNER_TEMP/npm-cache"
             install_status=$?
             if [ "$install_status" -ne 0 ]; then
               printf '\n%s\n' "npm ci failed with exit code ${install_status}."
@@ -2164,6 +2179,14 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      - name: 'Restore npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        uses: 'actions/cache@v4'
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2179,13 +2202,16 @@ jobs:
           rm -rf "$RUNNER_TEMP/verify-results"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
           {
             printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
             runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-              npm ci --prefer-offline --no-audit --progress=false
+              npm ci --prefer-offline --no-audit --progress=false \
+              --cache "$RUNNER_TEMP/npm-cache"
             install_status=$?
             if [ "$install_status" -ne 0 ]; then
               printf '\n%s\n' "npm ci failed with exit code ${install_status}."
