@@ -245,8 +245,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     });
 
     it('should handle process cleanup after error', async () => {
+      const controller = new AbortController();
       const fakeServer = await startFakeOpenAIServer(() => {
-        return { content: 'Hello world! This is a test response.' };
+        return { contentChunks: LONG_CONTENT_CHUNKS };
       }, FAKE_SERVER_OPTIONS);
 
       const q = query({
@@ -255,30 +256,23 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
+          abortController: controller,
           debug: false,
         },
       });
 
+      let receivedError = false;
       try {
-        for await (const message of q) {
-          if (isSDKAssistantMessage(message)) {
-            const textBlocks = message.message.content.filter(
-              (block): block is TextBlock => block.type === 'text',
-            );
-            const text = textBlocks
-              .map((b) => b.text)
-              .join('')
-              .slice(0, 50);
-            expect(text.length).toBeGreaterThan(0);
-          }
+        for await (const _message of q) {
+          controller.abort();
         }
       } catch (error) {
-        // Expected to potentially have errors
+        receivedError = true;
+        expect(isAbortError(error)).toBe(true);
       } finally {
-        // Should cleanup successfully even after error
         await q.close();
         await fakeServer.close();
-        expect(true).toBe(true); // Cleanup completed
+        expect(receivedError).toBe(true);
       }
     });
   });

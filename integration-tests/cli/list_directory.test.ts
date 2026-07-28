@@ -69,7 +69,7 @@ describe('list_directory', () => {
       if (requestIndex === 0) {
         return {
           toolCalls: [
-            fakeToolCall('list_directory', { path: '.' }, 'list-dir'),
+            fakeToolCall('list_directory', { path: rig.testDir! }, 'list-dir'),
           ],
         };
       }
@@ -108,7 +108,12 @@ describe('list_directory', () => {
         fakeServer.requests.length,
         'Fake server saw fewer than 2 requests — the CLI likely resolved a real model endpoint from user-level settings instead of the fake server',
       ).toBeGreaterThanOrEqual(2);
-      const toolResultRequest = JSON.stringify(fakeServer.requests[1]?.body);
+      const messages = fakeServer.requests[1]?.body['messages'] as
+        | Array<{ role?: string; content?: unknown }>
+        | undefined;
+      const toolResultRequest = JSON.stringify(
+        messages?.find((message) => message.role === 'tool')?.content ?? '',
+      );
       expect(toolResultRequest).toContain('file1.txt');
       expect(toolResultRequest).toContain('subdir');
     } finally {
