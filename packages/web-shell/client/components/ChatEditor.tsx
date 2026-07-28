@@ -50,6 +50,10 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
+import type {
+  VoiceStatusRevision,
+  VoiceWorkspaceTarget,
+} from '../voice/voice-workspace-target';
 import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
@@ -173,12 +177,15 @@ interface ChatEditorProps {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionId?: string;
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
+  voiceTarget?: VoiceWorkspaceTarget;
+  voiceStatusRevision?: VoiceStatusRevision;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -1192,12 +1199,15 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
       builtinAtProviders,
       atProviders,
       composerTagIcons,
+      voiceTarget,
+      voiceStatusRevision,
     } = props;
 
     const {
@@ -1228,6 +1238,7 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
@@ -1262,6 +1273,7 @@ export const ChatEditor = memo(
     const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
+    const [voiceActive, setVoiceActive] = useState(false);
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
       workspace: false,
@@ -1665,6 +1677,11 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
+    const mobileVoiceActive = showQuickActions && voiceActive;
+
+    useEffect(() => {
+      if (mobileVoiceActive) setQuickActionsOpen(false);
+    }, [mobileVoiceActive]);
 
     useLayoutEffect(() => {
       const toolbar = toolbarRef.current;
@@ -2045,6 +2062,7 @@ export const ChatEditor = memo(
                   className={styles.mobileTextarea}
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
+                  onBlur={core.mobileComposer.onBlur}
                   onPaste={core.mobileComposer.onPaste}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
@@ -2059,8 +2077,16 @@ export const ChatEditor = memo(
                 <div ref={core.containerRef} data-web-shell-composer-editor />
               )}
             </div>
-            <div ref={toolbarRef} className={styles.toolbar}>
-              <div ref={toolbarLeadingRef} className={styles.toolbarLeading}>
+            <div
+              ref={toolbarRef}
+              className={styles.toolbar}
+              data-mobile-voice-active={mobileVoiceActive || undefined}
+            >
+              <div
+                ref={toolbarLeadingRef}
+                className={styles.toolbarLeading}
+                data-web-shell-toolbar-leading
+              >
                 {ToolbarStart && (
                   <div ref={toolbarStartRef} className={styles.toolbarStart}>
                     <ToolbarStart
@@ -2243,6 +2269,7 @@ export const ChatEditor = memo(
                 {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
+                    data-hide-during-mobile-voice
                     onClick={(e) => {
                       e.stopPropagation();
                       core.closeSlashMenu();
@@ -2265,6 +2292,7 @@ export const ChatEditor = memo(
                   <div
                     ref={toolbarRightCustomRef}
                     className={styles.toolbarRightCustom}
+                    data-hide-during-mobile-voice
                   >
                     <ToolbarRight
                       disabled={disabled}
@@ -2280,6 +2308,7 @@ export const ChatEditor = memo(
                   showToolbarAction('widthMode') && (
                     <button
                       className={`${styles.toolBtn} ${styles.widthModeBtn}`}
+                      data-hide-during-mobile-voice
                       onClick={(e) => {
                         e.stopPropagation();
                         onChatWidthModeChange?.(
@@ -2311,6 +2340,9 @@ export const ChatEditor = memo(
                 {showToolbarAction('voice') && (
                   <VoiceButton
                     disabled={disabled}
+                    onActiveChange={setVoiceActive}
+                    target={voiceTarget}
+                    statusRevision={voiceStatusRevision}
                     onInsert={(text) => {
                       const existing = core.getText();
                       const sep = existing && !/\s$/.test(existing) ? ' ' : '';

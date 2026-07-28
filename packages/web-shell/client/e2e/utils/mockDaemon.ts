@@ -3,6 +3,8 @@ import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
   type DaemonCapabilities,
+  type DaemonChannelsSnapshot,
+  type DaemonChannelTypeCatalog,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
@@ -50,6 +52,8 @@ export interface WebShellDaemonScenario {
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  channelTypes: DaemonChannelTypeCatalog;
+  channels: DaemonChannelsSnapshot;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -88,6 +92,8 @@ type ScenarioOverrides = Partial<
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
+    | 'channelTypes'
+    | 'channels'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -101,6 +107,8 @@ type ScenarioOverrides = Partial<
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  channelTypes?: DaemonChannelTypeCatalog;
+  channels?: DaemonChannelsSnapshot;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -312,6 +320,8 @@ export function createWebShellDaemonScenario(
     extensions,
     extensionOperations,
     extensionUpdateCheck,
+    channelTypes: overrides.channelTypes ?? [],
+    channels: overrides.channels ?? { revision: '1', instances: {} },
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -510,8 +520,11 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
@@ -547,6 +560,18 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/settings\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(voice|providers)\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -560,6 +585,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/channels\/?$/.test(path))
+  ) {
     return true;
   }
   if (method === 'POST' && path === '/session') return true;
@@ -663,6 +695,27 @@ async function handleDaemonRoute(
     await json(route, workspaceVoice(scenario));
     return;
   }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
+    await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
+    await json(route, scenario.providers);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, scenario.settings);
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, {
+      key: getRecordValue(body, 'key') ?? 'unknown',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
+      value: getRecordValue(body, 'value'),
+      requiresRestart: false,
+    });
+    return;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     const serverName = decodeURIComponent(path.split('/')[3] ?? 'server');
     await json(route, workspaceMcpTools(scenario, serverName));
@@ -694,6 +747,17 @@ async function handleDaemonRoute(
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
     };
     await json(route, catalog);
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path)
+  ) {
+    await json(route, scenario.channelTypes);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/channels\/?$/.test(path)) {
+    await json(route, scenario.channels);
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {

@@ -53,7 +53,6 @@ import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolveInteractionMode,
 } from './prompts.js';
@@ -176,6 +175,8 @@ export enum SendMessageType {
 
 export interface SendMessageOptions {
   type: SendMessageType;
+  /** User-submitted text captured before prompt expansion. */
+  submittedPrompt?: string;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -1406,6 +1407,7 @@ export class GeminiClient {
             uiTelemetryService,
           ),
       );
+      chat.enableManualPlanExitNotices();
       this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
@@ -2017,6 +2019,12 @@ export class GeminiClient {
       this.config.hasHooksForEvent('UserPromptSubmit')
     ) {
       const promptText = partToString(request);
+      const submittedPrompt =
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string' &&
+        options.submittedPrompt.trim().length > 0
+          ? options.submittedPrompt
+          : undefined;
       const response = await messageBus.request<
         HookExecutionRequest,
         HookExecutionResponse
@@ -2026,6 +2034,9 @@ export class GeminiClient {
           eventName: 'UserPromptSubmit',
           input: {
             prompt: promptText,
+            ...(submittedPrompt !== undefined
+              ? { submitted_prompt: submittedPrompt }
+              : {}),
           },
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2465,15 +2476,6 @@ export class GeminiClient {
                 this.config.getSdkMode(),
             ),
           );
-        } else if (this.config.consumePendingManualPlanExitNotice()) {
-          // One-shot counterpart to the reminder above: the model was told
-          // "plan mode is active" on every turn, so a manual exit
-          // (Shift+Tab, /approval-mode, /plan) needs an explicit signal —
-          // the reminder silently disappearing goes unnoticed and the
-          // model keeps calling exit_plan_mode (#7671).
-          systemReminders.push(
-            getManualPlanExitSystemReminder(this.config.getApprovalMode()),
-          );
         }
 
         // add arena system reminder if an arena session is active
@@ -2762,6 +2764,7 @@ export class GeminiClient {
               {
                 ...options,
                 type: SendMessageType.Steer,
+                submittedPrompt: undefined,
                 steerInput,
               },
               steerTurnBudget,
@@ -3087,6 +3090,7 @@ export class GeminiClient {
                 type: pendingSteer
                   ? SendMessageType.Steer
                   : SendMessageType.Hook,
+                submittedPrompt: undefined,
                 steerInput: pendingSteer,
               },
               continueTurnBudget,

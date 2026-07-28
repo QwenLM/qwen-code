@@ -61,6 +61,9 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
+import { approvedPlanRedactionText } from './geminiChat.js';
+import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -489,6 +492,7 @@ export type CompletedToolCall =
  */
 const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.READ_FILE,
+  ToolNames.ZOOM_IMAGE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
   ToolNames.GREP,
@@ -571,7 +575,7 @@ function pushLspPathCandidate(out: string[], v: unknown): void {
  * Pull the filesystem path-bearing fields out of a tool's input.
  * Per-tool dispatcher because the field name and shape differ:
  *
- *  - read_file / edit / write_file → `file_path`
+ *  - read_file / zoom_image / edit / write_file → `file_path`
  *  - notebook_edit → `notebook_path`
  *  - list_directory → `path` (search root)
  *  - glob → `path` (search root, optional) + `pattern` (path-shaped
@@ -690,6 +694,7 @@ export function extractToolFilePaths(
       return out;
 
     case ToolNames.READ_FILE:
+    case ToolNames.ZOOM_IMAGE:
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
       push(obj['file_path']);
@@ -4610,6 +4615,60 @@ export class CoreToolScheduler {
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
+        // After an APPROVED exit_plan_mode, swap the large `plan` argument
+        // still sitting in the model turn's functionCall for a pointer to the
+        // saved plan file. The blob otherwise stays in the model's attention
+        // window and gets regurgitated into later responses (#6237). Keyed off
+        // the approval llmContent prefixes (not just tool success) so
+        // rejected/no-action results keep their plan text for revision. Must
+        // run BEFORE setStatusInternal: completion callbacks may submit the
+        // continuation turn synchronously, and it should already see the
+        // sanitized history.
+        if (
+          canonicalName === ToolNames.EXIT_PLAN_MODE &&
+          typeof toolResult.llmContent === 'string' &&
+          PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES.some((prefix) =>
+            (toolResult.llmContent as string).startsWith(prefix),
+          )
+        ) {
+          try {
+            const planPath = this.config.getPlanFilePath();
+            // Gate on the on-disk plan actually matching the in-history
+            // text: savePlanBestEffort swallows filesystem errors, and the
+            // pointer must never claim a save that failed or reference a
+            // file holding a different plan. A missing/unreadable file
+            // throws here and skips the redaction entirely.
+            const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
+            const redacted = this.config
+              .getGeminiClient?.()
+              ?.getChat()
+              .redactApprovedPlanFromHistory(
+                callId,
+                approvedPlanRedactionText(planPath),
+                savedPlan,
+              );
+            // The rewrite declines silently on a no-match call id, a
+            // non-string plan argument, or in-history text differing from
+            // the saved file — trace those so a "plan still in history"
+            // report can tell a skipped rewrite from a run one.
+            if (redacted === false) {
+              debugLogger.debug(
+                `Approved-plan redaction left history unchanged for ` +
+                  `${callId}: no matching exit_plan_mode call, or its ` +
+                  `plan text does not match ${planPath}.`,
+              );
+            }
+          } catch (redactErr) {
+            debugLogger.warn(
+              `Skipping approved-plan redaction for ${callId} (plan file ` +
+                `unavailable?): ${
+                  redactErr instanceof Error
+                    ? redactErr.message
+                    : String(redactErr)
+                }`,
+            );
+          }
+        }
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
         // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span

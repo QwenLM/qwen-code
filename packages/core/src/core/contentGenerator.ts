@@ -370,6 +370,7 @@ function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
 
 class LazyContentGenerator implements ContentGenerator {
   private generatorPromise?: Promise<ContentGenerator>;
+  private preloadedOnly = false;
 
   constructor(
     private readonly loader: () => Promise<ContentGenerator>,
@@ -381,18 +382,39 @@ class LazyContentGenerator implements ContentGenerator {
     return this.generatorPromise;
   }
 
+  private getGeneratorForUse(): Promise<ContentGenerator> {
+    this.preloadedOnly = false;
+    return this.getGenerator();
+  }
+
+  preload(): Promise<ContentGenerator> {
+    if (!this.generatorPromise) {
+      this.preloadedOnly = true;
+    }
+    return this.getGenerator();
+  }
+
+  resetPreload(): void {
+    if (!this.preloadedOnly) return;
+    this.preloadedOnly = false;
+    this.generatorPromise = undefined;
+  }
+
   async generateContent(
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    return (await this.getGenerator()).generateContent(request, userPromptId);
+    return (await this.getGeneratorForUse()).generateContent(
+      request,
+      userPromptId,
+    );
   }
 
   async generateContentStream(
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    return (await this.getGenerator()).generateContentStream(
+    return (await this.getGeneratorForUse()).generateContentStream(
       request,
       userPromptId,
     );
@@ -401,17 +423,35 @@ class LazyContentGenerator implements ContentGenerator {
   async countTokens(
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
-    return (await this.getGenerator()).countTokens(request);
+    return (await this.getGeneratorForUse()).countTokens(request);
   }
 
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    return (await this.getGenerator()).embedContent(request);
+    return (await this.getGeneratorForUse()).embedContent(request);
   }
 
   useSummarizedThinking(): boolean {
     return this.summarizedThinking;
+  }
+}
+
+/** @internal */
+export async function preloadContentGenerator(
+  generator: ContentGenerator,
+): Promise<void> {
+  if (generator instanceof LazyContentGenerator) {
+    await generator.preload();
+  }
+}
+
+/** @internal */
+export function resetPreloadedContentGenerator(
+  generator: ContentGenerator | undefined,
+): void {
+  if (generator instanceof LazyContentGenerator) {
+    generator.resetPreload();
   }
 }
 

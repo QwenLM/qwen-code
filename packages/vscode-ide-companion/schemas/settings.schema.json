@@ -1383,6 +1383,20 @@
             }
           }
         },
+        "modelGrades": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Maps semantic model grade names exposed to the Agent tool to concrete model selectors."
+        },
+        "allowedGrades": {
+          "description": "Optional whitelist of model grade names the Agent tool may use.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,

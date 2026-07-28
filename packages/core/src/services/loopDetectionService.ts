@@ -746,6 +746,7 @@ export class LoopDetectionService {
     'read_file',
     'read_many_files',
     'list_directory',
+    'zoom_image',
   ]);
 
   // Prefix fallback for MCP-provided tools that follow the same naming

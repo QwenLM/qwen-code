@@ -201,6 +201,19 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
+    });
+
     it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
       const timeout = getSettingsSchema().visionBridgeTimeoutMs;
 

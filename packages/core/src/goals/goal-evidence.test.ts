@@ -155,12 +155,12 @@ describe('Goal evidence catalog', () => {
     expect(catalog.entries.some(({ uuid }) => uuid === 'evidence-0')).toBe(
       false,
     );
-    expect(
+    expect(() =>
       validateGoalEvidenceReferences({
         ...input,
         proposal: complete(['evidence-100']),
-      }).citedRecords[0]?.content,
-    ).toBe('output 100');
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
     expect(() =>
       validateGoalEvidenceReferences({
         ...input,
@@ -239,13 +239,27 @@ describe('Goal evidence catalog', () => {
         record(`evidence-${index}`, 'assistant', {
           provenance: 'assistant_output',
           turnId: 'turn-3',
-          text: index === 0 ? 'x'.repeat(24_001) : `output ${index}`,
+          text: index === 0 ? 'x'.repeat(256_001) : `output ${index}`,
+        }),
+      ),
+    ];
+
+    const tooManyRecords = [
+      record('cursor', 'system'),
+      ...Array.from({ length: 101 }, (_, index) =>
+        record(`short-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
         }),
       ),
     ];
 
     expect(() =>
-      validate(records, complete(records.slice(1).map(({ uuid }) => uuid))),
+      validate(
+        tooManyRecords,
+        complete(tooManyRecords.slice(1).map(({ uuid }) => uuid)),
+      ),
     ).toThrowError(
       expect.objectContaining({ code: 'too_many_evidence_references' }),
     );
@@ -257,6 +271,47 @@ describe('Goal evidence catalog', () => {
     expect(() => validate(records, complete(['evidence-0']))).toThrowError(
       expect.objectContaining({ code: 'evidence_payload_too_large' }),
     );
+  });
+
+  it('admits delivered output larger than the catalog preview budget', () => {
+    const records = [
+      record('cursor', 'system'),
+      record('output', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: 'x'.repeat(24_001),
+      }),
+    ];
+
+    expect(
+      validate(records, complete(['output'])).citedRecords[0],
+    ).toMatchObject({
+      uuid: 'output',
+      content: 'x'.repeat(24_001),
+    });
+  });
+
+  it('admits thirteen delivered outputs plus independent evidence', () => {
+    const records = [
+      record('cursor', 'system'),
+      record('tool', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: 'tests passed' },
+      }),
+      ...Array.from({ length: 13 }, (_, index) =>
+        record(`output-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
+        }),
+      ),
+    ];
+
+    expect(
+      validate(records, complete(records.slice(1).map(({ uuid }) => uuid)))
+        .citedRecords,
+    ).toHaveLength(14);
   });
 
   it('uses a stable cursor and exposes only bounded previews', () => {
@@ -369,6 +424,32 @@ describe('Goal evidence catalog', () => {
 });
 
 describe('Goal evidence lineage and blockers', () => {
+  it('keeps completion available after the lineage display window fills', () => {
+    const records = [
+      record('cursor', 'system'),
+      ...Array.from({ length: 17 }, (_, index) =>
+        record(`output-${index + 1}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: `turn-${index + 1}`,
+          text: `output ${index + 1}`,
+        }),
+      ),
+    ];
+    const currentPermit = permit('turn-17');
+    const input = { records, goal: goal(), permit: currentPermit };
+
+    expect(buildGoalEvidenceCatalog(input)).toMatchObject({
+      truncated: false,
+      lineageTurnIds: Array.from(
+        { length: 16 },
+        (_, index) => `turn-${index + 2}`,
+      ),
+    });
+    expect(
+      validate(records, complete(['output-17']), currentPermit).citedRecords,
+    ).toHaveLength(1);
+  });
+
   it('rejects permit mismatch, malformed ownership, re-entry, and wrong tail', () => {
     const base = [record('cursor', 'system')];
 
@@ -476,8 +557,16 @@ describe('Goal evidence lineage and blockers', () => {
         }),
       );
       expect(
-        validate(records, blocked(blockerKind, ['user'])).citedRecords[0],
+        validate(records, blocked(blockerKind, ['user', 'assistant']))
+          .citedRecords[0],
       ).toMatchObject({ proofKind: 'user_input' });
+      expect(() =>
+        validate(records, blocked(blockerKind, ['user'])),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'immediate_blocker_newer_evidence_required',
+        }),
+      );
     },
   );
 
