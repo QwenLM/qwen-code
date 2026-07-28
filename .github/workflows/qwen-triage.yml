@@ -1522,6 +1522,15 @@ jobs:
             find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
           fi
           git worktree prune -v || true
+          # Restore workspace ownership to the runner user so the next job's
+          # checkout step can clean the tree without EACCES. The prepare step
+          # chowned everything to node:node; without this, node_modules and
+          # .qwen/ remain node-owned and the next checkout's rm -rf fails.
+          RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
   # with the write PAT and never checks out PR code, so the write credential is
@@ -2825,6 +2834,15 @@ jobs:
             esac
           done
           git worktree prune -v || true
+          # Restore workspace ownership to the runner user so the next job's
+          # checkout step can clean the tree without EACCES. The prepare step
+          # chowned everything to node:node; without this, node_modules and
+          # .qwen/ remain node-owned and the next checkout's rm -rf fails.
+          RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted
   # runner with the write PAT and never checks out PR code, so the write
