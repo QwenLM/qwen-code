@@ -74,6 +74,9 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         addTags: vi.fn(),
         removeInlineTags: vi.fn(),
         submit: vi.fn(),
+        hasAttachments: () =>
+          mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.composerTags.length > 0,
       },
       pastedImages: mockComposerCoreState.pastedImages,
       removeImage: vi.fn(),

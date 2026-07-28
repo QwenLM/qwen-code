@@ -961,6 +961,7 @@ export interface EditorHandle extends WebShellComposerApi {
   clearText(): void;
   focus(): void;
   getText(): string;
+  hasAttachments(): boolean;
   hasInput(): boolean;
   retryLast(): void;
   restoreImages(images: readonly PromptImage[]): void;
@@ -3553,6 +3554,17 @@ export function useComposerCore(
     );
   }, [isTouchComposer]);
 
+  const hasAttachments = useCallback(() => {
+    const inlineTags = viewRef.current
+      ? getInlineComposerTags(viewRef.current)
+      : [];
+    return (
+      inlineTags.length > 0 ||
+      composerTagsRef.current.length > 0 ||
+      pastedImagesRef.current.length > 0
+    );
+  }, []);
+
   const submit = useCallback(
     (input?: WebShellComposerInput) => {
       const view = viewRef.current;
@@ -3856,6 +3868,7 @@ export function useComposerCore(
       clear,
       focus,
       getText,
+      hasAttachments,
       hasInput,
       setText,
       addTags,
@@ -3871,6 +3884,7 @@ export function useComposerCore(
     clearText,
     focus,
     getText,
+    hasAttachments,
     hasInput,
     insertText,
     removeTopTag,

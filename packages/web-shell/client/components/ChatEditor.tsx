@@ -1259,8 +1259,7 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
-    const hasAttachments =
-      core.pastedImages.length > 0 || core.composerTags.length > 0;
+    const hasAttachments = core.handle.hasAttachments();
     useEffect(() => {
       onAttachmentsChange?.(hasAttachments);
     }, [hasAttachments, onAttachmentsChange]);

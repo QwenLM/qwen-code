@@ -2621,7 +2621,6 @@ export function App({
   const [hasComposerAttachments, setHasComposerAttachments] = useState<
     boolean | null
   >(null);
-  const hasComposerAttachmentsRef = useRef<boolean | null>(null);
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
@@ -5138,7 +5137,6 @@ export function App({
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
-      hasComposerAttachmentsRef.current = hasAttachments;
       setHasComposerAttachments(hasAttachments);
     },
     [],
@@ -5276,7 +5274,7 @@ export function App({
       newSessionSuggestion.classifiedInput !== draft ||
       newSessionSuggestion.sourceSessionId !==
         connectionRef.current.sessionId ||
-      hasComposerAttachmentsRef.current !== false
+      editorRef.current?.hasAttachments() !== false
     ) {
       dismissNewSessionSuggestion();
       return;

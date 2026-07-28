@@ -400,6 +400,7 @@ vi.mock('./components/ChatEditor', async () => {
       props: ChatEditorTestProps,
       ref: React.ForwardedRef<{
         clear: () => void;
+        hasAttachments: () => boolean;
         hasInput: () => boolean;
         insertText: (text: string) => void;
         submit: (input?: { text?: string }) => void;
@@ -423,6 +424,11 @@ vi.mock('./components/ChatEditor', async () => {
           props.onInputTextChange?.('');
           editorClear();
         },
+        hasAttachments: () =>
+          Boolean(
+            testState.promptImages?.length ||
+              testState.inputAnnotations?.length,
+          ),
         hasInput: () => testState.prompt.trim().length > 0,
         insertText: editorInsertText,
         submit: (input) => {
@@ -5459,7 +5465,7 @@ describe('App session callbacks', () => {
     expect(editorCommit).toHaveBeenCalledTimes(1);
   });
 
-  it('never suggests BTW for a draft with an attachment', async () => {
+  it('refuses a visible BTW suggestion when an inline tag is added before acceptance', async () => {
     vi.useFakeTimers();
     mockConnection.capabilities.features = ['session_generation'];
     (
@@ -5480,8 +5486,7 @@ describe('App session callbacks', () => {
       content: `existing session topic ${index} about daemon generation review work`,
       timestamp: index,
     }));
-    testState.prompt = '顺便看看这张截图里为什么会报错？';
-    testState.promptImages = [{ data: 'abc', media_type: 'image/png' }];
+    testState.prompt = '顺便看看这里为什么会报错？';
     mockSessionActions.generateSessionContent.mockImplementation(
       async function* () {
         yield {
@@ -5520,8 +5525,30 @@ describe('App session callbacks', () => {
 
     expect(
       container.querySelector('[data-testid="btw-suggestion"]'),
-    ).toBeNull();
+    ).not.toBeNull();
+
+    testState.inputAnnotations = [
+      {
+        type: 'reference',
+        text: '@src/App.tsx',
+        start: 0,
+        end: 12,
+        reference: {
+          id: 'src/App.tsx',
+          value: 'src/App.tsx',
+          serialized: '@src/App.tsx',
+        },
+      },
+    ];
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="btw-suggestion-send"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
     expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
   });
 
   it('waits for the current session to detach before auto-submitting the suggested new-session draft', async () => {
