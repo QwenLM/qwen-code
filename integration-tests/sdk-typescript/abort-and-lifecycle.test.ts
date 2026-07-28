@@ -132,7 +132,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const controller = new AbortController();
 
       const fakeServer = await startFakeOpenAIServer(() => {
-        return { content: 'Hello! How can I help you today?' };
+        return { contentChunks: LONG_CONTENT_CHUNKS };
       }, FAKE_SERVER_OPTIONS);
 
       const q = query({

@@ -118,6 +118,7 @@ describe('Channel Plugin (Mock WebSocket E2E)', () => {
     async () => {
       await setup();
 
+      // This goes: server → WS → MockPluginChannel → ChannelBase → AcpBridge → agent → back
       const response = await server.sendMessage(
         'What is 2+2? Reply with ONLY the number, nothing else.',
       );
