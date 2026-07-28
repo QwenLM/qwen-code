@@ -880,6 +880,25 @@ describe('useComposerCore tags', () => {
     ).toHaveLength(kinds.length);
   });
 
+  it('reports inline composer tags as attachments', async () => {
+    await mount();
+
+    expect(latest!.handle.hasAttachments()).toBe(false);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+    });
+    expect(latest!.handle.hasAttachments()).toBe(true);
+
+    act(() => {
+      latest!.removeInlineTags();
+    });
+    expect(latest!.handle.hasAttachments()).toBe(false);
+  });
+
   it('keeps inline tags after trimming leading whitespace on submit', async () => {
     const { onSubmit } = await mount();
 
