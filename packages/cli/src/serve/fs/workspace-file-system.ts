@@ -1481,33 +1481,13 @@ async function readTextSnapshotFromResolvedFile(
   return { content, meta };
 }
 
-/**
- * Stability check for a streamed *prefix* window.
- *
- * The full-snapshot path can demand byte-for-byte stability (`size` and
- * `mtimeMs` unchanged) because it returns the whole file: any change
- * invalidates the result. A line window does not return the whole file, so
- * demanding whole-file stability rejects reads whose returned bytes are
- * still perfectly valid — and the case it rejects is the one this feature
- * exists for. Appending to a log does not change lines 1-20, but under an
- * equality check every read of a live log is a coin flip.
- *
- * So the streamed path asserts only what the returned bytes depend on: the
- * inode is unchanged (`assertSameFile`, checked separately) and the file did
- * not shrink. Truncation, `>` rewrites, and replacement are still rejected.
- *
- * The residual gap is a writer that truncates *and* regrows past the
- * original size inside one read window while keeping the same inode. That is
- * narrower than what an equality check on `mtimeMs` catches, and it is the
- * price of supporting append-only files at all.
- */
-function assertDidNotShrink(
-  before: { size: number | bigint },
-  after: { size: number | bigint },
+function assertFileUnchanged(
+  before: { size: number | bigint; mtimeMs: number | bigint },
+  after: { size: number | bigint; mtimeMs: number | bigint },
   p: ResolvedPath,
   reason: string,
 ): void {
-  if (toBigInt(after.size) < toBigInt(before.size)) {
+  if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
     throw new FsError('hash_mismatch', `${reason}: ${p}`, {
       hint: 'retry after re-reading the latest file',
     });
@@ -1521,7 +1501,7 @@ async function readLargeTextWindowFromResolvedFile(
   lowFs: StandardFileSystemService,
 ): Promise<TextReadOutcome> {
   const fh = await fsp.open(p as string, 'r');
-  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let opened: Awaited<ReturnType<typeof fh.stat>>;
   let content = '';
   let readMeta:
     | Awaited<
@@ -1531,7 +1511,7 @@ async function readLargeTextWindowFromResolvedFile(
   try {
     opened = await fh.stat();
     assertSameFile(pre, opened, p as string, 'read');
-    assertDidNotShrink(pre, opened, p, 'file was truncated before read');
+    assertFileUnchanged(pre, opened, p, 'file changed before read');
 
     const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
     if (probe.length > 0) {
@@ -1584,14 +1564,11 @@ async function readLargeTextWindowFromResolvedFile(
 
     const afterRead = await fh.stat();
     assertSameFile(opened, afterRead, p as string, 'read');
-    assertDidNotShrink(opened, afterRead, p, 'file was truncated during read');
+    assertFileUnchanged(opened, afterRead, p, 'file changed during read');
   } finally {
     await fh.close();
   }
 
-  if (opened === undefined) {
-    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
-  }
   const post = await fsp.lstat(p as string);
   if (post.isSymbolicLink()) {
     throw new FsError(
@@ -1601,15 +1578,12 @@ async function readLargeTextWindowFromResolvedFile(
     );
   }
   assertSameFile(opened, post, p as string, 'read');
-  assertDidNotShrink(opened, post, p, 'file was truncated during read');
+  assertFileUnchanged(opened, post, p, 'file changed during read');
 
   const meta: TextReadOutcome['meta'] = {
     encoding: readMeta?.encoding,
     bom: readMeta?.bom,
-    lineEnding: readMeta?.lineEnding ?? detectLineEnding(content),
-    // Size as of `open`, not as of now: it describes the snapshot the
-    // returned window was cut from. A file that grew during the read
-    // reports the smaller, consistent number.
+    lineEnding: detectLineEnding(content),
     sizeBytes: opened.size,
     truncated: true,
   };

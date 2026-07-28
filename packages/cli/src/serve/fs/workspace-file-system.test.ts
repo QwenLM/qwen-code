@@ -331,6 +331,21 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(out.meta.hash).toBeUndefined();
   });
 
+  it('derives line-ending metadata from the returned large-file window', async () => {
+    const target = path.join(h.workspace, 'large-mixed-eol.txt');
+    const lines = Array.from(
+      { length: 8_000 },
+      (_, index) => `body-${index + 1} ${'x'.repeat(30)}`,
+    );
+    await fsp.writeFile(target, `header\r\n${lines.join('\n')}`);
+    const r = await h.fs.resolve('large-mixed-eol.txt', 'read');
+
+    const out = await h.fs.readText(r, { line: 2, limit: 2 });
+
+    expect(out.content).toBe(lines.slice(0, 2).join('\n'));
+    expect(out.meta.lineEnding).toBe('lf');
+  });
+
   it('rejects a symlink swap while a large range is being read', async () => {
     const target = path.join(h.workspace, 'large-swap.txt');
     const moved = path.join(h.workspace, 'large-swap.original.txt');
@@ -397,9 +412,7 @@ describe('WorkspaceFileSystem - readText', () => {
     }
   });
 
-  it('serves a prefix window from a file being appended to during the read', async () => {
-    // The whole point of the feature: tailing a live log. A prefix window
-    // does not depend on the tail, so an append must not fail the read.
+  it('rejects an append while a large range is being read', async () => {
     const target = path.join(h.workspace, 'large-append.txt');
     const lines = Array.from(
       { length: 4_000 },
@@ -408,7 +421,6 @@ describe('WorkspaceFileSystem - readText', () => {
     await fsp.writeFile(target, lines.join('\n'));
     const resolved = await h.fs.resolve('large-append.txt', 'read');
     const original = StandardFileSystemService.prototype.readTextFileFromHandle;
-    const sizeBefore = (await fsp.stat(target)).size;
     const readSpy = vi
       .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
       .mockImplementation(async function (
@@ -421,11 +433,58 @@ describe('WorkspaceFileSystem - readText', () => {
       });
 
     try {
-      const out = await h.fs.readText(resolved, { limit: 20 });
-      expect(out.content).toBe(lines.slice(0, 20).join('\n'));
-      // sizeBytes describes the snapshot the window was cut from, not the
-      // file as it stands after the concurrent append.
-      expect(out.meta.sizeBytes).toBe(sizeBefore);
+      const err = await h.fs
+        .readText(resolved, { limit: 20 })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('rejects a same-size in-place rewrite while a large range is being read', async () => {
+    const target = path.join(h.workspace, 'large-rewrite.txt');
+    const original = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'a'.repeat(80)}`,
+    ).join('\n');
+    await fsp.writeFile(target, original);
+    const before = await fsp.stat(target);
+    const resolved = await h.fs.resolve('large-rewrite.txt', 'read');
+    const originalRead =
+      StandardFileSystemService.prototype.readTextFileFromHandle;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await originalRead.call(this, params);
+        const rewriteHandle = await fsp.open(target, 'r+');
+        try {
+          const replacement = Buffer.from('changed!');
+          const { bytesWritten } = await rewriteHandle.write(
+            replacement,
+            0,
+            replacement.length,
+            0,
+          );
+          expect(bytesWritten).toBe(replacement.length);
+        } finally {
+          await rewriteHandle.close();
+        }
+        const changedTime = new Date(before.mtimeMs + 10_000);
+        await fsp.utimes(target, changedTime, changedTime);
+        return result;
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { limit: 20 })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('hash_mismatch');
     } finally {
       readSpy.mockRestore();
     }

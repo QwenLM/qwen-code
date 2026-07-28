@@ -183,7 +183,7 @@ describe('StandardFileSystemService', () => {
       });
     });
 
-    it('should force handle-bound reads through the streaming range path', async () => {
+    it('should route handle-bound reads through the bounded range path', async () => {
       const fileHandle = {} as import('node:fs/promises').FileHandle;
       const stats = { size: 300_000 } as import('node:fs').Stats;
       vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
@@ -208,7 +208,6 @@ describe('StandardFileSystemService', () => {
       expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
         path: '/test/large.txt',
         fileHandle,
-        forceStreaming: true,
         stats,
         limit: 1,
         line: 1,

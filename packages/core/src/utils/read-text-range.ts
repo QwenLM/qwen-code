@@ -30,8 +30,6 @@ export interface ReadTextRangeRequest {
    * already-open inode; this function never closes the handle.
    */
   fileHandle?: FileHandle;
-  /** Skip the small-file full-buffer fast path. */
-  forceStreaming?: boolean;
   /**
    * Upper bound on bytes read off disk while locating the requested window.
    * Line offsets address a byte stream, so a deep `offset` costs a scan from
@@ -101,20 +99,14 @@ export async function readTextRange(
   // the same bound apply, and raises `TextScanBudgetExceededError` if the
   // window really is out of reach.
   if (
-    request.forceStreaming !== true &&
+    request.fileHandle === undefined &&
     stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE &&
     stats.size <= maxScanBytes
   ) {
-    const { content, encoding, bom } =
-      request.fileHandle === undefined
-        ? await readFileWithEncodingInfo(request.path, request.signal)
-        : await decodeBufferWithEncodingInfoAsync(
-            await readFileHandleBuffer(
-              request.fileHandle,
-              stats.size,
-              request.signal,
-            ),
-          );
+    const { content, encoding, bom } = await readFileWithEncodingInfo(
+      request.path,
+      request.signal,
+    );
     request.signal?.throwIfAborted();
     const range = sliceDecodedContent(
       content,
@@ -130,7 +122,7 @@ export async function readTextRange(
     };
   }
 
-  return readLargeUtf8Range(request, maxOutputBytes, maxScanBytes);
+  return readLargeUtf8Range(request, maxOutputBytes, maxScanBytes, stats.size);
 }
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
@@ -177,6 +169,7 @@ async function readLargeUtf8Range(
   request: ReadTextRangeRequest,
   maxOutputBytes: number,
   maxScanBytes: number,
+  snapshotSize: number,
 ): Promise<ReadTextRangeResult> {
   const encoding =
     request.fileHandle === undefined
@@ -214,7 +207,8 @@ async function readLargeUtf8Range(
         })
       : undefined;
   const chunks =
-    pathStream ?? readFileHandleChunks(request.fileHandle!, request.signal);
+    pathStream ??
+    readFileHandleChunks(request.fileHandle!, snapshotSize, request.signal);
 
   function appendSelected(fragment: string): void {
     if (fragment.length === 0 || truncatedByBytes) {
@@ -332,38 +326,18 @@ async function readLargeUtf8Range(
   };
 }
 
-async function readFileHandleBuffer(
-  fileHandle: FileHandle,
-  size: number,
-  signal?: AbortSignal,
-): Promise<Buffer> {
-  const buffer = Buffer.alloc(size);
-  let offset = 0;
-  while (offset < size) {
-    signal?.throwIfAborted();
-    const read = await fileHandle.read(buffer, offset, size - offset, offset);
-    if (read.bytesRead === 0) break;
-    offset += read.bytesRead;
-  }
-  signal?.throwIfAborted();
-  return offset === buffer.length ? buffer : buffer.subarray(0, offset);
-}
-
 async function* readFileHandleChunks(
   fileHandle: FileHandle,
+  snapshotSize: number,
   signal?: AbortSignal,
 ): AsyncGenerator<Buffer> {
   const highWaterMark = 512 * 1024;
+  const buffer = Buffer.allocUnsafe(highWaterMark);
   let position = 0;
-  while (true) {
+  while (position < snapshotSize) {
     signal?.throwIfAborted();
-    const buffer = Buffer.allocUnsafe(highWaterMark);
-    const { bytesRead } = await fileHandle.read(
-      buffer,
-      0,
-      buffer.length,
-      position,
-    );
+    const length = Math.min(highWaterMark, snapshotSize - position);
+    const { bytesRead } = await fileHandle.read(buffer, 0, length, position);
     signal?.throwIfAborted();
     if (bytesRead === 0) return;
     position += bytesRead;

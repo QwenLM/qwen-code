@@ -349,7 +349,6 @@ export class StandardFileSystemService implements FileSystemService {
     }
     return readTextFileStandard(params, {
       fileHandle: params.fileHandle,
-      forceStreaming: true,
       maxScanBytes: params.maxScanBytes,
     });
   }
@@ -392,7 +391,6 @@ async function readTextFileStandard(
   params: CoreReadTextFileRequest,
   source?: {
     fileHandle: FileHandle;
-    forceStreaming: boolean;
     maxScanBytes: number;
   },
 ): Promise<ReadTextFileResponse> {

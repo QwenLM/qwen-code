@@ -1589,7 +1589,11 @@ For files within the full-snapshot cap, the response includes `hash`, a SHA-256
 digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,
 or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
 complete `sizeBytes`, set `truncated: true`, and return
-`originalLineCount: null` when the stream stops before EOF.
+`originalLineCount: null` when the stream stops before EOF. A streamed result
+is returned only when the file remains stable. Concurrent changes detected by
+the post-read inode, size, and modification-time checks return `hash_mismatch`,
+while content validation can fail earlier with `binary_file` and path
+replacement retains the existing `symlink_escape` protection.
 
 ```json
 {
