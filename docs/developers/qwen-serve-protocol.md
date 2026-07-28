@@ -1574,9 +1574,16 @@ Filesystem errors use this JSON shape:
 
 Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
 `limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
-cap require a finite `limit`; no-limit, line-only, and maxBytes-only requests
-remain `file_too_large`. A finite large-file window is streamed and its returned
-UTF-8 content remains capped at 256 KiB.
+cap require at least one explicit window argument (`line`, `limit`, or
+`maxBytes`); a request with none of them remains `file_too_large`. Such a
+window is streamed, and its returned UTF-8 content stays capped at 256 KiB.
+
+Line offsets are resolved by scanning from the start of the file, so a window
+is also refused with `file_too_large` when reaching it would read more than
+8 MiB (`MAX_TEXT_SCAN_BYTES`). Use `GET /file/bytes` to reach a deeper offset
+directly. Large text in an encoding the route cannot decode returns
+`binary_file`, not `file_too_large` — retrying with a smaller window cannot
+help, and `readBytes` is the same remedy that already applies to binary.
 
 For files within the full-snapshot cap, the response includes `hash`, a SHA-256
 digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,

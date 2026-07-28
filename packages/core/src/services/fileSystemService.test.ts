@@ -202,6 +202,7 @@ describe('StandardFileSystemService', () => {
         limit: 1,
         line: 1,
         maxOutputBytes: 262_144,
+        maxScanBytes: 8 * 1024 * 1024,
       });
 
       expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
@@ -212,12 +213,47 @@ describe('StandardFileSystemService', () => {
         limit: 1,
         line: 1,
         maxOutputBytes: 262_144,
+        maxScanBytes: 8 * 1024 * 1024,
       });
       expect(result.content).toBe('line 2');
       expect(result._meta?.originalLineCountExact).toBe(false);
     });
 
-    it('should reject unbounded handle reads', async () => {
+    it('should allow an unbounded limit when both byte bounds are finite', async () => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+      const stats = { size: 300_000 } as import('node:fs').Stats;
+      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
+        content: 'head of file',
+        originalLineCount: 3,
+        originalLineCountExact: false,
+        truncatedByBytes: true,
+      });
+
+      const result = await fileSystem.readTextFileFromHandle({
+        path: '/test/large.txt',
+        fileHandle,
+        stats,
+        limit: Number.POSITIVE_INFINITY,
+        maxOutputBytes: 262_144,
+        maxScanBytes: 8 * 1024 * 1024,
+      });
+
+      expect(result.content).toBe('head of file');
+      expect(readFileWithLineAndLimit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          limit: Number.POSITIVE_INFINITY,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+        }),
+      );
+    });
+
+    it.each([
+      ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
+      ['maxScanBytes', { maxScanBytes: Number.POSITIVE_INFINITY }],
+      ['maxOutputBytes', { maxOutputBytes: 0 }],
+      ['maxScanBytes', { maxScanBytes: -1 }],
+    ])('should reject a handle read with unbounded %s', async (bound, over) => {
       const fileHandle = {} as import('node:fs/promises').FileHandle;
       const stats = { size: 300_000 } as import('node:fs').Stats;
 
@@ -226,9 +262,12 @@ describe('StandardFileSystemService', () => {
           path: '/test/large.txt',
           fileHandle,
           stats,
-          limit: Number.POSITIVE_INFINITY,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+          ...over,
         }),
-      ).rejects.toThrow(/positive finite limit/);
+      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
       expect(readFileWithLineAndLimit).not.toHaveBeenCalled();
     });
 

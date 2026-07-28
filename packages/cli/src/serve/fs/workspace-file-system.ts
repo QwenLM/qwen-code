@@ -20,6 +20,7 @@ import { glob as globAsync } from 'glob';
 import {
   LargeNonUtf8TextError,
   StandardFileSystemService,
+  TextScanBudgetExceededError,
   decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
   encodeTextFileContentAsync,
@@ -45,6 +46,7 @@ import {
 import {
   BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
+  MAX_TEXT_SCAN_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
   enforceWriteSize,
@@ -85,6 +87,13 @@ export interface ReadMeta {
   originalLineCount?: number;
 }
 
+/**
+ * Above `MAX_READ_BYTES` at least one of these must be set. Any of them is
+ * the caller stating it accepts partial content, which is all the streamed
+ * path returns; with none of them the read is refused rather than silently
+ * handing back a truncated "whole file". Which one is set does not affect
+ * cost — that is bounded by `MAX_TEXT_SCAN_BYTES`.
+ */
 export interface ReadTextOptions {
   /** Returned-byte cap in [1, MAX_READ_BYTES]; defaults to MAX_READ_BYTES. */
   maxBytes?: number;
@@ -1375,13 +1384,25 @@ async function readTextFromResolvedFile(
     throw new FsError('parse_error', `path is not a regular file: ${p}`);
   }
 
-  if (pre.size > MAX_READ_BYTES && opts.limit !== undefined) {
-    return readLargeTextWindowFromResolvedFile(
-      p,
-      pre,
-      { ...opts, limit: opts.limit },
-      lowFs,
-    );
+  // Any explicit window argument is the caller stating it accepts partial
+  // content, which is what the large-file path returns. Gating on `limit`
+  // alone got this backwards in both directions: `{ line: 900_000_000,
+  // limit: 20 }` was admitted despite costing a full scan, while
+  // `{ maxBytes: 4096 }` — satisfiable from the first 4 KiB — was refused.
+  // Cost is bounded by MAX_TEXT_SCAN_BYTES, not by which knob was set.
+  //
+  // A read with no window argument at all still fails: an agent that
+  // believes it holds the whole file may write it back truncated. The
+  // omitted `hash` blocks that for `editText`/`writeTextAtomic`, but
+  // `writeTextOverwrite` takes no hash, so `truncated: true` is the only
+  // signal on that path — refusing the unbounded read keeps the caller
+  // from ever being in that position by accident.
+  const wantsWindow =
+    opts.limit !== undefined ||
+    opts.maxBytes !== undefined ||
+    opts.line !== undefined;
+  if (pre.size > MAX_READ_BYTES && wantsWindow) {
+    return readLargeTextWindowFromResolvedFile(p, pre, opts, lowFs);
   }
   return readTextSnapshotFromResolvedFile(p, opts, pre);
 }
@@ -1460,10 +1481,43 @@ async function readTextSnapshotFromResolvedFile(
   return { content, meta };
 }
 
+/**
+ * Stability check for a streamed *prefix* window.
+ *
+ * The full-snapshot path can demand byte-for-byte stability (`size` and
+ * `mtimeMs` unchanged) because it returns the whole file: any change
+ * invalidates the result. A line window does not return the whole file, so
+ * demanding whole-file stability rejects reads whose returned bytes are
+ * still perfectly valid — and the case it rejects is the one this feature
+ * exists for. Appending to a log does not change lines 1-20, but under an
+ * equality check every read of a live log is a coin flip.
+ *
+ * So the streamed path asserts only what the returned bytes depend on: the
+ * inode is unchanged (`assertSameFile`, checked separately) and the file did
+ * not shrink. Truncation, `>` rewrites, and replacement are still rejected.
+ *
+ * The residual gap is a writer that truncates *and* regrows past the
+ * original size inside one read window while keeping the same inode. That is
+ * narrower than what an equality check on `mtimeMs` catches, and it is the
+ * price of supporting append-only files at all.
+ */
+function assertDidNotShrink(
+  before: { size: number | bigint },
+  after: { size: number | bigint },
+  p: ResolvedPath,
+  reason: string,
+): void {
+  if (toBigInt(after.size) < toBigInt(before.size)) {
+    throw new FsError('hash_mismatch', `${reason}: ${p}`, {
+      hint: 'retry after re-reading the latest file',
+    });
+  }
+}
+
 async function readLargeTextWindowFromResolvedFile(
   p: ResolvedPath,
   pre: Awaited<ReturnType<typeof fsp.lstat>>,
-  opts: ReadTextOptions & { limit: number },
+  opts: ReadTextOptions,
   lowFs: StandardFileSystemService,
 ): Promise<TextReadOutcome> {
   const fh = await fsp.open(p as string, 'r');
@@ -1477,11 +1531,7 @@ async function readLargeTextWindowFromResolvedFile(
   try {
     opened = await fh.stat();
     assertSameFile(pre, opened, p as string, 'read');
-    if (opened.size !== pre.size || opened.mtimeMs !== pre.mtimeMs) {
-      throw new FsError('hash_mismatch', `file changed before read: ${p}`, {
-        hint: 'retry after re-reading the latest file',
-      });
-    }
+    assertDidNotShrink(pre, opened, p, 'file was truncated before read');
 
     const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
     if (probe.length > 0) {
@@ -1501,15 +1551,30 @@ async function readLargeTextWindowFromResolvedFile(
         path: p as string,
         fileHandle: fh,
         stats: opened,
-        limit: opts.limit,
+        limit: opts.limit ?? Number.POSITIVE_INFINITY,
         line: opts.line !== undefined ? opts.line - 1 : 0,
         maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
+        maxScanBytes: MAX_TEXT_SCAN_BYTES,
       });
     } catch (err) {
+      // An encoding the text route can't represent is the same class of
+      // refusal as sniffed-binary content, and `binary_file` already tells
+      // clients to fall back to `readBytes` — which is the right remedy for
+      // a GBK file too. `file_too_large` (413) would send a client that
+      // retries with a smaller window into a loop it can never exit.
       if (err instanceof LargeNonUtf8TextError) {
+        throw new FsError('binary_file', err.message, {
+          cause: err,
+          hint: 'convert the file to UTF-8, or use readBytes for the raw bytes',
+        });
+      }
+      // Budget exhaustion *is* a size refusal: the file is too large to
+      // reach this line offset by scanning. 413 is correct, and the hint
+      // names the O(1) alternative so the retry has somewhere to go.
+      if (err instanceof TextScanBudgetExceededError) {
         throw new FsError('file_too_large', err.message, {
           cause: err,
-          hint: 'convert the file to UTF-8 before requesting a large line window',
+          hint: `line offsets are resolved by scanning from byte 0 and stop after ${MAX_TEXT_SCAN_BYTES} bytes; use readBytes to reach a deeper offset directly`,
         });
       }
       throw err;
@@ -1519,14 +1584,7 @@ async function readLargeTextWindowFromResolvedFile(
 
     const afterRead = await fh.stat();
     assertSameFile(opened, afterRead, p as string, 'read');
-    if (
-      afterRead.size !== opened.size ||
-      afterRead.mtimeMs !== opened.mtimeMs
-    ) {
-      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
-        hint: 'retry after re-reading the latest file',
-      });
-    }
+    assertDidNotShrink(opened, afterRead, p, 'file was truncated during read');
   } finally {
     await fh.close();
   }
@@ -1543,16 +1601,15 @@ async function readLargeTextWindowFromResolvedFile(
     );
   }
   assertSameFile(opened, post, p as string, 'read');
-  if (post.size !== opened.size || post.mtimeMs !== opened.mtimeMs) {
-    throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
-      hint: 'retry after re-reading the latest file',
-    });
-  }
+  assertDidNotShrink(opened, post, p, 'file was truncated during read');
 
   const meta: TextReadOutcome['meta'] = {
     encoding: readMeta?.encoding,
     bom: readMeta?.bom,
     lineEnding: readMeta?.lineEnding ?? detectLineEnding(content),
+    // Size as of `open`, not as of now: it describes the snapshot the
+    // returned window was cut from. A file that grew during the read
+    // reports the smaller, consistent number.
     sizeBytes: opened.size,
     truncated: true,
   };

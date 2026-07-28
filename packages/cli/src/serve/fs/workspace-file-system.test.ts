@@ -167,22 +167,63 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(out.content.length).toBeLessThanOrEqual(1024);
   });
 
-  it('throws file_too_large for an oversized read without a finite line limit', async () => {
+  it('throws file_too_large for an oversized read with no window argument', async () => {
     const big = path.join(h.workspace, 'huge.txt');
     const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
     await fsp.writeFile(big, 'a'.repeat(bytes));
     const r = await h.fs.resolve('huge.txt', 'read');
-    for (const opts of [{}, { line: 2 }, { maxBytes: 1024 }]) {
-      const err = await h.fs.readText(r, opts).catch((e: unknown) => e);
-      expect(isFsError(err)).toBe(true);
-      expect((err as { kind: string }).kind).toBe('file_too_large');
-    }
+    const err = await h.fs.readText(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
     // Audit was recorded for the denial (P0 silent-failure fix).
     const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
     expect(denied).toBeDefined();
     expect((denied!.data as { errorKind: string }).errorKind).toBe(
       'file_too_large',
     );
+  });
+
+  it('serves oversized text for any explicit window argument, not just limit', async () => {
+    // `maxBytes` and `line` bound the response just as much as `limit` does;
+    // refusing them while admitting a deep `line` had the cost model backwards.
+    const big = path.join(h.workspace, 'huge-window.txt');
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    const line = `${'a'.repeat(99)}\n`;
+    await fsp.writeFile(big, line.repeat(Math.ceil(maxReadBytes / 100) + 10));
+    const r = await h.fs.resolve('huge-window.txt', 'read');
+
+    const capped = await h.fs.readText(r, { maxBytes: 1024 });
+    expect(Buffer.byteLength(capped.content)).toBeLessThanOrEqual(1024);
+    expect(capped.meta.truncated).toBe(true);
+    expect(capped.meta.hash).toBeUndefined();
+
+    const fromLine = await h.fs.readText(r, { line: 2 });
+    expect(fromLine.content.startsWith('a'.repeat(99))).toBe(true);
+    expect(Buffer.byteLength(fromLine.content)).toBeLessThanOrEqual(
+      maxReadBytes,
+    );
+    expect(fromLine.meta.truncated).toBe(true);
+  });
+
+  it('refuses a line offset beyond MAX_TEXT_SCAN_BYTES', async () => {
+    const { MAX_TEXT_SCAN_BYTES } = await import('./policy.js');
+    const big = path.join(h.workspace, 'deep-offset.txt');
+    const line = `${'a'.repeat(99)}\n`;
+    const lineCount = Math.ceil((MAX_TEXT_SCAN_BYTES / 100) * 1.5);
+    await fsp.writeFile(big, line.repeat(lineCount));
+    const r = await h.fs.resolve('deep-offset.txt', 'read');
+
+    // A shallow window on the same file is still cheap and still works.
+    const head = await h.fs.readText(r, { limit: 2 });
+    expect(head.content.split('\n')).toHaveLength(2);
+
+    // The deep one is refused rather than silently costing a full scan.
+    const err = await h.fs
+      .readText(r, { line: lineCount - 5, limit: 2 })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+    expect((err as { hint?: string }).hint).toMatch(/readBytes/);
   });
 
   it('streams bounded line windows from text above MAX_READ_BYTES', async () => {
@@ -234,7 +275,7 @@ describe('WorkspaceFileSystem - readText', () => {
     expect((err as { kind: string }).kind).toBe('binary_file');
   });
 
-  it('maps oversized non-UTF-8 text windows to file_too_large', async () => {
+  it('maps oversized non-UTF-8 text windows to binary_file', async () => {
     const target = path.join(h.workspace, 'large-utf16.txt');
     const body = Buffer.concat([
       Buffer.from([0xff, 0xfe]),
@@ -247,7 +288,10 @@ describe('WorkspaceFileSystem - readText', () => {
 
     const err = await h.fs.readText(r, { limit: 20 }).catch((e: unknown) => e);
     expect(isFsError(err)).toBe(true);
-    expect((err as { kind: string }).kind).toBe('file_too_large');
+    // Not `file_too_large`: shrinking the window can never make a GBK file
+    // decodable, so a client retrying on 413 would loop forever. 422 with the
+    // readBytes hint is the same remedy that already works for binary.
+    expect((err as { kind: string }).kind).toBe('binary_file');
     expect((err as { hint?: string }).hint).toMatch(/convert.*UTF-8/i);
   });
 
@@ -322,7 +366,7 @@ describe('WorkspaceFileSystem - readText', () => {
     }
   });
 
-  it('rejects in-place changes while a large range is being read', async () => {
+  it('rejects a truncation while a large range is being read', async () => {
     const target = path.join(h.workspace, 'large-change.txt');
     const lines = Array.from(
       { length: 4_000 },
@@ -338,7 +382,7 @@ describe('WorkspaceFileSystem - readText', () => {
         params,
       ) {
         const result = await original.call(this, params);
-        await fsp.appendFile(target, '\nchanged');
+        await fsp.truncate(target, 1_000);
         return result;
       });
 
@@ -348,6 +392,40 @@ describe('WorkspaceFileSystem - readText', () => {
         .catch((e: unknown) => e);
       expect(isFsError(err)).toBe(true);
       expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('serves a prefix window from a file being appended to during the read', async () => {
+    // The whole point of the feature: tailing a live log. A prefix window
+    // does not depend on the tail, so an append must not fail the read.
+    const target = path.join(h.workspace, 'large-append.txt');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    const resolved = await h.fs.resolve('large-append.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    const sizeBefore = (await fsp.stat(target)).size;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await original.call(this, params);
+        await fsp.appendFile(target, `\n${'appended '.repeat(50)}`);
+        return result;
+      });
+
+    try {
+      const out = await h.fs.readText(resolved, { limit: 20 });
+      expect(out.content).toBe(lines.slice(0, 20).join('\n'));
+      // sizeBytes describes the snapshot the window was cut from, not the
+      // file as it stands after the concurrent append.
+      expect(out.meta.sizeBytes).toBe(sizeBefore);
     } finally {
       readSpy.mockRestore();
     }

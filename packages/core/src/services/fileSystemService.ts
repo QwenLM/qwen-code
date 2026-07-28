@@ -51,14 +51,22 @@ export type CoreReadTextFileRequest = Omit<
 /**
  * Handle-bound range read used by filesystem security boundaries. The caller
  * owns the handle lifecycle and must pass the Stats captured from that handle.
+ *
+ * Both bounds are required rather than optional: what makes a large-file read
+ * safe at a boundary is that the *returned* bytes and the *scanned* bytes are
+ * each capped. A finite `limit` is not one of those bounds — `limit: 20` at
+ * `line: 900_000_000` still walks the whole file — so it stays optional and
+ * `maxScanBytes` is what actually keeps the read affordable.
  */
 export type CoreReadTextFileHandleRequest = Omit<
   CoreReadTextFileRequest,
-  'limit' | 'stats'
+  'limit' | 'stats' | 'maxOutputBytes'
 > & {
   fileHandle: FileHandle;
   stats: Stats;
-  limit: number;
+  limit?: number;
+  maxOutputBytes: number;
+  maxScanBytes: number;
 };
 
 /**
@@ -320,14 +328,29 @@ export class StandardFileSystemService implements FileSystemService {
   async readTextFileFromHandle(
     params: CoreReadTextFileHandleRequest,
   ): Promise<ReadTextFileResponse> {
-    if (!Number.isSafeInteger(params.limit) || params.limit < 1) {
+    if (!isPositiveSafeInteger(params.maxOutputBytes)) {
       throw new RangeError(
-        `handle-bound text reads require a positive finite limit, got ${params.limit}`,
+        `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
+      );
+    }
+    if (!isPositiveSafeInteger(params.maxScanBytes)) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite maxScanBytes, got ${params.maxScanBytes}`,
+      );
+    }
+    if (
+      params.limit !== undefined &&
+      params.limit !== Number.POSITIVE_INFINITY &&
+      !isPositiveSafeInteger(params.limit)
+    ) {
+      throw new RangeError(
+        `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
       );
     }
     return readTextFileStandard(params, {
       fileHandle: params.fileHandle,
       forceStreaming: true,
+      maxScanBytes: params.maxScanBytes,
     });
   }
 
@@ -361,9 +384,17 @@ export class StandardFileSystemService implements FileSystemService {
   }
 }
 
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
 async function readTextFileStandard(
   params: CoreReadTextFileRequest,
-  source?: { fileHandle: FileHandle; forceStreaming: boolean },
+  source?: {
+    fileHandle: FileHandle;
+    forceStreaming: boolean;
+    maxScanBytes: number;
+  },
 ): Promise<ReadTextFileResponse> {
   const { path, limit, line, maxOutputBytes, signal, stats } = params;
   const readResult = await readFileWithLineAndLimit({

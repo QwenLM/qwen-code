@@ -322,6 +322,7 @@ export async function readFileWithLineAndLimit(params: {
   stats?: import('node:fs').Stats;
   fileHandle?: fs.promises.FileHandle;
   forceStreaming?: boolean;
+  maxScanBytes?: number;
 }): Promise<{
   content: string;
   bom?: boolean;
@@ -339,6 +340,7 @@ export async function readFileWithLineAndLimit(params: {
     signal,
     fileHandle,
     forceStreaming,
+    maxScanBytes,
   } = params;
   const stats =
     params.stats ??
@@ -359,7 +361,17 @@ export async function readFileWithLineAndLimit(params: {
       ...(signal !== undefined ? { signal } : {}),
       ...(fileHandle !== undefined ? { fileHandle } : {}),
       ...(forceStreaming !== undefined ? { forceStreaming } : {}),
+      ...(maxScanBytes !== undefined ? { maxScanBytes } : {}),
     });
+  }
+
+  // Below this point the read is satisfied by path, not by descriptor. A
+  // caller that pinned an inode would silently get bytes from whatever the
+  // path resolves to now, defeating the reason it opened a handle.
+  if (fileHandle !== undefined) {
+    throw new RangeError(
+      'readFileWithLineAndLimit cannot honor fileHandle for an unbounded read: pass a finite limit or maxOutputBytes',
+    );
   }
 
   signal?.throwIfAborted();

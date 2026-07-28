@@ -9,7 +9,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { iconvEncode } from './iconvHelper.js';
-import { LargeNonUtf8TextError, readTextRange } from './read-text-range.js';
+import {
+  LargeNonUtf8TextError,
+  TextScanBudgetExceededError,
+  readTextRange,
+} from './read-text-range.js';
 
 describe('readTextRange', () => {
   let tempDir: string;
@@ -159,6 +163,61 @@ describe('readTextRange', () => {
     } finally {
       await fileHandle.close();
     }
+  });
+
+  it('refuses a line offset that cannot be reached within maxScanBytes', async () => {
+    const filePath = await writeFile('budget.log', largeUtf8Lines(5_000));
+
+    await expect(
+      readTextRange({
+        path: filePath,
+        offset: 4_000,
+        limit: 20,
+        maxOutputBytes: 262_144,
+        maxScanBytes: 100_000,
+      }),
+    ).rejects.toBeInstanceOf(TextScanBudgetExceededError);
+  });
+
+  it('serves a shallow window from a file far larger than maxScanBytes', async () => {
+    const filePath = await writeFile('budget-head.log', largeUtf8Lines(5_000));
+
+    const result = await readTextRange({
+      path: filePath,
+      offset: 0,
+      limit: 3,
+      maxOutputBytes: 262_144,
+      maxScanBytes: 100_000,
+    });
+
+    expect(result.content.split('\n')).toEqual([
+      expect.stringContaining('line-1 '),
+      expect.stringContaining('line-2 '),
+      expect.stringContaining('line-3 '),
+    ]);
+  });
+
+  it('does not charge a budget failure to a file that ends within it', async () => {
+    // The scan reaches EOF on the same chunk that exhausts the budget; the
+    // window was fully satisfied, so there is nothing to refuse.
+    const body = largeUtf8Lines(100);
+    const filePath = await writeFile('budget-exact.log', body);
+
+    const result = await readTextRange({
+      path: filePath,
+      offset: 98,
+      limit: 10,
+      maxOutputBytes: 262_144,
+      maxScanBytes: Buffer.byteLength(body),
+      forceStreaming: true,
+    });
+
+    expect(result.content.split('\n')).toEqual([
+      expect.stringContaining('line-99 '),
+      expect.stringContaining('line-100 '),
+    ]);
+    expect(result.originalLineCount).toBe(100);
+    expect(result.originalLineCountExact).toBe(true);
   });
 
   it('streams a large UTF-8 file from the beginning when no range is provided', async () => {

@@ -32,6 +32,14 @@ export interface ReadTextRangeRequest {
   fileHandle?: FileHandle;
   /** Skip the small-file full-buffer fast path. */
   forceStreaming?: boolean;
+  /**
+   * Upper bound on bytes read off disk while locating the requested window.
+   * Line offsets address a byte stream, so a deep `offset` costs a scan from
+   * byte 0 — this is what keeps that scan from being unbounded. Defaults to
+   * `Infinity` so non-boundary callers (the `read_file` tool) are unchanged;
+   * security boundaries must pass a finite value.
+   */
+  maxScanBytes?: number;
 }
 
 export interface ReadTextRangeResult {
@@ -58,6 +66,23 @@ export class LargeNonUtf8TextError extends Error {
   }
 }
 
+/**
+ * Raised when locating the requested line window would require reading more
+ * than `maxScanBytes`. Distinct from `LargeNonUtf8TextError`: the file is
+ * readable, the *offset* is what cannot be reached affordably.
+ */
+export class TextScanBudgetExceededError extends Error {
+  constructor(
+    readonly scannedBytes: number,
+    readonly maxScanBytes: number,
+  ) {
+    super(
+      `Locating the requested line window would read more than ${maxScanBytes} bytes (line offsets are resolved by scanning from the start of the file). Use a byte-offset read to reach this part of the file.`,
+    );
+    this.name = 'TextScanBudgetExceededError';
+  }
+}
+
 export async function readTextRange(
   request: ReadTextRangeRequest,
 ): Promise<ReadTextRangeResult> {
@@ -68,10 +93,17 @@ export async function readTextRange(
       ? await request.fileHandle.stat()
       : await stat(request.path));
   const maxOutputBytes = normalizeMaxBytes(request.maxOutputBytes);
+  const maxScanBytes = request.maxScanBytes ?? Number.POSITIVE_INFINITY;
 
+  // The fast path buffers the whole file, so it reads `stats.size` bytes no
+  // matter how small the window is — a budget that only constrained the
+  // streaming path would not be a budget. Falling through to streaming lets
+  // the same bound apply, and raises `TextScanBudgetExceededError` if the
+  // window really is out of reach.
   if (
     request.forceStreaming !== true &&
-    stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE
+    stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE &&
+    stats.size <= maxScanBytes
   ) {
     const { content, encoding, bom } =
       request.fileHandle === undefined
@@ -98,7 +130,7 @@ export async function readTextRange(
     };
   }
 
-  return readLargeUtf8Range(request, maxOutputBytes);
+  return readLargeUtf8Range(request, maxOutputBytes, maxScanBytes);
 }
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
@@ -144,6 +176,7 @@ function sliceDecodedContent(
 async function readLargeUtf8Range(
   request: ReadTextRangeRequest,
   maxOutputBytes: number,
+  maxScanBytes: number,
 ): Promise<ReadTextRangeResult> {
   const encoding =
     request.fileHandle === undefined
@@ -166,6 +199,8 @@ async function readLargeUtf8Range(
   let previousChunkEndedWithCR = false;
   let originalLineCountExact = true;
   let stoppedEarly = false;
+  let scannedBytes = 0;
+  let budgetExhausted = false;
   const decoder = new TextDecoder('utf-8', {
     fatal: true,
     ignoreBOM: true,
@@ -218,6 +253,15 @@ async function readLargeUtf8Range(
   try {
     for await (const rawChunk of chunks) {
       request.signal?.throwIfAborted();
+      // Checked on arrival of the *next* chunk rather than after consuming
+      // the current one: reaching here at all proves there was more file to
+      // read, which is what separates "budget ran out mid-file" from "the
+      // file happened to end on the budget". Costs one chunk of overshoot.
+      if (scannedBytes >= maxScanBytes) {
+        budgetExhausted = true;
+        break;
+      }
+      scannedBytes += (rawChunk as Buffer).length;
       let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
       if (firstChunk) {
         firstChunk = false;
@@ -267,6 +311,10 @@ async function readLargeUtf8Range(
     if (pathStream !== undefined && !pathStream.destroyed) {
       pathStream.destroy();
     }
+  }
+
+  if (budgetExhausted) {
+    throw new TextScanBudgetExceededError(scannedBytes, maxScanBytes);
   }
 
   if (!stoppedEarly) {
