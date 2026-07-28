@@ -97,11 +97,11 @@ Notes:
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,
-        // ASK_USER_QUESTION is excluded from wildcard tool lists in
-        // agent-core.ts's prepareTools() (the path background fork/
-        // general-purpose subagents use), so it is not needed in the
-        // explicit tool list here. Foreground subagents with explicit
-        // tool lists (e.g. statusline-setup) are unaffected.
+        // ASK_USER_QUESTION is deliberately absent: Explore is a read-only
+        // search worker that typically runs as a subagent with no human in
+        // the loop — an interactive question would block forever (#7126).
+        // (The wildcard-path exclusion in agent-core.ts covers agents that
+        // use tools: ['*'], not this explicit list. See #7835.)
       ],
     },
     {

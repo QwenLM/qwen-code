@@ -625,10 +625,14 @@ export class AgentCore {
     } else {
       // Inherit all available tools by default when not specified — see the
       // wildcard branch above for why deferred tools are included.
+      // ASK_USER_QUESTION is excluded here too: agents without a `tools`
+      // property (general-purpose) take this branch, not the wildcard path.
+      // See #7835.
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
-          .filter((t) => !isExcluded(t.name)),
+          .filter((t) => !isExcluded(t.name))
+          .filter((t) => t.name !== ToolNames.ASK_USER_QUESTION),
       );
     }
 
