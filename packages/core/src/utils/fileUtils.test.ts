@@ -1274,8 +1274,26 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(corruptPath, mockConfig);
 
       expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
-      expect(result.error).toBeDefined();
+      expect(result.error).toContain(corruptPath);
       expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).not.toContain(corruptPath);
+      expect(result.returnDisplay).not.toContain(corruptPath);
+    });
+
+    it('returns READ_CONTENT_FAILURE for an animated canonical image', async () => {
+      const twoFrameGif = Buffer.from(
+        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
+        'hex',
+      );
+      const animatedPath = path.join(tempRootDir, 'animated.webp');
+      await sharp(twoFrameGif, { animated: true }).webp().toFile(animatedPath);
+      mockMimeGetType.mockReturnValue('image/webp');
+
+      const result = await processSingleFileContent(animatedPath, mockConfig);
+
+      expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toMatch(/static/i);
     });
 
     it('applies EXIF orientation before describing and rendering an overview', async () => {

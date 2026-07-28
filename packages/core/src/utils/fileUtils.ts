@@ -1480,9 +1480,10 @@ export async function processSingleFileContent(
                 error.code === 'output_too_large'
                   ? ToolErrorType.FILE_TOO_LARGE
                   : ToolErrorType.READ_CONTENT_FAILURE;
+              const userMessage = message.replace(`: ${filePath}`, '');
               return {
-                llmContent: message,
-                returnDisplay: message,
+                llmContent: userMessage,
+                returnDisplay: userMessage,
                 error: message,
                 errorType,
               };
