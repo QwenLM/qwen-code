@@ -2202,6 +2202,10 @@ jobs:
           rm -rf "$RUNNER_TEMP/verify-results"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
           mkdir -p "$RUNNER_TEMP/npm-cache"
           chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
