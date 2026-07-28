@@ -2766,6 +2766,13 @@ export async function runAcpAgent(
   argv: CliArgs,
   options?: { privateParentCapability?: string },
 ) {
+  // Freeze the restart-required writer protocol before the first await.
+  // Per-request settings reloads must not mix leased and legacy writers
+  // within one ACP process lifetime.
+  const sessionWriterLeaseEnabledAtStartup =
+    typeof config.isSessionWriterLeaseEnabled === 'function'
+      ? config.isSessionWriterLeaseEnabled()
+      : settings.merged.experimental?.sessionWriterLease === true;
   const privateParentCapability =
     options === undefined
       ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
@@ -2897,6 +2904,7 @@ export async function runAcpAgent(
         argv,
         conn,
         privateParentCapability,
+        sessionWriterLeaseEnabledAtStartup,
       );
       return agentInstance;
     }, stream);
@@ -3831,6 +3839,7 @@ class QwenAgent implements Agent {
     private argv: CliArgs,
     private connection: AgentSideConnection,
     private readonly expectedPrivateParentCapability?: string,
+    private readonly sessionWriterLeaseEnabledAtStartup = false,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -10439,7 +10448,13 @@ class QwenAgent implements Agent {
       }
     }
 
-    const mergedSettings = settings.merged;
+    const mergedSettings = {
+      ...settings.merged,
+      experimental: {
+        ...settings.merged.experimental,
+        sessionWriterLease: this.sessionWriterLeaseEnabledAtStartup,
+      },
+    };
 
     const sessionArg =
       resume === true

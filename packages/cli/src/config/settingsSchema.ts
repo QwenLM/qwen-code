@@ -3358,7 +3358,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable cross-process write fencing for persisted ACP and daemon sessions. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.',
+          'Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.',
         showInDialog: true,
       },
       cronRecurringMaxAgeDays: {

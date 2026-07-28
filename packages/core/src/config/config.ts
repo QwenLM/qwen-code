@@ -6162,6 +6162,10 @@ export class Config {
     return this.experimentalZedIntegration;
   }
 
+  isSessionWriterLeaseEnabled(): boolean {
+    return this.sessionWriterLeaseEnabled;
+  }
+
   getListExtensions(): boolean {
     return this.listExtensions;
   }

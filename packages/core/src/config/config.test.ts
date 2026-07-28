@@ -2652,6 +2652,7 @@ describe('Server Config (config.ts)', () => {
         ).activateChatRecording();
 
         expect(acquire).not.toHaveBeenCalled();
+        expect(config.isSessionWriterLeaseEnabled()).toBe(false);
         expect(config.hasSessionWriteOwnership()).toBe(false);
         await expect(
           config
@@ -2669,6 +2670,7 @@ describe('Server Config (config.ts)', () => {
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
       });
+      expect(config.isSessionWriterLeaseEnabled()).toBe(true);
       const activationError = new SessionTranscriptChangedError();
       const releaseError = new Error('lease release failed');
       const release = vi.fn().mockRejectedValue(releaseError);
