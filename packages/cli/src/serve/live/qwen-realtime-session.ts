@@ -35,8 +35,22 @@ const MAX_ERROR_MESSAGE_CHARS = 300;
 const MAX_RECENT_EVENT_IDS = 512;
 const MAX_TRACKED_INPUT_ITEMS = 32;
 const MAX_RETRY_AFTER_MS = 60_000;
+const MAX_AUTHORIZED_TOOL_REPLAYS = 2;
 const DELEGATE_TOOL_NAME = 'delegate_to_coordinator';
 const COORDINATOR_UPDATE_PREFIX = '[QWEN_CODE_COORDINATOR_UPDATE]\n';
+const DELEGATE_TOOL = {
+  type: 'function',
+  function: {
+    name: DELEGATE_TOOL_NAME,
+    description:
+      'Signal that the final input transcript must be delegated to the authoritative Qwen Code coordinator.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+} as const;
 
 const DEFAULT_INSTRUCTIONS =
   'You are the realtime voice frontend for Qwen Code. For every meaningful user request, including requests to start, reset, or switch the current Live conversation, call delegate_to_coordinator exactly once with an empty object. Do not answer from your own knowledge before the tool returns. After the tool result arrives, give a concise, natural spoken answer that preserves the authoritative result. A message prefixed [QWEN_CODE_COORDINATOR_UPDATE] is a trusted asynchronous result: speak it concisely without calling any tool.';
@@ -274,6 +288,7 @@ interface PendingFunctionCall {
   approved: boolean;
   dispatched: boolean;
   outputSubmitted: boolean;
+  pendingOutput?: string;
   origin: 'provider' | 'transcript_fallback';
 }
 
@@ -521,7 +536,11 @@ export function openQwenRealtimeSession(
     let pendingResponseAuthority:
       | Exclude<ResponseAuthority, 'untrusted_input'>
       | undefined;
+    let pendingAuthorizedOutput: string | undefined;
     let activeResponseAuthority: ResponseAuthority | undefined;
+    let activeAuthorizedOutput: string | undefined;
+    let authorizedToolReplayCount = 0;
+    let routingToolSuppressed = false;
     let activeApprovedCallId: string | undefined;
     let activeApprovedToolName: string | undefined;
     let rateLimitRetryAfterMs: number | undefined;
@@ -533,7 +552,6 @@ export function openQwenRealtimeSession(
     const cancelledResponseIds = new Set<string>();
     const recentEventIds = new Set<string>();
     const pendingCalls = new Map<string, PendingFunctionCall>();
-    const pendingFollowupResponses = new Set<string>();
     const pendingCoordinatorUpdates: string[] = [];
     const committedInputItemIds = new Set<string>();
     const completedInputTranscripts = new Map<string, string>();
@@ -678,14 +696,49 @@ export function openQwenRealtimeSession(
       }
     };
 
+    const sendFunctionCallOutput = (
+      call: PendingFunctionCall,
+      output: string,
+    ): boolean => {
+      if (
+        !sendJson({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: call.callId,
+            output,
+          },
+        })
+      ) {
+        return false;
+      }
+      call.outputSubmitted = true;
+      call.pendingOutput = undefined;
+      pendingCalls.delete(call.callId);
+      return true;
+    };
+
+    const setRoutingToolEnabled = (enabled: boolean): boolean => {
+      if (routingToolSuppressed === !enabled) return true;
+      const sent = sendJson({
+        type: 'session.update',
+        session: { tools: enabled ? [DELEGATE_TOOL] : [] },
+      });
+      if (sent) routingToolSuppressed = !enabled;
+      return sent;
+    };
+
     const sendResponseCreate = (
       authority: Exclude<ResponseAuthority, 'untrusted_input'>,
+      authorizedOutput?: string,
     ): boolean => {
       if (responseCreatePending || activeResponseId) return false;
+      if (!setRoutingToolEnabled(false)) return false;
       const sent = sendJson({ type: 'response.create' });
       if (sent) {
         responseCreatePending = true;
         pendingResponseAuthority = authority;
+        pendingAuthorizedOutput = authorizedOutput;
       }
       return sent;
     };
@@ -708,7 +761,8 @@ export function openQwenRealtimeSession(
       ) {
         return false;
       }
-      return sendResponseCreate('coordinator_update');
+      authorizedToolReplayCount = 0;
+      return sendResponseCreate('coordinator_update', text);
     };
 
     const deletePendingCallsForResponse = (responseId: string): void => {
@@ -955,6 +1009,23 @@ export function openQwenRealtimeSession(
         return;
       }
       if (activeResponseAuthority !== 'untrusted_input') {
+        if (
+          call.name === DELEGATE_TOOL_NAME &&
+          activeAuthorizedOutput !== undefined &&
+          authorizedToolReplayCount < MAX_AUTHORIZED_TOOL_REPLAYS &&
+          activeApprovedCallId === undefined
+        ) {
+          // A repeated routing call is a provider retry. Return the cached
+          // authoritative result without executing the Coordinator twice.
+          call.arguments = rawArguments;
+          call.approved = true;
+          call.dispatched = true;
+          call.pendingOutput = activeAuthorizedOutput;
+          activeApprovedCallId = call.callId;
+          activeApprovedToolName = DELEGATE_TOOL_NAME;
+          authorizedToolReplayCount += 1;
+          return;
+        }
         protocolError(
           'Realtime model requested a tool from an authorized spoken response.',
           'unexpected_tool_call',
@@ -1050,6 +1121,7 @@ export function openQwenRealtimeSession(
           !call ||
           !call.dispatched ||
           call.outputSubmitted ||
+          call.pendingOutput !== undefined ||
           terminal ||
           closedByClient
         ) {
@@ -1099,25 +1171,16 @@ export function openQwenRealtimeSession(
           );
           return false;
         }
-        if (
-          !sendJson({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: call.callId,
-              output: result.output,
-            },
-          })
-        ) {
-          return false;
-        }
-        call.outputSubmitted = true;
         if (activeResponseId === call.responseId) {
-          pendingFollowupResponses.add(call.responseId);
+          // DashScope's documented tool flow returns the function output only
+          // after the tool-call response completes. Keep an early Coordinator
+          // result queued until that boundary.
+          call.pendingOutput = result.output;
           return true;
         }
-        pendingCalls.delete(call.callId);
-        return sendResponseCreate('delegate_result');
+        if (!sendFunctionCallOutput(call, result.output)) return false;
+        authorizedToolReplayCount = 0;
+        return sendResponseCreate('delegate_result', result.output);
       },
       sendCoordinatorUpdate: (text) => {
         if (
@@ -1182,21 +1245,7 @@ export function openQwenRealtimeSession(
             create_response: true,
             interrupt_response: true,
           },
-          tools: [
-            {
-              type: 'function',
-              function: {
-                name: DELEGATE_TOOL_NAME,
-                description:
-                  'Signal that the final input transcript must be delegated to the authoritative Qwen Code coordinator.',
-                parameters: {
-                  type: 'object',
-                  properties: {},
-                  additionalProperties: false,
-                },
-              },
-            },
-          ],
+          tools: [DELEGATE_TOOL],
         },
       });
     };
@@ -1506,7 +1555,11 @@ export function openQwenRealtimeSession(
           activeResponseAuthority = responseCreatePending
             ? (pendingResponseAuthority ?? 'untrusted_input')
             : 'untrusted_input';
+          activeAuthorizedOutput = responseCreatePending
+            ? pendingAuthorizedOutput
+            : undefined;
           if (activeResponseAuthority === 'untrusted_input') {
+            authorizedToolReplayCount = 0;
             bindResponseInput(responseId);
             if (terminal) break;
           }
@@ -1514,6 +1567,7 @@ export function openQwenRealtimeSession(
           activeApprovedToolName = undefined;
           responseCreatePending = false;
           pendingResponseAuthority = undefined;
+          pendingAuthorizedOutput = undefined;
           activeAudioResponseId = undefined;
           const response = isRecord(message['response'])
             ? message['response']
@@ -1837,16 +1891,23 @@ export function openQwenRealtimeSession(
           }
           if (cancelledResponseIds.has(responseId)) {
             const responseInputItemId = responseInputItemIds.get(responseId);
+            const cancelledAuthority = activeResponseAuthority;
             cancelledResponseIds.delete(responseId);
-            pendingFollowupResponses.delete(responseId);
             deletePendingCallsForResponse(responseId);
             consumeResponseInput(responseId);
             if (activeResponseId === responseId) activeResponseId = undefined;
             activeResponseAuthority = undefined;
+            activeAuthorizedOutput = undefined;
             activeApprovedCallId = undefined;
             activeApprovedToolName = undefined;
             if (activeAudioResponseId === responseId) {
               activeAudioResponseId = undefined;
+            }
+            if (
+              cancelledAuthority !== undefined &&
+              cancelledAuthority !== 'untrusted_input'
+            ) {
+              setRoutingToolEnabled(true);
             }
             callback(() =>
               callbacks.onResponseDone?.({
@@ -1866,15 +1927,18 @@ export function openQwenRealtimeSession(
             : undefined;
           const status = optionalString(response?.['status']);
           const responseAuthority = activeResponseAuthority;
+          const authorizedOutput = activeAuthorizedOutput;
           const approvedToolName = activeApprovedToolName;
+          const approvedCall = activeApprovedCallId
+            ? pendingCalls.get(activeApprovedCallId)
+            : undefined;
           const authorizedDeliveryFailed =
             status === 'failed' &&
             (responseAuthority === 'delegate_result' ||
               responseAuthority === 'coordinator_update' ||
-              pendingFollowupResponses.has(responseId));
-          const approvedCall = activeApprovedCallId
-            ? pendingCalls.get(activeApprovedCallId)
-            : undefined;
+              approvedCall?.pendingOutput !== undefined);
+          const hasPendingAuthorizedReplay =
+            status === 'completed' && approvedCall?.pendingOutput !== undefined;
           if (activeApprovedCallId && !approvedCall) {
             protocolError(
               'Realtime response lost its approved routing call.',
@@ -1922,11 +1986,11 @@ export function openQwenRealtimeSession(
           else finishPendingCallsForResponse(responseId);
           activeResponseId = undefined;
           activeResponseAuthority = undefined;
+          activeAuthorizedOutput = undefined;
           activeApprovedCallId = undefined;
           activeApprovedToolName = undefined;
           activeAudioResponseId = undefined;
           if (authorizedDeliveryFailed) {
-            pendingFollowupResponses.delete(responseId);
             consumeResponseInput(responseId);
             fail(
               new QwenRealtimeError(
@@ -1936,6 +2000,13 @@ export function openQwenRealtimeSession(
                 { kind: 'protocol' },
               ),
             );
+            break;
+          }
+          if (
+            responseAuthority !== 'untrusted_input' &&
+            !hasPendingAuthorizedReplay &&
+            !setRoutingToolEnabled(true)
+          ) {
             break;
           }
           const needsTranscriptFallback =
@@ -1967,14 +2038,16 @@ export function openQwenRealtimeSession(
           }
           if (
             status === 'completed' &&
-            pendingFollowupResponses.delete(responseId)
+            approvedCall?.pendingOutput !== undefined
           ) {
-            sendResponseCreate('delegate_result');
+            const output = approvedCall.pendingOutput;
+            if (sendFunctionCallOutput(approvedCall, output)) {
+              sendResponseCreate('delegate_result', authorizedOutput ?? output);
+            }
           } else if (status === 'completed') {
             flushCoordinatorUpdate();
           }
           if (status === 'failed') {
-            pendingFollowupResponses.delete(responseId);
             notifyError(
               new QwenRealtimeError(
                 'Realtime response failed.',

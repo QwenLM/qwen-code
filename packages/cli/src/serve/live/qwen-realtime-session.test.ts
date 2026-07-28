@@ -481,15 +481,7 @@ describe('qwen-realtime-session', () => {
         output: '当前页面是项目概览。',
       }),
     ).toBe(true);
-    expect(sentJson(socket, 0)).toMatchObject({
-      type: 'conversation.item.create',
-      item: {
-        type: 'function_call_output',
-        call_id: 'call-1',
-        output: '当前页面是项目概览。',
-      },
-    });
-    expect(socket.sent).toHaveLength(1);
+    expect(socket.sent).toHaveLength(0);
     socket.message({
       type: 'response.output_item.done',
       event_id: 'output-item-done',
@@ -516,7 +508,19 @@ describe('qwen-realtime-session', () => {
       event_id: 'tool-response-done',
       response: { id: 'response-tool', status: 'completed' },
     });
-    expect(sentJson(socket, 1)).toMatchObject({ type: 'response.create' });
+    expect(sentJson(socket, 0)).toMatchObject({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: '当前页面是项目概览。',
+      },
+    });
+    expect(sentJson(socket, 1)).toMatchObject({
+      type: 'session.update',
+      session: { tools: [] },
+    });
+    expect(sentJson(socket, 2)).toMatchObject({ type: 'response.create' });
     expect(
       session.submitFunctionCallOutput({
         callEpoch: 7,
@@ -1118,7 +1122,11 @@ describe('qwen-realtime-session', () => {
         ],
       },
     });
-    expect(sentJson(socket, 1)).toMatchObject({ type: 'response.create' });
+    expect(sentJson(socket, 1)).toMatchObject({
+      type: 'session.update',
+      session: { tools: [] },
+    });
+    expect(sentJson(socket, 2)).toMatchObject({ type: 'response.create' });
     session.close();
   });
 
@@ -1181,7 +1189,11 @@ describe('qwen-realtime-session', () => {
         output: '慢任务完成。',
       },
     });
-    expect(sentJson(socket, 1)).toMatchObject({ type: 'response.create' });
+    expect(sentJson(socket, 1)).toMatchObject({
+      type: 'session.update',
+      session: { tools: [] },
+    });
+    expect(sentJson(socket, 2)).toMatchObject({ type: 'response.create' });
     session.close();
   });
 
@@ -1293,7 +1305,11 @@ describe('qwen-realtime-session', () => {
         ],
       },
     });
-    expect(sentJson(socket, 1)).toMatchObject({ type: 'response.create' });
+    expect(sentJson(socket, 1)).toMatchObject({
+      type: 'session.update',
+      session: { tools: [] },
+    });
+    expect(sentJson(socket, 2)).toMatchObject({ type: 'response.create' });
 
     socket.message({
       type: 'response.created',
@@ -1301,13 +1317,25 @@ describe('qwen-realtime-session', () => {
       response: { id: 'update-response', status: 'in_progress' },
     });
     expect(session.sendCoordinatorUpdate('第二个任务也完成了。')).toBe(true);
-    expect(socket.sent).toHaveLength(2);
+    expect(socket.sent).toHaveLength(3);
     socket.message({
       type: 'response.done',
       event_id: 'update-done',
       response: { id: 'update-response', status: 'completed' },
     });
-    expect(sentJson(socket, 2)).toMatchObject({
+    expect(sentJson(socket, 3)).toMatchObject({
+      type: 'session.update',
+      session: {
+        tools: [
+          expect.objectContaining({
+            function: expect.objectContaining({
+              name: 'delegate_to_coordinator',
+            }),
+          }),
+        ],
+      },
+    });
+    expect(sentJson(socket, 4)).toMatchObject({
       type: 'conversation.item.create',
       item: {
         content: [
@@ -1317,7 +1345,11 @@ describe('qwen-realtime-session', () => {
         ],
       },
     });
-    expect(sentJson(socket, 3)).toMatchObject({ type: 'response.create' });
+    expect(sentJson(socket, 5)).toMatchObject({
+      type: 'session.update',
+      session: { tools: [] },
+    });
+    expect(sentJson(socket, 6)).toMatchObject({ type: 'response.create' });
     expect(() =>
       session.sendCoordinatorUpdate(
         'x'.repeat(QWEN_REALTIME_LIMITS.maxFunctionOutputChars + 1),
@@ -1423,8 +1455,12 @@ describe('qwen-realtime-session', () => {
         ],
       },
     });
-    expect(sentJson(socket, 1)).toMatchObject({ type: 'response.create' });
-    expect(socket.sent).toHaveLength(2);
+    expect(sentJson(socket, 1)).toMatchObject({
+      type: 'session.update',
+      session: { tools: [] },
+    });
+    expect(sentJson(socket, 2)).toMatchObject({ type: 'response.create' });
+    expect(socket.sent).toHaveLength(3);
     socket.message({
       type: 'response.created',
       event_id: 'fallback-spoken-created',
@@ -1593,7 +1629,7 @@ describe('qwen-realtime-session', () => {
     await expect(session.closed).resolves.toMatchObject({ reason: 'error' });
   });
 
-  it('fails closed when an authorized spoken response requests another tool', async () => {
+  it('replays cached output without delegating when an authorized spoken response requests another tool', async () => {
     const socket = new FakeSocket();
     const onDelegateCall = vi.fn();
     const onError = vi.fn();
@@ -1611,6 +1647,70 @@ describe('qwen-realtime-session', () => {
       call_id: 'trusted-call',
       name: 'delegate_to_coordinator',
       arguments: '{"request":"loop"}',
+    });
+
+    expect(onDelegateCall).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    socket.message({
+      type: 'response.done',
+      event_id: 'trusted-done',
+      response: { id: 'trusted-response', status: 'completed' },
+    });
+    expect(sentJson(socket, socket.sent.length - 2)).toMatchObject({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: 'trusted-call',
+        output: '后台任务已经完成。',
+      },
+    });
+    expect(sentJson(socket, socket.sent.length - 1)).toMatchObject({
+      type: 'response.create',
+    });
+    session.close();
+  });
+
+  it('fails closed when an authorized response exceeds the cached-output replay limit', async () => {
+    const socket = new FakeSocket();
+    const onDelegateCall = vi.fn();
+    const onError = vi.fn();
+    const session = await connect(socket, { onDelegateCall, onError });
+    expect(session.sendCoordinatorUpdate('后台任务已经完成。')).toBe(true);
+
+    for (let index = 0; index < 2; index += 1) {
+      const responseId = `trusted-replay-${index}`;
+      socket.message({
+        type: 'response.created',
+        event_id: `${responseId}-created`,
+        response: { id: responseId, status: 'in_progress' },
+      });
+      socket.message({
+        type: 'response.function_call_arguments.done',
+        event_id: `${responseId}-tool`,
+        response_id: responseId,
+        call_id: `${responseId}-call`,
+        name: 'delegate_to_coordinator',
+        arguments: '{}',
+      });
+      socket.message({
+        type: 'response.done',
+        event_id: `${responseId}-done`,
+        response: { id: responseId, status: 'completed' },
+      });
+    }
+
+    socket.message({
+      type: 'response.created',
+      event_id: 'trusted-replay-limit-created',
+      response: { id: 'trusted-replay-limit', status: 'in_progress' },
+    });
+    socket.message({
+      type: 'response.function_call_arguments.done',
+      event_id: 'trusted-replay-limit-tool',
+      response_id: 'trusted-replay-limit',
+      call_id: 'trusted-replay-limit-call',
+      name: 'delegate_to_coordinator',
+      arguments: '{}',
     });
 
     expect(onDelegateCall).not.toHaveBeenCalled();
