@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -139,10 +139,12 @@ describe('GitlabChannel', () => {
   let channel: TestableGitlabChannel;
   let mockApi: ReturnType<typeof createMockApi>;
   let savedQwenHome: string | undefined;
+  let tempDir: string;
 
   beforeEach(() => {
     savedQwenHome = process.env.QWEN_HOME;
-    process.env.QWEN_HOME = mkdtempSync(join(tmpdir(), 'qwen-gl-test-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'qwen-gl-test-'));
+    process.env.QWEN_HOME = tempDir;
     vi.clearAllMocks();
 
     mockApi = createMockApi();
@@ -158,6 +160,7 @@ describe('GitlabChannel', () => {
   afterEach(() => {
     if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
     else process.env.QWEN_HOME = savedQwenHome;
+    rmSync(tempDir, { recursive: true, force: true });
   });
 
   async function initWithoutLoop() {
@@ -315,8 +318,9 @@ describe('GitlabChannel', () => {
 
       await pollOnce();
 
-      expect(mockApi.IssueNotes.all).not.toHaveBeenCalled();
       expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
     });
 
     it('skips non-issue/MR target types', async () => {
@@ -327,8 +331,21 @@ describe('GitlabChannel', () => {
 
       await pollOnce();
 
-      expect(mockApi.IssueNotes.all).not.toHaveBeenCalled();
       expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('handles directly_addressed via mentioned template fallback', async () => {
+      await initWithoutLoop();
+
+      const todo = makeTodo({ action_name: 'directly_addressed' });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('please fix this');
     });
 
     it('marks todo as done after successful processing', async () => {
