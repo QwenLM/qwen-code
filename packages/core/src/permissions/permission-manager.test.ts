@@ -530,6 +530,9 @@ describe('splitCompoundCommand', () => {
     ['ls /nope 2>&1'],
     ['echo err >&2'],
     ['ls /nope > out.txt 2>& 1'],
+    // Input-descriptor duplication: the `<` branch of the backward scan.
+    ['exec 3<&4'],
+    ['cat <&3'],
   ])('does not split %s, where & belongs to a redirection', async (command) => {
     expect(splitCompoundCommand(command)).toEqual([command]);
   });
