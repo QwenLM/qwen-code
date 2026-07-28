@@ -50,6 +50,9 @@ const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_WORK_TREE',
   'GIT_COMMON_DIR',
   'GIT_INDEX_FILE',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
   // Repository selectors that an inherited daemon environment could use to
   // redirect a trusted-workspace git/gh invocation to a different repository
   // or object database despite the resolved cwd.

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createGitHubPullRequest,
   fetchGitHubPullRequests,
+  getDefaultBranch,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
@@ -25,10 +26,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   createGitHubPullRequest: vi.fn(),
   fetchGitHubPullRequests: vi.fn(),
+  getDefaultBranch: vi.fn(),
 }));
 
 const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
+const getDefaultBranchMock = vi.mocked(getDefaultBranch);
 
 const passthroughMutate = () =>
   ((_req: unknown, _res: unknown, next: () => void) => next()) as never;
@@ -290,6 +293,76 @@ describe('workspace GitHub PR routes', () => {
 
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('creates a pull request and returns 201 with url and number', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'ok',
+      url: 'https://github.com/o/r/pull/43',
+      number: 43,
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      url: 'https://github.com/o/r/pull/43',
+      number: 43,
+    });
+    expect(createGitHubPullRequestMock).toHaveBeenCalledWith(
+      '/work/main',
+      {
+        title: 'Add a thing',
+        body: undefined,
+        base: undefined,
+        head: undefined,
+      },
+      undefined,
+    );
+  });
+
+  it('returns the default branch for a trusted workspace', async () => {
+    getDefaultBranchMock.mockResolvedValue('origin/main');
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/default-branch',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ branch: 'origin/main' });
+    expect(getDefaultBranchMock).toHaveBeenCalledWith('/work/main', undefined);
+  });
+
+  it('falls back to origin/main when getDefaultBranch returns null', async () => {
+    getDefaultBranchMock.mockResolvedValue(null);
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/default-branch',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ branch: 'origin/main' });
   });
 });
 

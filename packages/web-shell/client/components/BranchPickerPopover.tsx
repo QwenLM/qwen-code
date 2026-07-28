@@ -583,6 +583,7 @@ function BranchSection({
       <button
         type="button"
         className={styles.sectionHeader}
+        aria-expanded={!collapsed}
         onClick={() => onToggle(_key)}
       >
         <ChevronRightIcon

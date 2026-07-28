@@ -314,7 +314,7 @@ export function GitDialog({
   const loadPrBranches = useCallback(() => {
     const ws = client.workspaceByCwd(workspaceCwd);
     setPrBranchesError(false);
-    ws.workspaceGitBranches()
+    ws.workspaceGitBranches(gitCwd)
       .then((branches) => {
         const local = branches.local.map((b) => b.name);
         const remoteMap = new Map<string, string[]>();
@@ -334,7 +334,7 @@ export function GitDialog({
         setPrBranches(null);
         setPrBranchesError(true);
       });
-  }, [client, workspaceCwd]);
+  }, [client, workspaceCwd, gitCwd]);
 
   // Auto-fill PR form when it opens.
   useEffect(() => {
