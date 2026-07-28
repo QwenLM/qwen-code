@@ -299,6 +299,28 @@ describe('auto-skill curator', () => {
     expect(run.reactivated).toEqual([]);
   });
 
+  it('reactivates a stale skill once activity resumes', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 40 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-revived', 'auto-skill', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'revived', level: 'project', filePath: manifest },
+      old,
+    );
+
+    const staleRun = await runAutoSkillCurator(projectRoot, { now });
+    expect(staleRun.markedStale).toEqual(['auto-skill-revived']);
+    expect(staleRun.reactivated).toEqual([]);
+
+    await fs.utimes(manifest, now, now);
+    const revivedRun = await runAutoSkillCurator(projectRoot, { now });
+
+    expect(revivedRun.reactivated).toEqual(['auto-skill-revived']);
+    expect(revivedRun.archived).toEqual([]);
+    expect(revivedRun.markedStale).toEqual([]);
+  });
+
   it('fails closed on corrupt state without moving a skill', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const manifest = await writeSkill(
