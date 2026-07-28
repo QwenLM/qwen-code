@@ -397,11 +397,13 @@ jobs:
             # work while drops stay newest-first (later rebases would chase
             # SHAs rewritten by earlier ones); a single todo edit has no
             # ordering assumption.
+            # core.abbrev=40 makes the todo list full SHAs so the sed match
+            # cannot hit a colliding short-SHA prefix.
             SED_EXPRS=''
             for sha in "${DROPPED_COMMITS[@]}"; do
-              SED_EXPRS="${SED_EXPRS} -e 's/^pick \(${sha:0:7}\)/drop \1/'"
+              SED_EXPRS="${SED_EXPRS} -e 's/^pick \(${sha}\)/drop \1/'"
             done
-            GIT_SEQUENCE_EDITOR="sed -i${SED_EXPRS}" git rebase -i "origin/main"
+            GIT_SEQUENCE_EDITOR="sed -i${SED_EXPRS}" git -c core.abbrev=40 rebase -i "origin/main"
 
             # Update findings.json: move dropped fixes to reportOnly
             export DROPPED_MSGS
@@ -453,6 +455,8 @@ jobs:
         if: '${{ steps.gate.outputs.result == ''fixes'' }}'
         id: 'verify'
         run: |-
+          # Typecheck only, by design: it catches most bad model-generated
+          # commits cheaply. Lint/build breakage still fails the job below.
           REVERTED=0
           REVERTED_MSGS=''
           while true; do
