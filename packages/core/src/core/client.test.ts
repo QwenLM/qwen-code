@@ -1349,6 +1349,24 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
     });
 
+    it('clamps a threshold above 100% to a full-context budget', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      // A misconfigured threshold (e.g. 200) must not produce a budget larger
+      // than the context window, which would unconditionally preload every
+      // deferred tool. It is clamped to 100%.
+      vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(200);
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(
+        DEFAULT_TOKEN_LIMIT,
+      );
+    });
+
     it('skips deferred preload when ToolSearch is unavailable', async () => {
       // The eager-reveal branch already exposes everything; running the
       // budget check as well would be redundant.

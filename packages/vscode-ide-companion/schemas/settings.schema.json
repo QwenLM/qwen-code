@@ -1085,9 +1085,11 @@
               "default": true
             },
             "threshold": {
-              "description": "Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.",
               "type": "number",
-              "default": 10
+              "minimum": 0,
+              "maximum": 100,
+              "default": 10,
+              "description": "Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand."
             }
           }
         },

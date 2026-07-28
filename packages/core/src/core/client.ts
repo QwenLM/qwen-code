@@ -1011,6 +1011,12 @@ export class GeminiClient {
     if (thresholdPercent <= 0) {
       return;
     }
+    // Symmetric upper guard to the `<= 0` lower one: the setting is a percentage
+    // of the context window, so a value above 100 (a typo or misreading of the
+    // "(%)" label) would make the budget exceed the whole window and preload
+    // every deferred tool unconditionally. Cap it at 100% — the schema also
+    // bounds it, but clamp here so a hand-edited settings file can't slip past.
+    const boundedPercent = Math.min(thresholdPercent, 100);
     const contextWindow =
       this.config.getContentGeneratorConfig()?.contextWindowSize ??
       tokenLimit(this.config.getModel(), 'input');
@@ -1018,7 +1024,7 @@ export class GeminiClient {
       return;
     }
     toolRegistry.preloadDeferredToolsWithinBudget(
-      Math.floor((contextWindow * thresholdPercent) / 100),
+      Math.floor((contextWindow * boundedPercent) / 100),
     );
   }
 
