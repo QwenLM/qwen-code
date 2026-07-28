@@ -476,6 +476,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         deps.sendBridgeError(res, err, {
           route: 'POST /workspaces/:workspace/git/checkout',
         });
@@ -508,6 +509,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         deps.sendBridgeError(res, err, {
           route: 'POST /workspaces/:workspace/git/branch',
         });
@@ -540,6 +542,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         deps.sendBridgeError(res, err, {
           route: 'POST /workspaces/:workspace/git/push',
         });
@@ -572,6 +575,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         deps.sendBridgeError(res, err, {
           route: 'POST /workspaces/:workspace/git/pull',
         });
@@ -604,6 +608,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         deps.sendBridgeError(res, err, {
           route: 'POST /workspaces/:workspace/git/commit',
         });

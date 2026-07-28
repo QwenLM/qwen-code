@@ -237,4 +237,27 @@ describe('workspace qualified Git branch routes (generation guard)', () => {
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('workspace_runtime_unavailable');
   });
+
+  it('returns runtime-unavailable on POST checkout when the generation is closed', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const guarded = {
+      ...qualifiedRuntime('primary', '/work/main', true),
+      generationGuard,
+    };
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([guarded]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/checkout')
+      .send({ ref: 'main' });
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
 });

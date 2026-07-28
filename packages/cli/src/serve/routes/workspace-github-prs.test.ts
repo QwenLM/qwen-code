@@ -258,6 +258,44 @@ describe('workspace GitHub PR routes', () => {
     expect(response.body.error).not.toContain('/work');
   });
 
+  it('maps a not-a-repo result to 404 on PR create', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({ kind: 'not_a_repo' });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: 'not_a_git_repository' });
+  });
+
+  it('maps a missing gh binary to 502 on PR create', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_cli_unavailable');
+  });
+
   it('falls back to the bridge error mapper on unexpected throws', async () => {
     fetchGitHubPullRequestsMock.mockRejectedValue(new Error('boom'));
     const app = express();

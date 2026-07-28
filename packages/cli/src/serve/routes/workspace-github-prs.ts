@@ -164,6 +164,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         deps.sendBridgeError(res, err, { route });
         return;
       }
