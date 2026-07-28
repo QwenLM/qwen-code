@@ -452,7 +452,7 @@ it('ACKs before sending forbidden feedback to the original group', async () => {
   }
 });
 
-it('sends generic direct feedback for an ignored callback', async () => {
+it('silently ACKs an ignored callback', async () => {
   createCallbackResultChannel({ kind: 'ignored', actorId: 'owner-1' });
   const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
   const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
@@ -466,22 +466,22 @@ it('sends generic direct feedback for an ignored callback', async () => {
       }),
     });
 
-    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(directSendCalls()).toHaveLength(0);
     expect(groupSendCalls()).toHaveLength(0);
-    const requestBody = JSON.parse(
-      String((directSendCalls()[0]![1] as RequestInit).body),
-    );
-    expect(requestBody.userIds).toEqual(['owner-1']);
-    expect(JSON.parse(requestBody.msgParam).text).toContain('已失效');
   } finally {
     spy.mockRestore();
   }
 });
 
-it('uses the trusted top-level actor for malformed callback feedback', async () => {
+it('silently ACKs a malformed callback with a trusted actor', async () => {
   createChannel();
   const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
-  const { spy, directSendCalls } = stubCardFeedbackFetch();
+  const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
 
   try {
     dispatchCardCallback(client, {
@@ -489,12 +489,13 @@ it('uses the trusted top-level actor for malformed callback feedback', async () 
       value: JSON.stringify({ outTrackId: 'missing-action' }),
     });
 
-    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
-    const requestBody = JSON.parse(
-      String((directSendCalls()[0]![1] as RequestInit).body),
-    );
-    expect(requestBody.userIds).toEqual(['actor-1']);
-    expect(JSON.parse(requestBody.msgParam).text).toContain('已失效');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.send).toHaveBeenCalledWith('card-message', {
+      status: 'success',
+      message: 'ok',
+    });
+    expect(directSendCalls()).toHaveLength(0);
+    expect(groupSendCalls()).toHaveLength(0);
   } finally {
     spy.mockRestore();
   }
@@ -640,7 +641,7 @@ it('ACKs duplicate card callbacks while executing one claimed action', async () 
     });
     expect(claim).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
+    expect(directSendCalls()).toHaveLength(0);
   } finally {
     spy.mockRestore();
   }

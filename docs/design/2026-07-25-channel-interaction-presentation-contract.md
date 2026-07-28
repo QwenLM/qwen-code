@@ -2,14 +2,9 @@
 
 ## Status
 
-Implemented correction to the interactive-card implementation on PR #6930.
-This document supersedes the parts of
-`2026-07-15-dingtalk-interactive-cards.md` that model one status card for an
-entire run and allow a status card and an input card to remain active
-simultaneously.
-
-The implementation remains local until its verified changes are committed. It
-does not change remote branches.
+Implemented channel-neutral contract for PR #6930. The DingTalk-specific
+projection and operational details remain in
+`2026-07-15-dingtalk-interactive-cards.md`.
 
 ## Problem
 
@@ -124,9 +119,9 @@ pre-question segment.
 A `requestId` identifies one original pending `ask_user_question` permission
 request. One request may contain all normalized questions from that tool call.
 Presentation ownership is scoped by `sessionId + owner.id`. Different users or
-sessions may have live input presentations simultaneously. After a newer
-request is delivered in the same scope, the older presentation becomes
-non-interactive without sending a synthetic response to the agent.
+sessions may have live input presentations simultaneously. Within one run, a
+second request in the same scope returns `unsupported`, keeps the first native
+presentation answerable, and uses the existing text permission fallback.
 
 The adapter-internal input state machine is:
 
@@ -137,14 +132,13 @@ reserved -> pending -> claimed -> terminal
 It is callback arbitration, not a platform card state. DingTalk exposes only
 `pending`, `submitted`, `cancelled`, and `expired`: accepted submission maps to
 `submitted`, accepted user cancellation maps to `cancelled`, and timeout,
-supersession, external resolution, or an unavailable responder maps to
-`expired`. Every terminal transition updates the existing native input
-presentation in place and never deletes it.
+external resolution, or an unavailable responder maps to `expired`. Every
+terminal transition updates the existing native input presentation in place
+and never deletes it.
 
-The current branch-local settlement label `resolved_outside_card` is renamed
-to `resolved_outside_presenter` before publication. The contract is shared by
-native forms and other interaction surfaces, so a platform-specific noun must
-not become public API.
+The shared settlement label is `resolved_outside_presenter`. The contract is
+shared by native forms and other interaction surfaces, so a platform-specific
+noun does not become public API.
 
 ## Shared contract
 
@@ -330,11 +324,13 @@ synthetic inbound message.
 
 ### Concurrent questions
 
-Each original permission request gets its own input presentation. A newer
-request delivered for the same `sessionId + owner.id` scope expires the older
-presentation. It does not synthesize a permission response or inbound message.
-Different users and sessions remain independent. The shared permission
-scheduler remains authoritative for agent continuation.
+At most one native input presentation is active for the same
+`sessionId + owner.id + runId`. A second request in that scope returns
+`unsupported`; `ChannelBase` sends its semantic text fallback while the first
+native presentation remains valid. This avoids an unreachable pending request
+without synthesizing a cancellation or inbound message. Different users and
+sessions remain independent, and run termination closes all presentations
+owned by that run.
 
 ## DingTalk projection
 
@@ -349,8 +345,8 @@ Changes from the current implementation:
 - create it on the first chunk or final response for a segment;
 - key status records by `segmentId`, while retaining `runId` for Stop;
 - close the active segment before creating a question card;
-- do not queue a new question-card creation behind an older question card's
-  terminal OpenAPI update;
+- keep the first question card active when the same run requests another
+  question and let the newer request use text fallback;
 - never change an old status card to `Waiting for input`;
 - update the question card in place to submitted, cancelled, expired, or
   externally resolved;
@@ -478,8 +474,8 @@ matches the sequences above. It remains unpushed until explicit approval.
 - A direct `ask_user_question` displays one question card and no status card.
 - A question card is updated in place on submit, cancel, expiry, and external
   resolution.
-- A second question for the same session and owner is delivered even if the
-  previous card's terminal update is slow; the previous card becomes expired.
+- A second question in the same run uses the text fallback while the first
+  native card remains answerable.
 - Different users and sessions retain independent live question cards.
 - Text before a question remains in a completed historical status card.
 - Text after submission appears in a new status card.

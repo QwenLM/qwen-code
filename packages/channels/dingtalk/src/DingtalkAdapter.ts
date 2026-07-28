@@ -438,21 +438,12 @@ export class DingtalkChannel extends ChannelBase {
     } else if (result.kind === 'forbidden') {
       void this.sendCardInteractionFeedback(
         result.actorId,
-        result.kind,
         result.target,
       ).catch((err) => {
         process.stderr.write(
           `[DingTalk:${this.name}] card interaction feedback failed: ${sanitizeLogText(String(err), 200)}\n`,
         );
       });
-    } else if (result.actorId) {
-      void this.sendCardInteractionFeedback(result.actorId, result.kind).catch(
-        (err) => {
-          process.stderr.write(
-            `[DingTalk:${this.name}] card interaction feedback failed: ${sanitizeLogText(String(err), 200)}\n`,
-          );
-        },
-      );
     }
   }
 
@@ -869,10 +860,9 @@ export class DingtalkChannel extends ChannelBase {
 
   private sendCardInteractionFeedback(
     actorId: string,
-    kind: 'forbidden' | 'ignored',
     target?: { chatId: string; isGroup: boolean },
   ): Promise<void> {
-    if (kind === 'forbidden' && target?.isGroup) {
+    if (target?.isGroup) {
       return this.sendProactiveChunk(
         {
           channelName: this.name,
@@ -885,10 +875,6 @@ export class DingtalkChannel extends ChannelBase {
         'card interaction feedback',
       );
     }
-    const text =
-      kind === 'forbidden'
-        ? '你无权操作这张卡片，仅任务发起人可以提交或停止。'
-        : '该卡片操作已失效或暂时无法处理。';
     return this.sendProactiveChunk(
       {
         channelName: this.name,
@@ -897,7 +883,7 @@ export class DingtalkChannel extends ChannelBase {
         isGroup: false,
       },
       '卡片操作',
-      text,
+      '你无权操作这张卡片，仅任务发起人可以提交或停止。',
       'card interaction feedback',
     );
   }

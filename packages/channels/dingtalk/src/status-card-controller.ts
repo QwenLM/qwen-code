@@ -124,7 +124,7 @@ export class StatusCardController {
       if (!record) continue;
       void this.finalize(
         segmentId,
-        record.content,
+        sanitizeStreamingImageMarkers(record.content),
         reason === 'cancel_command' ? 'Stopped' : 'Cancelled',
         false,
       );

@@ -60,11 +60,19 @@ export class QuestionCardController {
     context: ChannelUserInputRequestContext,
     target: { chatId: string; isGroup: boolean },
   ): Promise<UserInputPresentationResult> {
+    const scopeKey = this.scopeKey(context);
+    const active = this.activeByScope.get(scopeKey);
+    if (
+      (active?.state === 'reserved' || active?.state === 'pending') &&
+      active.context.runId === context.runId
+    ) {
+      return { kind: 'unsupported' };
+    }
     const record: QuestionRecord = {
       context,
       target,
       outTrackId: `qwen-question-${randomUUID()}`,
-      scopeKey: this.scopeKey(context),
+      scopeKey,
       sequence: this.nextSequence++,
       state: 'reserved',
       delivered: false,
@@ -72,6 +80,7 @@ export class QuestionCardController {
     };
     this.byRequest.set(context.requestId, record);
     this.byOutTrack.set(record.outTrackId, record);
+    this.activeByScope.set(record.scopeKey, record);
     const unsubscribe = context.onSettled((reason) => {
       if (record.state === 'claimed') return;
       if (record.state === 'pending') this.reserveTerminalProjection(record);

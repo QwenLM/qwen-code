@@ -138,6 +138,36 @@ describe('StatusCardController', () => {
     expect(streamContents.at(-1)).toBe('before [Image pending] after');
   });
 
+  it('hides image paths when a streaming card is cancelled', async () => {
+    const { client, controller } = createHarness();
+
+    controller.append(
+      segment(),
+      target,
+      'before [IMAGE: /Users/ben/private/image.png] after',
+    );
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+
+    controller.cancelRun('run-1', 'cancel_command');
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: 'before [Image pending] after',
+            copy_content: 'before [Image pending] after',
+          }),
+        }),
+      ),
+    );
+    const terminalPayload = JSON.stringify(
+      vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap,
+    );
+    expect(terminalPayload).not.toContain('/Users/ben/private');
+  });
+
   it('shows the configured model and refreshes elapsed time only on text flushes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

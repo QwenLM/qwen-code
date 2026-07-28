@@ -547,33 +547,40 @@ describe('QuestionCardController', () => {
     expect(second.respond).toHaveBeenCalledOnce();
   });
 
-  it('expires the previous card when the same user receives a newer question', async () => {
+  it('keeps the first card active when the same run requests another question', async () => {
+    const firstDelivery = deferred<void>();
     const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockReturnValueOnce(
+      firstDelivery.promise,
+    );
     const first = createContext('request-1');
     const second = createContext('request-2');
-    await controller.present(first.context, {
+    const firstPresentation = controller.present(first.context, {
       chatId: 'cid-1',
       isGroup: true,
     });
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
     const firstOutTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
       .outTrackId;
 
-    await controller.present(second.context, {
-      chatId: 'cid-1',
-      isGroup: true,
-    });
-
-    expect(client.updateInstance).toHaveBeenCalledWith(
-      expect.objectContaining({
-        outTrackId: firstOutTrackId,
-        cardParamMap: expect.objectContaining({
-          card_status: 'expired',
-          question_desc:
-            'A newer question is available. Answer the latest card.',
-        }),
+    await expect(
+      controller.present(second.context, {
+        chatId: 'cid-1',
+        isGroup: true,
       }),
+    ).resolves.toEqual({ kind: 'unsupported' });
+
+    expect(client.createAndDeliver).toHaveBeenCalledOnce();
+    expect(client.updateInstance).not.toHaveBeenCalledWith(
+      expect.objectContaining({ outTrackId: firstOutTrackId }),
     );
     expect(first.respond).not.toHaveBeenCalled();
+    expect(second.respond).not.toHaveBeenCalled();
+
+    firstDelivery.resolve();
+    await expect(firstPresentation).resolves.toEqual({ kind: 'presented' });
     expect(
       callbackResult(
         controller.claim({
@@ -582,8 +589,8 @@ describe('QuestionCardController', () => {
           actorId: 'owner-1',
           formData: { '0': 'Beijing', '1': ['Logs'] },
         }),
-      ),
-    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
+      ).kind,
+    ).toBe('accepted');
   });
 
   it('keeps the newer card active when deliveries finish out of order', async () => {
@@ -594,6 +601,7 @@ describe('QuestionCardController', () => {
       .mockResolvedValueOnce(undefined);
     const first = createContext('request-1');
     const second = createContext('request-2');
+    second.context.runId = 'run-2';
 
     const firstPresentation = controller.present(first.context, {
       chatId: 'cid-1',
