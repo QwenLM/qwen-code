@@ -34,11 +34,7 @@ export function buildPullRequestQuery(numbers) {
         pr${index}: pullRequest(number: ${number}) {
           number
           body
-          additions
-          deletions
-          changedFiles
           labels(first: 20) { nodes { name } }
-          files(first: 40) { nodes { path } }
         }`,
     )
     .join('\n');
@@ -262,14 +258,7 @@ function compactEntry(entry) {
   return {
     number: entry.number,
     title: entry.title,
-    body: (entry.body || '').slice(0, 3000),
-    labels: (entry.labels || []).map((label) =>
-      typeof label === 'string' ? label : label.name,
-    ),
-    files: (entry.files || []).slice(0, 40),
-    additions: entry.additions,
-    deletions: entry.deletions,
-    changedFiles: entry.changedFiles,
+    body: (entry.body || '').slice(0, 700),
     category: classifyChange(entry),
   };
 }
@@ -375,15 +364,10 @@ export function enrichEntries(entries, metadata) {
   const byNumber = new Map(metadata.map((item) => [item.number, item]));
   return entries.map((entry) => {
     const details = byNumber.get(entry.number) || {};
-    const files = details.files?.nodes || details.files || [];
     return {
       ...entry,
       body: details.body || '',
       labels: details.labels?.nodes || details.labels || [],
-      files: files.map((file) => (typeof file === 'string' ? file : file.path)),
-      additions: details.additions || 0,
-      deletions: details.deletions || 0,
-      changedFiles: details.changedFiles || files.length,
     };
   });
 }
@@ -468,6 +452,7 @@ export function createOpenAiCompleter({
       if (remainingMs <= 0) {
         throw deadlineError();
       }
+      const attemptStartedAt = Date.now();
       try {
         const response = await fetchImpl(endpoint, {
           method: 'POST',
@@ -495,10 +480,16 @@ export function createOpenAiCompleter({
         if (typeof content !== 'string' || !content.trim()) {
           throw new Error(CONTENT_VALIDATION_ERROR_MESSAGE);
         }
+        console.error(
+          `Model ${request.kind} request succeeded in ${Date.now() - attemptStartedAt}ms (prompt ${prompt.user.length} chars).`,
+        );
         return content;
       } catch (error) {
         lastError = error;
         attempt += 1;
+        console.error(
+          `Model ${request.kind} request failed after ${Date.now() - attemptStartedAt}ms (prompt ${prompt.user.length} chars): ${escapeWorkflowCommand(error.message)}`,
+        );
         if (Date.now() >= deadline) {
           throw deadlineError();
         }
