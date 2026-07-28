@@ -181,7 +181,7 @@ async function prepareImage(
     signal.throwIfAborted();
     throw new ImageViewError(
       'decode_failed',
-      `Failed to decode image metadata (file may be corrupt): ${filePath}`,
+      `Failed to decode image (file may be corrupt or not a static PNG, JPEG, or WebP): ${filePath}`,
     );
   }
   signal.throwIfAborted();
