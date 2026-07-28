@@ -15,7 +15,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
-import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
+} from '../../constants/sessions';
 import { useI18n } from '../../i18n';
 import {
   readWorkspaceCollapsedGroupIds,
@@ -163,6 +166,7 @@ export function WorkspaceSection({
         .listWorkspaceSessions({
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'active',
+          sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),

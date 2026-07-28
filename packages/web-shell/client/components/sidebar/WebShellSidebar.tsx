@@ -92,6 +92,7 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
@@ -602,6 +603,7 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -622,6 +624,7 @@ export function WebShellSidebar({
       enabled: organizationEnabled && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
+      sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
       view: 'organized',
       group: 'pinned',
     });
@@ -645,6 +648,7 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -1051,6 +1055,7 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'active',
+            sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
             view: 'organized',
             group: 'pinned',
           });
@@ -1124,6 +1129,7 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'archived',
+            sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
             ...(organizationEnabled
               ? { view: 'organized' as const, group: 'all' }
               : {}),

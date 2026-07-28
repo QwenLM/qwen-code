@@ -12368,6 +12368,49 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('creates a side task with source metadata and no branch suffix', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      renameSession: vi.fn().mockResolvedValue(true),
+      removeSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionSideTask,
+      {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        name: 'Side task',
+      },
+    );
+
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
+      expect.any(String),
+      {
+        source: {
+          sourceType: 'side_task',
+          sourceId: liveSessionId,
+        },
+      },
+    );
+    expect(sessionService.renameSession).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      title: 'Side task',
+      displayName: 'Side task',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('keeps the live session open when strict session close flush fails', async () => {
     const recording = makeRecordingService();
     recording.flush.mockRejectedValue(new Error('flush failed'));

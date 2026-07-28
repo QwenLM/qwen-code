@@ -297,6 +297,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   LOAD_REPLAY_BULK_MODE,
+  LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
@@ -621,6 +622,32 @@ function invalidArtifactPersistPayload(): Error {
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
+}
+
+function shouldHideInheritedHistory(params: LoadSessionRequest): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  return meta?.[LOAD_REPLAY_HIDE_INHERITED_META_KEY] === true;
+}
+
+function selectVisibleHistoryRecords(
+  records: ChatRecord[],
+  hideInheritedHistory: boolean,
+): ChatRecord[] {
+  const sourceBoundary = records.findIndex(
+    (record) =>
+      record.type === 'system' &&
+      record.subtype === 'session_source' &&
+      isObjectRecord(record.systemPayload) &&
+      record.systemPayload['sourceType'] === 'side_task',
+  );
+  if (sourceBoundary >= 0) {
+    return records
+      .slice(sourceBoundary)
+      .filter((record) => record.forkedFrom === undefined);
+  }
+  return hideInheritedHistory
+    ? records.filter((record) => record.forkedFrom === undefined)
+    : records;
 }
 
 function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
@@ -4381,12 +4408,19 @@ class QwenAgent implements Agent {
               : {}),
           } as LoadSessionResponse;
           const records = sessionData.conversation.messages;
-          if (records.length === 0) return response;
+          const visibleRecords = selectVisibleHistoryRecords(
+            records,
+            shouldHideInheritedHistory(params),
+          );
+          if (visibleRecords.length === 0) return response;
 
           const bulkReplay = isBulkLoadReplayRequest(params);
           const replayPage = bulkReplay
-            ? selectRecentHistoryRecords(records, getLoadReplayPageSize(params))
-            : { records, hasMore: false };
+            ? selectRecentHistoryRecords(
+                visibleRecords,
+                getLoadReplayPageSize(params),
+              )
+            : { records: visibleRecords, hasMore: false };
           const replay = await collectHistoryReplayUpdates({
             sessionId: params.sessionId,
             config,
@@ -4465,8 +4499,12 @@ class QwenAgent implements Agent {
             let replayUpdates: SessionUpdate[] = [];
             if (records) {
               createdSession.primeTurnFromHistory(records);
-              const replayPage = selectRecentHistoryRecords(
+              const visibleRecords = selectVisibleHistoryRecords(
                 records,
+                shouldHideInheritedHistory(params),
+              );
+              const replayPage = selectRecentHistoryRecords(
+                visibleRecords,
                 replayPageSize,
               );
               const replayUsage = createReplayCumulativeUsage();
@@ -4514,7 +4552,6 @@ class QwenAgent implements Agent {
         }
       });
     }
-
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
@@ -9978,7 +10015,9 @@ class QwenAgent implements Agent {
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
       }
-      case SERVE_CONTROL_EXT_METHODS.sessionBranch: {
+      case SERVE_CONTROL_EXT_METHODS.sessionBranch:
+      case SERVE_CONTROL_EXT_METHODS.sessionSideTask: {
+        const isSideTask = method === SERVE_CONTROL_EXT_METHODS.sessionSideTask;
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
           throw RequestError.invalidParams(
@@ -10004,7 +10043,16 @@ class QwenAgent implements Agent {
 
         const newSessionId = randomUUID();
         const sessionService = sourceConfig.getSessionService();
-        await sessionService.forkSession(sessionId, newSessionId);
+        if (isSideTask) {
+          await sessionService.forkSession(sessionId, newSessionId, {
+            source: {
+              sourceType: 'side_task',
+              sourceId: sessionId,
+            },
+          });
+        } else {
+          await sessionService.forkSession(sessionId, newSessionId);
+        }
 
         let title: string;
         try {
@@ -10023,18 +10071,22 @@ class QwenAgent implements Agent {
             }
           }
 
-          title = await computeUniqueBranchTitle(baseName, sessionService);
-          const renamed = await sessionService.renameSession(
-            newSessionId,
-            title,
-            'manual',
-          );
-          if (!renamed) {
-            throw new RequestError(
-              -32603,
-              `Failed to set title on forked session ${newSessionId}`,
-              { errorKind: 'internal', sessionId: newSessionId },
+          title = isSideTask
+            ? baseName
+            : await computeUniqueBranchTitle(baseName, sessionService);
+          if (!isSideTask) {
+            const renamed = await sessionService.renameSession(
+              newSessionId,
+              title,
+              'manual',
             );
+            if (!renamed) {
+              throw new RequestError(
+                -32603,
+                `Failed to set title on forked session ${newSessionId}`,
+                { errorKind: 'internal', sessionId: newSessionId },
+              );
+            }
           }
         } catch (err) {
           sessionService.removeSession(newSessionId).catch((rmErr) => {

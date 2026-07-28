@@ -33,6 +33,7 @@ import type {
   DaemonSessionContextUsageStatus,
   BranchSessionRequest,
   DaemonBranchedSession,
+  DaemonSideTaskSession,
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
@@ -41,6 +42,7 @@ import type {
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  SideTaskSessionRequest,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
@@ -2381,13 +2383,38 @@ export class DaemonClient {
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ name: req.name }),
+        body: JSON.stringify({
+          ...(req.name !== undefined ? { name: req.name } : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
         return (await res.json()) as DaemonBranchedSession;
+      },
+    );
+  }
+
+  async createSideTaskSession(
+    sessionId: string,
+    req: SideTaskSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSideTaskSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/side-task`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          ...(req.name !== undefined ? { name: req.name } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/side-task');
+        }
+        return (await res.json()) as DaemonSideTaskSession;
       },
     );
   }

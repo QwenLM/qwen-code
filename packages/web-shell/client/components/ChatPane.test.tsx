@@ -31,6 +31,13 @@ let latestOnSubmit:
   | undefined;
 let latestChatEditorProps: any;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
+let latestMonitorDetailsOnOpen:
+  | ((tool: {
+      callId: string;
+      toolName: string;
+      status: 'completed';
+    }) => Promise<boolean>)
+  | undefined;
 let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
 const insertText = vi.fn();
@@ -41,6 +48,7 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const getTasks = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -48,6 +56,7 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   loadArtifacts,
+  getTasks,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -111,6 +120,19 @@ vi.mock('../hooks/useMessages', () => ({
 vi.mock('../adapters/transcriptAdapter', () => ({
   extractPendingPermission: () => pendingPermission,
 }));
+
+vi.mock('../monitorDetailsContext', async () => {
+  const React = await import('react');
+  return {
+    MonitorDetailsProvider: (props: {
+      onOpen: typeof latestMonitorDetailsOnOpen;
+      children: React.ReactNode;
+    }) => {
+      latestMonitorDetailsOnOpen = props.onOpen;
+      return React.createElement(React.Fragment, null, props.children);
+    },
+  };
+});
 
 vi.mock('./MessageList', () => ({
   MessageList: (props: any) => (
@@ -241,12 +263,14 @@ beforeEach(() => {
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
   latestFollowupAccept = undefined;
+  latestMonitorDetailsOnOpen = undefined;
   sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  getTasks.mockReset();
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -312,6 +336,80 @@ function testid(id: string): HTMLElement | null {
 }
 
 describe('ChatPane', () => {
+  it('opens a pane monitor in the shared right panel', async () => {
+    connectionState.capabilities = {
+      features: ['session_monitor_tool_correlation'],
+    };
+    const monitor = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch pane logs',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'tail -f pane.log',
+      eventCount: 1,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'sess-1',
+      now: 11,
+      tasks: [monitor],
+    });
+    const onOpenMonitor = vi.fn();
+
+    render({ onOpenMonitor });
+
+    let opened = false;
+    await act(async () => {
+      opened =
+        (await latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        })) ?? false;
+    });
+
+    expect(opened).toBe(true);
+    expect(getTasks).toHaveBeenCalledOnce();
+    expect(onOpenMonitor).toHaveBeenCalledWith(
+      monitor,
+      'sess-1',
+      daemonActions,
+    );
+  });
+
+  it('does not open a monitor returned for another pane session', async () => {
+    connectionState.capabilities = {
+      features: ['session_monitor_tool_correlation'],
+    };
+    getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'other-session',
+      now: 11,
+      tasks: [],
+    });
+    const onOpenMonitor = vi.fn();
+
+    render({ onOpenMonitor });
+
+    let opened = true;
+    await act(async () => {
+      opened =
+        (await latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        })) ?? false;
+    });
+
+    expect(opened).toBe(false);
+    expect(onOpenMonitor).not.toHaveBeenCalled();
+  });
+
   it('renders the custom composer footer directly after the pane editor', () => {
     const footerProps: WebShellComposerToolbarRenderInfo[] = [];
     const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
@@ -390,6 +488,12 @@ describe('ChatPane', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
     expect(container!.textContent).toContain('Refactor core');
+  });
+
+  it('omits its frame header when embedded in another panel', () => {
+    render({ title: 'Side task', embedded: true });
+    expect(container!.querySelector('header')).toBeNull();
+    expect(testid('pane-messages')).not.toBeNull();
   });
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {

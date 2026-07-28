@@ -362,5 +362,6 @@ normalize 成原生 ECharts option，并注入 `option.dataset`，再渲染图�
 | `/init`          | ACP 透传            | 分析项目并创建定制的 `QWEN.md`。                                                                                        |
 | `/stats`         | ACP 透传            | 显示统计信息，包含 `model`、`tools` 子命令。                                                                            |
 | `/summary`       | ACP 透传            | 生成当前会话摘要。                                                                                                      |
-| `/tasks`         | ACP 透传            | 列出后台任务。                                                                                                          |
+| `/tasks`         | 本地实现            | 打开环境信息面板并刷新后台任务。                                                                                        |
+| `/fork`          | 本地实现 + ACP 透传 | `/fork sider` 新建侧边任务；其他参数启动共享当前上下文的后台智能体。                                                    |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |

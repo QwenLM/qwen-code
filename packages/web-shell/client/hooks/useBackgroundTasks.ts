@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { useActions } from '@qwen-code/webui/daemon-react-sdk';
 import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMessage';
-import { isComposerTask } from '../utils/composerTasks';
+import { isSessionDisconnectedError } from '../utils/sessionErrors';
 
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
@@ -60,9 +60,8 @@ export function useBackgroundTasks(
         .getTasks()
         .then((snapshot) => {
           if (disposed || snapshot.sessionId !== sessionId) return;
-          const composerTasks = snapshot.tasks.filter(isComposerTask);
-          setTasks(composerTasks);
-          if (composerTasks.length === 0) {
+          setTasks(snapshot.tasks);
+          if (snapshot.tasks.length === 0) {
             emptyPollsRef.current += 1;
             if (emptyPollsRef.current >= MAX_EMPTY_TASK_POLLS) {
               setPollingActive(false);
@@ -70,12 +69,14 @@ export function useBackgroundTasks(
             return;
           }
           emptyPollsRef.current = 0;
-          if (!hasActiveTask(composerTasks)) {
+          if (!hasActiveTask(snapshot.tasks)) {
             setPollingActive(false);
           }
         })
         .catch((error: unknown) => {
           if (disposed) return;
+          setPollingActive(false);
+          if (isSessionDisconnectedError(error)) return;
           console.warn('[web-shell] failed to refresh tasks:', error);
         })
         .finally(() => {

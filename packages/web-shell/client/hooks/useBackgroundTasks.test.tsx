@@ -34,6 +34,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let sessionId: string | undefined = 'session-a';
+let taskActivityKey = 'monitor:running';
+let refreshTrigger = 0;
 let latestTasks: DaemonSessionTaskStatus[] = [];
 
 function deferred<T>(): Deferred<T> {
@@ -76,7 +78,12 @@ function monitor(
 }
 
 function Harness() {
-  latestTasks = useBackgroundTasks(sessionId, 'monitor:running', true);
+  latestTasks = useBackgroundTasks(
+    sessionId,
+    taskActivityKey,
+    true,
+    refreshTrigger,
+  );
   return null;
 }
 
@@ -98,6 +105,8 @@ async function rerenderHarness() {
 beforeEach(() => {
   vi.useFakeTimers();
   sessionId = 'session-a';
+  taskActivityKey = 'monitor:running';
+  refreshTrigger = 0;
   latestTasks = [];
   sdkMock.actions.getTasks.mockReset();
 });
@@ -115,6 +124,37 @@ afterEach(async () => {
 });
 
 describe('useBackgroundTasks', () => {
+  it('starts polling when an out-of-band task triggers a refresh', async () => {
+    taskActivityKey = '';
+    const runningFork = {
+      kind: 'agent' as const,
+      id: 'fork-agent-1',
+      label: 'Review current changes',
+      description: 'Review current changes',
+      status: 'running' as const,
+      startTime: Date.now(),
+      runtimeMs: 1,
+      isBackgrounded: true,
+    };
+    sdkMock.actions.getTasks.mockResolvedValue(
+      snapshot('session-a', [runningFork]),
+    );
+
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).not.toHaveBeenCalled();
+
+    refreshTrigger = 1;
+    await rerenderHarness();
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+    expect(latestTasks).toEqual([runningFork]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+  });
+
   it('ignores an old response and starts polling the new session immediately', async () => {
     const sessionA = deferred<DaemonSessionTasksStatus>();
     const sessionB = deferred<DaemonSessionTasksStatus>();

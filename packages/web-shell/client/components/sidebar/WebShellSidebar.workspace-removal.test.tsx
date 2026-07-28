@@ -57,8 +57,9 @@ const {
   const exportSession = vi.fn();
   const active = makeSessions();
   const archived = makeSessions();
-  const useSessions = vi.fn((options?: { archiveState?: string }) =>
-    options?.archiveState === 'archived' ? archived : active,
+  const useSessions = vi.fn(
+    (options?: { archiveState?: string; sourceType?: string }) =>
+      options?.archiveState === 'archived' ? archived : active,
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
@@ -525,7 +526,11 @@ describe('WebShellSidebar workspace removal', () => {
       isArchived: true,
     });
     const listSecondarySessions = vi.fn(
-      async (options?: { archiveState?: string; group?: string }) => {
+      async (options?: {
+        archiveState?: string;
+        group?: string;
+        sourceType?: string;
+      }) => {
         if (options?.group === 'pinned') {
           return [
             {
@@ -585,12 +590,12 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.textContent).not.toContain('Primary archived');
     expect(
       useSessions.mock.calls.every(
-        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+        ([options]) => options?.sourceType === 'default',
       ),
     ).toBe(true);
     expect(
       listSecondarySessions.mock.calls.every(
-        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+        ([options]) => options?.sourceType === 'default',
       ),
     ).toBe(true);
   });

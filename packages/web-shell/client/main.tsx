@@ -172,6 +172,15 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onLanguageChange: handleLanguageChange,
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
+            header: {
+              items: ['title', 'environment', 'rightPanel'],
+            },
+            rightPanel: {
+              items: ['review', 'sideTask'],
+            },
+            environmentPanel: {
+              items: ['environment', 'subagents', 'backgroundTasks'],
+            },
             compactThinking: true,
           }}
         />

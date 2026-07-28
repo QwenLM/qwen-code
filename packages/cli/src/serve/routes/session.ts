@@ -155,6 +155,7 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
+  'POST /session/:id/side-task',
   'POST /session/:id/fork',
   'POST /session/:id/cd',
 ] as const;
@@ -2248,6 +2249,62 @@ export function registerSessionRoutes(
               .catch(() => {
                 // Best-effort cleanup; channel.exited will eventually reap.
               });
+          }
+          return;
+        }
+        res.status(201).json(result);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/side-task',
+    mutate(),
+    withPrimaryOnlyMutableSession(
+      'POST /session/:id/side-task',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        let name =
+          typeof body?.['name'] === 'string' ? body['name'] : undefined;
+        if (name) {
+          // eslint-disable-next-line no-control-regex
+          name = name.replace(/[\x00-\x1F\x7F-\x9F]/g, '').slice(0, 200);
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await runtime.bridge.createSideTaskSession(
+          sessionId,
+          { name },
+          { clientId },
+        );
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (!result.attached) {
+            const killed = await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd)
+                .removeSession(result.sessionId)
+                .catch(() => {});
+            }
+          } else {
+            await runtime.bridge
+              .detachClient(result.sessionId, result.clientId)
+              .catch(() => {});
+          }
+          throw error;
+        }
+        if (!res.writable) {
+          if (!result.attached) {
+            runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => {});
+          } else {
+            runtime.bridge
+              .detachClient(result.sessionId, result.clientId)
+              .catch(() => {});
           }
           return;
         }

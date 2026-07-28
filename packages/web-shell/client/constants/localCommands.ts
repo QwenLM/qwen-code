@@ -95,7 +95,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'fork',
       description: t('local.fork'),
-      argumentHint: '<directive>',
+      argumentHint: 'sider | <directive>',
     },
     { name: 'clear', description: t('local.clear') },
     { name: 'new', description: t('local.new') },

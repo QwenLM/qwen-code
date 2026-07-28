@@ -61,6 +61,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
 import {
   ApprovalMode,
@@ -10815,6 +10816,57 @@ describe('createAcpSessionBridge', () => {
           sourceType: 'scheduled_task',
           sourceId: 'task-123',
         },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('creates a side task with hidden inherited replay', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+            return { newSessionId: 'side-1', title: 'Side task' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            return { persisted: true };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const parent = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const sideTask = await bridge.createSideTaskSession(parent.sessionId, {
+        name: 'Side task',
+      });
+
+      expect(sideTask).toMatchObject({
+        sessionId: 'side-1',
+        sourceType: 'side_task',
+        sourceId: parent.sessionId,
+        sourcePersisted: true,
+        parentSessionId: parent.sessionId,
+      });
+      expect(bridge.getSessionSummary(sideTask.sessionId)).toMatchObject({
+        sourceType: 'side_task',
+        sourceId: parent.sessionId,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: sideTask.sessionId,
+          sourceType: 'side_task',
+          sourceId: parent.sessionId,
+        },
+      });
+      expect(handle.agent.loadSessionCalls[0]?._meta).toMatchObject({
+        [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true,
       });
 
       await bridge.shutdown();

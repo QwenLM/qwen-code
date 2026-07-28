@@ -1,15 +1,27 @@
 import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
+import type { WebShellRightPanelItem } from '../../customization';
 import {
   useWorkspaceActions,
+  type DaemonSessionActions,
   type DaemonWorkspaceActions,
   type DaemonScheduledTask,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
+import {
+  ChevronRightIcon,
+  CirclePlusIcon,
+  MessageCirclePlusIcon,
+  PanelRightIcon,
+  PlusIcon,
+  SquareActivityIcon,
+  SquareTerminalIcon,
+} from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -21,8 +33,16 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
+import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { isSafeHref, Markdown } from '../messages/Markdown';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import {
   buildCron,
   describeCron,
@@ -43,12 +63,17 @@ import {
   isRenderedFilePath,
   type TurnOutputFileChange,
   type TurnOutputFileDiff,
+  type TurnOutputOpenRequest,
   type TurnOutputScheduledTask,
 } from './TurnOutputs';
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 import { SubagentDetail } from './SubagentDetail';
-import { MonitorTaskDetail } from '../messages/TasksStatusMessage';
+import { SideTaskPanel } from './SideTaskPanel';
+import {
+  MonitorTaskDetail,
+  ShellTaskDetail,
+} from '../messages/TasksStatusMessage';
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -60,6 +85,10 @@ const FREQUENCIES: Frequency[] = [
   'custom',
 ];
 const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+const ignoreSideTaskCreated = (_tabId: string, _sessionId: string) => undefined;
+const ignoreSideTaskTitleChange = (_tabId: string, _title: string) => undefined;
+const rejectMissingSideTaskCreate = () =>
+  Promise.reject(new Error('Side-task session creation is unavailable'));
 
 export type ArtifactPanelTab =
   | {
@@ -68,6 +97,8 @@ export type ArtifactPanelTab =
       title: string;
       workspaceActions?: DaemonWorkspaceActions;
       workspaceCwd?: string;
+      changes?: readonly TurnOutputFileChange[];
+      selectedPath?: string;
     }
   | {
       id: string;
@@ -106,7 +137,37 @@ export type ArtifactPanelTab =
       kind: 'monitor';
       title: string;
       task: DaemonSessionMonitorTaskStatus;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'shell';
+      title: string;
+      task: DaemonSessionShellTaskStatus;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+    }
+  | {
+      id: string;
+      kind: 'side_task';
+      title: string;
+      sessionId?: string;
+      parentSessionId: string;
+      workspaceCwd?: string;
     };
+
+export interface SideTaskListItem {
+  sessionId: string;
+  title: string;
+  workspaceCwd?: string;
+  updatedAt?: string;
+}
+
+const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
+  'review',
+  'sideTask',
+];
 
 interface ArtifactPanelProps {
   artifacts: readonly DaemonSessionArtifact[];
@@ -125,6 +186,28 @@ interface ArtifactPanelProps {
     workspaceActions: DaemonWorkspaceActions,
     workspaceCwd?: string,
   ) => void;
+  latestReviewAvailable?: boolean;
+  onOpenLatestReview?: () => void;
+  items?: readonly WebShellRightPanelItem[];
+  sideTaskAvailable?: boolean;
+  sideTasks?: readonly SideTaskListItem[];
+  sideTasksLoading?: boolean;
+  onCreateSideTask?: () => void;
+  onOpenSideTask?: (sideTask: SideTaskListItem) => void;
+  onCreateSideTaskSession?: (
+    tabId: string,
+    parentSessionId: string,
+    title: string,
+  ) => Promise<{ sessionId: string; displayName?: string }>;
+  onSideTaskCreated?: (tabId: string, sessionId: string) => void;
+  onSideTaskTitleChange?: (tabId: string, title: string) => void;
+  onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onNestedArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+    workspaceActions: DaemonWorkspaceActions,
+  ) => void;
+  onSideTaskError?: (error: unknown, fallback: string) => void;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -142,10 +225,61 @@ export function ArtifactPanel({
   onSelectTab,
   onCloseTab,
   onOpenFilePreview,
+  latestReviewAvailable = false,
+  onOpenLatestReview,
+  items = DEFAULT_RIGHT_PANEL_ITEMS,
+  sideTaskAvailable = false,
+  sideTasks = [],
+  sideTasksLoading = false,
+  onCreateSideTask,
+  onOpenSideTask,
+  onCreateSideTaskSession,
+  onSideTaskCreated,
+  onSideTaskTitleChange,
+  onNestedRightPanelOpen,
+  onNestedArtifactsChange,
+  onSideTaskError,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
+  const { t } = useI18n();
+  const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
+  const sideTaskMenuCloseTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const openSideTaskMenu = useCallback(() => {
+    if (sideTaskMenuCloseTimerRef.current) {
+      clearTimeout(sideTaskMenuCloseTimerRef.current);
+      sideTaskMenuCloseTimerRef.current = null;
+    }
+    setSideTaskMenuOpen(true);
+  }, []);
+  const scheduleSideTaskMenuClose = useCallback(() => {
+    if (sideTaskMenuCloseTimerRef.current) {
+      clearTimeout(sideTaskMenuCloseTimerRef.current);
+    }
+    sideTaskMenuCloseTimerRef.current = setTimeout(() => {
+      setSideTaskMenuOpen(false);
+      sideTaskMenuCloseTimerRef.current = null;
+    }, 120);
+  }, []);
+  useEffect(
+    () => () => {
+      if (sideTaskMenuCloseTimerRef.current) {
+        clearTimeout(sideTaskMenuCloseTimerRef.current);
+      }
+    },
+    [],
+  );
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const showReviewMenuItem =
+    items.includes('review') && !tabs.some((tab) => tab.kind === 'review');
+  const showSideTaskMenuItems =
+    items.includes('sideTask') &&
+    sideTaskAvailable &&
+    Boolean(onCreateSideTask);
+  const showAddMenu =
+    Boolean(activeTab) && (showReviewMenuItem || showSideTaskMenuItems);
   const defaultWorkspaceActions = useWorkspaceActions();
   const activeWorkspaceActions =
     activeTab && 'workspaceActions' in activeTab
@@ -163,69 +297,257 @@ export function ArtifactPanel({
       aria-label="Right panel"
     >
       <div className={styles.header}>
-        <div className={styles.tabs} role="tablist" aria-label="Right panel">
-          {tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={[
-                styles.tabItem,
-                tab.id === activeTab?.id ? styles.tabActive : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab.id === activeTab?.id}
-                className={styles.tab}
-                onClick={() => onSelectTab(tab.id)}
-                title={tab.title}
+        {tabs.length > 0 && (
+          <div className={styles.tabs} role="tablist" aria-label="Right panel">
+            {tabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={[
+                  styles.tabItem,
+                  tab.id === activeTab?.id ? styles.tabActive : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
               >
-                <span className={styles.tabIcon} aria-hidden="true">
-                  {tab.kind === 'review' ? (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tab.id === activeTab?.id}
+                  className={styles.tab}
+                  onClick={() => onSelectTab(tab.id)}
+                  title={tab.title}
+                >
+                  <span className={styles.tabIcon} aria-hidden="true">
+                    {tab.kind === 'review' ? (
+                      <TabReviewIcon />
+                    ) : tab.kind === 'artifact' || tab.kind === 'file' ? (
+                      <TabArtifactIcon />
+                    ) : tab.kind === 'subagent' ? (
+                      <TabSubagentIcon />
+                    ) : tab.kind === 'monitor' ? (
+                      <SquareActivityIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'shell' ? (
+                      <SquareTerminalIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'side_task' ? (
+                      <MessageCirclePlusIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : (
+                      <TabScheduledTaskIcon />
+                    )}
+                  </span>
+                  <span className={styles.tabTitle}>{tab.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.tabCloseButton}
+                  onClick={() => onCloseTab(tab.id)}
+                  aria-label={`Close ${tab.title}`}
+                  title="Close"
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={styles.headerActions}>
+          {showAddMenu && (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={`${styles.iconButton} ${styles.addButton}`}
+                  aria-label={t('rightPanel.add')}
+                  title={t('rightPanel.add')}
+                >
+                  <PlusIcon className={styles.toolbarIcon} />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                {showReviewMenuItem && (
+                  <DropdownMenuItem
+                    disabled={!latestReviewAvailable || !onOpenLatestReview}
+                    onSelect={onOpenLatestReview}
+                  >
                     <TabReviewIcon />
-                  ) : tab.kind === 'artifact' || tab.kind === 'file' ? (
-                    <TabArtifactIcon />
-                  ) : tab.kind === 'subagent' ? (
-                    <TabSubagentIcon />
-                  ) : tab.kind === 'monitor' ? (
-                    <TabMonitorIcon />
-                  ) : (
-                    <TabScheduledTaskIcon />
-                  )}
-                </span>
-                <span className={styles.tabTitle}>{tab.title}</span>
-              </button>
+                    <span className={styles.sideTaskListTitle}>
+                      {t('turnOutputs.review')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+                {showReviewMenuItem && showSideTaskMenuItems && (
+                  <DropdownMenuSeparator />
+                )}
+                {showSideTaskMenuItems && (
+                  <DropdownMenuItem
+                    disabled={sideTasksLoading}
+                    onSelect={onCreateSideTask}
+                  >
+                    <MessageCirclePlusIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('sideTask.create')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          <button
+            type="button"
+            className={`${styles.iconButton} ${styles.panelToggleButton}`}
+            onClick={onClose}
+            aria-label={t('chatHeader.toggleRightPanel')}
+            aria-pressed="true"
+            title={t('chatHeader.toggleRightPanel')}
+          >
+            <PanelRightIcon className={styles.panelToggleIcon} />
+          </button>
+        </div>
+      </div>
+      <div
+        className={`${styles.body} ${
+          activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
+        }`.trim()}
+      >
+        {!activeTab ? (
+          <div
+            className={styles.emptyActions}
+            data-testid="right-panel-empty-actions"
+          >
+            {items.includes('review') && (
               <button
                 type="button"
-                className={styles.tabCloseButton}
-                onClick={() => onCloseTab(tab.id)}
-                aria-label={`Close ${tab.title}`}
-                title="Close"
+                className={styles.emptyAction}
+                disabled={!latestReviewAvailable || !onOpenLatestReview}
+                onClick={onOpenLatestReview}
               >
-                <CloseIcon />
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <TabReviewIcon />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('turnOutputs.review')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('turnOutputs.reviewLatest')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
               </button>
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          className={styles.iconButton}
-          onClick={onClose}
-          aria-label="Close artifacts panel"
-          title="Close"
-        >
-          ×
-        </button>
-      </div>
-      <div className={styles.body}>
-        {!activeTab ? (
-          <div className={styles.empty}>No panel selected.</div>
+            )}
+            {items.includes('sideTask') &&
+              sideTaskAvailable &&
+              onCreateSideTask &&
+              (sideTasks.length === 0 ? (
+                <button
+                  type="button"
+                  className={styles.emptyAction}
+                  disabled={sideTasksLoading}
+                  aria-busy={sideTasksLoading}
+                  onClick={onCreateSideTask}
+                >
+                  <span className={styles.emptyActionIcon} aria-hidden="true">
+                    <MessageCirclePlusIcon strokeWidth={1.6} />
+                  </span>
+                  <span className={styles.emptyActionTitle}>
+                    {t('sideTask.title')}
+                  </span>
+                  <span className={styles.emptyActionHint}>
+                    {t('sideTask.description')}
+                  </span>
+                  <ChevronRightIcon
+                    className={styles.emptyActionChevron}
+                    strokeWidth={1.6}
+                    aria-hidden="true"
+                  />
+                </button>
+              ) : (
+                <DropdownMenu
+                  open={sideTaskMenuOpen}
+                  onOpenChange={setSideTaskMenuOpen}
+                  modal={false}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.emptyAction}
+                      aria-expanded={sideTaskMenuOpen}
+                      onMouseEnter={openSideTaskMenu}
+                      onMouseLeave={scheduleSideTaskMenuClose}
+                    >
+                      <span
+                        className={styles.emptyActionIcon}
+                        aria-hidden="true"
+                      >
+                        <MessageCirclePlusIcon strokeWidth={1.6} />
+                      </span>
+                      <span className={styles.emptyActionTitle}>
+                        {t('sideTask.title')}
+                      </span>
+                      <span className={styles.emptyActionHint}>
+                        {t('sideTask.description')}
+                      </span>
+                      <ChevronRightIcon
+                        className={styles.emptyActionChevron}
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
+                    className="w-80"
+                    onMouseEnter={openSideTaskMenu}
+                    onMouseLeave={scheduleSideTaskMenuClose}
+                  >
+                    {sideTasks.map((sideTask) => (
+                      <DropdownMenuItem
+                        key={sideTask.sessionId}
+                        onSelect={() => onOpenSideTask?.(sideTask)}
+                      >
+                        <span className={styles.sideTaskListTitle}>
+                          {sideTask.title}
+                        </span>
+                        {sideTask.updatedAt && (
+                          <span className={styles.sideTaskListTime}>
+                            {formatRelativeTime(sideTask.updatedAt, t)}
+                          </span>
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={onCreateSideTask}>
+                      <CirclePlusIcon
+                        className={styles.sideTaskNewIcon}
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.sideTaskListTitle}>
+                        {t('sideTask.new')}
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ))}
+          </div>
         ) : activeTab.kind === 'review' ? (
           <ReviewChanges
-            changes={reviewChanges}
-            selectedPath={selectedReviewPath}
+            changes={activeTab.changes ?? reviewChanges}
+            selectedPath={activeTab.selectedPath ?? selectedReviewPath}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
             onOpenFilePreview={(change) =>
               onOpenFilePreview(
@@ -258,9 +580,38 @@ export function ArtifactPanel({
             rootToolCallId={activeTab.rootToolCallId}
             initialRootTool={activeTab.rootTool}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
           />
         ) : activeTab.kind === 'monitor' ? (
-          <MonitorTaskDetail key={activeTab.id} task={activeTab.task} />
+          <MonitorTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'shell' ? (
+          <ShellTaskDetail
+            key={activeTab.id}
+            task={activeTab.task}
+            actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'side_task' ? (
+          <SideTaskPanel
+            key={activeTab.id}
+            tabId={activeTab.id}
+            sessionId={activeTab.sessionId}
+            parentSessionId={activeTab.parentSessionId}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            title={activeTab.title}
+            createSession={
+              onCreateSideTaskSession ?? rejectMissingSideTaskCreate
+            }
+            onCreated={onSideTaskCreated ?? ignoreSideTaskCreated}
+            onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+            onError={onSideTaskError}
+          />
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
@@ -270,26 +621,6 @@ export function ArtifactPanel({
         )}
       </div>
     </aside>
-  );
-}
-
-function TabMonitorIcon() {
-  return (
-    <svg
-      className={styles.tabIconSvg}
-      viewBox="0 0 24 24"
-      fill="none"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <path
-        d="M4 12h3l2-5 4 10 2-5h5"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }
 

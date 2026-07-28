@@ -256,6 +256,7 @@ function projectSubagentToolUpdate(
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
+  const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
@@ -275,6 +276,7 @@ function projectSubagentToolUpdate(
           ? { type: 'task_execution' }
           : {}),
         ...(subagentName ? { subagentName } : {}),
+        ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(terminateReason ? { terminateReason } : {}),
