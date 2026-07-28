@@ -29,11 +29,14 @@ PR #7584.
   the manifest completion and publication gates. Isolated terminal failures do
   not cancel the remaining tasks.
 - A persistent DSW publisher watches terminal runs and actively updates the
-  triggering Release.
-- A score is written to the Release only when all 500 instances have a unique
-  terminal state and the run status is `SUCCEEDED`.
-- A `QUARANTINED` or pipeline-error run writes status and counts, but never a
-  score.
+  triggering Release with the public result JSON and a per-case trajectory
+  archive.
+- A score is written only after all 500 instances reach a unique terminal
+  state, no task is canceled, and `EXECUTION_ERROR + INFRA_FAILED < 10`.
+  The score denominator remains all 500 expected instances.
+- Ten or more terminal errors, a canceled task, a missing result, or a missing
+  trajectory for a scoreable case makes the run `QUARANTINED`; status and
+  counts are written without a score.
 
 ## Isolation boundaries
 
@@ -76,8 +79,8 @@ for the benchmark duration.
 - Coordinator: expired-lease recovery, run reconciliation, and completion gate.
 - Executors: task claim, Harbor/Qwen Code/grader execution, heartbeat, and
   outcome submission.
-- Publisher: terminal-run validation, public bundle generation, and active
-  GitHub Release writeback.
+- Publisher: terminal-run validation, public result and trajectory bundle
+  generation, and active GitHub Release writeback.
 
 The DSW implementation is maintained separately in the internal
 `qwen-code-benchmark-dsw` repository. This PR contains only the GitHub trigger,
