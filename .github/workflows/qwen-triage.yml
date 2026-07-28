@@ -3198,7 +3198,7 @@ jobs:
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
               esac
             fi
-            # Every headline carries its Chinese twin. The verdict is the one
+            # The verdict headline carries its Chinese twin. The verdict is the one
             # line a reader acts on, and until now it was the only part of
             # the unfolded comment that was English-only — the scope
             # disclaimer below it has been bilingual all along, so a Chinese
