@@ -505,6 +505,69 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('re-resolve immediately before EACH patch');
   });
 
+  it('keeps the sandboxed-lane recommendation out of the local-only section', () => {
+    // Measured on 2026-07-28: of 16 open PRs whose AUTHOR had write access
+    // and that already carried a triage comment, exactly 1 mentioned
+    // `/verify`. The instruction existed the whole time — buried as a
+    // conditional clause inside a section headed "local invocation ONLY"
+    // that opens with "Never in unattended CI." An agent running in CI
+    // reasonably skipped the whole section, so the instruction never fired.
+    //
+    // The fix is positional, so the test has to be positional too:
+    // asserting merely that the file mentions `/verify` would have passed
+    // throughout the entire period the recommendation was dead.
+    const localOnly = prSkill.indexOf('local invocation ONLY');
+    const recommendation = prSkill.indexOf(
+      '#### 2b-bis. Name the sandboxed lane when CI cannot settle the claim',
+    );
+    expect(recommendation).toBeGreaterThan(-1);
+    expect(localOnly).toBeGreaterThan(-1);
+    expect(recommendation).toBeLessThan(localOnly);
+
+    // Whitespace-normalised: these are prose assertions, and prettier
+    // reflows this file. A test that goes red on a re-wrap teaches people to
+    // ignore it.
+    const section = prSkill
+      .slice(recommendation, localOnly)
+      .replace(/\s+/g, ' ');
+    // It must be reachable on the CI path...
+    expect(section).toContain('required element of the Stage 2 comment');
+    expect(section).toContain('applies on an unattended run');
+    expect(section).not.toContain('Never in unattended CI');
+    // ...name the trigger and what it settles, not just the trigger...
+    expect(section).toContain('@qwen-code /verify');
+    expect(section).toContain('the specific claim it would settle');
+    // ...and keep the author-permission carve-out, or the bot sends
+    // maintainers into a guaranteed denial on external contributors' PRs.
+    expect(section).toContain('AUTHOR');
+    expect(section).toContain('sandboxed lanes are unavailable');
+
+    // The assembly order is the other half: a section nothing assembles is
+    // as dead as one nobody reads.
+    const order = prSkill.slice(
+      prSkill.indexOf('Post a single Stage 2 comment'),
+      prSkill.indexOf('### Stage 3'),
+    );
+    expect(order).toContain('(2b-bis)');
+    expect(order).toContain('not an enrichment');
+  });
+
+  it('names /verify on the high-risk paths, not just tmux', () => {
+    // 1e is the strongest triage-time signal in the skill (10 of 31 reverted
+    // PRs touched these paths vs 5 of 60 controls, p = 0.006) — and it used
+    // to recommend tmux alone, pointing at the local-only 2c. So the PRs
+    // most likely to be reverted were the ones never offered the lane that
+    // proves a change is load-bearing.
+    const highRisk = prSkill.slice(
+      prSkill.indexOf('If any file matches (the strongest triage-time signal'),
+      prSkill.indexOf('This signal is NOT a terminal gate'),
+    );
+    expect(highRisk).toContain('@qwen-code /verify');
+    expect(highRisk).toContain('2b-bis');
+    // The dead pointer into the local-only section must not come back.
+    expect(highRisk).not.toContain('Stage 2c');
+  });
+
   it('scopes the approve-skip check to the bot own approval on the reviewed commit', () => {
     // A maintainer approved a PR three minutes before re-triggering /triage.
     // The agent read that human approval as "existing approval from prior run

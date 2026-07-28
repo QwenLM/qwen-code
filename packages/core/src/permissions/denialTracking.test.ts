@@ -19,6 +19,7 @@ import {
   shouldFallback,
   type AutoModeDenialState,
 } from './denialTracking.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
 
 const FRESH: AutoModeDenialState = {
   consecutiveBlock: 0,
@@ -266,18 +267,42 @@ describe('isApproveOutcome', () => {
   // Single source of truth for "user said yes" — shared between the CLI
   // scheduler and the ACP Session. Drift between them was a previous
   // round's bug; this test guards both call sites at once.
-  it('returns true for every proceed_* outcome plus modify_with_editor', () => {
-    expect(isApproveOutcome('proceed_once')).toBe(true);
-    expect(isApproveOutcome('proceed_always')).toBe(true);
-    expect(isApproveOutcome('proceed_always_project')).toBe(true);
-    expect(isApproveOutcome('proceed_always_user')).toBe(true);
-    expect(isApproveOutcome('modify_with_editor')).toBe(true);
+  // Enumerated from the enum rather than hand-listed. The hand-written list
+  // had drifted from it -- `proceed_always_server` and `proceed_always_tool`
+  // were missing while the test claimed to cover "every proceed_* outcome" --
+  // so a future addition to the enum now fails here instead of silently
+  // reading as a denial.
+  const proceedOutcomes = Object.values(ToolConfirmationOutcome).filter(
+    (outcome) => outcome.startsWith('proceed_'),
+  );
+
+  it('covers every proceed_* value the enum declares', () => {
+    // Guards the filter itself: if the naming convention changes, the
+    // parametrised test below would silently shrink to nothing.
+    expect(proceedOutcomes.length).toBeGreaterThanOrEqual(7);
+  });
+
+  it.each(proceedOutcomes)('returns true for %s', (outcome) => {
+    expect(isApproveOutcome(outcome)).toBe(true);
+  });
+
+  it('returns true for modify_with_editor', () => {
+    expect(isApproveOutcome(ToolConfirmationOutcome.ModifyWithEditor)).toBe(
+      true,
+    );
   });
 
   it('returns false for cancel and unknown outcomes', () => {
     expect(isApproveOutcome('cancel')).toBe(false);
     expect(isApproveOutcome('')).toBe(false);
     expect(isApproveOutcome('unknown_outcome')).toBe(false);
+  });
+
+  // Restoring the previous approval mode is not an approval of this call.
+  it('returns false for restore_previous', () => {
+    expect(isApproveOutcome(ToolConfirmationOutcome.RestorePrevious)).toBe(
+      false,
+    );
   });
 });
 

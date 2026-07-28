@@ -16,6 +16,7 @@ export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
   DaemonChannelBridgeOptions,
+  DaemonChannelLoopMcpHost,
   DaemonChannelEvent,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
@@ -41,6 +42,7 @@ export type {
   ChannelLoopController,
 } from './ChannelBase.js';
 export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
+export { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 export type {
   ChannelLoopSchedulerOptions,
   ChannelLoopRunner,
