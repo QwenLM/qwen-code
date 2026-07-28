@@ -16,7 +16,7 @@ import {
   SKILL_FILE_NAME,
 } from './skill-paths.js';
 import type { SkillConfig } from './types.js';
-import { validateSkillName } from './types.js';
+import { SKILL_NAME_PATTERN, validateSkillName } from './types.js';
 
 export const AUTO_SKILL_CURATOR_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 export const AUTO_SKILL_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
@@ -253,7 +253,16 @@ function parseAutoSkillName(content: string): string | undefined {
 function isManagedDirectoryName(directoryName: string): boolean {
   return (
     directoryName.startsWith(AUTO_SKILL_PREFIX) &&
-    path.basename(directoryName) === directoryName
+    path.basename(directoryName) === directoryName &&
+    // Restrict to the skill-name charset (letters, digits, _ : . -). A managed
+    // directory is always `auto-skill-<name>` where `<name>` passes
+    // validateSkillName and the prefix chars are within the same set, so this
+    // never rejects a legitimately generated directory. It does reject names
+    // carrying ANSI/control bytes, whose `directoryName` is later printed
+    // verbatim by the non-interactive `/curator` output (which, unlike the TUI,
+    // does not run escapeAnsiCtrlCodes) — closing a terminal control-sequence
+    // injection via a crafted directory committed to a cloned repo.
+    SKILL_NAME_PATTERN.test(directoryName)
   );
 }
 
