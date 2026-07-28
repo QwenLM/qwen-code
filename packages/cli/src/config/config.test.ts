@@ -1445,6 +1445,108 @@ describe('loadCliConfig', () => {
     expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
   });
 
+  it('preserves session/CLI-supplied MCP servers under safe mode while dropping settings-sourced ones', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+    const sessionMcpServers = {
+      'session-server': new ServerConfig.MCPServerConfig('session-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    // Session-supplied server survives safe mode — it's an explicit,
+    // per-invocation argument (ACP session/new), not ambient local state.
+    expect(servers['session-server']?.command).toBe('session-cmd');
+    // Settings-sourced server is still dropped under safe mode.
+    expect(servers['settings-only']).toBeUndefined();
+    // Never approval-gated, same as the non-safe-mode case above.
+    expect(config.isMcpServerPendingApproval('session-server')).toBe(false);
+  });
+
+  it('preserves --mcp-config-supplied MCP servers under safe mode while dropping settings-sourced ones', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--mcp-config',
+      JSON.stringify({ 'cli-server': { command: 'cli-cmd' } }),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, process.cwd());
+
+    const servers = config.getMcpServers() ?? {};
+    expect(servers['cli-server']?.command).toBe('cli-cmd');
+    expect(servers['settings-only']).toBeUndefined();
+  });
+
+  it('does NOT let a settings-sourced mcp.allowed list silently filter a session-supplied server under safe mode', async () => {
+    // Found by an automated review pass on PR #7827: the allowedMcpServers
+    // assembly guard was `!bareMode` only (missing `&& !safeMode`), so
+    // settings.mcp.allowed/excluded — LOCAL/ambient state, same category as
+    // settings.mcpServers itself — was still read under safe mode. Combined
+    // with getMcpServers()'s own allowedMcpServers filter (added earlier in
+    // this same PR for the --allowed-mcp-server-names case), a narrow
+    // settings.json mcp.allowed list would silently drop a caller-supplied
+    // top-tier server, defeating the very guarantee this PR exists to
+    // provide — via an indirect vector (a filter's SOURCE), not the
+    // mcpServers map directly.
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcp: { allowed: ['some-other-server'] },
+    };
+    const sessionMcpServers = {
+      'session-server': new ServerConfig.MCPServerConfig('session-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    expect(servers['session-server']?.command).toBe('session-cmd');
+  });
+
+  it('drops ALL MCP servers under safe mode when none were supplied by the caller', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, process.cwd());
+
+    expect(config.getMcpServers()).toEqual({});
+  });
+
   it('gates unapproved workspace MCP servers in non-interactive runs', async () => {
     process.argv = ['node', 'script.js', '-p', 'hello'];
     const argv = await parseArguments();

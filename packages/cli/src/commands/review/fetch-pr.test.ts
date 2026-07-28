@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
 import { fetchPrCommand } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
 describe('classifyHeavy', () => {
   it('flags a substantially rewritten existing file', () => {
@@ -206,7 +207,7 @@ describe('fetchPrCommand builder', () => {
 
 const producerMocks = vi.hoisted(() => ({
   writeFileSync: vi.fn(),
-  readFileSync: vi.fn((): string => {
+  readFileSync: vi.fn((_path?: unknown): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
   gh: vi.fn(),
@@ -266,7 +267,7 @@ vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
 }));
 
-describe('fetch-pr report — audit-window contract', () => {
+describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // clearAllMocks resets call history but NOT implementations, so a
@@ -400,5 +401,51 @@ describe('fetch-pr report — audit-window contract', () => {
       .map((c) => String(c[0]))
       .some((l) => l.includes('could not read the previous fetch report'));
     expect(warned).toBe(true);
+  });
+
+  describe('effort threading', () => {
+    // The PR path spreads `planEffortField(args.effort)` into the report exactly
+    // as capture-local and plan-diff do, but a refactor of this result assembly
+    // (dropping the import, or a later property shadowing `effort`) would silently
+    // lose it — safe-expanding the roster to the full set even with `--effort
+    // medium` while the sibling tests still pass. These trip that wire.
+    function seedReport(effort: unknown): void {
+      producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+        if (path === PARSE_ARGS_REPORT) {
+          return JSON.stringify({ effort, effortSource: 'flag' });
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+    }
+
+    it('records an explicit --effort in the report', async () => {
+      const report = await reportFor({ effort: 'medium' });
+      expect(report.effort).toBe('medium');
+    });
+
+    it('recovers the effort parse-args resolved when --effort is not re-threaded', async () => {
+      seedReport('medium');
+      const report = await reportFor({});
+      expect(report.effort).toBe('medium');
+      // And the resolution is disclosed on stderr, not silent.
+      const traced = producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .some(
+          (l) =>
+            l.includes('effort: medium') && l.includes('parse-args report'),
+        );
+      expect(traced).toBe(true);
+    });
+
+    it('omits effort when neither flag nor report is present', async () => {
+      const report = await reportFor({});
+      expect(report.effort).toBeUndefined();
+    });
+
+    it('ignores a malformed effort in the report rather than trusting it', async () => {
+      seedReport('turbo');
+      const report = await reportFor({});
+      expect(report.effort).toBeUndefined();
+    });
   });
 });
