@@ -14,6 +14,10 @@ The design adds those DingTalk interactions without teaching the model, tools, A
 
 ![DingTalk interactive cards architecture](./assets/dingtalk-interactive-cards-architecture.png)
 
+![Channel adapter compatibility and degradation](./assets/dingtalk-interactive-cards-other-im-impact.png)
+
+![Future IM adapter extension boundary](./assets/dingtalk-interactive-cards-other-im-extension.png)
+
 The architecture has four ownership layers:
 
 1. Core and ACP continue to own semantic questions and permission resolution.
@@ -66,7 +70,7 @@ The labels in this document are normative:
 | `packages/channels/base/src/types.ts` and exports                                               | Change required — shared Channel     | Add semantic-input types plus optional public lifecycle `runId` and `owner`; attended events emitted by `ChannelBase` always populate both.                                              |
 | `packages/channels/dingtalk`                                                                    | DingTalk-only change                 | Add card configuration, Card OpenAPI access, callback parsing, owner checks, two registries, bounded coalesced projections, degradation, and tests.                                      |
 | This design document                                                                            | Change required — documentation only | Record the final payload, ownership, change-impact, lifecycle, degradation, and acceptance contracts.                                                                                    |
-| Existing architecture assets                                                                    | No change                            | They already show the shared seam, DingTalk-local paths, and unaffected-client boundary; the written contract supplies the field-level detail.                                           |
+| Architecture assets                                                                             | Documentation only                   | Show the runtime chain, compatibility and degradation matrix, and future adapter extension boundary without introducing platform fields into the shared contract.                        |
 | `packages/core`, `ask_user_question`, and `ToolConfirmationPayload`                             | No change                            | Continue producing semantic questions and consuming `answers`.                                                                                                                           |
 | ACP agent session, ACP schema, `acp-bridge`, permission mediator, daemon routes, and daemon SDK | No change                            | Continue carrying `toolCall`, permission options, outcomes, and top-level `answers`.                                                                                                     |
 | `ChannelAgentBridge`, `AcpBridge`, `DaemonChannelBridge`, daemon worker, and `SessionRouter`    | No change                            | Continue relaying complete permission requests, routing by owning `sessionId`, and returning permission responses. No separate `userQuestionRequest` bridge event is introduced.         |
