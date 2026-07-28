@@ -510,13 +510,12 @@ async function runRipgrepOnce(
           }
 
           const errorCode = errorCodeOf(error);
-          if (
-            errorCode === 1 &&
-            stdoutText.trim() === '' &&
-            stderrText.trim() === ''
-          ) {
+          // ripgrep's contract: exit 1 means "no matches AND no error". It
+          // never carries matches, but under --json it still emits a trailing
+          // summary event on stdout, so stdout emptiness cannot gate this.
+          if (errorCode === 1 && stderrText.trim() === '') {
             settle({
-              stdout: '',
+              stdout: stdoutText,
               incomplete: false,
               canceled: false,
             });

@@ -296,23 +296,21 @@ describe('ripgrepUtils', () => {
       });
     });
 
-    it('preserves stdout from exit code 1 as incomplete output', async () => {
-      const error = createExecError('Command failed', { code: 1 });
+    it('treats exit code 1 with json summary on stdout as no matches', async () => {
+      const summary = '{"data":{"stats":{"matches":0}},"type":"summary"}\n';
       mockRipgrepAttempt({
-        error,
-        stdout: 'file.ts:1:needle\n',
+        error: createExecError('Command failed', { code: 1 }),
+        stdout: summary,
       });
 
       const result = await runRipgrep(['--threads', '4']);
 
-      expect(result).toMatchObject({
-        stdout: 'file.ts:1:needle\n',
-        incomplete: true,
-        error,
+      expect(result).toEqual({
+        stdout: summary,
+        incomplete: false,
         recovery: {
           selectionMode: 'builtin',
           retryTriggered: false,
-          failureKind: 'exit',
         },
       });
     });
