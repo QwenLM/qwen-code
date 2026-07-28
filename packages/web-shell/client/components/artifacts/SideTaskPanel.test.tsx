@@ -1,25 +1,39 @@
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from 'react';
+import { act, type ComponentProps, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 
-const { connection, providerProps, latestChatPaneProps, renameSession } =
-  vi.hoisted(() => ({
-    connection: {
-      status: 'idle',
-      sessionId: undefined as string | undefined,
-      displayName: undefined as string | undefined,
-    },
-    providerProps: {
-      current: undefined as Record<string, unknown> | undefined,
-    },
-    latestChatPaneProps: {
-      current: undefined as Record<string, unknown> | undefined,
-    },
-    renameSession: vi.fn().mockResolvedValue(undefined),
-  }));
+const {
+  connection,
+  providerProps,
+  latestChatPaneProps,
+  renameSession,
+  transcript,
+} = vi.hoisted(() => ({
+  connection: {
+    status: 'idle',
+    sessionId: undefined as string | undefined,
+    displayName: undefined as string | undefined,
+    loadingTranscript: false,
+    catchingUp: false,
+  },
+  providerProps: {
+    current: undefined as Record<string, unknown> | undefined,
+  },
+  latestChatPaneProps: {
+    current: undefined as Record<string, unknown> | undefined,
+  },
+  renameSession: vi.fn().mockResolvedValue(undefined),
+  transcript: {
+    blocks: [] as Array<{ kind: string }>,
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    paginationError: undefined as string | undefined,
+  },
+}));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: {
@@ -31,6 +45,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useConnection: () => connection,
   useActions: () => ({ renameSession }),
+  useTranscriptBlocks: () => transcript.blocks,
+  useTranscriptHistory: () => transcript,
 }));
 
 vi.mock('../ChatPane', () => ({
@@ -47,16 +63,45 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
+function renderSideTask(
+  props: Partial<ComponentProps<typeof SideTaskPanel>> = {},
+) {
+  root!.render(
+    <I18nProvider language="en">
+      <SideTaskPanel
+        tabId="side-task:side-session-1"
+        sessionId="side-session-1"
+        parentSessionId="parent-session"
+        workspaceCwd="/work/project"
+        title="Side task"
+        createSession={vi.fn()}
+        onCreated={vi.fn()}
+        onTitleChange={vi.fn()}
+        {...props}
+      />
+    </I18nProvider>,
+  );
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
   container = null;
   root = null;
+  connection.status = 'idle';
   connection.sessionId = undefined;
   connection.displayName = undefined;
+  connection.loadingTranscript = false;
+  connection.catchingUp = false;
   providerProps.current = undefined;
   latestChatPaneProps.current = undefined;
+  transcript.blocks = [];
+  transcript.hasMore = false;
+  transcript.loading = false;
+  transcript.capacityReached = false;
+  transcript.paginationError = undefined;
   renameSession.mockClear();
+  renameSession.mockResolvedValue(undefined);
 });
 
 it('creates a side task and reports the new session id', async () => {
@@ -100,6 +145,8 @@ it('creates a side task and reports the new session id', async () => {
 it('renders a restored side task as a full chat pane', () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Investigate flaky tests';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -146,7 +193,76 @@ it('renders a restored side task as a full chat pane', () => {
   });
 });
 
-it('names a newly created side task from its first prompt', () => {
+it('names a restored empty side task from its first prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  act(() => {
+    renderSideTask({ onTitleChange });
+  });
+
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )('Investigate restored task');
+    await Promise.resolve();
+  });
+
+  expect(renameSession).toHaveBeenCalledWith('Investigate restored task');
+  expect(onTitleChange).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+    'Investigate restored task',
+    true,
+  );
+});
+
+it('does not rename a restored side task when older history exists', () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Existing task';
+  connection.status = 'connected';
+  transcript.hasMore = true;
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  act(() => {
+    renderSideTask({ title: 'Existing task' });
+  });
+
+  expect(
+    latestChatPaneProps.current?.['onFirstPromptAdmitted'],
+  ).toBeUndefined();
+});
+
+it.each([
+  ['loading', { loading: true }],
+  ['capacity reached', { capacityReached: true }],
+  ['pagination failed', { paginationError: 'history unavailable' }],
+])('does not rename when transcript history is incomplete: %s', (_, state) => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  Object.assign(transcript, state);
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  act(() => {
+    renderSideTask();
+  });
+
+  expect(
+    latestChatPaneProps.current?.['onFirstPromptAdmitted'],
+  ).toBeUndefined();
+});
+
+it('names a newly created side task from its first prompt', async () => {
   connection.sessionId = 'side-session-1';
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -171,12 +287,13 @@ it('names a newly created side task from its first prompt', () => {
     );
   });
 
-  act(() => {
+  await act(async () => {
     (
       latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
         text: string,
       ) => void
     )('Investigate cache invalidation');
+    await Promise.resolve();
   });
 
   expect(onTitleChange).toHaveBeenCalledWith(
@@ -189,6 +306,7 @@ it('names a newly created side task from its first prompt', () => {
   act(() => {
     root!.render(null);
   });
+  transcript.blocks = [{ kind: 'user' }];
   act(() => {
     root!.render(
       <I18nProvider language="en">
@@ -210,4 +328,86 @@ it('names a newly created side task from its first prompt', () => {
   expect(
     latestChatPaneProps.current?.['onFirstPromptAdmitted'],
   ).toBeUndefined();
+});
+
+it('retries the first-prompt title before marking it complete', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  renameSession
+    .mockRejectedValueOnce(new Error('temporary failure'))
+    .mockResolvedValueOnce(undefined);
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  const onError = vi.fn();
+  act(() => {
+    renderSideTask({
+      tabId: 'side-task:draft:1',
+      shouldNameFromFirstPrompt: true,
+      onTitleChange,
+      onError,
+    });
+  });
+
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )('Retry this title');
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(renameSession).toHaveBeenCalledTimes(2);
+  expect(renameSession).toHaveBeenNthCalledWith(1, 'Retry this title');
+  expect(renameSession).toHaveBeenNthCalledWith(2, 'Retry this title');
+  expect(onTitleChange).toHaveBeenCalledWith(
+    'side-task:draft:1',
+    'Retry this title',
+    true,
+  );
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it('bounds first-prompt title retries and reports the final failure', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  const failure = new Error('persistent failure');
+  renameSession.mockRejectedValue(failure);
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  const onError = vi.fn();
+  act(() => {
+    renderSideTask({
+      tabId: 'side-task:draft:1',
+      shouldNameFromFirstPrompt: true,
+      onTitleChange,
+      onError,
+    });
+  });
+
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )('Keep this title');
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(renameSession).toHaveBeenCalledTimes(3);
+  expect(onTitleChange).not.toHaveBeenCalledWith(
+    'side-task:draft:1',
+    'Keep this title',
+    true,
+  );
+  expect(onError).toHaveBeenCalledWith(failure, 'Failed to name side task');
 });

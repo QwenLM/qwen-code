@@ -3,6 +3,8 @@ import {
   DaemonSessionProvider,
   useActions,
   useConnection,
+  useTranscriptBlocks,
+  useTranscriptHistory,
 } from '@qwen-code/webui/daemon-react-sdk';
 import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
@@ -42,6 +44,8 @@ interface SideTaskPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
 }
+
+const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
 
 export function SideTaskPanel({
   tabId,
@@ -184,6 +188,20 @@ function SideTaskSession({
 >) {
   const connection = useConnection();
   const actions = useActions();
+  const blocks = useTranscriptBlocks();
+  const transcriptHistory = useTranscriptHistory();
+  const hasUserPrompt = blocks.some((block) => block.kind === 'user');
+  const restoredEmptySession =
+    connection.status === 'connected' &&
+    !connection.loadingTranscript &&
+    !connection.catchingUp &&
+    !transcriptHistory.loading &&
+    !transcriptHistory.hasMore &&
+    !transcriptHistory.capacityReached &&
+    !transcriptHistory.paginationError &&
+    !hasUserPrompt;
+  const canNameFromFirstPrompt =
+    !hasUserPrompt && (shouldNameFromFirstPrompt || restoredEmptySession);
   useEffect(() => {
     const displayName = connection.displayName?.trim();
     if (displayName) onTitleChange(tabId, displayName);
@@ -192,12 +210,24 @@ function SideTaskSession({
     (text: string) => {
       const nextTitle = text.trim().slice(0, 200);
       if (!nextTitle) return;
-      onTitleChange(tabId, nextTitle, true);
-      void actions
-        .renameSession(nextTitle)
-        .catch((error: unknown) =>
-          onError?.(error, 'Failed to name side task'),
-        );
+      onTitleChange(tabId, nextTitle);
+      void (async () => {
+        let lastError: unknown;
+        for (
+          let attempt = 0;
+          attempt < FIRST_PROMPT_RENAME_ATTEMPTS;
+          attempt++
+        ) {
+          try {
+            await actions.renameSession(nextTitle);
+            onTitleChange(tabId, nextTitle, true);
+            return;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        onError?.(lastError, 'Failed to name side task');
+      })();
     },
     [actions, onError, onTitleChange, tabId],
   );
@@ -216,7 +246,7 @@ function SideTaskSession({
       onError={onError}
       embedded
       onFirstPromptAdmitted={
-        shouldNameFromFirstPrompt ? nameFromFirstPrompt : undefined
+        canNameFromFirstPrompt ? nameFromFirstPrompt : undefined
       }
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
