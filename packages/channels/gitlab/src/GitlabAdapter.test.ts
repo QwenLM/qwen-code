@@ -443,6 +443,13 @@ describe('GitlabChannel', () => {
         channel.testSendThreadMessage('owner/repo', 'invalid', 'reply'),
       ).rejects.toThrow('invalid threadId format');
     });
+
+    it('throws on undefined threadId', async () => {
+      await initWithoutLoop();
+      await expect(
+        channel.testSendThreadMessage('owner/repo', undefined as never, 'x'),
+      ).rejects.toThrow('requires a threadId');
+    });
   });
 
   describe('cursor validation', () => {

@@ -41,6 +41,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   private api!: InstanceType<typeof Gitlab>;
   private apiHost = 'https://gitlab.com';
   private botUsername = '';
+  private descriptionCache = new Map<string, string>();
 
   constructor(
     name: string,
@@ -106,7 +107,9 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     text: string,
   ): Promise<void> {
     if (!threadId) {
-      return super.sendThreadMessage(chatId, threadId, text);
+      throw new Error(
+        `[Channel:${this.name}] sendThreadMessage requires a threadId (e.g. "issue:42" or "mr:7")`,
+      );
     }
     const match = threadId.match(/^(?:issue|mr):(\d+)$/);
     if (!match) {
@@ -122,6 +125,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     const templates = (this.config as GitlabConfig).action_prompt_template;
     if (!templates || Object.keys(templates).length === 0) return;
 
+    this.descriptionCache.clear();
     const windowSince = this.cursor.lastProcessedAt;
 
     const allTodos = (await this.api.TodoLists.all({
@@ -134,6 +138,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
 
     for (const todo of todos) {
       if (
+        !todo.project ||
         !todo.target ||
         !todo.target.iid ||
         (todo.target_type !== 'Issue' && todo.target_type !== 'MergeRequest')
@@ -161,7 +166,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       }
 
       this.cursor.lastProcessedAt = todo.updated_at;
-      this.saveCursor();
 
       try {
         await this.api.TodoLists.done({ todoId: todo.id });
@@ -178,7 +182,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       // best-effort cleanup
     }
     this.cursor.lastProcessedAt = todo.updated_at;
-    this.saveCursor();
   }
 
   private resolveTemplate(
@@ -235,18 +238,26 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     targetType: string,
     iid: number,
   ): Promise<string> {
+    const cacheKey = `${chatId}/${targetType}/${iid}`;
+    const cached = this.descriptionCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    let description = '';
     try {
       if (targetType === 'mr') {
         // gitbeaker types require numeric projectId; GitLab API accepts path strings at runtime
         const pid = chatId as unknown as number;
         const mr = await this.api.MergeRequests.show(pid, iid);
-        return (mr as { description?: string }).description || '';
+        description = (mr as { description?: string }).description || '';
+      } else {
+        const issue = await this.api.Issues.show(iid, { projectId: chatId });
+        description = (issue as { description?: string }).description || '';
       }
-      const issue = await this.api.Issues.show(iid, { projectId: chatId });
-      return (issue as { description?: string }).description || '';
     } catch {
-      return '';
+      // leave empty
     }
+    this.descriptionCache.set(cacheKey, description);
+    return description;
   }
 
   private buildEnvelope(
@@ -281,21 +292,20 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     commentId: string,
     description: string,
   ): string {
-    return template
-      .replace(/%(\w+)%/g, (match, key: string) => {
-        const vars: Record<string, string> = {
-          project: chatId,
-          project_url: `${this.apiHost}/${chatId}`,
-          author,
-          target_type: todo.target_type,
-          iid: String(todo.target.iid),
-          title: todo.target.title,
-          description,
-          todo_id: commentId,
-        };
-        return vars[key] ?? match;
-      })
-      .replace(/%%/g, '%');
+    const vars: Record<string, string> = {
+      project: chatId,
+      project_url: `${this.apiHost}/${chatId}`,
+      author,
+      target_type: todo.target_type,
+      iid: String(todo.target.iid),
+      title: todo.target.title,
+      description,
+      todo_id: commentId,
+    };
+    return template.replace(/%%|%(\w+)%/g, (match, key: string) => {
+      if (match === '%%') return '%';
+      return vars[key] ?? match;
+    });
   }
 
   private async createNote(

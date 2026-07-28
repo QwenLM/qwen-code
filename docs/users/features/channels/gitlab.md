@@ -154,7 +154,7 @@ The cursor (`lastProcessedAt`) advances regardless of dispatch success or failur
 
 - **First start skips existing pending todos.** The cursor initializes to "now" on first launch.
 - The bot does not read prior conversation history — only the triggering content is processed.
-- Confidential (internal) notes are not filtered at the todo level; the todo body may contain internal comment text if the mention occurred in a confidential note.
+- **Confidential (internal) notes:** If someone @mentions the bot in a confidential note, the todo body contains that internal text and the agent will process it. The bot's reply is always posted as a **public** note, potentially exposing internal discussion. GitLab's todo API does not expose note visibility, so the adapter cannot filter this. Avoid @mentioning the bot in confidential notes.
 - Requires `read_api` + `api` PAT scopes. Group-level or project-level tokens work if they have these scopes.
 - Todos for Epics, Designs, and Alerts are skipped (only Issues and MRs are processed).
 
