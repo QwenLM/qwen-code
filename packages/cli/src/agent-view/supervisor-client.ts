@@ -171,10 +171,10 @@ export async function requestAgentViewSupervisor(
   options: AgentViewSupervisorClientOptions = {},
 ): Promise<AgentViewSupervisorResponse> {
   const timeoutMs = options.timeoutMs ?? 5000;
-  const requestWithProtocol =
-    request.protocolVersion === undefined
-      ? { ...request, protocolVersion: AGENT_VIEW_PROTOCOL_VERSION }
-      : request;
+  const requestWithProtocol = {
+    ...request,
+    protocolVersion: request.protocolVersion ?? AGENT_VIEW_PROTOCOL_VERSION,
+  };
   if (options.authToken && requestWithProtocol.authToken === undefined) {
     requestWithProtocol.authToken = options.authToken;
   }
@@ -316,11 +316,16 @@ export async function attachAgentViewSupervisorTerminal(
             };
           },
           resize: (size) => {
-            void callAgentViewSupervisor(socketPath, 'resize', {
-              sessionId,
-              columns: size.columns,
-              rows: size.rows,
-            }).catch(() => {});
+            void callAgentViewSupervisor(
+              socketPath,
+              'resize',
+              {
+                sessionId,
+                columns: size.columns,
+                rows: size.rows,
+              },
+              options.authToken ? { authToken: options.authToken } : undefined,
+            ).catch(() => {});
           },
         },
         detachSignal: controller.signal,

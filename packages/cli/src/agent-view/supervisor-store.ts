@@ -343,7 +343,8 @@ async function readJsonRecord(
   } catch (error) {
     if (
       error instanceof SyntaxError ||
-      (isNodeError(error) && error.code === 'ENOENT')
+      (isNodeError(error) &&
+        (error.code === 'ENOENT' || error.code === 'ENOTDIR'))
     ) {
       return undefined;
     }

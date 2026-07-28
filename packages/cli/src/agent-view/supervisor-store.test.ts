@@ -184,6 +184,9 @@ describe('agent view supervisor store', () => {
     });
     fs.mkdirSync(invalid.sessionDir, { recursive: true });
     fs.writeFileSync(invalid.statePath, '{"sessionId":"invalid"}');
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    fs.mkdirSync(paths.jobsDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.jobsDir, '.DS_Store'), 'ignored');
 
     const states = await listAgentViewSessionStates({ globalDir: tempDir });
     expect(states.map((state) => state.sessionId)).toEqual(['newer', 'older']);

@@ -32,6 +32,7 @@ import {
   readAgentViewSupervisor,
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
+import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
@@ -404,11 +405,8 @@ async function readSupervisorAuthToken(
 }
 
 function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
-  const entry = process.argv[1];
-  if (!entry) {
-    throw new Error('Cannot locate qwen CLI entrypoint for Agent View.');
-  }
-  return spawn(process.execPath, [entry, ...args], {
+  const argv = buildCurrentQwenCliArgv(args);
+  return spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: 'ignore',
     env: {
