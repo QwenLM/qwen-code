@@ -9408,6 +9408,103 @@ Other open files:
         });
       });
 
+      it('wraps injected additionalContext in the reserved tag and records display provenance', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'extra hook context',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'my prompt' }],
+            new AbortController().signal,
+            'prompt-hook-context-tag',
+          ),
+        );
+
+        const taggedContext =
+          '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+
+        // The model-bound request keeps the user prompt intact and carries
+        // the injected context inside the reserved tag.
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).toContain(taggedContext);
+
+        // The recorded message is the exact model-bound request, with the
+        // user-authored projection preserved separately.
+        expect(recordUserMessage).toHaveBeenCalledWith(
+          [{ text: 'my prompt' }, { text: taggedContext }],
+          undefined,
+          { displayText: 'my prompt', hookContext: 'extra hook context' },
+        );
+      });
+
+      it('uses the pre-injection prompt for managed auto-memory recall', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'extra hook context',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'my prompt' }],
+            new AbortController().signal,
+            'prompt-hook-context-recall',
+          ),
+        );
+
+        expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+          '/test/project/root',
+          'my prompt',
+          expect.any(Object),
+        );
+      });
+
       it.each([
         {
           name: 'empty UserQuery value',

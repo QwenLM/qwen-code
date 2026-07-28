@@ -349,6 +349,7 @@ export interface ChatRecord {
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
     | NotificationRecordPayload
+    | UserPromptRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | FileHistorySnapshotRecordPayload
@@ -389,6 +390,20 @@ export interface ChatRecord {
     sessionId: string;
     messageUuid: string;
   };
+}
+
+/**
+ * Stored payload for user-prompt records whose model-bound parts were
+ * augmented by a UserPromptSubmit hook. `message` keeps the exact
+ * model-bound Content (resume must replay what the model actually saw);
+ * this payload preserves the user-authored projection for UI/resume
+ * display and offline analysis.
+ */
+export interface UserPromptRecordPayload {
+  /** Pre-injection projection of the user's own prompt text. */
+  displayText?: string;
+  /** Sanitized additional context injected by the hook (without the tag). */
+  hookContext?: string;
 }
 
 export interface NotificationRecordPayload {
@@ -1255,6 +1270,7 @@ export class ChatRecordingService {
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
+    payload?: UserPromptRecordPayload,
   ): void {
     try {
       this.turnParentUuids.push(this.lastRecordUuid);
@@ -1262,6 +1278,7 @@ export class ChatRecordingService {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
+        ...(payload ? { systemPayload: payload } : {}),
       };
       this.appendRecord(record);
     } catch (error) {

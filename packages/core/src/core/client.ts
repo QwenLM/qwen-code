@@ -50,6 +50,7 @@ import {
 } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
+import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
@@ -2216,6 +2217,13 @@ export class GeminiClient {
       // content's own pairing.
     }
 
+    // Set when the UserPromptSubmit hook injects additional context: the
+    // sanitized injected string and the pre-injection prompt projection.
+    // Telemetry, memory recall, and chat recording must see the user's own
+    // text, not the augmented request.
+    let injectedHookContext: string | undefined;
+    let preInjectionPromptText: string | undefined;
+
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
@@ -2297,11 +2305,22 @@ export class GeminiClient {
           return new Turn(this.getChat(), prompt_id);
         }
 
-        // Add additional context from hooks to the request
+        // Add additional context from hooks to the request. The context is
+        // appended as its own part, wrapped in a reserved tag so it stays
+        // distinguishable from user-authored text in model history, resume,
+        // and offline transcript analysis. `getAdditionalContext()` escapes
+        // `<`/`>`, so hook output cannot forge the closing tag.
+        // `promptText` is declared above this block so assignment here cannot
+        // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
         const additionalContext = hookOutput?.getAdditionalContext();
         if (additionalContext) {
           const requestArray = Array.isArray(request) ? request : [request];
-          request = [...requestArray, { text: additionalContext }];
+          request = [
+            ...requestArray,
+            { text: wrapUserPromptSubmitContext(additionalContext) },
+          ];
+          injectedHookContext = additionalContext;
+          preInjectionPromptText = promptText;
         }
       }
     } catch (error) {
@@ -2424,7 +2443,7 @@ export class GeminiClient {
         addUserPromptAttributes(
           this.config,
           interactionSpan,
-          partToString(request),
+          preInjectionPromptText ?? partToString(request),
         );
       }
     }
@@ -2478,12 +2497,16 @@ export class GeminiClient {
           }
           const promise = this.config
             .getMemoryManager()
-            .recall(this.config.getProjectRoot(), partToString(request), {
-              config: this.config,
-              excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-              recentTools: [...this.recentCompletedToolNames],
-              abortSignal: controller.signal,
-            })
+            .recall(
+              this.config.getProjectRoot(),
+              preInjectionPromptText ?? partToString(request),
+              {
+                config: this.config,
+                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+                recentTools: [...this.recentCompletedToolNames],
+                abortSignal: controller.signal,
+              },
+            )
             .catch((error: unknown) => {
               // Abort sources are now numerous (caller signal, new UserQuery,
               // cleanup paths, safety-net timeout). Keep a debug trace so
@@ -2548,9 +2571,16 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
-          this.config
-            .getChatRecordingService()
-            ?.recordUserMessage(request, goalPermit);
+          this.config.getChatRecordingService()?.recordUserMessage(
+            request,
+            goalPermit,
+            injectedHookContext !== undefined
+              ? {
+                  displayText: preInjectionPromptText,
+                  hookContext: injectedHookContext,
+                }
+              : undefined,
+          );
         }
       }
 

@@ -86,6 +86,7 @@ import {
   NotificationType,
   persistPermissionOutcome,
   createHookOutput,
+  wrapUserPromptSubmitContext,
   generateToolUseId,
   MessageBusType,
   MessageDisplayDispatcher,
@@ -2847,10 +2848,15 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
 
-              // Add additional context from hooks to the request
+              // Add additional context from hooks to the request, wrapped in
+              // the reserved tag so it stays distinguishable from
+              // user-authored text (same shape as the interactive path).
               const additionalContext = hookOutput?.getAdditionalContext();
               if (additionalContext) {
-                parts = [...parts, { text: additionalContext }];
+                parts = [
+                  ...parts,
+                  { text: wrapUserPromptSubmitContext(additionalContext) },
+                ];
               }
             }
 

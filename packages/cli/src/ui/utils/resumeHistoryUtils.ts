@@ -16,7 +16,10 @@ import type {
   AtCommandRecordPayload,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
-import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
+import {
+  getToolResponseDisplayText,
+  isUserPromptSubmitContextPartText,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -30,6 +33,36 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+
+/**
+ * Projects a plain user record to its display text.
+ *
+ * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
+ * the model-bound parts. For records that carry the reserved tag but no
+ * payload (written by other/newer writers), drops a trailing part that is
+ * entirely a tagged hook-context block. Legacy records with bare injected
+ * text fall back to the raw part concatenation.
+ */
+function extractUserRecordDisplayText(
+  record: ConversationRecord['messages'][number],
+): string {
+  const payload = record.systemPayload as { displayText?: string } | undefined;
+  if (payload?.displayText) {
+    return payload.displayText;
+  }
+  const parts = (record.message?.parts as Part[] | undefined) ?? [];
+  const lastText = parts.at(-1)?.text;
+  // Injection always appends the tagged block after the user's own part(s),
+  // so a genuine hook-context part is never the sole part. A single-part
+  // record matching the tag shape is user-authored and must be kept.
+  const displayParts =
+    parts.length > 1 &&
+    typeof lastText === 'string' &&
+    isUserPromptSubmitContextPartText(lastText)
+      ? parts.slice(0, -1)
+      : parts;
+  return extractTextFromParts(displayParts);
+}
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -356,9 +389,7 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
-          const text =
-            payload.userText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+          const text = payload.userText || extractUserRecordDisplayText(record);
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -381,7 +412,7 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractTextFromParts(record.message?.parts as Part[]);
+        const text = extractUserRecordDisplayText(record);
         if (text) {
           items.push({ type: 'user', text });
         }

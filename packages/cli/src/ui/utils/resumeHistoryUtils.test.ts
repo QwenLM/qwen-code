@@ -118,6 +118,71 @@ describe('resumeHistoryUtils', () => {
     expect(userItem.text).toBe('post-gap message');
   });
 
+  describe('UserPromptSubmit hook context provenance', () => {
+    const tagged =
+      '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    const buildUserItems = (record: Record<string, unknown>) => {
+      const conversation = {
+        messages: [record],
+      } as unknown as ConversationRecord;
+      const session: ResumedSessionData = {
+        conversation,
+      } as ResumedSessionData;
+      return buildResumedHistoryItems(session, makeConfig({}), 1_000);
+    };
+
+    it('prefers recorded displayText over the augmented parts', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
+        systemPayload: {
+          displayText: 'my prompt',
+          hookContext: 'injected hook context',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('strips a trailing whole-part tagged block when no displayText is recorded', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('keeps user-authored text that merely contains the tag', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: `quote: ${tagged} end` }] },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: `quote: ${tagged} end` },
+      ]);
+    });
+
+    it('keeps a sole part that matches the tag shape (user-authored)', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: tagged }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: tagged }]);
+    });
+
+    it('falls back to raw concatenation for legacy bare-injected records', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [{ text: 'my prompt' }, { text: 'bare injected context' }],
+        },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+      ]);
+    });
+  });
+
   it('converts conversation into history items with incremental ids', () => {
     const conversation = {
       messages: [
