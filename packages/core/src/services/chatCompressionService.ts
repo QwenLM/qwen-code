@@ -13,7 +13,7 @@ import {
   type CompactionTriggerReason,
   CompressionStatus,
 } from '../core/turn.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, outputClampMargin } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
@@ -65,6 +65,23 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
  * tokenizer count — the same kind of estimation slack `estimatePromptTokens`
  * already accounts for on the trigger side, but needed again here on the
  * request-construction side.
+ *
+ * 2026-07-28: kept as the historical/minimum value for reference, but
+ * `computeCompactionOutputBudget` now uses `outputClampMargin(window)`
+ * instead of this flat constant directly. A real production failure showed
+ * a flat 1000 isn't enough: `estimatedPromptTokens` here can itself be the
+ * caller's own char/4-based estimate (e.g. the hard-tier rescue's cheap-gate
+ * value, which is deliberately left un-inflated there — safe to under-count
+ * for a trigger decision, see `estimatePromptTokens`'s `conservative` param),
+ * and that under-count is dangerous once it feeds an output-budget calc. One
+ * real case fed a 43,549-token estimate into this function while the
+ * backend's true tokenizer count was 50,951 (a 7,402-token gap, far past
+ * this flat margin), computing a budget large enough to reproduce the exact
+ * 400-then-empty-summary failure this function exists to prevent.
+ * `outputClampMargin` (`max(10_000, 5% of window)`) is the same
+ * window-scaled margin already used by the main-turn clamp
+ * (`clampOutputTokensToWindow`), so both request-construction sites now
+ * share one safety-margin policy instead of drifting apart.
  */
 export const COMPACT_OUTPUT_SAFETY_MARGIN = 1_000;
 
@@ -254,7 +271,7 @@ export function computeCompactionOutputBudget(
   window: number,
   promptTokens: number,
 ): number {
-  const remaining = window - promptTokens - COMPACT_OUTPUT_SAFETY_MARGIN;
+  const remaining = window - promptTokens - outputClampMargin(window);
   return Math.max(0, Math.min(COMPACT_MAX_OUTPUT_TOKENS, remaining));
 }
 

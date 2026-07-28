@@ -8,6 +8,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
   COMPACT_MAX_OUTPUT_TOKENS,
+  COMPACT_MIN_OUTPUT_TOKENS,
+  computeCompactionOutputBudget,
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
@@ -15,7 +17,7 @@ import {
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { outputClampMargin, tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -63,6 +65,14 @@ describe('ChatCompressionService', () => {
 
     vi.mocked(tokenLimit).mockReturnValue(1000);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(500);
+    // `../core/tokenLimits.js` is module-mocked (line 28 above), which
+    // replaces every export including outputClampMargin with an auto-mock
+    // stub. Default it to the real formula (max(10_000, 5% of window)) so
+    // computeCompactionOutputBudget behaves the same as in production unless
+    // a specific test overrides it to exercise the margin's own behavior.
+    vi.mocked(outputClampMargin).mockImplementation((contextWindowSize) =>
+      Math.max(10_000, Math.round(0.05 * contextWindowSize)),
+    );
   });
 
   afterEach(() => {
@@ -1013,9 +1023,15 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    // contextWindowSize bumped from the old 6_000 toy value: outputClampMargin
+    // now scales with window (max(10_000, 5%)), so a flat 10_000 floor alone
+    // would swallow the whole old 6_000 window and make the compaction
+    // budget check bail out before ever reaching the code path this test
+    // exercises (the inflated-token-count rejection, downstream of a
+    // successful side-query call).
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 6_000,
+      contextWindowSize: 50_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1268,11 +1284,18 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-      90_000,
+      120_000,
     );
+    // window/originalTokenCount bumped from 100_000/90_000: outputClampMargin
+    // now scales with window (max(10_000, 5%)), so the old pair left 0 room
+    // (100_000-90_000-10_000=0), below COMPACT_MIN_OUTPUT_TOKENS, causing
+    // compress() to bail before ever reaching the code path this test
+    // exercises. 150_000/120_000 clears both the cheap-gate auto threshold
+    // (auto(150_000)=117_000) and leaves comfortable budget room
+    // (150_000-120_000-10_000=20_000).
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 100_000,
+      contextWindowSize: 150_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1870,6 +1893,13 @@ describe('ChatCompressionService.compress sideQuery config', () => {
   });
 
   it('passes maxOutputTokens=20_000 and includeThoughts=false to runSideQuery', async () => {
+    // This describe block is a sibling of the outer 'ChatCompressionService'
+    // describe, so its beforeEach (which defaults the module-mocked
+    // outputClampMargin to the real formula) does not apply here — set it
+    // directly for this suite too.
+    vi.mocked(outputClampMargin).mockImplementation((contextWindowSize) =>
+      Math.max(10_000, Math.round(0.05 * contextWindowSize)),
+    );
     const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>summary</state_snapshot>',
       usage: {
@@ -1894,14 +1924,14 @@ describe('ChatCompressionService.compress sideQuery config', () => {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
-      // 210_000 (rather than the round 200_000) so that after subtracting
-      // originalTokenCount(180_000) and COMPACT_OUTPUT_SAFETY_MARGIN(1_000),
+      // 225_000 so that after subtracting originalTokenCount(180_000) and
+      // outputClampMargin(225_000)=max(10_000, 5%*225_000)=11_250,
       // computeCompactionOutputBudget still has >= COMPACT_MAX_OUTPUT_TOKENS
-      // of headroom left and clamps to the expected 20_000 below, rather than
-      // silently returning a smaller dynamic budget.
+      // of headroom left (33,750) and clamps to the expected 20_000 below,
+      // rather than silently returning a smaller dynamic budget.
       getContentGeneratorConfig: vi
         .fn()
-        .mockReturnValue({ contextWindowSize: 210_000 }),
+        .mockReturnValue({ contextWindowSize: 225_000 }),
       getHookSystem: vi.fn().mockReturnValue({
         fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
         firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
@@ -3490,5 +3520,64 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     expect(flat).toContain('<plan-mode-active>');
     expect(flat).toContain('<background-tasks>');
     expect(flat).toContain('agent-bg');
+  });
+});
+
+describe('computeCompactionOutputBudget', () => {
+  beforeEach(() => {
+    // '../core/tokenLimits.js' is module-mocked at the top of this file;
+    // default outputClampMargin to the real formula so these unit tests
+    // exercise computeCompactionOutputBudget's own logic, not a stubbed
+    // margin.
+    vi.mocked(outputClampMargin).mockImplementation((contextWindowSize) =>
+      Math.max(10_000, Math.round(0.05 * contextWindowSize)),
+    );
+  });
+
+  it('clamps to COMPACT_MAX_OUTPUT_TOKENS when the window has ample room', () => {
+    expect(computeCompactionOutputBudget(200_000, 10_000)).toBe(
+      COMPACT_MAX_OUTPUT_TOKENS,
+    );
+  });
+
+  it('floors at 0 rather than going negative when promptTokens already exceeds the window', () => {
+    expect(computeCompactionOutputBudget(65_536, 70_000)).toBe(0);
+  });
+
+  it("reproduces the real-world 2026-07-28 KAT-Coder-V2.5-Dev regression and confirms the fix: a 43,549-token client-side estimate (vs. the backend tokenizer's true 50,951) no longer produces a budget that overflows the window", () => {
+    // Real production numbers from the qwen-code + KAT-Coder-V2.5-Dev
+    // COMPRESSION_FAILED_EMPTY_SUMMARY incident (2026-07-28, ArgoStack
+    // Research/Discovery_QwenCode-MainTurnOutputClamp-SeparateBug doc):
+    // the hard-tier rescue's own char/4 estimate (43,549) was fed into this
+    // function as `promptTokens`. With the OLD flat 1,000-token
+    // COMPACT_OUTPUT_SAFETY_MARGIN, the computed budget (20,000, clamped by
+    // COMPACT_MAX_OUTPUT_TOKENS) plus the TRUE backend prompt size (50,951)
+    // would have summed to 70,951 — 5,415 tokens past the 65,536 window.
+    const window = 65_536;
+    const clientEstimatedPromptTokens = 43_549;
+    const trueBackendPromptTokens = 50_951;
+
+    const budget = computeCompactionOutputBudget(
+      window,
+      clientEstimatedPromptTokens,
+    );
+
+    // The fix (outputClampMargin scaling with window: max(10_000, 5%) instead
+    // of a flat 1,000) must leave enough headroom that even the TRUE
+    // (larger) prompt size still fits under the window once this budget is
+    // requested.
+    expect(trueBackendPromptTokens + budget).toBeLessThanOrEqual(window);
+    expect(budget).toBeGreaterThanOrEqual(COMPACT_MIN_OUTPUT_TOKENS);
+  });
+
+  it('uses a window-scaled margin (not a flat constant): a larger window gets a larger absolute margin', () => {
+    const smallWindowBudget = computeCompactionOutputBudget(100_000, 50_000);
+    const largeWindowBudget = computeCompactionOutputBudget(1_000_000, 50_000);
+    // Same prompt size, much larger window → margin grows with window (5%
+    // of 1,000,000 = 50,000 vs. the 10,000 floor for 100,000), so the larger
+    // window's budget benefits from more room, not just an equal pass-through
+    // of the extra window size.
+    expect(largeWindowBudget).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(smallWindowBudget).toBeLessThanOrEqual(largeWindowBudget);
   });
 });
