@@ -277,7 +277,9 @@ export class StatusCardController {
     try {
       if (!(await record.ready)) return false;
       await record.writeChain;
-      const finalContent = boundContent(content || record.content);
+      const finalContent = boundContent(
+        sanitizeStreamingImageMarkers(content || record.content),
+      );
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',

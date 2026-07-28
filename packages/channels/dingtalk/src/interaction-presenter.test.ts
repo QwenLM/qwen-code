@@ -254,6 +254,73 @@ describe('DingtalkInteractionPresenter', () => {
     ]);
   });
 
+  it.each([
+    'response_boundary',
+    'input_requested',
+    'completed',
+    'failed',
+  ] as const)(
+    'hides local image paths when output ends with %s',
+    async (reason) => {
+      const { client, presenter } = createHarness();
+      presenter.appendOutput(
+        segment('segment-1'),
+        'before [IMAGE: /Users/ben/private/image.png] after',
+      );
+
+      await presenter.closeOutput('segment-1', '', reason);
+
+      await vi.waitFor(() => {
+        const terminalPayload = vi
+          .mocked(client.updateInstance)
+          .mock.calls.map(([request]) => request.cardParamMap)
+          .find((payload) => payload.flowStatus === 3);
+        expect(terminalPayload).toMatchObject({
+          blockList: '[{"type":0,"markdown":"before [Image pending] after"}]',
+          content: 'before [Image pending] after',
+          copy_content: 'before [Image pending] after',
+        });
+        expect(JSON.stringify(terminalPayload)).not.toContain(
+          '/Users/ben/private',
+        );
+      });
+    },
+  );
+
+  it.each([
+    ['cancel_command', 'Stopped'],
+    ['steer', 'Cancelled'],
+  ] as const)(
+    'hides local image paths when output becomes %s',
+    async (reason, expectedState) => {
+      const { client, presenter } = createHarness();
+      presenter.appendOutput(
+        segment('segment-1'),
+        'before [IMAGE: /Users/ben/private/image.png] after',
+      );
+
+      presenter.terminalizeRun('run-1', 'cancelled', reason);
+
+      await vi.waitFor(() => {
+        const terminalPayload = vi
+          .mocked(client.updateInstance)
+          .mock.calls.map(([request]) => request.cardParamMap)
+          .find((payload) => payload.flowStatus === 3);
+        expect(terminalPayload).toMatchObject({
+          blockList: '[{"type":0,"markdown":"before [Image pending] after"}]',
+          content: 'before [Image pending] after',
+          copy_content: 'before [Image pending] after',
+          statusLine: expect.stringMatching(
+            new RegExp(`^${expectedState} · \\d+s$`),
+          ),
+        });
+        expect(JSON.stringify(terminalPayload)).not.toContain(
+          '/Users/ben/private',
+        );
+      });
+    },
+  );
+
   it('falls back to text before presenting a question when output finalization fails', async () => {
     const { client, presenter, sendFallback } = createHarness();
     vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
