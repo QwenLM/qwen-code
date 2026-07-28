@@ -628,6 +628,20 @@ describe('runner decision contracts', () => {
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
+        coldWarmPairedDeltasMs: [],
+        seed: 7264,
+        coldPromptToProviderRequestP50Ms: 200,
+        warmPromptToProviderRequestP50Ms: 100,
+        coldPromptToFirstModelOutputP50Ms: 400,
+      }),
+    ).toMatchObject({
+      passed: false,
+      pairedMedianDeltaMs: null,
+      bootstrapMedianCi95: null,
+    });
+    expect(
+      evaluateSingleBundlePrototypeGate({
+        complete: true,
         coldWarmPairedDeltasMs: tightAround(30),
         seed: 7264,
         coldPromptToProviderRequestP50Ms: 200,
