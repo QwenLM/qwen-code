@@ -1336,13 +1336,13 @@ export class DingtalkChannel extends ChannelBase {
     await this.sendResponseMessage(chatId, text, sessionId);
   }
 
-  protected override onResponseBoundary(
+  protected override onOutputSegmentEnd(
     _chatId: string,
     _sessionId: string,
-    segment?: ChannelOutputSegmentContext,
-    reason: ChannelOutputSegmentEndReason = 'response_boundary',
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
-    if (!segment || !this.interactionPresenter) return;
+    if (!this.interactionPresenter) return;
     return this.interactionPresenter
       .closeOutput(segment.segmentId, '', reason, segment)
       .then(() => undefined);
@@ -1365,13 +1365,6 @@ export class DingtalkChannel extends ChannelBase {
       return { kind: 'unsupported' };
     }
     if (this.questionCardController && this.interactionPresenter) {
-      if (context.precedingSegmentId) {
-        await this.interactionPresenter.closeOutput(
-          context.precedingSegmentId,
-          '',
-          'input_requested',
-        );
-      }
       return this.interactionPresenter.presentInput(context);
     }
     try {

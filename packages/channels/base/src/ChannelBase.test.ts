@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryEntry,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -1362,9 +1364,23 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
-    it('passes visible output identity without projecting a shared boundary', async () => {
+    it('ends visible output before presenting user input without projecting a legacy boundary', async () => {
       const ch = createChannel();
-      ch.userInputPresentationResult = { kind: 'presented' };
+      const order: string[] = [];
+      Object.assign(ch, {
+        onOutputSegmentEnd: async (
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => {
+          order.push(reason);
+        },
+      });
+      ch.userInputPresentationHandler = async () => {
+        order.push('present');
+        return { kind: 'presented' };
+      };
       const active = await startActiveSession(ch);
 
       (bridge as unknown as EventEmitter).emit(
@@ -1381,6 +1397,7 @@ describe('ChannelBase', () => {
         | undefined;
       expect(segment?.segmentId).toEqual(expect.any(String));
       expect(ch.responseBoundaries).toEqual([]);
+      expect(order).toEqual(['input_requested', 'present']);
       expect(
         (
           ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
@@ -11692,12 +11709,12 @@ describe('ChannelBase', () => {
       expect(repeatedSegment?.segmentId).toBe(firstSegment?.segmentId);
       expect(secondSegment?.segmentId).not.toBe(firstSegment?.segmentId);
       expect(ch.responseBoundaries).toEqual([
-        expect.objectContaining({
-          segment: expect.objectContaining({
-            segmentId: firstSegment?.segmentId,
-          }),
-          reason: 'response_boundary',
-        }),
+        {
+          chatId: 'chat1',
+          sessionId: 's-1',
+          segment: undefined,
+          reason: undefined,
+        },
       ]);
       expect(ch.responseCompletions).toEqual([
         expect.objectContaining({
@@ -11721,16 +11738,19 @@ describe('ChannelBase', () => {
         },
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
 
       await ch.handleInbound(envelope());
 
       const segmentId = ch.responseChunks[0]!.segment?.segmentId;
-      expect(ch.responseBoundaries).toEqual([
-        expect.objectContaining({
-          segment: expect.objectContaining({ segmentId }),
-          reason: 'completed',
-        }),
-      ]);
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'completed',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('does not expose mutable lifecycle metadata references', async () => {
@@ -11865,6 +11885,8 @@ describe('ChannelBase', () => {
         },
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
 
       await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
 
@@ -11879,12 +11901,13 @@ describe('ChannelBase', () => {
         ]),
       );
       const segmentId = ch.responseChunks[0]!.segment?.segmentId;
-      expect(ch.responseBoundaries).toEqual([
-        expect.objectContaining({
-          segment: expect.objectContaining({ segmentId }),
-          reason: 'failed',
-        }),
-      ]);
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'failed',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('contains a throwing onTaskLifecycle hook and logs it', async () => {
@@ -12012,6 +12035,8 @@ describe('ChannelBase', () => {
         pendingPrompt,
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
       ch.enableCancelCommand();
 
       const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
@@ -12042,12 +12067,13 @@ describe('ChannelBase', () => {
         ]),
       );
       const segmentId = ch.responseChunks[0]!.segment?.segmentId;
-      expect(ch.responseBoundaries).toEqual([
-        expect.objectContaining({
-          segment: expect.objectContaining({ segmentId }),
-          reason: 'cancelled',
-        }),
-      ]);
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'cancelled',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('suppresses lifecycle activity while cancel command is still awaiting bridge cancellation', async () => {

@@ -528,22 +528,23 @@ function getCompleteHook(
   return fn.bind(channel);
 }
 
-function getBoundaryHook(
+function getOutputSegmentEndHook(
   channel: DingtalkChannelInstance,
 ): (
   chatId: string,
   sessionId: string,
-  segment?: ChannelOutputSegmentContext,
-  reason?: ChannelOutputSegmentEndReason,
+  segment: ChannelOutputSegmentContext,
+  reason: ChannelOutputSegmentEndReason,
 ) => void | Promise<void> {
   const fn = (channel as unknown as Record<string, unknown>)[
-    'onResponseBoundary'
+    'onOutputSegmentEnd'
   ] as (
     chatId: string,
     sessionId: string,
-    segment?: ChannelOutputSegmentContext,
-    reason?: ChannelOutputSegmentEndReason,
-  ) => void | Promise<void>;
+    segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ) => void | Promise<void> | undefined;
+  expect(fn).toBeTypeOf('function');
   return fn.bind(channel);
 }
 
@@ -1534,7 +1535,7 @@ describe('DingtalkChannel status cards', () => {
     expect(terminalizeRun).toHaveBeenCalledWith('run-1', 'completed');
   });
 
-  it('closes the exact output segment at a response boundary', async () => {
+  it('closes the exact output segment when that segment ends', async () => {
     const channel = createChannel();
     const closeOutput = vi.fn().mockResolvedValue(true);
     (
@@ -1556,7 +1557,7 @@ describe('DingtalkChannel status cards', () => {
       },
     } as ChannelOutputSegmentContext;
 
-    await getBoundaryHook(channel)(
+    await getOutputSegmentEndHook(channel)(
       'cid-1',
       'session-1',
       segment,
@@ -1615,17 +1616,10 @@ describe('DingtalkChannel question cards', () => {
 
   it('presents through the matching attended run only', async () => {
     const channel = createChannel();
-    const operations: string[] = [];
-    const closeOutput = vi.fn().mockImplementation(async () => {
-      operations.push('close');
-      return true;
-    });
+    const closeOutput = vi.fn().mockResolvedValue(true);
     const presentInput = vi
       .fn()
-      .mockImplementationOnce(async () => {
-        operations.push('present');
-        return { kind: 'presented' };
-      })
+      .mockResolvedValueOnce({ kind: 'presented' })
       .mockResolvedValueOnce({ kind: 'unsupported' });
     (
       channel as unknown as {
@@ -1654,13 +1648,8 @@ describe('DingtalkChannel question cards', () => {
     await expect(getUserInputHook(channel)(context)).resolves.toEqual({
       kind: 'presented',
     });
-    expect(closeOutput).toHaveBeenCalledWith(
-      'segment-1',
-      '',
-      'input_requested',
-    );
     expect(presentInput).toHaveBeenCalledWith(context);
-    expect(operations).toEqual(['close', 'present']);
+    expect(closeOutput).not.toHaveBeenCalled();
 
     await expect(
       getUserInputHook(channel)({ ...context, runId: 'unknown' }),

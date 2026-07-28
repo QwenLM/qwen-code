@@ -599,6 +599,14 @@ export abstract class ChannelBase {
     pending.userInputPresented = true;
     return (async () => {
       try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
         const result = await this.presentUserInputRequest(context);
         if (this.pendingPermissions.get(pending.requestId) !== pending) {
           return true;
@@ -906,7 +914,12 @@ export abstract class ChannelBase {
     }
     active.cancellationEmitted = true;
     const segment = this.closeOutputSegment(sessionId, active);
-    this.notifyOutputSegmentEnd(active.chatId, sessionId, segment, 'cancelled');
+    void this.notifyOutputSegmentEnd(
+      active.chatId,
+      sessionId,
+      segment,
+      'cancelled',
+    );
     this.emitTaskLifecycle({
       ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
       type: 'cancelled',
@@ -1092,27 +1105,15 @@ export abstract class ChannelBase {
     return this.outputSegmentContext(sessionId, active, segmentId, target);
   }
 
-  private notifyOutputSegmentEnd(
+  private async notifyOutputSegmentEnd(
     chatId: string,
     sessionId: string,
     segment: ChannelOutputSegmentContext | undefined,
     reason: ChannelOutputSegmentEndReason,
-  ): void {
+  ): Promise<void> {
     if (!segment) return;
     try {
-      const result = this.onResponseBoundary(
-        chatId,
-        sessionId,
-        segment,
-        reason,
-      );
-      if (result && typeof result.catch === 'function') {
-        result.catch((err: unknown) => {
-          process.stderr.write(
-            `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
-          );
-        });
-      }
+      await this.onOutputSegmentEnd(chatId, sessionId, segment, reason);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
@@ -2315,6 +2316,17 @@ export abstract class ChannelBase {
     _segment?: ChannelOutputSegmentContext,
   ): void {}
 
+  protected onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    _segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    if (reason === 'response_boundary') {
+      return this.onResponseBoundary(chatId, sessionId);
+    }
+  }
+
   /**
    * Called when the agent starts a new response segment for the same prompt.
    * Override to clear adapter-owned streaming buffers.
@@ -2322,8 +2334,6 @@ export abstract class ChannelBase {
   protected onResponseBoundary(
     _chatId: string,
     _sessionId: string,
-    _segment?: ChannelOutputSegmentContext,
-    _reason?: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {}
 
   protected async sendResponseMessage(
@@ -5439,7 +5449,7 @@ export abstract class ChannelBase {
         heldChunks.length = 0;
         hasStreamedText = false;
         const segment = this.closeOutputSegment(sessionId, promptState);
-        this.notifyOutputSegmentEnd(
+        void this.notifyOutputSegmentEnd(
           envelope.chatId,
           sessionId,
           segment,
@@ -5490,7 +5500,7 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
           const segment = this.closeOutputSegment(sessionId, promptState);
-          this.notifyOutputSegmentEnd(
+          void this.notifyOutputSegmentEnd(
             envelope.chatId,
             sessionId,
             segment,
@@ -5515,7 +5525,7 @@ export abstract class ChannelBase {
         if (!promptState.cancelled) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
-          this.notifyOutputSegmentEnd(
+          void this.notifyOutputSegmentEnd(
             envelope.chatId,
             sessionId,
             segment,
