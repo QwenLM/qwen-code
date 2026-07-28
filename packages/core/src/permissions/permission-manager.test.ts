@@ -91,6 +91,7 @@ describe('getSpecifierKind', () => {
 
   it('returns "path" for file read/edit tools', async () => {
     expect(getSpecifierKind('read_file')).toBe('path');
+    expect(getSpecifierKind('zoom_image')).toBe('path');
     expect(getSpecifierKind('edit')).toBe('path');
     expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
@@ -118,7 +119,8 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('edit', 'edit')).toBe(true);
   });
 
-  it('"Read" (read_file) covers grep_search, glob, list_directory', async () => {
+  it('"Read" (read_file) covers all read-only file tools', async () => {
+    expect(toolMatchesRuleToolName('read_file', 'zoom_image')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'grep_search')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'glob')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
@@ -2290,9 +2292,17 @@ describe('PermissionManager', () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('zoom_image')).toBe(false);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
       expect(await pm.isToolEnabled('edit')).toBe(false);
       expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
+    it('coreTools allowlist: ZoomImage alias enables zoom_image', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['ZoomImage'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('zoom_image')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
     });
 
     it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
@@ -2583,6 +2593,7 @@ describe('PermissionManager', () => {
 describe('getRuleDisplayName', () => {
   it('maps read tools to "Read" meta-category', async () => {
     expect(getRuleDisplayName('read_file')).toBe('Read');
+    expect(getRuleDisplayName('zoom_image')).toBe('Read');
     expect(getRuleDisplayName('grep_search')).toBe('Read');
     expect(getRuleDisplayName('glob')).toBe('Read');
     expect(getRuleDisplayName('list_directory')).toBe('Read');
@@ -2622,6 +2633,14 @@ describe('buildPermissionRules', () => {
         filePath: '/Users/alice/.secrets',
       });
       // read_file is file-targeted → dirname gives /Users/alice, plus /** glob
+      expect(rules).toEqual(['Read(//Users/alice/**)']);
+    });
+
+    it('generates Read rule scoped to parent directory for zoom_image', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'zoom_image',
+        filePath: '/Users/alice/chart.png',
+      });
       expect(rules).toEqual(['Read(//Users/alice/**)']);
     });
 

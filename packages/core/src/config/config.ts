@@ -7161,6 +7161,10 @@ export class Config {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
     });
+    await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
+      const { ZoomImageTool } = await import('../tools/zoom-image.js');
+      return new ZoomImageTool(this);
+    });
 
     // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
