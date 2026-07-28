@@ -5663,6 +5663,24 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
   });
 
+  it('Config exposes the telemetry user ID', () => {
+    const config = new Config({
+      ...baseParams,
+      telemetry: { enabled: true, userId: '  user-079458  ' },
+    });
+
+    expect(config.getTelemetryUserId()).toBe('user-079458');
+  });
+
+  it('Config omits the telemetry user ID by default', () => {
+    const config = new Config({
+      ...baseParams,
+      telemetry: { enabled: true },
+    });
+
+    expect(config.getTelemetryUserId()).toBeUndefined();
+  });
+
   it('should have a getFileService method that returns FileDiscoveryService', () => {
     const config = new Config(baseParams);
     const fileService = config.getFileService();
