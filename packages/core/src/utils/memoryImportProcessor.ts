@@ -327,10 +327,20 @@ export async function processImports(
             normalizedFullPath,
             depth + 1,
           );
-          await notifyFileImported(options, {
-            filePath: normalizedFullPath,
-            parentFilePath: normalizedPath,
-          });
+          // Announce a file the first time it is reached, matching the single
+          // copy of it in the flat output. A file first met down a truncated
+          // route is re-expanded when a shallower route reaches it, and that
+          // second pass must not announce it again: nothing downstream
+          // de-duplicates, so the consumer would see one loaded file reported
+          // twice under two different parents. `childSeenAt` is read before
+          // the recursion above, which is what makes it a first-visit test --
+          // afterwards the entry always reads `depth + 1`.
+          if (childSeenAt === undefined) {
+            await notifyFileImported(options, {
+              filePath: normalizedFullPath,
+              parentFilePath: normalizedPath,
+            });
+          }
         } catch (error) {
           // If file doesn't exist, silently skip this import (it's not a real import)
           // Only log warnings for other types of errors

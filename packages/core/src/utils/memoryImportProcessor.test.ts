@@ -993,6 +993,66 @@ describe('memoryImportProcessor', () => {
       // The shallower re-expansion must not emit x.md a second time.
       expect(result.content.match(/XFILE/g)).toHaveLength(1);
     });
+
+    it('notifies once for a file a shallower route re-expands', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      mockedFs.access.mockReset();
+      mockedFs.readFile.mockReset();
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockImplementation(async (file: unknown) => {
+        switch (path.basename(String(file))) {
+          case 'deep0.md':
+            return 'DEEP0 @./deep1.md';
+          case 'deep1.md':
+            return 'DEEP1 @./x.md';
+          case 'x.md':
+            return 'XFILE @./y.md';
+          case 'y.md':
+            return 'YFILE';
+          default:
+            return '';
+        }
+      });
+
+      const importedFiles: Array<{
+        filePath: string;
+        parentFilePath: string;
+      }> = [];
+
+      // Same shape as the re-expansion case above: the deep route reaches x.md
+      // at the limit, then the root's own direct import re-expands it.
+      await processImports(
+        'Root @./x.md @./deep0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+        {
+          onFileImported: (event) => {
+            importedFiles.push(event);
+          },
+        },
+      );
+
+      // The notification says "this instruction file was loaded", and x.md is
+      // emitted into the flat output exactly once however many routes reach
+      // it, so it must be announced exactly once too. Nothing downstream
+      // de-duplicates: onFileImported feeds notifyInstructionsLoaded in
+      // memoryDiscovery, which forwards every call straight to the consumer.
+      const announced = importedFiles.map((event) =>
+        path.basename(event.filePath),
+      );
+      expect(announced.filter((name) => name === 'x.md')).toHaveLength(1);
+      // Every other file is announced once as well, and each exactly once.
+      expect([...announced].sort()).toEqual([
+        'deep0.md',
+        'deep1.md',
+        'x.md',
+        'y.md',
+      ]);
+    });
   });
 
   describe('validateImportPath', () => {
