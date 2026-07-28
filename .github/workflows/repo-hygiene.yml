@@ -36,7 +36,6 @@ jobs:
   # ── Phase 1: Scan (read-only, no code changes) ──────────────────────────
   scan:
     name: 'Scan'
-    if: '${{ github.repository == ''ZijianZhang989/qwen-code'' }}'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 60
     permissions:
@@ -162,7 +161,7 @@ jobs:
   # ── Phase 2: Fix (write code, push PR) ──────────────────────────────────
   fix:
     name: 'Fix'
-    if: '${{ github.repository == ''ZijianZhang989/qwen-code'' && needs.scan.result == ''success'' }}'
+    if: '${{ needs.scan.result == ''success'' }}'
     needs: 'scan'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
