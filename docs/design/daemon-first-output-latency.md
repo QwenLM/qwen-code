@@ -52,6 +52,7 @@ All latency timestamps use `performance.now()` in the parent harness. No duratio
 | -------------------------- | ---------------------------------------------------------------------------------- |
 | `processSpawnAt`           | Immediately before daemon `spawn`                                                  |
 | `sessionReadyAt`           | Successful session response fully read and validated                               |
+| `sseReadyAt`               | First SSE epoch callback observed; the dwell anchor                                |
 | `promptStartedAt`          | Immediately before starting the non-blocking prompt request                        |
 | `promptAcceptedAt`         | HTTP `202` body validated, including top-level `promptId` and replay cursor        |
 | `providerRequestArrivalAt` | Fake Provider accepts the measured request, before its fixed delay                 |
@@ -150,7 +151,7 @@ For each metric, report nearest-rank P50/P90/P99 and mean for each arm, paired m
 
 Two definitions of median coexist deliberately and a reader comparing columns should expect them to differ on an even number of samples. The per-arm `p50` is nearest-rank, so it is always an observed value. The paired `median delta`, and the medians resampled inside the bootstrap, average the two middle values on even counts. A Markdown row can therefore show a `p50` and a `median delta` that do not reconcile arithmetically without either being wrong.
 
-The paired-median 95% confidence interval uses 10,000 seeded bootstrap resamples of valid pair deltas with replacement; seed and iteration count are stored. Its bounds are the nearest-rank 2.5th and 97.5th percentiles. `orderSensitive` is true when AB and BA median deltas have opposite signs and either absolute median is at least 10 ms. Order sensitivity makes the run inconclusive rather than being averaged away.
+The paired-median 95% confidence interval uses 10,000 seeded bootstrap resamples of valid pair deltas with replacement; seed and iteration count are stored. Its bounds are the nearest-rank 2.5th and 97.5th percentiles. Each metric's seed is offset by its position in the metric list, so inserting or reordering a metric shifts the bootstrap bounds of every later metric and makes artifacts on either side of the change incomparable even for identical raw samples; the per-metric stored `seed` keeps this auditable. `orderSensitive` is true when AB and BA median deltas have opposite signs and either absolute median is at least 10 ms. Order sensitivity makes the run inconclusive rather than being averaged away.
 
 A paired artifact's top-level outcome describes only its primary metric in that one scenario. It does not evaluate the cross-scenario, resource, functional, or publication gates and cannot by itself authorize a Phase 2 pull request.
 
