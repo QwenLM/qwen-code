@@ -2564,6 +2564,22 @@ export class GeminiChat {
               ]
             : requestContents;
 
+        /**
+         * Forget any in-flight continuation.
+         *
+         * Called from every branch that re-sends the *original* request, since
+         * those emit a `RETRY` without `isContinuation` and the UI drops the
+         * delivered text on that event. The request has to drop it too, or the
+         * resend would keep asking the model to resume output the caller no
+         * longer has — and a later success would merge that discarded text back
+         * into history, leaving the UI and history permanently out of step.
+         */
+        const resetTransportContinuation = () => {
+          transportContinuationCount = 0;
+          transportContinuationText = '';
+          transportContinuationPrefix = '';
+        };
+
         for (;;) {
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
@@ -2572,6 +2588,11 @@ export class GeminiChat {
           let streamYieldedFunctionCall = false;
           try {
             if (suppressNextRetryEvent) {
+              // The branch that scheduled this attempt already emitted its own
+              // RETRY, and — if that RETRY was a fresh restart rather than a
+              // continuation — already called `resetTransportContinuation`.
+              // Resetting again here would clear the state of a continuation
+              // that is legitimately in flight.
               suppressNextRetryEvent = false;
             } else if (
               rateLimitRetryCount > 0 ||
@@ -2579,15 +2600,10 @@ export class GeminiChat {
               transportStreamRetryCount > 0 ||
               transportContinuationCount > 0
             ) {
-              // A fresh-restart retry reaching this point means some other
-              // branch (rate limit, invalid stream, reactive compression)
-              // chose to re-send the original request. That RETRY event has no
-              // `isContinuation`, so the UI discards the delivered text — the
-              // request must discard it too, or the resend would keep asking
-              // the model to continue output the caller no longer has.
-              transportContinuationCount = 0;
-              transportContinuationText = '';
-              transportContinuationPrefix = '';
+              // A fresh-restart retry reaching this point means a branch that
+              // does not set `suppressNextRetryEvent` (rate limit, invalid
+              // stream) chose to re-send the original request.
+              resetTransportContinuation();
               yield { type: StreamEventType.RETRY };
             }
 
@@ -2763,6 +2779,12 @@ export class GeminiChat {
                 transportCode: classification.transportCode,
               });
               yield { type: StreamEventType.RETRY };
+              // A replay is a fresh restart, so anything a previous
+              // continuation had staged must go. Reaching here with state to
+              // clear is possible: a continuation attempt can itself die from
+              // a transport error before yielding visible output, which lands
+              // in this branch rather than the continuation one.
+              resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
@@ -2914,6 +2936,11 @@ export class GeminiChat {
                       info: reactiveInfo,
                     };
                     yield { type: StreamEventType.RETRY };
+                    // Compression rebuilt `requestContents` from scratch, so
+                    // any continuation staged against the old contents is
+                    // stale — and the RETRY above already told the UI to drop
+                    // the delivered text.
+                    resetTransportContinuation();
                     suppressNextRetryEvent = true;
                     continue;
                   }

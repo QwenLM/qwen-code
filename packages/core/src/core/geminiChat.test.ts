@@ -8000,6 +8000,140 @@ describe('GeminiChat', async () => {
           vi.useRealTimers();
         }
       });
+
+      it('drops a pending continuation when a replay takes over', async () => {
+        // Same requirement as the test above, but through the branch that sets
+        // `suppressNextRetryEvent`: a socket cut delivers text and schedules a
+        // continuation, then the continuation attempt is cut again *before*
+        // yielding anything visible — which lands in the replay branch, not the
+        // continuation branch, because replay is still legal with no visible
+        // output. Replay re-sends the original request and emits a plain RETRY,
+        // so the staged continuation must be discarded. Otherwise the replay
+        // would carry a resume instruction for text the UI has thrown away, and
+        // the merge on success would put that text back into history.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockResolvedValueOnce(cutAfter([]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-replaced-by-replay',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('discarded half'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          // The delivered text was discarded by the UI on the plain RETRY, so
+          // it must not be merged back in here.
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a pending continuation when reactive compression takes over', async () => {
+        // The third branch that emits a plain RETRY alongside
+        // `suppressNextRetryEvent`. This ordering is not far-fetched: a
+        // continuation attempt sends *more* than the original request (the
+        // delivered text plus the resume instruction ride along), so it is
+        // exactly the attempt most likely to overflow the context window.
+        // Compression rebuilds `requestContents` from a compacted history, so a
+        // continuation staged against the old contents is stale twice over.
+        vi.useFakeTimers();
+        try {
+          vi.spyOn(ChatCompressionService.prototype, 'compress')
+            // The pre-send proactive pass; the reactive one is the second call.
+            .mockResolvedValueOnce({
+              newHistory: null,
+              info: {
+                originalTokenCount: 0,
+                newTokenCount: 0,
+                compressionStatus: CompressionStatus.NOOP,
+              },
+            })
+            .mockResolvedValueOnce({
+              newHistory: [
+                { role: 'user', parts: [{ text: 'summary' }] },
+                { role: 'model', parts: [{ text: 'ack' }] },
+                { role: 'user', parts: [{ text: 'test' }] },
+              ],
+              info: {
+                originalTokenCount: 135_000,
+                newTokenCount: 40_000,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+            });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockRejectedValueOnce(
+              new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-replaced-by-compression',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('discarded half'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {
