@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, useEffect, type ReactNode } from 'react';
+import { act, useEffect, useState, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
@@ -60,21 +60,26 @@ function render(ui: ReactNode): void {
   );
 }
 
+function hostEl(): HTMLElement | null {
+  return (
+    container!.querySelector('[data-testid="pane-header-actions-inline"]') ??
+    container!.querySelector('[data-testid="pane-header-actions-host"]')
+  );
+}
+
 function stubWidths(opts: {
   header: number;
   hostActions: number;
   trailing?: number;
 }): void {
   const header = container!.querySelector('header') as HTMLElement;
-  const inline = container!.querySelector(
-    '[data-testid="pane-header-actions-inline"]',
-  ) as HTMLElement | null;
+  const host = hostEl();
   Object.defineProperty(header, 'clientWidth', {
     configurable: true,
     value: opts.header,
   });
-  if (inline) {
-    Object.defineProperty(inline, 'scrollWidth', {
+  if (host) {
+    Object.defineProperty(host, 'scrollWidth', {
       configurable: true,
       value: opts.hostActions,
     });
@@ -88,6 +93,13 @@ function stubWidths(opts: {
       value: opts.trailing ?? 26,
     });
   }
+}
+
+function collapse(): void {
+  stubWidths({ header: 200, hostActions: 180, trailing: 26 });
+  act(() => {
+    resizeCallback?.([], {} as ResizeObserver);
+  });
 }
 
 describe('PaneHeaderActions', () => {
@@ -126,6 +138,7 @@ describe('PaneHeaderActions', () => {
   });
 
   it('collapses host actions into an overflow menu with menuitems', async () => {
+    const onShare = vi.fn();
     render(
       <header>
         <span>Title</span>
@@ -136,29 +149,25 @@ describe('PaneHeaderActions', () => {
             </button>
           }
         >
-          <button type="button" data-testid="host-action">
+          <button type="button" data-testid="host-action" onClick={onShare}>
             Share
           </button>
         </PaneHeaderActions>
       </header>,
     );
 
-    // header 200 - titleMin 64 - trailing 26 - gap 8 ≈ 102; host 180 → collapse
-    stubWidths({ header: 200, hostActions: 180, trailing: 26 });
-    act(() => {
-      resizeCallback?.([], {} as ResizeObserver);
-    });
+    collapse();
 
     expect(
       container!.querySelector('[data-testid="pane-header-actions-inline"]'),
     ).toBeNull();
+    expect(
+      container!.querySelector('[data-testid="pane-header-actions-host"]'),
+    ).not.toBeNull();
     const overflow = container!.querySelector(
       '[data-testid="pane-header-overflow"]',
     ) as HTMLButtonElement;
     expect(overflow).not.toBeNull();
-    expect(
-      container!.querySelector('[data-testid="pane-close"]'),
-    ).not.toBeNull();
 
     await act(async () => {
       overflow.dispatchEvent(
@@ -170,22 +179,75 @@ describe('PaneHeaderActions', () => {
       '[data-testid="pane-header-overflow-menu"]',
     );
     expect(menu).not.toBeNull();
-    expect(
-      menu!.querySelector('[data-testid="host-action"]')?.textContent,
-    ).toBe('Share');
-    expect(menu!.querySelectorAll('[role="menuitem"]').length).toBeGreaterThan(
-      0,
-    );
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toBe('Share');
+
+    await act(async () => {
+      items[0]!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(onShare).toHaveBeenCalledTimes(1);
   });
 
-  it('mounts host actions only once', () => {
+  it('flattens Fragment children into overflow menuitems', async () => {
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <>
+            <button type="button" aria-label="Env">
+              Env
+            </button>
+            <button type="button" aria-label="Share">
+              Share
+            </button>
+          </>
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    const overflow = container!.querySelector(
+      '[data-testid="pane-header-overflow"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      overflow.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const menu = document.querySelector(
+      '[data-testid="pane-header-overflow-menu"]',
+    );
+    expect(menu!.querySelectorAll('[role="menuitem"]')).toHaveLength(2);
+  });
+
+  it('keeps host action instances mounted across collapse', () => {
     let mounts = 0;
+    let unmounts = 0;
     function HostAction() {
+      const [clicks, setClicks] = useState(0);
       useEffect(() => {
         mounts += 1;
+        return () => {
+          unmounts += 1;
+        };
       }, []);
       return (
-        <button type="button" data-testid="host-action">
+        <button
+          type="button"
+          data-testid="host-action"
+          data-clicks={clicks}
+          onClick={() => setClicks((value) => value + 1)}
+        >
           Share
         </button>
       );
@@ -206,9 +268,25 @@ describe('PaneHeaderActions', () => {
       </header>,
     );
 
-    expect(mounts).toBe(1);
+    act(() => {
+      container!
+        .querySelector('[data-testid="host-action"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
     expect(
-      container!.querySelectorAll('[data-testid="host-action"]'),
-    ).toHaveLength(1);
+      container!
+        .querySelector('[data-testid="host-action"]')
+        ?.getAttribute('data-clicks'),
+    ).toBe('1');
+
+    collapse();
+
+    expect(mounts).toBe(1);
+    expect(unmounts).toBe(0);
+    expect(
+      container!
+        .querySelector('[data-testid="host-action"]')
+        ?.getAttribute('data-clicks'),
+    ).toBe('1');
   });
 });

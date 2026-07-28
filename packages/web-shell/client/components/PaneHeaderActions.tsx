@@ -6,10 +6,13 @@
 
 import {
   Children,
+  Fragment,
+  cloneElement,
   isValidElement,
   useLayoutEffect,
   useRef,
   useState,
+  type ReactElement,
   type ReactNode,
 } from 'react';
 import { MoreHorizontalIcon } from 'lucide-react';
@@ -32,13 +35,44 @@ export interface PaneHeaderActionsProps {
   trailing?: ReactNode;
 }
 
+/** Flatten Fragments (and nested Fragments) into concrete action elements. */
+function flattenActionElements(node: ReactNode): ReactElement[] {
+  const out: ReactElement[] = [];
+  for (const child of Children.toArray(node)) {
+    if (!isValidElement(child)) continue;
+    if (child.type === Fragment) {
+      const fragmentChildren = (child.props as { children?: ReactNode })
+        .children;
+      out.push(...flattenActionElements(fragmentChildren));
+      continue;
+    }
+    out.push(child);
+  }
+  return out;
+}
+
+function actionMenuLabel(element: ReactElement): ReactNode {
+  const props = element.props as {
+    'aria-label'?: string;
+    title?: string;
+    children?: ReactNode;
+  };
+  if (props['aria-label']) return props['aria-label'];
+  if (props.title) return props.title;
+  if (props.children != null && props.children !== false) {
+    return props.children;
+  }
+  return 'Action';
+}
+
 /**
  * Renders pane-header host actions inline when they fit, otherwise collapses
  * them into a `…` menu. Measures against the header width so split-pane
  * resizing / add-remove does not crush the title.
  *
- * Host actions are mounted in exactly one place (inline or overflow) so
- * stateful action components are not duplicated for width measurement.
+ * Host actions stay mounted in one host slot across collapse so stateful
+ * actions are not reset. The overflow menu uses menuitem proxies that click
+ * those mounted hosts.
  */
 export function PaneHeaderActions({
   children,
@@ -46,11 +80,12 @@ export function PaneHeaderActions({
 }: PaneHeaderActionsProps) {
   const { t } = useI18n();
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const inlineRef = useRef<HTMLDivElement | null>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const trailingRef = useRef<HTMLDivElement | null>(null);
   const preferredWidthRef = useRef(0);
   const [collapsed, setCollapsed] = useState(false);
   const hasHostActions = children != null && children !== false;
+  const actionElements = hasHostActions ? flattenActionElements(children) : [];
 
   useLayoutEffect(() => {
     if (!hasHostActions) {
@@ -63,16 +98,12 @@ export function PaneHeaderActions({
     if (!header) return;
 
     const update = () => {
-      // Refresh natural width only while inline; when collapsed keep the last
-      // measured value so we can decide when to expand again without a second
-      // React mount of the host actions.
-      if (inlineRef.current) {
-        preferredWidthRef.current = inlineRef.current.scrollWidth;
+      if (hostRef.current) {
+        preferredWidthRef.current = hostRef.current.scrollWidth;
       }
       const needed = preferredWidthRef.current;
-      // Skip until the inline row has a real width — jsdom and the first
-      // paint often report 0, which would otherwise force a false collapse
-      // and unmount host actions into a closed menu.
+      // Skip until the host row has a real width — jsdom and the first paint
+      // often report 0, which would otherwise force a false collapse.
       if (needed === 0) {
         setCollapsed(false);
         return;
@@ -104,11 +135,9 @@ export function PaneHeaderActions({
     update();
     const observer = new ResizeObserver(update);
     observer.observe(header);
-    if (inlineRef.current) observer.observe(inlineRef.current);
+    if (hostRef.current) observer.observe(hostRef.current);
     if (trailingRef.current) observer.observe(trailingRef.current);
     return () => observer.disconnect();
-    // Re-run when collapse flips so we can attach/detach the inline observer
-    // after the single host-action mount moves between trees.
   }, [hasHostActions, collapsed]);
 
   return (
@@ -117,45 +146,66 @@ export function PaneHeaderActions({
       className={styles.headerActions}
       data-testid="pane-header-actions"
     >
-      {hasHostActions &&
-        (collapsed ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className={styles.headerActionButton}
-                aria-label={t('splitView.morePaneActions')}
-                title={t('splitView.morePaneActions')}
-                data-testid="pane-header-overflow"
-              >
-                <MoreHorizontalIcon size={16} aria-hidden="true" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              className="w-auto min-w-40"
-              data-testid="pane-header-overflow-menu"
+      {hasHostActions && (
+        <div
+          ref={hostRef}
+          className={
+            collapsed
+              ? styles.headerActionsHostHidden
+              : styles.headerActionsInline
+          }
+          data-testid={
+            collapsed
+              ? 'pane-header-actions-host'
+              : 'pane-header-actions-inline'
+          }
+          aria-hidden={collapsed || undefined}
+        >
+          {actionElements.map((element, index) =>
+            cloneElement(element, {
+              key: element.key ?? `pane-header-action-${index}`,
+              'data-pane-header-action-index': String(index),
+            } as Partial<unknown> & ReactElement['props']),
+          )}
+        </div>
+      )}
+
+      {hasHostActions && collapsed && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className={styles.headerActionButton}
+              aria-label={t('splitView.morePaneActions')}
+              title={t('splitView.morePaneActions')}
+              data-testid="pane-header-overflow"
             >
-              <div className={styles.headerOverflowPanel}>
-                {Children.toArray(children).map((child, index) =>
-                  isValidElement(child) ? (
-                    <DropdownMenuItem key={child.key ?? index} asChild>
-                      {child}
-                    </DropdownMenuItem>
-                  ) : null,
-                )}
-              </div>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : (
-          <div
-            ref={inlineRef}
-            className={styles.headerActionsInline}
-            data-testid="pane-header-actions-inline"
+              <MoreHorizontalIcon size={16} aria-hidden="true" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="w-auto min-w-40"
+            data-testid="pane-header-overflow-menu"
           >
-            {children}
-          </div>
-        ))}
+            <div className={styles.headerOverflowPanel}>
+              {actionElements.map((element, index) => (
+                <DropdownMenuItem
+                  key={element.key ?? `pane-header-menu-${index}`}
+                  onSelect={() => {
+                    const target = hostRef.current?.querySelector(
+                      `[data-pane-header-action-index="${index}"]`,
+                    );
+                    if (target instanceof HTMLElement) target.click();
+                  }}
+                >
+                  {actionMenuLabel(element)}
+                </DropdownMenuItem>
+              ))}
+            </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
       {trailing != null && (
         <div ref={trailingRef} className={styles.headerTrailing}>

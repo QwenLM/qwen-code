@@ -108,6 +108,18 @@
   min-width: 0;
 }
 
+/* Keep host actions mounted while collapsed so stateful actions survive
+   resize. Absolutely positioned so they do not affect flex layout. */
+.headerActionsHostHidden {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
 .headerTrailing {
   display: inline-flex;
   align-items: center;
