@@ -110,6 +110,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-hygiene-home'
+          QWEN_TIMEOUT_MS: '3900000'
           SETTINGS_JSON: |-
             {
               "maxSessionTurns": 400,
@@ -289,6 +290,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-hygiene-home'
+          QWEN_TIMEOUT_MS: '4500000'
           SETTINGS_JSON: |-
             {
               "maxSessionTurns": 400,

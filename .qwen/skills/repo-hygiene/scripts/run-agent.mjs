@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const skillDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 70 * 60 * 1000;
 const specs = {
   'scan': {
     inputs: [],
