@@ -179,4 +179,13 @@ describe('Workflow anti-recursion guard', () => {
       true,
     );
   });
+
+  it('ASK_USER_QUESTION is in EXCLUDED_TOOLS_FOR_SUBAGENTS (#7835)', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.ASK_USER_QUESTION)).toBe(
+      true,
+    );
+  });
 });
