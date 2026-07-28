@@ -11,6 +11,7 @@ import {
   ChartRendererRegistry,
   type JsonPrimitive,
   type JsonValue,
+  type MarkdownChartLabelOverrides,
 } from '@datafe-open/markdown-chart';
 import {
   createEChartsRenderer,
@@ -93,11 +94,30 @@ export interface EchartsFullDataRendererOptions {
 export function createMarkdownChartRegistry(
   options: CreateEChartsRendererOptions = {},
 ): ChartRendererRegistry {
-  const { validateDataRef = isSupportedLegacyDataRef, ...rendererOptions } =
-    options;
+  const {
+    resolveDataRef,
+    validateDataRef = isSupportedLegacyDataRef,
+    ...rendererOptions
+  } = options;
+  const usesDefaultDataRefValidation = options.validateDataRef === undefined;
+  const boundedResolveDataRef: ResolveDataRef | undefined = resolveDataRef
+    ? async (ref, context) => {
+        const resolvedRef = usesDefaultDataRefValidation
+          ? normalizeSupportedDataRef(ref)
+          : ref;
+        if (!resolvedRef) {
+          throw new Error('Chart data reference is not supported.');
+        }
+        return withTimeout(
+          Promise.resolve(resolveDataRef(resolvedRef, context)),
+          'Chart data reference resolution',
+        );
+      }
+    : undefined;
   return new ChartRendererRegistry().register(
     createEChartsRenderer({
       ...rendererOptions,
+      resolveDataRef: boundedResolveDataRef,
       validateDataRef,
     }),
   );
@@ -154,6 +174,7 @@ export function WebShellMarkdownChartProvider({
   readonly theme: WebShellTheme;
   readonly children: ReactNode;
 }): ReactElement {
+  const labels = useWebShellMarkdownChartLabels(customization.labels);
   const { t } = useI18n();
   return (
     <MarkdownChartProvider
@@ -162,10 +183,39 @@ export function WebShellMarkdownChartProvider({
       streaming={streaming}
       theme={theme}
       loadingLabel={customization.loadingLabel ?? t('echartsChart.rendering')}
+      labels={labels}
       onError={customization.onError}
     >
       {children}
     </MarkdownChartProvider>
+  );
+}
+
+function useWebShellMarkdownChartLabels(
+  overrides?: MarkdownChartLabelOverrides,
+): MarkdownChartLabelOverrides {
+  const { t } = useI18n();
+  return useMemo<MarkdownChartLabelOverrides>(
+    () => ({
+      chartUnavailable: t('echartsChart.renderFailed'),
+      viewMode: t('echartsChart.viewMode'),
+      chart: t('echartsChart.chart'),
+      data: t('echartsChart.data'),
+      showChart: t('echartsChart.showChart'),
+      showData: t('echartsChart.showData'),
+      noData: t('echartsChart.noData'),
+      tableNotice: ({ visibleRows, totalRows, visibleColumns, totalColumns }) =>
+        t('echartsChart.tableNotice', {
+          visibleRows,
+          totalRows,
+          visibleColumns,
+          totalColumns,
+          omittedRows: totalRows - visibleRows,
+          omittedColumns: totalColumns - visibleColumns,
+        }),
+      ...overrides,
+    }),
+    [overrides, t],
   );
 }
 
@@ -179,39 +229,47 @@ function hasWhitespaceOrControl(value: string): boolean {
   );
 }
 
-function isSupportedLegacyDataRef(ref: string): boolean {
+function normalizeSupportedDataRef(ref: string): string | undefined {
   if (ref.trim() !== ref || !ref || hasWhitespaceOrControl(ref)) {
-    return false;
+    return undefined;
   }
   const lower = ref.toLowerCase();
   const prefix = SUPPORTED_DATA_REF_PREFIXES.find((candidate) =>
     lower.startsWith(candidate),
   );
   if (!prefix) {
-    return false;
+    return undefined;
   }
   const rawPath = ref.slice(prefix.length);
   if (!rawPath || /[?#\\]/.test(rawPath)) {
-    return false;
+    return undefined;
   }
   let decodedPath: string;
   try {
     decodedPath = decodeURIComponent(rawPath);
   } catch {
-    return false;
+    return undefined;
   }
   if (/[%?#\\]/.test(decodedPath) || hasWhitespaceOrControl(decodedPath)) {
-    return false;
+    return undefined;
   }
-  return decodedPath
-    .split('/')
-    .every(
+  const segments = decodedPath.split('/');
+  if (
+    segments.some(
       (segment) =>
-        segment.length > 0 &&
-        segment !== '.' &&
-        segment !== '..' &&
-        !WINDOWS_DRIVE_SEGMENT_PATTERN.test(segment),
-    );
+        segment.length === 0 ||
+        segment === '.' ||
+        segment === '..' ||
+        WINDOWS_DRIVE_SEGMENT_PATTERN.test(segment),
+    )
+  ) {
+    return undefined;
+  }
+  return `${prefix}${segments.join('/')}`;
+}
+
+function isSupportedLegacyDataRef(ref: string): boolean {
+  return normalizeSupportedDataRef(ref) !== undefined;
 }
 
 function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -230,7 +288,9 @@ function adaptLegacyRuntimeLoader(
   loadEcharts: EchartsRuntimeLoader | undefined,
 ): CreateEChartsRendererOptions['loadECharts'] {
   if (!loadEcharts) {
-    return undefined;
+    return async () => {
+      throw new Error('Chart runtime is unavailable.');
+    };
   }
   return async () => {
     const runtime = await withTimeout(
@@ -258,15 +318,14 @@ function adaptLegacyDataResolver(
     if (!context.dimensions || !context.format) {
       throw new Error('Chart data reference metadata is incomplete.');
     }
-    const resolved = await withTimeout(
-      Promise.resolve(
-        resolveDataRef(ref, {
-          dimensions: [...context.dimensions],
-          format: context.format,
-        }),
-      ),
-      'Chart data reference resolution',
-    );
+    const normalizedRef = normalizeSupportedDataRef(ref);
+    if (!normalizedRef) {
+      throw new Error('Chart data reference is not supported.');
+    }
+    const resolved = await resolveDataRef(normalizedRef, {
+      dimensions: [...context.dimensions],
+      format: context.format,
+    });
     return {
       dimensions: resolved.dimensions,
       source: resolved.source,
@@ -325,12 +384,14 @@ function MarkdownChartCodeBlock({
   readonly theme: WebShellTheme;
 }): ReactElement {
   const { t } = useI18n();
+  const labels = useWebShellMarkdownChartLabels();
   return (
     <MarkdownChartProvider
       registry={registry}
       theme={theme}
       streaming={streaming}
       loadingLabel={t('echartsChart.rendering')}
+      labels={labels}
       onError={(error) => {
         console.error('[web-shell] markdown-chart render failed:', error);
       }}

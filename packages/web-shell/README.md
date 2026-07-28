@@ -300,15 +300,17 @@ const chartRegistry = createMarkdownChartRegistry({
   resolveDataRef: async (ref, context) =>
     loadControlledChartDataset(ref, context),
 });
+const markdown = { chart: { registry: chartRegistry } };
 
-<WebShellWithProviders
-  baseUrl="http://127.0.0.1:4170"
-  markdown={{ chart: { registry: chartRegistry } }}
-/>;
+<WebShellWithProviders baseUrl="http://127.0.0.1:4170" markdown={markdown} />;
 ```
 
 `resolveDataRef` 是 ref 数据的唯一读取入口；WebShell 不会自行读取 URL 或本地
-路径。默认只接受规范化的 `artifact://` 和 `session-file://` ref。
+路径。默认只接受规范化的 `artifact://` 和 `session-file://` ref，将 ref
+规范化后交给 resolver，并在 30 秒后终止等待。`markdown` 及其中的 `chart`
+对象应在图表挂载期间保持引用稳定。
+Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言；需要覆盖个别
+文案时可在稳定的 `chart` 对象上提供 `labels`。
 协议和数据格式见
 [`markdown-chart`](https://github.com/datafe/markdown-chart)。
 

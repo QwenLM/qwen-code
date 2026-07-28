@@ -43,12 +43,13 @@ const chartRegistry = createMarkdownChartRegistry({
   resolveDataRef: async (ref, context) =>
     loadControlledChartDataset(ref, context),
 });
+const markdown = { chart: { registry: chartRegistry } };
 
 <WebShellWithProviders
   baseUrl="http://127.0.0.1:4170"
   token={token}
   sessionId={sessionId}
-  markdown={{ chart: { registry: chartRegistry } }}
+  markdown={markdown}
 />;
 ```
 
@@ -56,7 +57,9 @@ The renderer never fetches a ref or reads a local path by itself.
 `resolveDataRef` is the host-owned boundary from a model-visible reference to a
 trusted dataset. The default registry accepts normalized `artifact://` and
 `session-file://` refs, parses the block as JSON, validates the option, and then
-passes the ref plus declared format and dimensions to the resolver.
+passes the normalized ref plus declared format and dimensions to the resolver.
+Resolver waits are bounded to 30 seconds. Keep `markdown`, `chart`, and
+`labels` overrides referentially stable while charts are mounted.
 
 ## Streaming behavior
 
@@ -64,7 +67,7 @@ The shared React adapter distinguishes a closed chart fence from the active
 unterminated tail fence:
 
 - A closed `markdown-chart` block renders immediately and remains mounted while
-  later answer text streams.
+  later answer text streams, including when the fence is inside a blockquote.
 - Only the active unterminated chart fence displays the loading state.
 
 ## Scope

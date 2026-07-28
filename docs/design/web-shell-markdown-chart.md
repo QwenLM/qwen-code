@@ -28,8 +28,8 @@ closed chart fence from the active incomplete tail fence.
   aliases, including `echarts-fulldata`, without importing ECharts or supplying
   host customization.
 - Keep `markdown.chart.registry` and `createMarkdownChartRegistry` as explicit
-  override APIs for controlled data refs, custom loading/error behavior, or a
-  host-selected runtime.
+  override APIs for controlled data refs, custom labels/loading/error behavior,
+  or a host-selected runtime.
 - Keep `createEchartsFullDataRenderer` and `EchartsFullDataBlock` as deprecated
   compatibility surfaces. They delegate rendering to the shared component
   instead of retaining a second parser or chart lifecycle.
@@ -89,8 +89,8 @@ closed chart fence from the active incomplete tail fence.
 
 ## Decisions
 
-- Use the currently published `@datafe-open/markdown-chart*` `0.1.10` packages,
-  which include block-oriented streaming loading support.
+- Use the published `@datafe-open/markdown-chart*` `0.1.11` packages, which
+  include localized labels and blockquote-aware streaming fence completion.
 - Document only the canonical `markdown-chart` skill for new integrations.
 - Preserve the old Web Shell exports as compatibility wrappers to avoid an
   unrelated breaking package API change.

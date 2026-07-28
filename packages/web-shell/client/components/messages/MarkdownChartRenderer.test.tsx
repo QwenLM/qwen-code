@@ -122,6 +122,7 @@ afterEach(async () => {
     });
     container.remove();
   }
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -181,6 +182,54 @@ describe('Web Shell markdown-chart integration', () => {
     expect(container.textContent).toContain('200');
   });
 
+  it('localizes shared chart controls and preserves host label overrides', async () => {
+    const { runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const customization = {
+      markdown: {
+        chart: {
+          registry,
+          labels: {
+            data: '数据明细',
+            showData: '显示数据明细',
+          },
+        },
+      },
+    };
+    const { container } = await mount(
+      <I18nProvider language="zh-CN">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider value={customization}>
+            <Markdown
+              content={`\`\`\`markdown-chart\n${canonicalChart()}\n\`\`\``}
+              source="assistant"
+            />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(
+      container
+        .querySelector('.markdown-chart-toggle')
+        ?.getAttribute('aria-label'),
+    ).toBe('视图模式');
+    expect(
+      container
+        .querySelector('[data-markdown-chart-chart-view="true"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('图表');
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="显示数据明细"]',
+      )?.title,
+    ).toBe('数据明细');
+  });
+
   it('renders a closed chart immediately while later Markdown is streaming', async () => {
     const { instance, runtime } = createFakeRuntime();
     const registry = createMarkdownChartRegistry({
@@ -210,6 +259,30 @@ describe('Web Shell markdown-chart integration', () => {
     expect(runtime.init).toHaveBeenCalledOnce();
     expect(instance.setOption).toHaveBeenCalledOnce();
     expect(instance.dispose).not.toHaveBeenCalled();
+  });
+
+  it('renders a closed blockquote chart while the response is streaming', async () => {
+    const { runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const quotedChart = `\`\`\`markdown-chart\n${canonicalChart()}\n\`\`\``
+      .split('\n')
+      .map((line) => `> ${line}`)
+      .join('\n');
+    const { container } = await mount(
+      chartTree({
+        content: quotedChart,
+        registry,
+        isStreaming: true,
+      }),
+    );
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(container.querySelector('.markdown-chart-streaming')).toBeNull();
+    expect(container.querySelector('.markdown-chart-card')).not.toBeNull();
   });
 
   it('loads only after the active tail fence closes', async () => {
@@ -331,7 +404,7 @@ describe('Web Shell markdown-chart integration', () => {
     expect(runtime.init).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledOnce();
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Chart unavailable',
+      'Chart render failed.',
     );
   });
 
@@ -362,16 +435,75 @@ describe('Web Shell markdown-chart integration', () => {
         content: `\`\`\`echarts-fulldata\n${compact(ref)}\n\`\`\``,
         registry,
       });
-    const chart = await mount(tree('artifact://charts/orders.csv'));
+    const chart = await mount(tree('ARTIFACT://charts/%6Frders.csv'));
     await flushChart();
 
-    expect(resolveDataRef).toHaveBeenCalledOnce();
+    expect(resolveDataRef).toHaveBeenCalledWith(
+      'artifact://charts/orders.csv',
+      expect.objectContaining({
+        dimensions: ['day', 'orders'],
+        format: 'csv',
+      }),
+    );
 
     await chart.rerender(tree('artifact://charts/%2e%2e/secret.csv'));
     await flushChart();
 
     expect(resolveDataRef).toHaveBeenCalledOnce();
     expect(chart.container.querySelector('[role="alert"]')).not.toBeNull();
+  });
+
+  it('times out a host data resolver on the primary registry path', async () => {
+    vi.useFakeTimers();
+    const { runtime } = createFakeRuntime();
+    const resolveDataRef = vi.fn(
+      () =>
+        new Promise<{
+          dimensions: string[];
+          source: Array<Array<string | number>>;
+        }>(() => {}),
+    );
+    const onError = vi.fn();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resolveDataRef,
+      resizeObserver: false,
+    });
+    const chart = JSON.stringify({
+      version: 1,
+      renderer: 'echarts',
+      data: {
+        kind: 'ref',
+        ref: 'artifact://charts/orders.csv',
+        format: 'csv',
+        dimensions: ['day', 'orders'],
+      },
+      spec: { series: [{ type: 'bar' }] },
+    });
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={{ markdown: { chart: { registry, onError } } }}
+        >
+          <Markdown
+            content={`\`\`\`markdown-chart\n${chart}\n\`\`\``}
+            source="assistant"
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    await flushChart();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Chart render failed.',
+    );
   });
 
   it('disposes the shared chart lifecycle on unmount', async () => {
@@ -476,6 +608,27 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
     expect(container.querySelector('.markdown-chart-card')).not.toBeNull();
   });
 
+  it('preserves the missing-runtime error for legacy hosts without a loader', async () => {
+    const renderer = createEchartsFullDataRenderer();
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={{ markdown: { renderCodeBlock: renderer } }}
+        >
+          <Markdown
+            content={'```echarts-fulldata\n{"series":[{"type":"bar"}]}\n```'}
+            source="assistant"
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Chart render failed.',
+    );
+  });
+
   it('preserves the controlled ref allowlist and legacy resolver metadata', async () => {
     const { runtime } = createFakeRuntime();
     const resolveDataRef = vi.fn<EchartsFullDataRefResolver>(async () => ({
@@ -510,7 +663,7 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
         </WebShellCustomizationProvider>
       </I18nProvider>
     );
-    const chart = await mount(tree('artifact://charts/orders.csv'));
+    const chart = await mount(tree('ARTIFACT://charts/%6Frders.csv'));
     await flushChart();
 
     expect(resolveDataRef).toHaveBeenCalledWith(
@@ -535,7 +688,7 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
 
     expect(resolveDataRef).toHaveBeenCalledOnce();
     expect(chart.container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Chart unavailable',
+      'Chart render failed.',
     );
   });
 
@@ -559,8 +712,21 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
     await flushChart();
 
     expect(runtime.init).toHaveBeenCalledOnce();
+    expect(runtime.init).toHaveBeenCalledWith(expect.any(HTMLElement), 'dark');
     expect(
       container.querySelector('.markdown-chart-placeholder'),
     ).not.toBeNull();
+  });
+
+  it('keeps the direct component parseError prop observable', async () => {
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <EchartsFullDataBlock parseError="Invalid legacy chart" theme="dark" />
+      </I18nProvider>,
+    );
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Invalid legacy chart',
+    );
   });
 });

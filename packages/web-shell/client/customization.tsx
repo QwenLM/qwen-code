@@ -6,7 +6,10 @@ import {
   type ReactNode,
 } from 'react';
 import type { Components, Options } from 'react-markdown';
-import type { ChartRendererRegistry } from '@datafe-open/markdown-chart';
+import type {
+  ChartRendererRegistry,
+  MarkdownChartLabelOverrides,
+} from '@datafe-open/markdown-chart';
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
@@ -55,6 +58,7 @@ export type CodeBlockRenderer = (
 export interface WebShellMarkdownChartCustomization {
   registry: ChartRendererRegistry;
   loadingLabel?: string;
+  labels?: MarkdownChartLabelOverrides;
   onError?: MarkdownChartReactErrorHandler;
   chartClassName?: string;
   chartStyle?: CSSProperties;
@@ -67,8 +71,8 @@ export interface WebShellMarkdownCustomization {
   ) => string;
   /**
    * Override Web Shell's built-in Markdown chart registry or its presentation
-   * callbacks. The registry must remain referentially stable while a chart is
-   * mounted.
+   * callbacks. The complete chart customization object must remain
+   * referentially stable while a chart is mounted.
    */
   chart?: WebShellMarkdownChartCustomization;
   renderCodeBlock?: CodeBlockRenderer;
