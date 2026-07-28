@@ -67,6 +67,7 @@ export interface IndividualToolCallDisplay {
   name: string;
   description: string;
   resultDisplay: ToolResultDisplay | string | undefined;
+  visionBridgeNotice?: string;
   /**
    * Full tool-result text for the Ctrl+O full-detail transcript (§4.9).
    * Derived (NOT persisted) — extracted via `getToolResponseDisplayText` from

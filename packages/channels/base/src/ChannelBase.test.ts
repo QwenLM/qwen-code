@@ -240,6 +240,7 @@ function createBridge(): ChannelAgentBridge {
     loadSession: vi.fn(),
     prompt: vi.fn().mockResolvedValue('agent response'),
     cancelSession: vi.fn().mockResolvedValue(undefined),
+    discardSession: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     start: vi.fn(),
     isConnected: true,
@@ -5679,6 +5680,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/clear' }));
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
+      expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -15969,6 +15971,7 @@ describe('ChannelBase', () => {
           message: 'loop timed out',
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
         expect(
           (
             ch as unknown as {

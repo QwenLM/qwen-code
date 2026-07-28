@@ -318,6 +318,9 @@ export type ComposerToolbarRightRenderer =
 export type ComposerHeaderRenderer =
   ComponentType<WebShellComposerToolbarRenderInfo>;
 
+export type ComposerFooterRenderer =
+  ComponentType<WebShellComposerToolbarRenderInfo>;
+
 // ---- Background task info (public type for footer renderer) ----
 
 interface WebShellTaskBase {
@@ -422,6 +425,7 @@ export interface WebShellCustomization {
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   renderComposerHeader?: ComposerHeaderRenderer;
+  renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**

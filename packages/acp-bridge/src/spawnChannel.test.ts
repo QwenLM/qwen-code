@@ -195,6 +195,38 @@ describe('createSpawnChannelFactory env policy', () => {
     reader.releaseLock();
     writer.releaseLock();
   });
+
+  it('settles exited on an async spawn error only when no process exists', async () => {
+    const child = createFakeChildProcess();
+    Object.defineProperty(child, 'pid', { value: undefined });
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory()('/tmp/project');
+
+    child.emit('error', new Error('ENOENT'));
+
+    await expect(channel.exited).resolves.toBeUndefined();
+  });
+
+  it('does not treat a post-spawn error as process exit', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory()('/tmp/project');
+    let settled = false;
+    void channel.exited.then(() => {
+      settled = true;
+    });
+
+    child.emit('spawn');
+    child.emit('error', new Error('transport error'));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    child.emit('exit', 1, null);
+    await expect(channel.exited).resolves.toEqual({
+      exitCode: 1,
+      signalCode: null,
+    });
+  });
 });
 
 describe('createStderrForwarder', () => {

@@ -11,8 +11,13 @@
  * comparison mode runs paired control/candidate processes in balanced AB/BA
  * order. Every process, workspace, home, qwen home, and listener is isolated.
  *
- * Enable with QWEN_FIRST_OUTPUT_BENCHMARK=1. See readBenchmarkConfig() for the
- * intentionally strict bundle-path contract.
+ * Latency figures are only meaningful when nothing else competes for the host,
+ * so this file is excluded from the shared integration config and must run
+ * under its own serial config:
+ *   QWEN_FIRST_OUTPUT_BENCHMARK=1 QWEN_SANDBOX=false BENCHMARK_CLI_PATH=... \
+ *     npx vitest run --config integration-tests/vitest.firstoutput.config.ts
+ *
+ * See readBenchmarkConfig() for the intentionally strict bundle-path contract.
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -34,8 +39,10 @@ import {
   DEFAULT_FIRST_OUTPUT_EVENT_BUFFER_LIMIT,
   DEFAULT_MATERIAL_THRESHOLD_MS,
   DEFAULT_ORDER_SENSITIVITY_THRESHOLD_MS,
+  FIRST_OUTPUT_BENCHMARK_VERSION,
   FirstOutputTracker,
   evaluateSingleBundlePrototypeGate,
+  findInvalidTimings,
   measuredPairCountForDwell,
   nullablePercentiles,
   pairedCandidateControlStats,
@@ -43,7 +50,7 @@ import {
   renderFirstOutputBenchmarkMarkdown,
   validateExpectedFinalText,
   validatePromptAcceptance,
-  type FirstOutputBenchmarkArtifactV1,
+  type FirstOutputBenchmarkArtifactV2,
   type FirstOutputFailure,
   type FirstOutputFailureCode,
   type FirstOutputMetricName,
@@ -131,7 +138,6 @@ interface ResolvedBundle {
   configuredPath: string;
   realPath: string;
   sha256: string;
-  gitCommit: string | null;
   compileCacheDir: string;
 }
 
@@ -301,9 +307,6 @@ function readBenchmarkConfig(): BenchmarkConfig {
     );
   }
 
-  const dwell = parseBenchmarkPostSessionDwell(
-    process.env['BENCHMARK_POST_SESSION_DWELL_MS'],
-  );
   if (hasSingle) {
     if (process.env['BENCHMARK_POST_SESSION_DWELL_MS'] !== undefined) {
       throw new Error(
@@ -324,6 +327,12 @@ function readBenchmarkConfig(): BenchmarkConfig {
     };
   }
 
+  // Parsed only after the compare-only rejections above, so an unsupported
+  // value in single mode reports that the variable is compare-only rather than
+  // listing the dwell values compare mode would have accepted.
+  const dwell = parseBenchmarkPostSessionDwell(
+    process.env['BENCHMARK_POST_SESSION_DWELL_MS'],
+  );
   const control = resolveBundle(controlPath!, 'control');
   const candidate = resolveBundle(candidatePath!, 'candidate');
   if (control.realPath === candidate.realPath) {
@@ -377,29 +386,12 @@ function resolveBundle(input: string, role: BundleRole): ResolvedBundle {
     sha256: createHash('sha256')
       .update(fs.readFileSync(realPath))
       .digest('hex'),
-    gitCommit: gitCommitForPath(realPath),
     compileCacheDir,
   };
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function gitCommitForPath(filePath: string): string | null {
-  try {
-    return execFileSync(
-      'git',
-      ['-C', path.dirname(filePath), 'rev-parse', 'HEAD'],
-      {
-        encoding: 'utf8',
-        timeout: 5_000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      },
-    ).trim();
-  } catch {
-    return null;
-  }
 }
 
 async function spawnBenchmarkDaemon(
@@ -982,7 +974,18 @@ async function runSession(
         { cause: error },
       );
     }
-    const promptNotBefore = timestamps.sessionReady + postSessionDwellMs;
+    // The dwell exists to give a candidate genuinely idle time before the
+    // prompt, so it is anchored to SSE readiness rather than session readiness.
+    // The SSE connect sits between the two: anchoring to sessionReady lets a
+    // slow connect consume the whole window, silently degrading the scenario
+    // into an immediate-prompt run that still reports its configured dwell.
+    if (timestamps.sseReady === null) {
+      throw new BenchmarkFailure(
+        'harness_error',
+        'SSE readiness resolved without recording a timestamp.',
+      );
+    }
+    const promptNotBefore = timestamps.sseReady + postSessionDwellMs;
     if (performance.now() < promptNotBefore) {
       await sleep(promptNotBefore - performance.now());
     }
@@ -1119,13 +1122,15 @@ async function runSession(
   timestamps.firstAnswerText = tracked.firstAnswer?.receivedAtMs ?? null;
   timestamps.terminal = tracked.terminal?.receivedAtMs ?? null;
   const timings = computeSessionTimings(timestamps, daemon.processStartedAtMs);
-  const invalidMetric = findInvalidTiming(timings);
-  if (invalidMetric) {
+  const invalidMetrics = findInvalidTimings(timings);
+  if (invalidMetrics.length > 0) {
     failure ??= {
       code: 'harness_error',
-      message: `Invalid ${invalidMetric[0]} duration: ${invalidMetric[1]}`,
+      message: `Invalid durations: ${invalidMetrics
+        .map(([key, value]) => `${key}=${value}`)
+        .join(', ')}`,
     };
-    timings[invalidMetric[0]] = null;
+    for (const [key] of invalidMetrics) timings[key] = null;
   }
 
   return {
@@ -1161,20 +1166,6 @@ async function runSession(
   };
 }
 
-function findInvalidTiming(
-  timings: FirstOutputSessionRunResult['timings'],
-): [keyof FirstOutputSessionRunResult['timings'], number] | null {
-  for (const key of Object.keys(timings) as Array<
-    keyof FirstOutputSessionRunResult['timings']
-  >) {
-    const value = timings[key];
-    if (value !== null && (!Number.isFinite(value) || value < 0)) {
-      return [key, value];
-    }
-  }
-  return null;
-}
-
 function computeSessionTimings(
   timestamps: FirstOutputSessionRunResult['timestamps'],
   processStartedAtMs: number,
@@ -1184,6 +1175,7 @@ function computeSessionTimings(
       timestamps.sessionReady,
       processStartedAtMs,
     ),
+    sseReadyToPromptMs: duration(timestamps.promptStart, timestamps.sseReady),
     promptToProviderRequestArrivalMs: duration(
       timestamps.providerRequestArrival,
       timestamps.promptStart,
@@ -1548,15 +1540,6 @@ async function runComparisonPairs(
     measured.push(pair);
     if (!isSuccessfulRawPair(pair)) return { warmups, measured };
   }
-  const abCount = measured.filter((pair) => pair.order === 'AB').length;
-  const baCount = measured.filter((pair) => pair.order === 'BA').length;
-  const expectedPerOrder = config.measuredPairs / 2;
-  if (abCount !== expectedPerOrder || baCount !== expectedPerOrder) {
-    throw new Error(
-      'Internal AB/BA balance error: expected ' +
-        `${expectedPerOrder}/${expectedPerOrder}, received ${abCount}/${baCount}.`,
-    );
-  }
   return { warmups, measured };
 }
 
@@ -1615,7 +1598,11 @@ async function runComparisonPair(
 }
 
 function isSuccessfulProcessSample(
-  sample: ProcessSample,
+  sample: {
+    failure: FirstOutputFailure | null;
+    cleanup: { failure: FirstOutputFailure | null };
+    sessions: readonly FirstOutputSessionRunResult[];
+  },
   expectedSessions: 1 | 2,
 ): boolean {
   return (
@@ -1680,6 +1667,7 @@ function logProgress(message: string): void {
 const METRICS: readonly FirstOutputMetricName[] = [
   'processToListenMs',
   'processToSessionReadyMs',
+  'sseReadyToPromptMs',
   'promptToProviderRequestArrivalMs',
   'promptToFirstModelOutputMs',
   'promptToFirstAnswerTextMs',
@@ -1765,6 +1753,8 @@ function sessionMetric(
   switch (metric) {
     case 'processToSessionReadyMs':
       return session.timings.processToSessionReadyMs;
+    case 'sseReadyToPromptMs':
+      return session.timings.sseReadyToPromptMs;
     case 'promptToProviderRequestArrivalMs':
       return session.timings.promptToProviderRequestArrivalMs;
     case 'promptToFirstModelOutputMs':
@@ -1875,13 +1865,13 @@ function pairedOptions(seedOffset: number): {
 }
 
 function commonArtifactFields(): Pick<
-  FirstOutputBenchmarkArtifactV1,
+  FirstOutputBenchmarkArtifactV2,
   'version' | 'benchmark' | 'capturedAt' | 'harnessGitCommit' | 'platform'
 > {
   const cpus = os.cpus();
   const loadAverage = os.loadavg() as [number, number, number];
   return {
-    version: 1,
+    version: FIRST_OUTPUT_BENCHMARK_VERSION,
     benchmark: 'daemon-first-output',
     capturedAt: new Date().toISOString(),
     harnessGitCommit: gitHead(),
@@ -1903,7 +1893,7 @@ function commonConfig(postSessionDwellMs: number): {
   providerDelayMs: number;
   providerConnection: 'close-per-response';
   postSessionDwellMs: number;
-  prompt: string;
+  promptShape: string;
   expectedAnswer: string;
   maxBufferedEvents: number;
   providerRequestsPerSession: number;
@@ -1914,7 +1904,7 @@ function commonConfig(postSessionDwellMs: number): {
     providerDelayMs: PROVIDER_DELAY_MS,
     providerConnection: 'close-per-response',
     postSessionDwellMs,
-    prompt:
+    promptShape:
       `Unique fixed-width ${PROMPT_LENGTH}-character prompt with a ` +
       'zero-padded per-session marker',
     expectedAnswer: EXPECTED_ANSWER,
@@ -1938,7 +1928,6 @@ function variantDescriptor(bundle: ResolvedBundle): {
   cliPath: string;
   realpath: string;
   sha256: string;
-  gitCommit: string | null;
   compileCache: {
     policy: 'fixed-private-per-variant-warmed';
     directory: string;
@@ -1948,7 +1937,6 @@ function variantDescriptor(bundle: ResolvedBundle): {
     cliPath: bundle.configuredPath,
     realpath: bundle.realPath,
     sha256: bundle.sha256,
-    gitCommit: bundle.gitCommit,
     compileCache: {
       policy: 'fixed-private-per-variant-warmed',
       directory: bundle.compileCacheDir,
@@ -1959,7 +1947,7 @@ function variantDescriptor(bundle: ResolvedBundle): {
 function buildSingleArtifact(
   config: SingleBenchmarkConfig,
   raw: Awaited<ReturnType<typeof runSingleSamples>>,
-): FirstOutputBenchmarkArtifactV1 {
+): FirstOutputBenchmarkArtifactV2 {
   const warmupRuns = raw.warmups.map((sample, index) =>
     toProcessRun(sample, index + 1, null),
   );
@@ -1990,6 +1978,8 @@ function buildSingleArtifact(
   const complete = warmupsValid && measuredValid;
   const gate = evaluateSingleBundlePrototypeGate({
     complete,
+    coldWarmPairedDeltasMs: coldWarmProviderDeltas(runs),
+    seed: BOOTSTRAP_SEED,
     coldPromptToProviderRequestP50Ms: coldProviderP50,
     warmPromptToProviderRequestP50Ms: warmProviderP50,
     coldPromptToFirstModelOutputP50Ms: coldFirstOutputP50,
@@ -2025,10 +2015,14 @@ function buildSingleArtifact(
             ? `All ${SINGLE_MEASURED} measured processes ran.`
             : `Only ${runs.length}/${SINGLE_MEASURED} measured processes ran before the first invalid process stopped sampling.`,
           measuredValid
-            ? `Cold-minus-warm Provider-arrival P50: ${
-                providerDeltaMs === null
+            ? `Paired cold-minus-warm Provider-arrival median: ${
+                gate.pairedMedianDeltaMs === null
                   ? 'n/a'
-                  : `${providerDeltaMs.toFixed(1)}ms`
+                  : `${gate.pairedMedianDeltaMs.toFixed(1)}ms`
+              }, 95% CI ${
+                gate.bootstrapMedianCi95 === null
+                  ? 'n/a'
+                  : `[${gate.bootstrapMedianCi95.lowMs.toFixed(1)}, ${gate.bootstrapMedianCi95.highMs.toFixed(1)}]`
               }.`
             : `Only ${successfulRuns}/${SINGLE_MEASURED} measured processes were valid.`,
           warmupsComplete
@@ -2046,6 +2040,8 @@ function buildSingleArtifact(
           coldPromptToProviderRequestP50Ms: coldProviderP50,
           warmPromptToProviderRequestP50Ms: warmProviderP50,
           providerDeltaMs,
+          pairedMedianDeltaMs: gate.pairedMedianDeltaMs,
+          bootstrapMedianCi95: gate.bootstrapMedianCi95,
           coldPromptToFirstModelOutputP50Ms: coldFirstOutputP50,
           absoluteThresholdMs: gate.absoluteThresholdMs,
           relativeThresholdRatio: gate.relativeThresholdRatio,
@@ -2059,7 +2055,7 @@ function buildSingleArtifact(
 function buildPairedArtifact(
   config: CompareBenchmarkConfig,
   raw: Awaited<ReturnType<typeof runComparisonPairs>>,
-): FirstOutputBenchmarkArtifactV1 {
+): FirstOutputBenchmarkArtifactV2 {
   const warmups = raw.warmups.map((pair, index) =>
     toPairResult(pair, index + 1),
   );
@@ -2148,13 +2144,20 @@ function buildPairedArtifact(
   };
 }
 
+function coldWarmProviderDeltas(
+  runs: readonly FirstOutputProcessRunResult[],
+): number[] {
+  const deltas: number[] = [];
+  for (const run of runs.filter(isSuccessfulRun)) {
+    const coldMs = metricForOrdinal(run, 1, 'promptToProviderRequestArrivalMs');
+    const warmMs = metricForOrdinal(run, 2, 'promptToProviderRequestArrivalMs');
+    if (coldMs !== null && warmMs !== null) deltas.push(coldMs - warmMs);
+  }
+  return deltas;
+}
+
 function isSuccessfulRun(run: FirstOutputProcessRunResult): boolean {
-  return (
-    run.failure === null &&
-    run.cleanup.failure === null &&
-    run.sessions.length === SINGLE_SESSIONS_PER_PROCESS &&
-    run.sessions.every((session) => session.runEligible)
-  );
+  return isSuccessfulProcessSample(run, SINGLE_SESSIONS_PER_PROCESS);
 }
 
 function countRunFailures(
@@ -2180,7 +2183,7 @@ function countPairFailures(
 
 function buildFatalArtifact(
   failure: FirstOutputFailure,
-): FirstOutputBenchmarkArtifactV1 {
+): FirstOutputBenchmarkArtifactV2 {
   const hasSingle = Boolean(process.env['BENCHMARK_CLI_PATH']?.trim());
   const hasPaired = Boolean(
     process.env['BENCHMARK_CONTROL_CLI_PATH']?.trim() ||
@@ -2278,7 +2281,7 @@ async function cleanupActiveResources(): Promise<void> {
     it(
       'records a single baseline or balanced paired comparison',
       async () => {
-        let artifact: FirstOutputBenchmarkArtifactV1 | undefined;
+        let artifact: FirstOutputBenchmarkArtifactV2 | undefined;
         let runError: unknown;
         let configResolved = false;
         try {
@@ -2300,7 +2303,7 @@ async function cleanupActiveResources(): Promise<void> {
           if (artifact) {
             writeSnapshotArtifacts(
               OUTPUT_DIR,
-              'daemon-first-output-benchmark-v1',
+              'daemon-first-output-benchmark-v2',
               artifact,
               renderFirstOutputBenchmarkMarkdown(artifact),
               'first-output-benchmark',

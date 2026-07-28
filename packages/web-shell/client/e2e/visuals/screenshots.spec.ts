@@ -182,19 +182,67 @@ for (const theme of THEMES) {
             type: 'dingtalk',
             displayName: 'DingTalk',
             manageable: true,
-            fields: [],
+            fields: [
+              {
+                key: 'clientId',
+                label: 'Client ID',
+                kind: 'string',
+                required: true,
+                envResolvable: true,
+              },
+              {
+                key: 'clientSecret',
+                label: 'Client Secret',
+                kind: 'secret',
+                required: true,
+                envResolvable: true,
+              },
+            ],
           },
           {
             type: 'wecom',
             displayName: 'WeCom',
             manageable: true,
-            fields: [],
+            fields: [
+              {
+                key: 'botId',
+                label: 'Bot ID',
+                kind: 'string',
+                required: true,
+              },
+              {
+                key: 'secret',
+                label: 'Bot Secret',
+                kind: 'secret',
+                required: true,
+              },
+              {
+                key: 'wsUrl',
+                label: 'WebSocket URL',
+                kind: 'string',
+                required: false,
+                envResolvable: true,
+              },
+            ],
           },
           {
             type: 'feishu',
             displayName: 'Feishu',
             manageable: true,
-            fields: [],
+            fields: [
+              {
+                key: 'clientId',
+                label: 'App ID',
+                kind: 'string',
+                required: true,
+              },
+              {
+                key: 'clientSecret',
+                label: 'App Secret',
+                kind: 'secret',
+                required: true,
+              },
+            ],
           },
           {
             type: 'telegram',
@@ -208,7 +256,11 @@ for (const theme of THEMES) {
           instances: {
             dingtalk: {
               name: 'dingtalk',
-              config: { type: 'dingtalk' },
+              config: {
+                type: 'dingtalk',
+                clientId: 'ding-visual-app',
+                senderPolicy: 'pairing',
+              },
               secrets: {
                 clientSecret: { present: true, source: 'literal' },
               },
@@ -219,7 +271,7 @@ for (const theme of THEMES) {
               name: 'release-notifier',
               config: { type: 'feishu' },
               secrets: {
-                appSecret: { present: true, source: 'environment' },
+                clientSecret: { present: true, source: 'environment' },
               },
               startsWithServe: false,
               runtime: {
@@ -235,6 +287,22 @@ for (const theme of THEMES) {
               runtime: { state: 'stopped' },
             },
           },
+        },
+        pairingRequests: {
+          dingtalk: [
+            {
+              senderId: 'user-42',
+              senderName: 'Ada',
+              code: 'ABCD1234',
+              createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
+            },
+            {
+              senderId: 'user-91',
+              senderName: 'Lin',
+              code: 'WXYZ5678',
+              createdAt: Date.parse('2026-07-28T00:04:00.000Z'),
+            },
+          ],
         },
       });
       await page.addInitScript(() => {
@@ -260,6 +328,20 @@ for (const theme of THEMES) {
       ).toBeVisible();
       await expect(page.getByText('hidden-telegram')).toHaveCount(0);
       await captureScreenshot(page, `channel-manager-${theme}`);
+      await page.getByRole('button', { name: 'Configure DingTalk' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure DingTalk' }),
+      ).toBeVisible();
+      await captureScreenshot(page, `channel-editor-${theme}`);
+      await page.keyboard.press('Escape');
+      await page.getByRole('button', { name: 'Edit dingtalk' }).click();
+      const editHeading = page.getByRole('heading', {
+        name: 'Edit DingTalk',
+      });
+      await expect(editHeading).toBeVisible();
+      await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+      await editHeading.click();
+      await captureScreenshot(page, `channel-editor-existing-${theme}`);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
