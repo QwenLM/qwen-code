@@ -1405,6 +1405,36 @@ describe('SessionWriterLease', () => {
     });
   });
 
+  it('fails closed when a primary candidate is abandoned during sealing', async () => {
+    const fixture = await createFixture('sealed-abandoned-candidate-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const activeRaw = await fs.readFile(lockPath, 'utf8');
+    const candidateRaw = JSON.stringify({
+      ...(JSON.parse(activeRaw) as Record<string, unknown>),
+      owner_id: 'abandoned-candidate',
+    });
+    const retiredPath = `${lockPath}.handoff.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.renameFrom = lockPath;
+    transitionFault.renameTo = retiredPath;
+    transitionFault.afterRename = () =>
+      fs.writeFile(lockPath, candidateRaw, 'utf8');
+
+    await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(candidateRaw);
+    await expect(fs.readFile(`${lockPath}.claim`, 'utf8')).resolves.toBe(
+      activeRaw,
+    );
+    await expect(fs.readFile(retiredPath, 'utf8')).resolves.toBe(activeRaw);
+  });
+
   it('waits for a claim-aware primary candidate while rolling back sealing', async () => {
     const fixture = await createFixture('sealed-rollback-candidate-session');
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
@@ -1447,6 +1477,50 @@ describe('SessionWriterLease', () => {
     await expect(
       fs.lstat(`${lockPath}.handoff.${encodeURIComponent(first.ownerId)}`),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('fails closed when a primary candidate is abandoned during rollback', async () => {
+    const fixture = await createFixture(
+      'sealed-rollback-abandoned-candidate-session',
+    );
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const activeRaw = await fs.readFile(lockPath, 'utf8');
+    const candidateRaw = JSON.stringify({
+      ...(JSON.parse(activeRaw) as Record<string, unknown>),
+      owner_id: 'abandoned-rollback-candidate',
+    });
+    const retiredPath = `${lockPath}.handoff.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.linkFrom = `${lockPath}.sealed-candidate.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.afterLink = () => {
+      lstatFault.path = fixture.transcriptPath;
+      lstatFault.remainingFailures = 1;
+      unlinkFault.path = lockPath;
+      unlinkFault.throwAfterUnlink = true;
+      unlinkFault.afterUnlink = async () => {
+        unlinkFault.path = undefined;
+        await fs.writeFile(lockPath, candidateRaw, 'utf8');
+      };
+    };
+
+    await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(candidateRaw);
+    await expect(fs.readFile(`${lockPath}.claim`, 'utf8')).resolves.toBe(
+      activeRaw,
+    );
+    await expect(fs.readFile(retiredPath, 'utf8')).resolves.toBe(activeRaw);
   });
 
   it('never overwrites a primary installed during the sealing transition', async () => {

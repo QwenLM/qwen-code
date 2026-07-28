@@ -16,6 +16,7 @@ const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
+const CLAIMED_PRIMARY_WAIT_ATTEMPTS = 20;
 const RELEASE_PRECHECK_ATTEMPTS = 3;
 const RELEASE_PRECHECK_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
@@ -867,6 +868,17 @@ async function assertExactTransitionClaim(
   }
 }
 
+async function waitForClaimedPrimaryCandidate(attempt: number): Promise<void> {
+  if (attempt >= CLAIMED_PRIMARY_WAIT_ATTEMPTS) {
+    throw new SessionWriterUnavailableError({
+      cause: new Error(
+        'Session writer primary candidate did not release the claimed path',
+      ),
+    });
+  }
+  await delay(MALFORMED_RETRY_DELAY_MS);
+}
+
 async function linkClaimedPrimary(
   lockPath: string,
   sourcePath: string,
@@ -875,6 +887,7 @@ async function linkClaimedPrimary(
   claimPath: string,
   claimRaw: string,
 ): Promise<void> {
+  let candidateWaitAttempts = 0;
   for (;;) {
     await assertExactTransitionClaim(claimPath, claimRaw);
     try {
@@ -887,7 +900,7 @@ async function linkClaimedPrimary(
         // A schema-v2 acquirer can pass its first claim check immediately
         // before this transition creates the claim. It must remove its primary
         // candidate after the second check, so keep the predecessor and wait.
-        await delay(MALFORMED_RETRY_DELAY_MS);
+        await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
         continue;
       }
       if (state === 'other') throw new SessionWriterLostError();
@@ -905,12 +918,13 @@ async function removeClaimedPrimary(
   claimPath: string,
   claimRaw: string,
 ): Promise<void> {
+  let candidateWaitAttempts = 0;
   for (;;) {
     await assertExactTransitionClaim(claimPath, claimRaw);
     const state = await inspectClaimedPrimary(lockPath, sourceRaw, sessionId);
     if (state === 'missing') return;
     if (state === 'candidate') {
-      await delay(MALFORMED_RETRY_DELAY_MS);
+      await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
       continue;
     }
     if (state === 'other') throw new SessionWriterLostError();
@@ -926,7 +940,7 @@ async function removeClaimedPrimary(
       );
       if (afterState === 'missing') return;
       if (afterState === 'candidate') {
-        await delay(MALFORMED_RETRY_DELAY_MS);
+        await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
         continue;
       }
       if (afterState === 'other') throw new SessionWriterLostError();

@@ -89,8 +89,10 @@ creates the claim, then install its active candidate during the transition's
 primary-path gap. The transition recognizes that same-session schema-v2 active
 record as a claim-aware candidate, preserves the retired predecessor, and
 waits for the candidate's mandatory second check to remove it before retrying
-the hard link. Unknown, malformed, or cross-session successors are never
-removed or overwritten.
+the hard link. This wait is bounded; if the candidate stalls or exits before
+its second check, the transition fails unavailable while retaining its claim
+and retired predecessor. Unknown, malformed, or cross-session successors are
+never removed or overwritten.
 
 ## Sealing
 
