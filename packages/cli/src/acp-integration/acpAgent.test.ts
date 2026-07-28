@@ -2457,6 +2457,25 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('forwards a caller-supplied sessionId from _meta to loadCliConfig', async () => {
+    await setupSessionMocks('meta-session');
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: { 'qwen-code/sessionId': '550e8400-e29b-41d4-a716-446655440000' },
+    });
+
+    const argv = vi.mocked(loadCliConfig).mock.calls[0]![1];
+    expect(argv).toMatchObject({
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('creates a session when OpenTelemetry is disabled', async () => {
     mockWithDaemonSpan.mockImplementationOnce(
       async (_name, _attributes, fn) => await fn(undefined),
