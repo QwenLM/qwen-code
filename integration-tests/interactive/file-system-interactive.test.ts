@@ -64,8 +64,9 @@ describe('Interactive file system', () => {
       // Tool call detection can miss real calls in docker/podman sandbox
       // (telemetry log flush races, stdout fallback in readToolLogs), and
       // the model may use run_shell_command instead of write_file/edit.
-      // Accept either a detected tool call OR correct file content as
-      // success; fail only when both are missing.
+      // File content is the source of truth: if a tool call is detected
+      // the file must also be updated; if detection misses, correct file
+      // content alone still passes.
       const toolCall = await rig.waitForAnyToolCall(
         ['write_file', 'edit'],
         30000,
