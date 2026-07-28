@@ -787,6 +787,39 @@ describe('LiveSessionCoordinator', () => {
     });
   });
 
+  it('rotates Live when the coordinator control has a trailing newline', async () => {
+    const harness = makeHarness({
+      coordinatorResponse: (modelPrompt) => {
+        const marker = modelPrompt?.match(
+          /<qwen_live_control nonce="[0-9a-f-]+">start_new_live_conversation<\/qwen_live_control>/,
+        )?.[0];
+        if (!marker) throw new Error('missing trusted Live control marker');
+        return marker + '\n';
+      },
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-trailing-newline',
+      mode: 'new',
+    });
+
+    harness.callbacks!.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-trailing-newline',
+      callId: 'transcript-fallback:trailing-newline',
+      request: 'start new conversation',
+    });
+
+    await vi.waitFor(() =>
+      expect(harness.startNewConversation).toHaveBeenCalledOnce(),
+    );
+    expect(harness.realtime.submitFunctionCallOutput).not.toHaveBeenCalled();
+    harness.coordinator.stop({
+      epoch: 1,
+      callId: 'call-trailing-newline',
+    });
+  });
+
   it.each([
     {
       name: 'wrong nonce',

@@ -49,6 +49,7 @@ private final class CommandTapMonitor {
         eventTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CFRelease(source)
         CGEvent.tapEnable(tap: tap, enable: true)
         return true
     }

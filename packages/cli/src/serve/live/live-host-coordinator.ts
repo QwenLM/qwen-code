@@ -853,16 +853,17 @@ export class LiveHostCoordinator {
       return;
     }
     const epoch = Number(encodedEpoch);
-    if (!this.call || epoch !== this.call.epoch || this.inputMuted) return;
+    const call = this.call;
+    if (!call || epoch !== call.epoch || this.inputMuted) return;
     const pcm16 = audio.subarray(LIVE_INPUT_AUDIO_EPOCH_BYTES);
     try {
       this.handlers.onInputAudio?.({
         epoch,
-        callId: this.call.callId,
+        callId: call.callId,
         pcm16: Buffer.from(pcm16),
       });
     } catch {
-      this.failCall(this.call.epoch, 'Live Voice audio input failed.');
+      this.failCall(call.epoch, 'Live Voice audio input failed.');
     }
   }
 

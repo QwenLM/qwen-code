@@ -940,6 +940,9 @@ export function openQwenRealtimeSession(
         if (call.origin === 'transcript_fallback') {
           call.outputSubmitted = true;
           pendingCalls.delete(call.callId);
+          if (!result.output || result.output.trim().length === 0) {
+            return false;
+          }
           return session.sendCoordinatorUpdate(result.output);
         }
         if (activeResponseId && activeResponseId !== call.responseId) {

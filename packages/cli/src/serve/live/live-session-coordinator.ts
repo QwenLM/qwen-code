@@ -924,7 +924,7 @@ export class LiveSessionCoordinator {
       );
       if (
         result.stopReason === 'end_turn' &&
-        result.text === newConversationControl &&
+        result.text.trim() === newConversationControl &&
         !context.stopping &&
         this.isCurrentSocket(context, generation) &&
         context.realtime === source

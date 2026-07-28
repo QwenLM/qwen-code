@@ -896,6 +896,45 @@ describe('qwen-realtime-session', () => {
     session.close();
   });
 
+  it('returns false for an empty transcript fallback output instead of throwing', async () => {
+    const socket = new FakeSocket();
+    const onDelegateCall = vi.fn();
+    const session = await connect(socket, { onDelegateCall });
+    socket.message({
+      type: 'input_audio_buffer.committed',
+      event_id: 'empty-input-committed',
+      item_id: 'empty-input',
+    });
+    socket.message({
+      type: 'conversation.item.input_audio_transcription.completed',
+      event_id: 'empty-input-transcript',
+      item_id: 'empty-input',
+      transcript: 'some request',
+    });
+    socket.message({
+      type: 'response.created',
+      event_id: 'empty-response-created',
+      response: { id: 'empty-response', status: 'in_progress' },
+    });
+    socket.message({
+      type: 'response.done',
+      event_id: 'empty-response-done',
+      response: { id: 'empty-response', status: 'completed' },
+    });
+
+    const fallbackCall = onDelegateCall.mock.calls[0]?.[0];
+    const sentBefore = socket.sent.length;
+    expect(
+      session.submitFunctionCallOutput({
+        callEpoch: fallbackCall.callEpoch,
+        callId: fallbackCall.callId,
+        output: '   ',
+      }),
+    ).toBe(false);
+    expect(socket.sent).toHaveLength(sentBefore);
+    session.close();
+  });
+
   it('fails closed when direct VAD output has no attributable transcript', async () => {
     const socket = new FakeSocket();
     const onDelegateCall = vi.fn();

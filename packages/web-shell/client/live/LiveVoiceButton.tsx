@@ -180,7 +180,7 @@ export function LiveVoiceButton(): React.JSX.Element | null {
             <Button
               variant="outline"
               onClick={() =>
-                window.open(status.installUrl, '_blank', 'noopener')
+                window.open(status.installUrl, '_blank', 'noopener,noreferrer')
               }
             >
               {t('live.installHost')}

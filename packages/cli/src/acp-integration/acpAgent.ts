@@ -3190,15 +3190,12 @@ interface ActivePromptCall {
 }
 
 function isOwnerOnlyDirectory(stats: Stats): boolean {
+  if (process.platform === 'win32') return false;
   if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
-  if (
-    process.platform !== 'win32' &&
-    typeof process.getuid === 'function' &&
-    stats.uid !== process.getuid()
-  ) {
+  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
     return false;
   }
-  return process.platform === 'win32' || (stats.mode & 0o077) === 0;
+  return (stats.mode & 0o077) === 0;
 }
 
 class QwenAgent implements Agent {

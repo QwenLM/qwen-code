@@ -56,6 +56,7 @@ export class CommandMonitor {
   private child: ChildProcessWithoutNullStreams | undefined;
   private buffer = Buffer.alloc(0);
   private intentionalStop = false;
+  private failed = false;
   private restartTimer: NodeJS.Timeout | undefined;
   private readonly restartPolicy = new BoundedReconnectPolicy([
     250, 500, 1_000, 2_000, 5_000,
@@ -73,6 +74,7 @@ export class CommandMonitor {
   start(requestAccess = false): void {
     if (process.platform !== 'darwin' || this.child) return;
     this.intentionalStop = false;
+    this.failed = false;
     this.buffer = Buffer.alloc(0);
     const executable = app.isPackaged
       ? join(process.resourcesPath, 'native', 'qwen-live-command-monitor')
@@ -141,6 +143,7 @@ export class CommandMonitor {
         return;
       }
       this.handleMessage(parseHelperMessage(line.toString('utf8')));
+      if (this.failed) return;
       newline = this.buffer.indexOf(0x0a);
     }
   }
@@ -171,6 +174,7 @@ export class CommandMonitor {
   }
 
   private failHelper(error: string): void {
+    this.failed = true;
     this.update({ ...this.state, healthy: false, error });
     this.child?.kill('SIGTERM');
   }
