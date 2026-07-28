@@ -2430,6 +2430,7 @@ const ZH: Messages = {
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
+  'toolName.zoom_image': '图片放大',
   'toolName.grep': '搜索内容',
   'toolName.grep_search': '搜索内容',
   'toolName.glob': 'Glob',

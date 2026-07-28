@@ -13,6 +13,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
+  zoom_image: 'ZoomImage',
   grep: 'Grep',
   grep_search: 'Grep',
   glob: 'Glob',
