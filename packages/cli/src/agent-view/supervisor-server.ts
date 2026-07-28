@@ -105,7 +105,9 @@ export function createAgentViewSupervisorServer(
             resolve();
             return;
           }
-          fs.chmod(options.socketPath, 0o600).then(resolve, reject);
+          fs.chmod(options.socketPath, 0o600).then(resolve, (error) => {
+            server.close(() => reject(error));
+          });
         });
       });
     },

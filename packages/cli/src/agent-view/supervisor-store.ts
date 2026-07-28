@@ -394,12 +394,8 @@ function normalizeRosterEntry(
     sessionId,
     projectCwd: path.resolve(projectCwd),
     activeCwd: path.resolve(activeCwd),
-    ...(stringValue(value['displayName'])
-      ? { displayName: stringValue(value['displayName']) }
-      : {}),
-    ...(typeof value['pinned'] === 'boolean'
-      ? { pinned: value['pinned'] }
-      : {}),
+    displayName: stringValue(value['displayName']),
+    pinned: typeof value['pinned'] === 'boolean' ? value['pinned'] : undefined,
     createdAt,
     updatedAt,
   };

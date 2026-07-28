@@ -335,7 +335,7 @@ describe('Agent View supervisor runner', () => {
     const supervisorPromise = runAgentViewSupervisor({
       globalDir,
       maintenanceIntervalMs: 10,
-      hibernationPolicy: { idleMs: 1, autoExitGraceMs: 0 },
+      hibernationPolicy: { autoExitGraceMs: 0 },
     });
 
     await waitForSupervisor(socketPath, globalDir);

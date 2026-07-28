@@ -471,11 +471,15 @@ describe('Agent View supervisor server', () => {
     };
     const server = createAgentViewSupervisorServer(handler, { socketPath });
     await server.listen();
-    const subscription = subscribeAgentViewSupervisor(socketPath, () => {});
-    await waitFor(() => subscribers.size === 1);
+    try {
+      const subscription = subscribeAgentViewSupervisor(socketPath, () => {});
+      await waitFor(() => subscribers.size === 1);
 
-    await expect(server.close()).resolves.toBeUndefined();
-    subscription.dispose();
+      await expect(server.close()).resolves.toBeUndefined();
+      subscription.dispose();
+    } finally {
+      await server.close();
+    }
   });
 
   it('creates local sockets with owner-only permissions', async () => {

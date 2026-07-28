@@ -24,7 +24,6 @@ const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
 
 export interface AgentViewSupervisorHibernationPolicy {
   enabled?: boolean;
-  idleMs?: number;
   autoExit?: boolean;
   autoExitGraceMs?: number;
 }

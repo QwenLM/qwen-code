@@ -191,6 +191,40 @@ describe('bridgeAgentViewTerminal', () => {
 
     await expect(done).resolves.toEqual({ reason: 'detached' });
   });
+
+  it('detaches when a PTY write fails', async () => {
+    const pty: AgentViewTerminalPty = {
+      write: () => Promise.reject(new Error('pty closed')),
+      onData: () => ({ dispose: () => {} }),
+    };
+
+    await expect(
+      bridgeAgentViewTerminal({
+        stdin: bytes(['input']),
+        stdout: new MemoryWritable(),
+        pty,
+      }),
+    ).resolves.toEqual({ reason: 'detached' });
+  });
+
+  it('drains pending stdout writes when the input pump fails', async () => {
+    const pty = new FakeTerminalPty();
+    const stdout = new MemoryWritable();
+    const stdin: AsyncIterable<AgentViewTerminalBytes> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () =>
+          Promise.reject<IteratorResult<AgentViewTerminalBytes>>(
+            new Error('stdin failed'),
+          ),
+      }),
+    };
+
+    const done = bridgeAgentViewTerminal({ stdin, stdout, pty });
+    pty.emitData('output');
+
+    await expect(done).rejects.toThrow('stdin failed');
+    expect(stdout.output()).toBe('output');
+  });
 });
 
 async function* bytes(

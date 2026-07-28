@@ -89,6 +89,8 @@ export async function bridgeAgentViewTerminal(
     await outputWrites;
     return { reason };
   } finally {
+    bridgeAbort.abort();
+    await outputWrites;
     options.detachSignal?.removeEventListener('abort', onDetach);
     options.stdout.removeListener('error', onStdoutError);
     for (const disposable of disposables.splice(0)) {
@@ -119,7 +121,12 @@ async function pumpInputToPty(
       if (next.done) {
         return 'stdin-ended';
       }
-      await pty.write(toBuffer(next.value));
+      try {
+        await pty.write(toBuffer(next.value));
+      } catch {
+        detached = true;
+        return 'detached';
+      }
     }
     detached = true;
     return 'detached';
