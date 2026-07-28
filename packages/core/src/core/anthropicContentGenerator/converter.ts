@@ -111,6 +111,17 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * cross-session caching support don't see an unrecognized scope field.
    */
   useGlobalCacheScope?: boolean;
+  /**
+   * The cross-session-stable prefix of the system prompt (everything the
+   * client assembles before appending volatile tails like git status or
+   * session-start context). When it exactly matches the beginning of the
+   * request's system text and a suffix follows, the system prompt is split
+   * into two text blocks with one cache breakpoint each, making the stable
+   * prefix independently cacheable. No match (subagent prompts, stale
+   * prefix) falls back to the single-block layout — fail-open, never worse
+   * than before. Only meaningful when `enableCacheControl` is on.
+   */
+  staticSystemPrefix?: string;
 }
 
 export class AnthropicContentConverter {
@@ -186,7 +197,11 @@ export class AnthropicContentConverter {
       options.enableCacheControl ?? this.enableCacheControl;
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     const system = enableCacheControl
-      ? this.buildSystemWithCacheControl(systemText, useGlobalCacheScope)
+      ? this.buildSystemWithCacheControl(
+          systemText,
+          useGlobalCacheScope,
+          options.staticSystemPrefix,
+        )
       : systemText;
     if (enableCacheControl) {
       this.addCacheControlToMessages(messages);
@@ -688,22 +703,60 @@ export class AnthropicContentConverter {
    * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
    * per-session shape so non-Anthropic baseURLs aren't sent a scope
    * extension they may not recognize.
+   *
+   * When `staticSystemPrefix` matches the beginning of the system text and
+   * a suffix follows (git status, session-start context — the volatile
+   * tails the client appends after the stable prompt), the text is split
+   * into two blocks carrying one breakpoint each:
+   *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
+   *      sessions reuse it even though their suffix differs;
+   *   2. the end of the full system prompt — always the per-session
+   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      so a global-scope entry here would churn cache for zero hits
+   *      (same reasoning as `addCacheControlToMessages`). Within a session
+   *      it still caches the suffix, and when the suffix changes mid-session
+   *      (/cd refreshes git status, session-start context lands) the prefix
+   *      breakpoint keeps the big block from re-billing.
+   * The split only shapes the outgoing request; stored history and
+   * non-Anthropic transports keep seeing a single system string.
    */
   private buildSystemWithCacheControl(
     systemText: string,
     useGlobalCacheScope: boolean,
+    staticSystemPrefix?: string,
   ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
+    }
+
+    const scopedCacheControl: AnthropicCacheControl = useGlobalCacheScope
+      ? { type: 'ephemeral', scope: 'global' }
+      : { type: 'ephemeral' };
+
+    if (
+      staticSystemPrefix &&
+      systemText.length > staticSystemPrefix.length &&
+      systemText.startsWith(staticSystemPrefix)
+    ) {
+      return [
+        {
+          type: 'text',
+          text: staticSystemPrefix,
+          cache_control: scopedCacheControl,
+        },
+        {
+          type: 'text',
+          text: systemText.slice(staticSystemPrefix.length),
+          cache_control: { type: 'ephemeral' },
+        },
+      ];
     }
 
     return [
       {
         type: 'text',
         text: systemText,
-        cache_control: useGlobalCacheScope
-          ? { type: 'ephemeral', scope: 'global' }
-          : { type: 'ephemeral' },
+        cache_control: scopedCacheControl,
       },
     ];
   }
@@ -910,8 +963,8 @@ export class AnthropicContentConverter {
    * no `scope: 'global'`. The last user message changes every turn (it's
    * the live prompt and any tool_result blocks from the immediately prior
    * round), so cross-session reuse here has effectively zero hit rate and
-   * paying the global-scope overhead would just churn cache. System text
-   * and tool prefixes (which DO repeat across sessions) carry
+   * paying the global-scope overhead would just churn cache. The static
+   * system prefix and tool prefixes (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {

@@ -1777,6 +1777,15 @@ export class Config {
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   /**
+   * The cross-session-stable prefix of the main-session system prompt —
+   * the stable → context layers `GeminiClient.getMainSessionSystemInstruction()`
+   * assembles before the volatile tails (git status, auto-memory). Recorded
+   * so the Anthropic converter can place an early cache breakpoint on the
+   * stable prefix; consumers match it via `startsWith` and fail open to the
+   * single-block layout when it doesn't match the request's system text.
+   */
+  private staticSystemPrefix: string | undefined;
+  /**
    * Volatile system-prompt layer: the managed auto-memory section
    * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
    * (context files, stable in-session) because it is rewritten on every
@@ -5282,6 +5291,14 @@ export class Config {
 
   getUserMemory(): string {
     return this.userMemory;
+  }
+
+  getStaticSystemPrefix(): string | undefined {
+    return this.staticSystemPrefix;
+  }
+
+  setStaticSystemPrefix(prefix: string | undefined): void {
+    this.staticSystemPrefix = prefix;
   }
 
   /**
