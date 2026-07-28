@@ -18,6 +18,7 @@ import { glob as globAsync } from 'glob';
 // don't repeat the regression.
 
 import {
+  LargeNonUtf8TextError,
   StandardFileSystemService,
   decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
@@ -42,6 +43,7 @@ import {
   type ResolvedPath,
 } from './paths.js';
 import {
+  BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
@@ -84,14 +86,14 @@ export interface ReadMeta {
 }
 
 export interface ReadTextOptions {
-  /** Cap returned bytes; defaults to MAX_READ_BYTES. */
+  /** Returned-byte cap in [1, MAX_READ_BYTES]; defaults to MAX_READ_BYTES. */
   maxBytes?: number;
   /**
    * 1-based starting line for partial reads. `1` returns the file
    * from its first line. The boundary converts to the 0-based slice
    * index `readFileWithLineAndLimit` expects internally; SDK
-   * consumers don't need to adjust. Values < 1 (or undefined) are
-   * treated as "from the beginning".
+   * consumers don't need to adjust. Undefined starts from the
+   * beginning; non-positive or non-integral values are rejected.
    */
   line?: number;
   /** Maximum number of lines to return. */
@@ -471,7 +473,18 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           `limit must be a positive integer, got ${opts.limit}`,
         );
       }
-      const snapshot = await readTextSnapshotFromResolvedFile(p, opts);
+      if (
+        opts.maxBytes !== undefined &&
+        (!Number.isSafeInteger(opts.maxBytes) ||
+          opts.maxBytes < 1 ||
+          opts.maxBytes > MAX_READ_BYTES)
+      ) {
+        throw new FsError(
+          'parse_error',
+          `maxBytes must be a positive integer in [1, ${MAX_READ_BYTES}], got ${opts.maxBytes}`,
+        );
+      }
+      const snapshot = await readTextFromResolvedFile(p, opts, this.deps.lowFs);
       this.deps.generationGuard?.assertOpen();
       const ignoreVerdict = this.ignoreVerdict(p, 'file');
       const meta = snapshot.meta;
@@ -1338,15 +1351,20 @@ function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
   }
 }
 
-interface TextSnapshot {
+interface TextReadOutcome {
   content: string;
+  meta: ReadMeta & { sizeBytes: number };
+}
+
+interface TextSnapshot extends TextReadOutcome {
   meta: ReadMeta & { hash: ContentHash; sizeBytes: number };
 }
 
-async function readTextSnapshotFromResolvedFile(
+async function readTextFromResolvedFile(
   p: ResolvedPath,
-  opts: ReadTextOptions = {},
-): Promise<TextSnapshot> {
+  opts: ReadTextOptions,
+  lowFs: StandardFileSystemService,
+): Promise<TextReadOutcome> {
   const pre = await fsp.lstat(p as string);
   if (pre.isSymbolicLink()) {
     throw new FsError('symlink_escape', `path is a symlink: ${p}`, {
@@ -1356,15 +1374,41 @@ async function readTextSnapshotFromResolvedFile(
   if (!pre.isFile()) {
     throw new FsError('parse_error', `path is not a regular file: ${p}`);
   }
+
+  if (pre.size > MAX_READ_BYTES && opts.limit !== undefined) {
+    return readLargeTextWindowFromResolvedFile(
+      p,
+      pre,
+      { ...opts, limit: opts.limit },
+      lowFs,
+    );
+  }
+  return readTextSnapshotFromResolvedFile(p, opts, pre);
+}
+
+async function readTextSnapshotFromResolvedFile(
+  p: ResolvedPath,
+  opts: ReadTextOptions = {},
+  knownPre?: Awaited<ReturnType<typeof fsp.lstat>>,
+): Promise<TextSnapshot> {
+  const pre = knownPre ?? (await fsp.lstat(p as string));
+  if (pre.isSymbolicLink()) {
+    throw new FsError('symlink_escape', `path is a symlink: ${p}`, {
+      hint: 're-resolve the target file instead of reading through a link',
+    });
+  }
+  if (!pre.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${p}`);
+  }
   // Hard size gate before reading the full raw snapshot. Files above
-  // this cap should use `readBytesWindow()` with an explicit byte
-  // window instead of allocating a full decoded text snapshot.
+  // this cap need a finite text line limit or an explicit
+  // `readBytesWindow()` byte window instead of a full decoded snapshot.
   if (pre.size > MAX_READ_BYTES) {
     throw new FsError(
       'file_too_large',
       `file of ${pre.size} bytes exceeds read cap of ${MAX_READ_BYTES} bytes`,
       {
-        hint: 'use readBytes for explicit byte-windowed access on large files',
+        hint: 'use a finite line limit for large UTF-8 text, or readBytes for explicit byte-windowed access',
       },
     );
   }
@@ -1416,6 +1460,111 @@ async function readTextSnapshotFromResolvedFile(
   return { content, meta };
 }
 
+async function readLargeTextWindowFromResolvedFile(
+  p: ResolvedPath,
+  pre: Awaited<ReturnType<typeof fsp.lstat>>,
+  opts: ReadTextOptions & { limit: number },
+  lowFs: StandardFileSystemService,
+): Promise<TextReadOutcome> {
+  const fh = await fsp.open(p as string, 'r');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let content = '';
+  let readMeta:
+    | Awaited<
+        ReturnType<StandardFileSystemService['readTextFileFromHandle']>
+      >['_meta']
+    | undefined;
+  try {
+    opened = await fh.stat();
+    assertSameFile(pre, opened, p as string, 'read');
+    if (opened.size !== pre.size || opened.mtimeMs !== pre.mtimeMs) {
+      throw new FsError('hash_mismatch', `file changed before read: ${p}`, {
+        hint: 'retry after re-reading the latest file',
+      });
+    }
+
+    const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
+    if (probe.length > 0) {
+      const { bytesRead } = await fh.read(probe, 0, probe.length, 0);
+      if (looksBinary(probe.subarray(0, bytesRead))) {
+        throw new FsError('binary_file', `binary file: ${p}`, {
+          hint: 'use readBytes for binary content',
+        });
+      }
+    }
+
+    let result: Awaited<
+      ReturnType<StandardFileSystemService['readTextFileFromHandle']>
+    >;
+    try {
+      result = await lowFs.readTextFileFromHandle({
+        path: p as string,
+        fileHandle: fh,
+        stats: opened,
+        limit: opts.limit,
+        line: opts.line !== undefined ? opts.line - 1 : 0,
+        maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
+      });
+    } catch (err) {
+      if (err instanceof LargeNonUtf8TextError) {
+        throw new FsError('file_too_large', err.message, {
+          cause: err,
+          hint: 'convert the file to UTF-8 before requesting a large line window',
+        });
+      }
+      throw err;
+    }
+    content = result.content;
+    readMeta = result._meta;
+
+    const afterRead = await fh.stat();
+    assertSameFile(opened, afterRead, p as string, 'read');
+    if (
+      afterRead.size !== opened.size ||
+      afterRead.mtimeMs !== opened.mtimeMs
+    ) {
+      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+        hint: 'retry after re-reading the latest file',
+      });
+    }
+  } finally {
+    await fh.close();
+  }
+
+  if (opened === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p as string);
+  if (post.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink during read: ${p}`,
+      { hint: 'TOCTOU swap detected via post-read lstat' },
+    );
+  }
+  assertSameFile(opened, post, p as string, 'read');
+  if (post.size !== opened.size || post.mtimeMs !== opened.mtimeMs) {
+    throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+      hint: 'retry after re-reading the latest file',
+    });
+  }
+
+  const meta: TextReadOutcome['meta'] = {
+    encoding: readMeta?.encoding,
+    bom: readMeta?.bom,
+    lineEnding: readMeta?.lineEnding ?? detectLineEnding(content),
+    sizeBytes: opened.size,
+    truncated: true,
+  };
+  if (
+    readMeta?.originalLineCountExact === true &&
+    readMeta?.originalLineCount !== undefined
+  ) {
+    meta.originalLineCount = readMeta.originalLineCount;
+  }
+  return { content, meta };
+}
+
 async function readStableRegularFileBuffer(
   p: string,
   pre: Awaited<ReturnType<typeof fsp.lstat>>,
@@ -1430,7 +1579,7 @@ async function readStableRegularFileBuffer(
         'file_too_large',
         `file of ${opened.size} bytes exceeds read cap of ${MAX_READ_BYTES} bytes`,
         {
-          hint: 'use readBytes for explicit byte-windowed access on large files',
+          hint: 'use a finite line limit for large UTF-8 text, or readBytes for explicit byte-windowed access',
         },
       );
     }

@@ -6,6 +6,7 @@
 
 import os from 'node:os';
 import type { Stats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -45,6 +46,19 @@ export type CoreReadTextFileRequest = Omit<
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: Stats;
+};
+
+/**
+ * Handle-bound range read used by filesystem security boundaries. The caller
+ * owns the handle lifecycle and must pass the Stats captured from that handle.
+ */
+export type CoreReadTextFileHandleRequest = Omit<
+  CoreReadTextFileRequest,
+  'limit' | 'stats'
+> & {
+  fileHandle: FileHandle;
+  stats: Stats;
+  limit: number;
 };
 
 /**
@@ -300,30 +314,21 @@ export class StandardFileSystemService implements FileSystemService {
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    const { path, limit, line, maxOutputBytes, signal, stats } = params;
-    const readResult = await readFileWithLineAndLimit({
-      path,
-      limit: limit ?? Number.POSITIVE_INFINITY,
-      ...(line !== undefined && line !== null ? { line } : {}),
-      ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
-      ...(signal !== undefined ? { signal } : {}),
-      ...(stats !== undefined ? { stats } : {}),
+    return readTextFileStandard(params);
+  }
+
+  async readTextFileFromHandle(
+    params: CoreReadTextFileHandleRequest,
+  ): Promise<ReadTextFileResponse> {
+    if (!Number.isSafeInteger(params.limit) || params.limit < 1) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite limit, got ${params.limit}`,
+      );
+    }
+    return readTextFileStandard(params, {
+      fileHandle: params.fileHandle,
+      forceStreaming: true,
     });
-    const detectedLineEnding =
-      readResult.lineEnding ?? detectLineEnding(readResult.content);
-    return {
-      content: readResult.content,
-      _meta: {
-        bom: readResult.bom,
-        encoding: readResult.encoding,
-        originalLineCount: readResult.originalLineCount,
-        originalLineCountExact: readResult.originalLineCountExact,
-        lineEnding: detectedLineEnding,
-        ...(readResult.truncatedByBytes !== undefined
-          ? { truncatedByBytes: readResult.truncatedByBytes }
-          : {}),
-      },
-    };
   }
 
   async writeTextFile(
@@ -354,4 +359,35 @@ export class StandardFileSystemService implements FileSystemService {
       });
     });
   }
+}
+
+async function readTextFileStandard(
+  params: CoreReadTextFileRequest,
+  source?: { fileHandle: FileHandle; forceStreaming: boolean },
+): Promise<ReadTextFileResponse> {
+  const { path, limit, line, maxOutputBytes, signal, stats } = params;
+  const readResult = await readFileWithLineAndLimit({
+    path,
+    limit: limit ?? Number.POSITIVE_INFINITY,
+    ...(line !== undefined && line !== null ? { line } : {}),
+    ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
+    ...(signal !== undefined ? { signal } : {}),
+    ...(stats !== undefined ? { stats } : {}),
+    ...(source !== undefined ? source : {}),
+  });
+  const detectedLineEnding =
+    readResult.lineEnding ?? detectLineEnding(readResult.content);
+  return {
+    content: readResult.content,
+    _meta: {
+      bom: readResult.bom,
+      encoding: readResult.encoding,
+      originalLineCount: readResult.originalLineCount,
+      originalLineCountExact: readResult.originalLineCountExact,
+      lineEnding: detectedLineEnding,
+      ...(readResult.truncatedByBytes !== undefined
+        ? { truncatedByBytes: readResult.truncatedByBytes }
+        : {}),
+    },
+  };
 }

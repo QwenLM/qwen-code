@@ -9,7 +9,7 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { Ignore } from '@qwen-code/qwen-code-core';
+import { Ignore, StandardFileSystemService } from '@qwen-code/qwen-code-core';
 import {
   FS_ACCESS_EVENT_TYPE,
   FS_DENIED_EVENT_TYPE,
@@ -167,23 +167,190 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(out.content.length).toBeLessThanOrEqual(1024);
   });
 
-  it('throws file_too_large when file exceeds MAX_READ_BYTES regardless of opts.maxBytes', async () => {
-    // Write a file larger than the soft cap and assert the boundary
-    // refuses BEFORE delegating to lowFs (which would slurp the
-    // whole file into memory).
+  it('throws file_too_large for an oversized read without a finite line limit', async () => {
     const big = path.join(h.workspace, 'huge.txt');
     const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
     await fsp.writeFile(big, 'a'.repeat(bytes));
     const r = await h.fs.resolve('huge.txt', 'read');
-    const err = await h.fs.readText(r).catch((e: unknown) => e);
-    expect(isFsError(err)).toBe(true);
-    expect((err as { kind: string }).kind).toBe('file_too_large');
+    for (const opts of [{}, { line: 2 }, { maxBytes: 1024 }]) {
+      const err = await h.fs.readText(r, opts).catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('file_too_large');
+    }
     // Audit was recorded for the denial (P0 silent-failure fix).
     const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
     expect(denied).toBeDefined();
     expect((denied!.data as { errorKind: string }).errorKind).toBe(
       'file_too_large',
     );
+  });
+
+  it('streams bounded line windows from text above MAX_READ_BYTES', async () => {
+    const target = path.join(h.workspace, 'large-window.txt');
+    const lines = Array.from(
+      { length: 100 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    const prefix = lines.join('\n');
+    const filler = 'z'.repeat(maxReadBytes + 1 - Buffer.byteLength(prefix) - 1);
+    const allLines = [...lines, filler];
+    const content = allLines.join('\n');
+    expect(Buffer.byteLength(content)).toBe(maxReadBytes + 1);
+    await fsp.writeFile(target, content);
+    const r = await h.fs.resolve('large-window.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 20 });
+    expect(first.content).toBe(lines.slice(0, 20).join('\n'));
+    expect(first.meta.sizeBytes).toBe(Buffer.byteLength(content));
+    expect(first.meta.truncated).toBe(true);
+    expect(first.meta.hash).toBeUndefined();
+    expect(first.meta.originalLineCount).toBeUndefined();
+
+    const offset = await h.fs.readText(r, { line: 3, limit: 20 });
+    expect(offset.content).toBe(lines.slice(2, 22).join('\n'));
+    expect(offset.meta.sizeBytes).toBe(Buffer.byteLength(content));
+    expect(offset.meta.truncated).toBe(true);
+    expect(offset.meta.hash).toBeUndefined();
+
+    const beyondEof = await h.fs.readText(r, {
+      line: allLines.length + 10,
+      limit: 20,
+    });
+    expect(beyondEof.content).toBe('');
+    expect(beyondEof.meta.originalLineCount).toBe(allLines.length);
+    expect(beyondEof.meta.truncated).toBe(true);
+    expect(beyondEof.meta.hash).toBeUndefined();
+  });
+
+  it('rejects oversized binary content even with a finite line limit', async () => {
+    const target = path.join(h.workspace, 'large-binary.dat');
+    const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
+    await fsp.writeFile(target, Buffer.alloc(bytes));
+    const r = await h.fs.resolve('large-binary.dat', 'read');
+
+    const err = await h.fs.readText(r, { limit: 20 }).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('binary_file');
+  });
+
+  it('maps oversized non-UTF-8 text windows to file_too_large', async () => {
+    const target = path.join(h.workspace, 'large-utf16.txt');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(body.length).toBeGreaterThan(maxReadBytes);
+    await fsp.writeFile(target, body);
+    const r = await h.fs.resolve('large-utf16.txt', 'read');
+
+    const err = await h.fs.readText(r, { limit: 20 }).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+    expect((err as { hint?: string }).hint).toMatch(/convert.*UTF-8/i);
+  });
+
+  it('byte-truncates an oversized multibyte line without replacement characters', async () => {
+    const target = path.join(h.workspace, 'large-unicode.txt');
+    const content = '中文🙂'.repeat(40_000);
+    await fsp.writeFile(target, content, 'utf8');
+    const r = await h.fs.resolve('large-unicode.txt', 'read');
+
+    const out = await h.fs.readText(r, { limit: 1, maxBytes: 7 });
+    expect(out.content).toBe('中文');
+    expect(out.content).not.toContain('\uFFFD');
+    expect(out.meta.truncated).toBe(true);
+    expect(out.meta.hash).toBeUndefined();
+  });
+
+  it('preserves BOM and CRLF metadata for an oversized bounded window', async () => {
+    const target = path.join(h.workspace, 'large-crlf.txt');
+    const lines = Array.from(
+      { length: 8_000 },
+      (_, index) => `row-${index + 1} ${'x'.repeat(30)}`,
+    );
+    const body = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(lines.join('\r\n')),
+    ]);
+    await fsp.writeFile(target, body);
+    const r = await h.fs.resolve('large-crlf.txt', 'read');
+
+    const out = await h.fs.readText(r, { line: 2, limit: 2 });
+    // Splitting on LF preserves the selected line's CR terminator, matching
+    // the existing full-snapshot range behavior.
+    expect(out.content).toBe(`${lines[1]}\r\n${lines[2]}\r`);
+    expect(out.meta.bom).toBe(true);
+    expect(out.meta.encoding).toBe('utf-8');
+    expect(out.meta.lineEnding).toBe('crlf');
+    expect(out.meta.hash).toBeUndefined();
+  });
+
+  it('rejects a symlink swap while a large range is being read', async () => {
+    const target = path.join(h.workspace, 'large-swap.txt');
+    const moved = path.join(h.workspace, 'large-swap.original.txt');
+    const outside = path.join(h.scratch, 'outside.txt');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    await fsp.writeFile(outside, 'replacement\n');
+    const resolved = await h.fs.resolve('large-swap.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await original.call(this, params);
+        await fsp.rename(target, moved);
+        await fsp.symlink(outside, target, 'file');
+        return result;
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { limit: 20 })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it('rejects in-place changes while a large range is being read', async () => {
+    const target = path.join(h.workspace, 'large-change.txt');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    await fsp.writeFile(target, lines.join('\n'));
+    const resolved = await h.fs.resolve('large-change.txt', 'read');
+    const original = StandardFileSystemService.prototype.readTextFileFromHandle;
+    const readSpy = vi
+      .spyOn(StandardFileSystemService.prototype, 'readTextFileFromHandle')
+      .mockImplementation(async function (
+        this: StandardFileSystemService,
+        params,
+      ) {
+        const result = await original.call(this, params);
+        await fsp.appendFile(target, '\nchanged');
+        return result;
+      });
+
+    try {
+      const err = await h.fs
+        .readText(resolved, { limit: 20 })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('throws binary_file when reading binary content', async () => {
@@ -946,6 +1113,20 @@ describe('WorkspaceFileSystem - write/edit', () => {
     ]) {
       const err = await h.fs
         .readText(r, { limit: bad })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('parse_error');
+    }
+  });
+
+  it('rejects opts.maxBytes outside the text boundary cap', async () => {
+    const target = path.join(h.workspace, 'max-bytes.txt');
+    await fsp.writeFile(target, 'a\nb\n');
+    const r = await h.fs.resolve('max-bytes.txt', 'read');
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    for (const bad of [0, -1, 1.5, NaN, maxReadBytes + 1]) {
+      const err = await h.fs
+        .readText(r, { maxBytes: bad })
         .catch((e: unknown) => e);
       expect(isFsError(err)).toBe(true);
       expect((err as { kind: string }).kind).toBe('parse_error');

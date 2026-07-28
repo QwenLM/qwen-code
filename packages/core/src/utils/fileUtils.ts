@@ -320,6 +320,8 @@ export async function readFileWithLineAndLimit(params: {
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: import('node:fs').Stats;
+  fileHandle?: fs.promises.FileHandle;
+  forceStreaming?: boolean;
 }): Promise<{
   content: string;
   bom?: boolean;
@@ -329,8 +331,20 @@ export async function readFileWithLineAndLimit(params: {
   lineEnding?: 'crlf' | 'lf';
   truncatedByBytes?: boolean;
 }> {
-  const { path: filePath, limit, line, maxOutputBytes, signal } = params;
-  const stats = params.stats ?? (await fs.promises.stat(filePath));
+  const {
+    path: filePath,
+    limit,
+    line,
+    maxOutputBytes,
+    signal,
+    fileHandle,
+    forceStreaming,
+  } = params;
+  const stats =
+    params.stats ??
+    (fileHandle !== undefined
+      ? await fileHandle.stat()
+      : await fs.promises.stat(filePath));
   if (
     (line !== undefined && line > 0) ||
     Number.isFinite(limit) ||
@@ -343,6 +357,8 @@ export async function readFileWithLineAndLimit(params: {
       maxOutputBytes: normalizeRangeReadByteLimit(maxOutputBytes),
       stats,
       ...(signal !== undefined ? { signal } : {}),
+      ...(fileHandle !== undefined ? { fileHandle } : {}),
+      ...(forceStreaming !== undefined ? { forceStreaming } : {}),
     });
   }
 

@@ -165,14 +165,13 @@ export interface ReadSizeOutcome {
  *
  * **Note**: this helper is the *soft* truncation gate that fires
  * when `opts.maxBytes < fileSize <= MAX_READ_BYTES`. It runs only
- * AFTER `readText`'s pre-stat hard-cap check has rejected files
- * above `MAX_READ_BYTES` with `file_too_large` (see
- * `workspace-file-system.ts:readText`). Within the hard cap the
- * caller can opt into a tighter byte ceiling via `opts.maxBytes`,
- * and we surface that truncation via `truncated: true` rather
- * than throwing — operators want to see a partial config file
- * rather than an opaque error when they explicitly opted in to a
- * smaller window.
+ * on the full-snapshot path: unbounded files above `MAX_READ_BYTES`
+ * are rejected before this helper, while finite line windows use
+ * the separate streaming path. Within the full-snapshot cap the caller
+ * can opt into a tighter byte ceiling via `opts.maxBytes`, and we
+ * surface that truncation via `truncated: true` rather than throwing —
+ * operators want to see a partial config file rather than an opaque
+ * error when they explicitly opted in to a smaller window.
  */
 export function enforceReadSize(
   fileBytes: number,

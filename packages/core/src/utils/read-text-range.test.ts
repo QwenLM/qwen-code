@@ -91,6 +91,76 @@ describe('readTextRange', () => {
     expect(result.truncatedByBytes).toBe(false);
   });
 
+  it('streams a requested range from a caller-owned file handle', async () => {
+    const filePath = await writeFile('handle.log', largeUtf8Lines(2_000));
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        forceStreaming: true,
+        offset: 1_500,
+        limit: 3,
+        maxOutputBytes: 10_000,
+      });
+
+      expect(result.content.split('\n')).toEqual([
+        expect.stringContaining('line-1501'),
+        expect.stringContaining('line-1502'),
+        expect.stringContaining('line-1503'),
+      ]);
+      expect(result.originalLineCountExact).toBe(false);
+
+      const beyondEof = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        forceStreaming: true,
+        offset: 10_000,
+        limit: 3,
+        maxOutputBytes: 10_000,
+      });
+      expect(beyondEof.content).toBe('');
+      expect(beyondEof.originalLineCount).toBe(2_000);
+      expect(beyondEof.originalLineCountExact).toBe(true);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('uses only the supplied file handle when the path names another file', async () => {
+    const originalPath = await writeFile(
+      'original.log',
+      'safe-one\nsafe-two\nsafe-three\n',
+    );
+    const replacementPath = await writeFile(
+      'replacement.log',
+      'secret-one\nsecret-two\n',
+    );
+    const fileHandle = await fs.open(originalPath, 'r');
+    try {
+      const result = await readTextRange({
+        path: replacementPath,
+        fileHandle,
+        stats: await fileHandle.stat(),
+        forceStreaming: true,
+        offset: 0,
+        limit: 2,
+        maxOutputBytes: 1_024,
+      });
+
+      expect(result.content).toBe('safe-one\nsafe-two');
+      expect(result.content).not.toContain('secret');
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
   it('streams a large UTF-8 file from the beginning when no range is provided', async () => {
     const filePath = await writeFile('large.log', largeUtf8Lines(65_000));
 
