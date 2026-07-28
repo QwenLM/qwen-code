@@ -182,6 +182,64 @@ describe('Web Shell markdown-chart integration', () => {
     expect(container.textContent).toContain('200');
   });
 
+  it('keeps tooltip safety invariants in the bundled ECharts renderer', async () => {
+    const { instance, runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const chart = JSON.stringify({
+      version: 1,
+      renderer: 'echarts',
+      spec: {
+        tooltip: {
+          appendToBody: true,
+          confine: false,
+          enterable: true,
+          renderMode: 'html',
+        },
+        series: [
+          {
+            type: 'bar',
+            tooltip: {
+              appendToBody: true,
+              confine: false,
+              enterable: true,
+              renderMode: 'html',
+            },
+          },
+        ],
+      },
+    });
+    await mount(
+      chartTree({
+        content: `\`\`\`markdown-chart\n${chart}\n\`\`\``,
+        registry,
+      }),
+    );
+    await flushChart();
+
+    const option = instance.setOption.mock.calls[0]?.[0];
+    expect(option).toMatchObject({
+      tooltip: {
+        appendToBody: false,
+        confine: true,
+        enterable: false,
+        renderMode: 'richText',
+      },
+      series: [
+        {
+          tooltip: {
+            appendToBody: false,
+            confine: true,
+            enterable: false,
+            renderMode: 'richText',
+          },
+        },
+      ],
+    });
+  });
+
   it('localizes shared chart controls and preserves host label overrides', async () => {
     const { runtime } = createFakeRuntime();
     const registry = createMarkdownChartRegistry({
@@ -765,6 +823,37 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
     expect(
       container.querySelector('.markdown-chart-placeholder'),
     ).not.toBeNull();
+  });
+
+  it('keeps the direct chart mounted when the loader prop identity changes', async () => {
+    const { instance, runtime } = createFakeRuntime();
+    const option = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [['Mon', 120]],
+      },
+      series: [{ type: 'bar' }],
+    };
+    const tree = (nonce: number) => (
+      <I18nProvider language="en">
+        <div data-nonce={nonce}>
+          <EchartsFullDataBlock
+            option={option}
+            theme="dark"
+            loadEcharts={() => runtime as EchartsRuntime}
+          />
+        </div>
+      </I18nProvider>
+    );
+    const chart = await mount(tree(1));
+    await flushChart();
+
+    await chart.rerender(tree(2));
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(instance.setOption).toHaveBeenCalledOnce();
+    expect(instance.dispose).not.toHaveBeenCalled();
   });
 
   it('keeps the direct component parseError prop observable', async () => {

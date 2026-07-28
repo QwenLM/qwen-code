@@ -3,6 +3,7 @@ import {
   createElement,
   isValidElement,
   useMemo,
+  useRef,
   type CSSProperties,
   type ReactElement,
   type ReactNode,
@@ -386,6 +387,10 @@ function normalizeLegacyEchartsSource(source: string): {
   return { language: ECHARTS_FULLDATA_LANGUAGE, source };
 }
 
+function reportLegacyMarkdownChartError(error: unknown): void {
+  console.error('[web-shell] markdown-chart render failed:', error);
+}
+
 function MarkdownChartCodeBlock({
   registry,
   language,
@@ -408,9 +413,7 @@ function MarkdownChartCodeBlock({
       streaming={streaming}
       loadingLabel={t('echartsChart.rendering')}
       labels={labels}
-      onError={(error) => {
-        console.error('[web-shell] markdown-chart render failed:', error);
-      }}
+      onError={reportLegacyMarkdownChartError}
     >
       <MarkdownChartBlock
         language={language}
@@ -489,9 +492,25 @@ export function EchartsFullDataBlock({
   theme,
   loadEcharts,
 }: EchartsFullDataBlockProps): ReactElement {
+  const loadEchartsRef = useRef(loadEcharts);
+  loadEchartsRef.current = loadEcharts;
+  const hasLoadEcharts = loadEcharts !== undefined;
+  const stableLoadEcharts = useMemo<EchartsRuntimeLoader | undefined>(
+    () =>
+      hasLoadEcharts
+        ? () => {
+            const current = loadEchartsRef.current;
+            if (!current) {
+              throw new Error('Chart runtime is unavailable.');
+            }
+            return current();
+          }
+        : undefined,
+    [hasLoadEcharts],
+  );
   const registry = useMemo(
-    () => createLegacyRegistry({ loadEcharts }),
-    [loadEcharts],
+    () => createLegacyRegistry({ loadEcharts: stableLoadEcharts }),
+    [stableLoadEcharts],
   );
   if (parseError && !isStreaming) {
     return <div role="alert">{parseError}</div>;
