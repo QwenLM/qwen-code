@@ -269,6 +269,15 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
+      });
+    });
+
     it('should have voice dictation settings under general', () => {
       const voice =
         getSettingsSchema().general.properties.voice.properties ?? {};
