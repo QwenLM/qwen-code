@@ -2680,7 +2680,27 @@ describe('qwen-triage build-process guard', () => {
         'live_build_processes',
       );
       expect(runStep).toContain('surviving process:');
-      expect(runStep).toContain('refusing to start the agent');
+      expect(runStep).toContain(
+        'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
+      );
+    }
+  });
+
+  // `ps -u node` exits 1 when the user owns zero processes. Under
+  // `set -euo pipefail` the bare assignment would die silently on the
+  // success path — the `|| true` absorbs the no-match status.
+  it('"survivors" assignment tolerates zero processes under pipefail', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(
+        runStep,
+        `${lane}: survivors assignment must survive ps exit 1`,
+      ).toContain('survivors="$(live_build_processes)" || true');
     }
   });
 

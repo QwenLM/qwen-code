@@ -1112,7 +1112,7 @@ jobs:
             sleep 1
             pkill -KILL -u node 2>/dev/null || true
           done
-          survivors="$(live_build_processes)"
+          survivors="$(live_build_processes)" || true
           if [ -n "$survivors" ]; then
             # Name them. The first version of this guard failed the job with
             # nothing but "processes survived", so a real threat and a
@@ -2302,7 +2302,7 @@ jobs:
             sleep 1
             pkill -KILL -u node 2>/dev/null || true
           done
-          survivors="$(live_build_processes)"
+          survivors="$(live_build_processes)" || true
           if [ -n "$survivors" ]; then
             # Name them. The first version of this guard failed the job with
             # nothing but "processes survived", so a real threat and a
