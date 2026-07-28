@@ -1121,15 +1121,83 @@ const MonitorDetailBody: React.FC<{
 
 // ─── Workflow detail body ──────────────────────────────────
 //
-// Shows the workflow's declared meta (name + description + whenToUse),
-// the phase tree with truncation, per-phase dispatch counts, and the
-// log tail. Phase tree is capped at MAX_VISIBLE_PHASES with a "+N more
-// above" header so deeply nested fan-outs don't blow the dialog body.
-// Logs are the most recent tail; the registry caps at 100 lines but
-// the body further truncates to fit the available height.
+// Shows the workflow's declared meta, truthful agent progress, a bounded
+// execution rail, per-phase token usage, and the recent signal tail.
+// The registry caps logs at 100 lines; the body further truncates both
+// phases and logs to fit the available height.
 
 const MAX_VISIBLE_PHASES = 20;
 const MAX_VISIBLE_LOG_LINES = 10;
+
+type WorkflowPhaseState = 'completed' | 'active' | 'queued';
+
+interface WorkflowPhasePresentation {
+  title: string;
+  detail?: string;
+  state: WorkflowPhaseState;
+}
+
+function workflowPhaseRail(entry: WorkflowTask): WorkflowPhasePresentation[] {
+  const declared = entry.meta?.phases ?? [];
+  const observed = new Set(entry.phases);
+  const declaredTitles = new Set(declared.map((phase) => phase.title));
+  const phases = [
+    ...declared,
+    ...entry.phases
+      .filter((title) => !declaredTitles.has(title))
+      .map((title) => ({ title })),
+  ];
+  const activeIndex =
+    entry.status === 'running'
+      ? phases.map((phase) => phase.title).lastIndexOf(entry.currentPhase ?? '')
+      : -1;
+
+  return phases.map((phase, index) => {
+    const active = index === activeIndex;
+    return {
+      ...phase,
+      state: active
+        ? 'active'
+        : observed.has(phase.title)
+          ? 'completed'
+          : 'queued',
+    };
+  });
+}
+
+function workflowPhaseMarker(state: WorkflowPhaseState): string {
+  switch (state) {
+    case 'completed':
+      return '●';
+    case 'active':
+      return '◆';
+    case 'queued':
+      return '○';
+    default: {
+      const _exhaustive: never = state;
+      throw new Error(`Unknown workflow phase state: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function agentMeter(
+  completed: number,
+  dispatched: number,
+  maxWidth: number,
+): { complete: string; remaining: string } | null {
+  if (dispatched <= 0) return null;
+  const cells = Math.min(10, dispatched, Math.max(3, maxWidth - 24));
+  const rawCompletedCells =
+    dispatched <= cells
+      ? Math.min(completed, cells)
+      : Math.round((Math.min(completed, dispatched) / dispatched) * cells);
+  const completedCells =
+    completed > 0 ? Math.max(1, rawCompletedCells) : rawCompletedCells;
+  return {
+    complete: '━'.repeat(completedCells),
+    remaining: '─'.repeat(cells - completedCells),
+  };
+}
 
 const WorkflowDetailBody: React.FC<{
   entry: WorkflowTask;
@@ -1137,15 +1205,26 @@ const WorkflowDetailBody: React.FC<{
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
   const title = `${t('Workflow')} › ${entry.meta?.name ?? entry.runId}`;
-  const terminal = terminalStatusPresentation(entry.status);
+  const status =
+    terminalStatusPresentation(entry.status) ??
+    ({
+      icon: '◆',
+      color: theme.text.accent,
+      labelColor: theme.text.accent,
+    } satisfies StatusPresentation);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
-  if (entry.agentsDispatched > 0) {
-    dimSubtitleParts.push(
-      `${entry.agentsCompleted}/${entry.agentsDispatched} ${t('agents')}`,
-    );
-  }
+  const phaseRail = workflowPhaseRail(entry);
+  const completedPhaseCount = phaseRail.filter(
+    (phase) => phase.state === 'completed',
+  ).length;
+  const activePhaseCount = phaseRail.some((phase) => phase.state === 'active')
+    ? 1
+    : 0;
+  const settledPhaseCount = completedPhaseCount + activePhaseCount;
   dimSubtitleParts.push(
-    `${entry.phases.length} ${entry.phases.length === 1 ? t('phase') : t('phases')}`,
+    phaseRail.length > 0
+      ? `${settledPhaseCount}/${phaseRail.length} ${phaseRail.length === 1 ? t('phase') : t('phases')}`
+      : `0 ${t('phases')}`,
   );
   // P5: surface the per-run token usage when there's anything to report
   // (cap set OR tokens spent). Skipped when both are absent so legacy
@@ -1160,11 +1239,32 @@ const WorkflowDetailBody: React.FC<{
     );
   }
 
-  // Phase tree: collapse the head when over the visible cap, keeping
-  // the most recent N entries (the user almost always wants to see the
-  // current state, not the launch sequence).
-  const phaseOverflow = Math.max(0, entry.phases.length - MAX_VISIBLE_PHASES);
-  const visiblePhases = entry.phases.slice(-MAX_VISIBLE_PHASES);
+  // Keep the active phase in the bounded window when metadata declares
+  // more phases than the dialog can show. Terminal runs retain the old
+  // tail-biased behavior so their most recent observed phases stay visible.
+  const activePhaseIndex = phaseRail.findIndex(
+    (phase) => phase.state === 'active',
+  );
+  const phaseWindowStart =
+    phaseRail.length <= MAX_VISIBLE_PHASES
+      ? 0
+      : activePhaseIndex >= 0
+        ? Math.max(0, activePhaseIndex - 2)
+        : phaseRail.length - MAX_VISIBLE_PHASES;
+  const visiblePhases = phaseRail.slice(
+    phaseWindowStart,
+    phaseWindowStart + MAX_VISIBLE_PHASES,
+  );
+  const phaseOverflowAbove = phaseWindowStart;
+  const phaseOverflowBelow = Math.max(
+    0,
+    phaseRail.length - phaseWindowStart - visiblePhases.length,
+  );
+  const meter = agentMeter(
+    entry.agentsCompleted,
+    entry.agentsDispatched,
+    maxWidth,
+  );
 
   // Log tail: similar truncation logic; show "+N more above" header if
   // the registry has more than the visible window.
@@ -1188,13 +1288,27 @@ const WorkflowDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        {terminal && (
-          <Text color={terminal.color}>
-            {`${terminal.icon} ${statusVerb(entry.status)} · `}
-          </Text>
-        )}
-        <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
+        <Text bold color={status.color}>
+          {`${status.icon} ${statusVerb(entry.status)}`}
+        </Text>
+        <Text color={theme.text.secondary}>
+          {`  ${dimSubtitleParts.join(' · ')}`}
+        </Text>
       </Box>
+
+      {meter && (
+        <Box>
+          <Text bold color={theme.text.secondary}>
+            {t('Agents')}
+          </Text>
+          <Text>{'  '}</Text>
+          <Text color={theme.status.success}>{meter.complete}</Text>
+          <Text color={theme.text.secondary}>{meter.remaining}</Text>
+          <Text color={theme.text.secondary}>
+            {` ${entry.agentsCompleted}/${entry.agentsDispatched}`}
+          </Text>
+        </Box>
+      )}
 
       {entry.meta?.description && (
         <Fragment>
@@ -1207,43 +1321,69 @@ const WorkflowDetailBody: React.FC<{
 
       <Box />
       <Box>
-        <Text bold dimColor>
-          {t('Phases')}
+        <Text bold color={theme.text.secondary}>
+          {t('Execution')}
         </Text>
       </Box>
-      {entry.phases.length === 0 ? (
+      {phaseRail.length === 0 ? (
         <Box>
           <Text dimColor>{t('(no phase recorded yet)')}</Text>
         </Box>
       ) : (
         <Fragment>
-          {phaseOverflow > 0 && (
+          {phaseOverflowAbove > 0 && (
             <Box>
-              <Text dimColor>{`+${phaseOverflow} ${t('more above')}`}</Text>
+              <Text dimColor>
+                {`  +${t('{{count}} more above', {
+                  count: String(phaseOverflowAbove),
+                })}`}
+              </Text>
             </Box>
           )}
-          {visiblePhases.map((phaseTitle, i) => {
-            const isCurrent =
-              entry.status === 'running' &&
-              i === visiblePhases.length - 1 &&
-              entry.currentPhase === phaseTitle;
-            const marker = isCurrent ? '▸' : '·';
+          {visiblePhases.map((phase, i) => {
             // P5: per-phase token tally appended to the phase row.
             // Skipped when no tokens attributed yet so empty phases
             // (early register, schema-mode-pending) don't render a
             // misleading `· 0` chip.
             // P5 R1 (#7): apply `formatTokenCount` for consistency.
-            const phaseTokens = entry.perPhaseTokens.get(phaseTitle) ?? 0;
+            const phaseTokens = entry.perPhaseTokens.get(phase.title) ?? 0;
             const tokenChip =
               phaseTokens > 0 ? ` · ${formatTokenCount(phaseTokens)}t` : '';
+            const color =
+              phase.state === 'active'
+                ? theme.text.accent
+                : phase.state === 'completed'
+                  ? theme.status.success
+                  : theme.text.secondary;
             return (
-              <Box key={`${phaseTitle}-${i}`}>
-                <Text color={isCurrent ? theme.status.success : undefined}>
-                  {`  ${marker} ${phaseTitle}${tokenChip}`}
-                </Text>
-              </Box>
+              <Fragment key={`${phase.title}-${i}`}>
+                <Box>
+                  <Text color={color}>
+                    {`${workflowPhaseMarker(phase.state)} `}
+                  </Text>
+                  <Text bold={phase.state === 'active'} color={color}>
+                    {`${phase.title}${tokenChip}`}
+                  </Text>
+                </Box>
+                {phase.state === 'active' && phase.detail && (
+                  <Box>
+                    <Text color={theme.text.secondary} wrap="wrap">
+                      {`│  ${phase.detail}`}
+                    </Text>
+                  </Box>
+                )}
+              </Fragment>
             );
           })}
+          {phaseOverflowBelow > 0 && (
+            <Box>
+              <Text dimColor>
+                {`  +${t('{{count}} more below', {
+                  count: String(phaseOverflowBelow),
+                })}`}
+              </Text>
+            </Box>
+          )}
           {/* P5 R1 (#6): surface null-sentinel attribution — tokens
               spent BEFORE the first `phase()` call accumulate under the
               `null` key. Without this row the entire pre-phase spend is
@@ -1251,7 +1391,7 @@ const WorkflowDetailBody: React.FC<{
           {(entry.perPhaseTokens.get(null) ?? 0) > 0 && (
             <Box>
               <Text dimColor>
-                {`  · ${t('(no phase)')} · ${formatTokenCount(
+                {`· ${t('(no phase)')} · ${formatTokenCount(
                   entry.perPhaseTokens.get(null) ?? 0,
                 )}t`}
               </Text>
@@ -1264,19 +1404,23 @@ const WorkflowDetailBody: React.FC<{
         <Fragment>
           <Box />
           <Box>
-            <Text bold dimColor>
-              {t('Logs')}
+            <Text bold color={theme.text.secondary}>
+              {t('Recent signal')}
             </Text>
           </Box>
           {logOverflow > 0 && (
             <Box>
-              <Text dimColor>{`+${logOverflow} ${t('more above')}`}</Text>
+              <Text dimColor>
+                {`+${t('{{count}} more above', {
+                  count: String(logOverflow),
+                })}`}
+              </Text>
             </Box>
           )}
           {visibleLogs.map((line, i) => (
             <Box key={`log-${i}`}>
               <Text wrap="truncate-end" dimColor>
-                {line}
+                {`› ${line}`}
               </Text>
             </Box>
           ))}

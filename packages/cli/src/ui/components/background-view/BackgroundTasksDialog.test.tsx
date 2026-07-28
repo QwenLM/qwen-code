@@ -120,6 +120,7 @@ interface Harness {
 function setup(
   initial: readonly DialogEntry[],
   availableTerminalHeight = 30,
+  terminalWidth = 80,
 ): Harness {
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
@@ -183,7 +184,7 @@ function setup(
           <Probe entriesSetter={setEntries} />
           <BackgroundTasksDialog
             availableTerminalHeight={availableTerminalHeight}
-            terminalWidth={80}
+            terminalWidth={terminalWidth}
           />
         </BackgroundTaskViewProvider>
       </ConfigContext.Provider>
@@ -943,6 +944,164 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('1.5k/5.0k tokens');
       expect(f).toContain('(no phase)');
       expect(f).toContain('420t');
+    });
+
+    it('renders a truthful execution rail from declared and observed phases', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        currentPhase: 'Search',
+        phases: ['Scope', 'Search'],
+        agentsDispatched: 5,
+        agentsCompleted: 3,
+        meta: {
+          name: 'deep-research',
+          description: 'Build a sourced engineering brief.',
+          phases: [
+            { title: 'Scope', detail: 'Shape the research question' },
+            { title: 'Search', detail: 'Gather independent sources' },
+            { title: 'Verify', detail: 'Challenge every material claim' },
+            { title: 'Synthesize', detail: 'Write the final brief' },
+          ],
+        },
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('◆ Running');
+      expect(frame).toContain('Agents');
+      expect(frame).toContain('3/5');
+      expect(frame).toContain('● Scope');
+      expect(frame).toContain('◆ Search');
+      expect(frame).toContain('○ Verify');
+      expect(frame).toContain('○ Synthesize');
+      expect(frame).toContain('Gather independent sources');
+    });
+
+    it('separates recent workflow signals from the phase rail', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        currentPhase: 'Build',
+        phases: ['Plan', 'Build'],
+        recentLogs: ['fan-out started', 'worker 2 returned'],
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('Execution');
+      expect(frame).toContain('Recent signal');
+      expect(frame.indexOf('Execution')).toBeLessThan(
+        frame.indexOf('Recent signal'),
+      );
+      expect(frame).toContain('fan-out started');
+    });
+
+    it('renders completed phases without inventing zero-agent progress', () => {
+      const wf = workflowEntry({
+        status: 'completed',
+        currentPhase: 'Ship',
+        phases: ['Plan', 'Ship'],
+        agentsDispatched: 0,
+        agentsCompleted: 0,
+        meta: {
+          name: 'release',
+          description: 'Prepare the release.',
+          phases: [{ title: 'Plan' }, { title: 'Ship' }],
+        },
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('✔ Completed');
+      expect(frame).toContain('● Plan');
+      expect(frame).toContain('● Ship');
+      expect(frame).not.toContain('Agents');
+      expect(frame).not.toContain('0/0');
+    });
+
+    it('gives workflow failures stronger priority than recent signals', () => {
+      const wf = workflowEntry({
+        status: 'failed',
+        currentPhase: 'Verify',
+        phases: ['Plan', 'Verify'],
+        recentLogs: ['verification started'],
+        error: 'Verifier contract failed',
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('✖ Failed');
+      expect(frame).toContain('Recent signal');
+      expect(frame).toContain('Error');
+      expect(frame).toContain('Verifier contract failed');
+    });
+
+    it('keeps the active phase visible when the declared rail is capped', () => {
+      const declaredPhases = Array.from({ length: 25 }, (_, index) => ({
+        title: `Phase ${index + 1}`,
+      }));
+      const wf = workflowEntry({
+        status: 'running',
+        currentPhase: 'Phase 23',
+        phases: declaredPhases.slice(0, 23).map((phase) => phase.title),
+        meta: {
+          name: 'wide-workflow',
+          description: 'Exercise a deep phase rail.',
+          phases: declaredPhases,
+        },
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('◆ Phase 23');
+      expect(frame).toContain('○ Phase 25');
+      expect(frame).toContain('more above');
+      expect(frame).not.toContain('● Phase 1');
+    });
+
+    it('keeps the execution console inside a narrow terminal', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        currentPhase: 'Implementation',
+        phases: ['Plan', 'Implementation'],
+        agentsDispatched: 14,
+        agentsCompleted: 7,
+        meta: {
+          name: 'release-readiness',
+          description:
+            'Inspect a large release candidate without hiding operational state.',
+          phases: [
+            { title: 'Plan' },
+            {
+              title: 'Implementation',
+              detail: 'Run the focused implementation and verification work',
+            },
+            { title: 'Verification' },
+          ],
+        },
+      });
+
+      const h = setup([wf], 30, 44);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('7/14');
+      expect(frame).toContain('◆ Implementation');
+      expect(frame).toContain('━━━━━─────');
+      const lines = frame.split('\n');
+      const firstDescriptionLine =
+        lines.find((line) =>
+          line.includes('Inspect a large release candidate'),
+        ) ?? '';
+      expect(firstDescriptionLine).not.toContain('without hiding');
+      expect(
+        lines.some((line) => line.includes('without hiding operational state')),
+      ).toBe(true);
     });
   });
 
