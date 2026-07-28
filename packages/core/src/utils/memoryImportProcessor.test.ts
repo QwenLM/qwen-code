@@ -935,6 +935,37 @@ describe('memoryImportProcessor', () => {
       );
     });
 
+    it('spends the same budget in both formats when depth is already partly used', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      // Entering with 2 of 3 levels already spent leaves one level of budget.
+      // The flat path used to start its own counter at 0 and hand out the
+      // full limit again, so it expanded two levels further than tree mode.
+      mockChain(8);
+      const flat = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 2 },
+        projectRoot,
+        'flat',
+      );
+
+      mockChain(8);
+      const tree = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 2 },
+        projectRoot,
+        'tree',
+      );
+
+      expect(chainMarkers(flat.content, 8)).toEqual(
+        chainMarkers(tree.content, 8),
+      );
+      expect(chainMarkers(flat.content, 8)).toEqual([0]);
+    });
+
     it('fully expands a flat import chain that stays within maxDepth', async () => {
       const projectRoot = testPath('test', 'project');
       const basePath = testPath(projectRoot, 'src');

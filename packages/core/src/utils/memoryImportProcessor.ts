@@ -358,7 +358,12 @@ export async function processImports(
     const rootPath = path.normalize(
       importState.currentFile || path.resolve(basePath),
     );
-    await processFlat(content, basePath, rootPath, 0);
+    // Start from the depth already spent rather than 0, so the two formats
+    // budget from the same origin. Every caller today enters flat mode at
+    // depth 0, which makes this a no-op for them, but a caller arriving with
+    // budget already spent would otherwise get the full limit over again in
+    // flat mode while tree mode gave it only what was left.
+    await processFlat(content, basePath, rootPath, importState.currentDepth);
 
     // Concatenate all unique files in order, Claude-style
     const flatContent = flatFiles
