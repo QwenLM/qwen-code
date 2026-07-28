@@ -22,13 +22,18 @@ interface SideTaskPanelProps {
   parentSessionId: string;
   workspaceCwd?: string;
   title: string;
+  shouldNameFromFirstPrompt?: boolean;
   createSession: (
     tabId: string,
     parentSessionId: string,
     title: string,
   ) => Promise<{ sessionId: string; displayName?: string }>;
   onCreated: (tabId: string, sessionId: string) => void;
-  onTitleChange: (tabId: string, title: string) => void;
+  onTitleChange: (
+    tabId: string,
+    title: string,
+    fromFirstPrompt?: boolean,
+  ) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onArtifactsChange?: (
     sessionId: string,
@@ -44,6 +49,7 @@ export function SideTaskPanel({
   parentSessionId,
   workspaceCwd,
   title,
+  shouldNameFromFirstPrompt,
   createSession,
   onCreated,
   onTitleChange,
@@ -79,6 +85,7 @@ export function SideTaskPanel({
       <SideTaskSession
         tabId={tabId}
         title={title}
+        shouldNameFromFirstPrompt={shouldNameFromFirstPrompt}
         workspaceCwd={workspaceCwd}
         onTitleChange={onTitleChange}
         onRightPanelOpen={onRightPanelOpen}
@@ -165,6 +172,7 @@ function SideTaskCreation({
 function SideTaskSession({
   tabId,
   title,
+  shouldNameFromFirstPrompt,
   workspaceCwd,
   onTitleChange,
   onRightPanelOpen,
@@ -184,7 +192,7 @@ function SideTaskSession({
     (text: string) => {
       const nextTitle = text.trim().slice(0, 200);
       if (!nextTitle) return;
-      onTitleChange(tabId, nextTitle);
+      onTitleChange(tabId, nextTitle, true);
       void actions
         .renameSession(nextTitle)
         .catch((error: unknown) =>
@@ -207,7 +215,9 @@ function SideTaskSession({
       workspaceCwd={workspaceCwd}
       onError={onError}
       embedded
-      onFirstPromptAdmitted={nameFromFirstPrompt}
+      onFirstPromptAdmitted={
+        shouldNameFromFirstPrompt ? nameFromFirstPrompt : undefined
+      }
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
     />

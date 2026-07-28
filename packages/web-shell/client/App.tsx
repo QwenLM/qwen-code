@@ -1020,7 +1020,10 @@ export function getTaskActivityKey(messages: readonly Message[]): string {
   const parts: string[] = [];
   const visit = (tools: readonly ACPToolCall[]) => {
     for (const tool of tools) {
-      if (isBackgroundTaskToolCall(tool)) {
+      if (
+        isBackgroundTaskToolCall(tool) ||
+        isBackgroundSubAgentToolCall(tool)
+      ) {
         parts.push(`${tool.callId}:${tool.status}`);
       }
       if (tool.subTools) visit(tool.subTools);
@@ -2304,6 +2307,7 @@ export function App({
       title: t('sideTask.title'),
       parentSessionId,
       workspaceCwd: connection.workspaceCwd,
+      nameFromFirstPrompt: true,
     };
     setArtifactPanelTabs((tabs) => [...tabs, tab]);
     setActiveArtifactPanelTabId(tab.id);
@@ -2369,18 +2373,22 @@ export function App({
     [],
   );
   const handleSideTaskTitleChange = useCallback(
-    (tabId: string, title: string) => {
+    (tabId: string, title: string, fromFirstPrompt = false) => {
       const sideTaskTab = artifactPanelTabsRef.current.find(
         (tab) => tab.id === tabId && tab.kind === 'side_task',
       );
       const sessionId =
         sideTaskTab?.kind === 'side_task' ? sideTaskTab.sessionId : undefined;
       setArtifactPanelTabs((tabs) =>
-        tabs.map((tab) =>
-          tab.id === tabId && tab.kind === 'side_task' && tab.title !== title
-            ? { ...tab, title }
-            : tab,
-        ),
+        tabs.map((tab) => {
+          if (tab.id !== tabId || tab.kind !== 'side_task') return tab;
+          if (!fromFirstPrompt && tab.title === title) return tab;
+          return {
+            ...tab,
+            title,
+            ...(fromFirstPrompt ? { nameFromFirstPrompt: false } : {}),
+          };
+        }),
       );
       if (sessionId) {
         setSideTaskCatalog((catalog) => ({
@@ -7988,6 +7996,10 @@ export function App({
     setEnvironmentPanelSuppressed(false);
     setEnvironmentPanelOpen(true);
   }, []);
+  const dismissEnvironmentPanel = useCallback(
+    () => setEnvironmentPanelOpen(false),
+    [],
+  );
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -9739,7 +9751,7 @@ export function App({
                 }
                 onOpenAgent={openEnvironmentAgent}
                 onOpenTask={openEnvironmentTask}
-                onDismiss={() => setEnvironmentPanelOpen(false)}
+                onDismiss={dismissEnvironmentPanel}
               />
             )}
             {artifactPanelOpen && useFloatingArtifactPanel ? (

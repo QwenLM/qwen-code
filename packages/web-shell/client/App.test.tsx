@@ -1111,7 +1111,7 @@ describe('task activity key', () => {
             callId: 'agent-call',
             toolName: 'agent',
             status: 'pending',
-            args: { run_in_background: true },
+            args: {},
             subTools: [
               {
                 callId: 'nested-shell',
@@ -1120,6 +1120,12 @@ describe('task activity key', () => {
                 args: { is_background: true },
               },
             ],
+          },
+          {
+            callId: 'foreground-agent',
+            toolName: 'agent',
+            status: 'in_progress',
+            args: { run_in_background: false },
           },
           {
             callId: 'completed-shell',
@@ -1138,7 +1144,7 @@ describe('task activity key', () => {
     ] satisfies Message[];
 
     expect(getTaskActivityKey(messages)).toBe(
-      'shell-call:in_progress|nested-shell:completed|completed-shell:completed|monitor-call:completed',
+      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|monitor-call:completed',
     );
   });
 

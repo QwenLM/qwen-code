@@ -12401,7 +12401,12 @@ describe('QwenAgent extMethod renameSession routing', () => {
         },
       },
     );
-    expect(sessionService.renameSession).not.toHaveBeenCalled();
+    const newSessionId = sessionService.forkSession.mock.calls[0]?.[1];
+    expect(sessionService.renameSession).toHaveBeenCalledWith(
+      newSessionId,
+      'Side task',
+      'manual',
+    );
     expect(result).toMatchObject({
       title: 'Side task',
       displayName: 'Side task',

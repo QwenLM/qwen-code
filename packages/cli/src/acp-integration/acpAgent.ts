@@ -640,6 +640,8 @@ function selectVisibleHistoryRecords(
       isObjectRecord(record.systemPayload) &&
       record.systemPayload['sourceType'] === 'side_task',
   );
+  // A persisted side-task source boundary is authoritative for every replay;
+  // callers cannot opt inherited parent history back into that child session.
   if (sourceBoundary >= 0) {
     return records
       .slice(sourceBoundary)
@@ -10074,19 +10076,17 @@ class QwenAgent implements Agent {
           title = isSideTask
             ? baseName
             : await computeUniqueBranchTitle(baseName, sessionService);
-          if (!isSideTask) {
-            const renamed = await sessionService.renameSession(
-              newSessionId,
-              title,
-              'manual',
+          const renamed = await sessionService.renameSession(
+            newSessionId,
+            title,
+            'manual',
+          );
+          if (!renamed) {
+            throw new RequestError(
+              -32603,
+              `Failed to set title on forked session ${newSessionId}`,
+              { errorKind: 'internal', sessionId: newSessionId },
             );
-            if (!renamed) {
-              throw new RequestError(
-                -32603,
-                `Failed to set title on forked session ${newSessionId}`,
-                { errorKind: 'internal', sessionId: newSessionId },
-              );
-            }
           }
         } catch (err) {
           sessionService.removeSession(newSessionId).catch((rmErr) => {

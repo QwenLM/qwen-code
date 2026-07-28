@@ -124,6 +124,40 @@ afterEach(async () => {
 });
 
 describe('useBackgroundTasks', () => {
+  it('keeps polling after a transient task refresh failure', async () => {
+    const runningMonitor = monitor('monitor-a', 'running');
+    sdkMock.actions.getTasks
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValue(snapshot('session-a', [runningMonitor]));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    expect(latestTasks).toEqual([runningMonitor]);
+    warn.mockRestore();
+  });
+
+  it('stops polling when the session is disconnected', async () => {
+    sdkMock.actions.getTasks.mockRejectedValue(
+      new Error('Get tasks failed: Daemon session is not connected'),
+    );
+
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+  });
+
   it('starts polling when an out-of-band task triggers a refresh', async () => {
     taskActivityKey = '';
     const runningFork = {

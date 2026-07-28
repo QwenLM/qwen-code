@@ -86,7 +86,11 @@ const FREQUENCIES: Frequency[] = [
 ];
 const MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
 const ignoreSideTaskCreated = (_tabId: string, _sessionId: string) => undefined;
-const ignoreSideTaskTitleChange = (_tabId: string, _title: string) => undefined;
+const ignoreSideTaskTitleChange = (
+  _tabId: string,
+  _title: string,
+  _fromFirstPrompt?: boolean,
+) => undefined;
 const rejectMissingSideTaskCreate = () =>
   Promise.reject(new Error('Side-task session creation is unavailable'));
 
@@ -155,6 +159,7 @@ export type ArtifactPanelTab =
       sessionId?: string;
       parentSessionId: string;
       workspaceCwd?: string;
+      nameFromFirstPrompt?: boolean;
     };
 
 export interface SideTaskListItem {
@@ -200,7 +205,11 @@ interface ArtifactPanelProps {
     title: string,
   ) => Promise<{ sessionId: string; displayName?: string }>;
   onSideTaskCreated?: (tabId: string, sessionId: string) => void;
-  onSideTaskTitleChange?: (tabId: string, title: string) => void;
+  onSideTaskTitleChange?: (
+    tabId: string,
+    title: string,
+    fromFirstPrompt?: boolean,
+  ) => void;
   onNestedRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onNestedArtifactsChange?: (
     sessionId: string,
@@ -603,6 +612,7 @@ export function ArtifactPanel({
             parentSessionId={activeTab.parentSessionId}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
             title={activeTab.title}
+            shouldNameFromFirstPrompt={activeTab.nameFromFirstPrompt}
             createSession={
               onCreateSideTaskSession ?? rejectMissingSideTaskCreate
             }

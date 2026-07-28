@@ -75,8 +75,10 @@ export function useBackgroundTasks(
         })
         .catch((error: unknown) => {
           if (disposed) return;
-          setPollingActive(false);
-          if (isSessionDisconnectedError(error)) return;
+          if (isSessionDisconnectedError(error)) {
+            setPollingActive(false);
+            return;
+          }
           console.warn('[web-shell] failed to refresh tasks:', error);
         })
         .finally(() => {

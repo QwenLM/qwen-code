@@ -136,6 +136,41 @@ it('renders a restored side task as a full chat pane', () => {
     onRightPanelOpen,
     onPaneArtifactsChange: onArtifactsChange,
   });
+  expect(
+    latestChatPaneProps.current?.['onFirstPromptAdmitted'],
+  ).toBeUndefined();
+  expect(providerProps.current).toMatchObject({
+    sessionId: 'side-session-1',
+    workspaceCwd: '/work/project',
+    autoConnect: true,
+  });
+});
+
+it('names a newly created side task from its first prompt', () => {
+  connection.sessionId = 'side-session-1';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  act(() => {
+    root!.render(
+      <I18nProvider language="en">
+        <SideTaskPanel
+          tabId="side-task:draft:1"
+          sessionId="side-session-1"
+          parentSessionId="parent-session"
+          workspaceCwd="/work/project"
+          title="Side task"
+          shouldNameFromFirstPrompt
+          createSession={vi.fn()}
+          onCreated={vi.fn()}
+          onTitleChange={onTitleChange}
+        />
+      </I18nProvider>,
+    );
+  });
+
   act(() => {
     (
       latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
@@ -143,14 +178,36 @@ it('renders a restored side task as a full chat pane', () => {
       ) => void
     )('Investigate cache invalidation');
   });
+
   expect(onTitleChange).toHaveBeenCalledWith(
-    'side-task:side-session-1',
+    'side-task:draft:1',
     'Investigate cache invalidation',
+    true,
   );
   expect(renameSession).toHaveBeenCalledWith('Investigate cache invalidation');
-  expect(providerProps.current).toMatchObject({
-    sessionId: 'side-session-1',
-    workspaceCwd: '/work/project',
-    autoConnect: true,
+
+  act(() => {
+    root!.render(null);
   });
+  act(() => {
+    root!.render(
+      <I18nProvider language="en">
+        <SideTaskPanel
+          tabId="side-task:draft:1"
+          sessionId="side-session-1"
+          parentSessionId="parent-session"
+          workspaceCwd="/work/project"
+          title="Investigate cache invalidation"
+          shouldNameFromFirstPrompt={false}
+          createSession={vi.fn()}
+          onCreated={vi.fn()}
+          onTitleChange={onTitleChange}
+        />
+      </I18nProvider>,
+    );
+  });
+
+  expect(
+    latestChatPaneProps.current?.['onFirstPromptAdmitted'],
+  ).toBeUndefined();
 });
