@@ -6,6 +6,7 @@
 
 import type {
   ChatRecord,
+  GoalSnapshotV2,
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +20,21 @@ import {
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TIMESTAMP = '2026-07-12T00:00:00.000Z';
+const GOAL_STATE: GoalSnapshotV2 = {
+  v: 2,
+  activity: 'idle',
+  goal: {
+    goalId: 'goal-1',
+    revision: 1,
+    objective: 'ship it',
+    status: 'active',
+    evidenceCursor: { recordId: 'goal-state' },
+    turnCount: 2,
+    activeTimeMs: 1000,
+    createdAt: 1,
+    updatedAt: 2,
+  },
+};
 
 function userRecord(): ChatRecord {
   return {
@@ -183,6 +199,132 @@ describe('history replay page', () => {
       gaps: [],
     });
     expect(encodeCursor).toHaveBeenCalledWith(cursorState());
+  });
+
+  it('passes authoritative Goal state into backward replay', async () => {
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+          goalState: GOAL_STATE,
+        },
+      });
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        direction: 'backward',
+        replay: { goalState: GOAL_STATE },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+      goalState: GOAL_STATE,
+    });
+  });
+
+  it('drops a malformed goalState from replay state and warns', async () => {
+    const logger = { warn: vi.fn() };
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+        },
+      });
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        replay: { goalState: { v: 2, activity: 'bogus', goal: null } },
+      }),
+      encodeCursor: vi.fn(),
+      logger,
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[transcript] replay state dropped a malformed Goal state',
+    );
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+    });
+  });
+
+  it('seeds backward replay so a cleared Goal keeps its prior condition', async () => {
+    // Drives the real (unspied) replayPage: the authoritative pre-page Goal
+    // state must seed the replay machine so a `clear` record still projects its
+    // original condition, iteration count, and timing. Without the seed the
+    // cleared card degrades to an empty condition.
+    const priorGoalState: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship the transcript work',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-state' },
+        turnCount: 3,
+        activeTimeMs: 1234,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    const goalClearRecord = {
+      uuid: 'goal-clear',
+      parentUuid: 'u2',
+      sessionId: SESSION_ID,
+      timestamp: TIMESTAMP,
+      type: 'system',
+      subtype: 'goal_state',
+      cwd: '/workspace',
+      version: '1.0.0',
+      systemPayload: {
+        v: 2,
+        cause: 'clear',
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
+    } as unknown as ChatRecord;
+
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        direction: 'backward',
+        records: [goalClearRecord],
+        replay: { goalState: priorGoalState },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const goalUpdate = result.updates.find((update) => {
+      const meta = (update as { _meta?: Record<string, unknown> })._meta;
+      return meta?.['goalStatus'] !== undefined;
+    }) as { _meta?: Record<string, unknown> } | undefined;
+
+    expect(goalUpdate?._meta).toMatchObject({
+      goalState: { v: 2, goal: null, activity: 'idle' },
+      goalStatus: {
+        kind: 'cleared',
+        condition: 'ship the transcript work',
+        iterations: 3,
+        setAt: 10,
+        durationMs: 1234,
+      },
+    });
+    expect(goalUpdate?._meta?.['goalStatus']).not.toHaveProperty('type');
   });
 
   it('terminates pagination when replay conversion fails', async () => {

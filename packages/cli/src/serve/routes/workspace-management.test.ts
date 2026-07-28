@@ -13,6 +13,7 @@ import {
   type WorkspaceManagementRouteDeps,
   type WorkspaceRuntimeRemovalController,
 } from './workspace-management.js';
+import { NativeDirectoryPickerUnavailableError } from '../native-directory-picker.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -2402,5 +2403,141 @@ describe('GET /workspace-path-suggestions', () => {
       .query({ prefix: '/' + 'x'.repeat(5000) });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_prefix');
+  });
+});
+
+describe('POST /workspace-directory-picker', () => {
+  it('remains available in loopback development without a configured token', async () => {
+    const mutate = vi.fn(
+      (options?: { strict?: boolean }) =>
+        (_req: Request, res: Response, next: () => void) => {
+          if (options?.strict) {
+            res.status(401).json({ code: 'token_required' });
+            return;
+          }
+          next();
+        },
+    );
+    const { app } = createApp({
+      mutate,
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body.selected).toBe(false);
+  });
+
+  it('returns the absolute path selected by the native picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/Users/me/code');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('returns selected=false when the user cancels', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: false,
+    });
+  });
+
+  it('returns 501 when the native picker is unavailable', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi
+        .fn()
+        .mockRejectedValue(new NativeDirectoryPickerUnavailableError()),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('directory_picker_unavailable');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker unavailable'),
+    );
+  });
+
+  it('returns 500 when the picker fails unexpectedly', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('directory_picker_failed');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker failed: boom'),
+    );
+  });
+
+  it('passes an abort signal to the picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/tmp');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    await request(app).post('/workspace-directory-picker');
+
+    expect(pickWorkspaceDirectory).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('does not abort the picker before it can resolve, for the body the Web Shell actually sends', async () => {
+    // A real picker resolves only after the user interacts — model that with a
+    // delay so an already-aborted signal surfaces as a rejection.
+    const pickWorkspaceDirectory = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<string | undefined>((resolve, reject) => {
+          setTimeout(() => {
+            if (signal?.aborted) {
+              reject(new Error('The operation was aborted'));
+              return;
+            }
+            resolve('/Users/me/code');
+          }, 50);
+        }),
+    );
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker').send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('still aborts a picker that is genuinely in flight when the client hangs up', async () => {
+    let observed: AbortSignal | undefined;
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn((signal?: AbortSignal) => {
+        observed = signal;
+        return new Promise<string | undefined>(() => {});
+      }),
+    });
+    const req = request(app).post('/workspace-directory-picker').send({});
+    req.end(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    req.abort();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(observed?.aborted).toBe(true);
   });
 });

@@ -137,8 +137,6 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
       if (
         key === 'type' ||
         key === 'const' ||
-        key === 'exclusiveMinimum' ||
-        key === 'exclusiveMaximum' ||
         key === 'items' ||
         key === 'enum' ||
         key === '$schema' ||
@@ -146,6 +144,21 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
         key === 'default' || // Optional: Gemini sometimes complains about defaults conflicting with types
         key === 'dependencies' ||
         key === 'patternProperties'
+      ) {
+        continue;
+      }
+
+      // Step 3 consumes only the NUMERIC form of the exclusive limits, so
+      // only the numeric form may be skipped here. A boolean is a Draft 4
+      // schema that already carries the exact shape step 3 emits, and
+      // skipping it unconditionally dropped it: `{minimum: 10,
+      // exclusiveMinimum: true}` came back as `{minimum: 10}`, silently
+      // relaxing `> 10` into `>= 10`. That also made this function
+      // non-idempotent — feeding its own output back in lost the flag it had
+      // just added.
+      if (
+        (key === 'exclusiveMinimum' || key === 'exclusiveMaximum') &&
+        typeof value === 'number'
       ) {
         continue;
       }

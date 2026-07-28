@@ -5,8 +5,24 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolve } from 'node:path';
-import { tmpFile, probeWorktreePath, worktreePath } from './paths.js';
+import { join, resolve } from 'node:path';
+import {
+  tmpFile,
+  probeWorktreePath,
+  worktreePath,
+  PARSE_ARGS_REPORT,
+} from './paths.js';
+
+describe('PARSE_ARGS_REPORT', () => {
+  it('is the literal path the skill tees to in Step 0', () => {
+    // The skill's Step 0 hard-codes `.qwen/tmp/qwen-review-parse-args.json` in
+    // its tee command. If this constant drifts from that literal the fallback
+    // silently stops reading the report and the original bug returns.
+    expect(PARSE_ARGS_REPORT).toBe(
+      join('.qwen', 'tmp', 'qwen-review-parse-args.json'),
+    );
+  });
+});
 
 describe('tmpFile — target is a single safe component', () => {
   it('keeps ordinary labels intact', () => {

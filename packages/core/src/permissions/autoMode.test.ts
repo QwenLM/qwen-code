@@ -37,6 +37,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
   it('includes the canonical read-only / metadata tools', () => {
     const expected = [
       ToolNames.READ_FILE,
+      ToolNames.ZOOM_IMAGE,
       ToolNames.GREP,
       ToolNames.GLOB,
       ToolNames.LS,
@@ -97,6 +98,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
         "task_stop",
         "todo_write",
         "tool_search",
+        "zoom_image",
       ]
     `);
   });
