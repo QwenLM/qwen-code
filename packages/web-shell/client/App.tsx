@@ -272,6 +272,7 @@ import {
   type ComposerToolbarEndRenderer,
   type ComposerToolbarRightRenderer,
   type ComposerHeaderRenderer,
+  type ComposerFooterRenderer,
   type ChatHeaderRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
@@ -620,6 +621,8 @@ export interface WebShellProps {
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom renderer shown directly above the chat composer input. */
   renderComposerHeader?: ComposerHeaderRenderer;
+  /** Custom renderer shown directly below the chat composer input. */
+  renderComposerFooter?: ComposerFooterRenderer;
   /**
    * Custom renderer shown at the top of the chat view, above the message list.
    * Only rendered when a session is active (not in the welcome/empty state).
@@ -1112,6 +1115,7 @@ export function App({
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
   renderComposerHeader,
+  renderComposerFooter,
   renderChatHeader,
   renderFooter,
   bottomStatusItems,
@@ -1316,6 +1320,7 @@ export function App({
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
       renderComposerHeader,
+      renderComposerFooter,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1338,6 +1343,7 @@ export function App({
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
       renderComposerHeader,
+      renderComposerFooter,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1348,6 +1354,7 @@ export function App({
   );
   const CustomFooter = renderFooter;
   const CustomComposerHeader = renderComposerHeader;
+  const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -8602,6 +8609,15 @@ export function App({
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
                         />
+                        {CustomComposerFooter && (
+                          <CustomComposerFooter
+                            disabled={isDisabled}
+                            isRunning={streamingState !== 'idle'}
+                            currentMode={currentMode}
+                            currentModel={currentModel}
+                            sessionName={sessionDisplayName}
+                          />
+                        )}
                       </div>
                       {CustomFooter ? (
                         hasMobileComposerBottom ? (
