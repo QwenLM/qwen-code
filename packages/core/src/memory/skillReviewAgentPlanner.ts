@@ -23,6 +23,7 @@ import {
   isProjectSkillPath,
   SKILL_FILE_NAME,
 } from '../skills/skill-paths.js';
+import { SKILL_NAME_PATTERN } from '../skills/types.js';
 
 export const SKILL_REVIEW_AGENT_NAME = 'managed-skill-extractor' as const;
 export const DEFAULT_AUTO_SKILL_MAX_TURNS = 8;
@@ -335,7 +336,15 @@ async function listReservedSkillDirNames(
       withFileTypes: true,
     });
     for (const entry of entries) {
-      if (entry.isDirectory() || entry.isSymbolicLink()) names.add(entry.name);
+      // Apply the same charset guard the curator uses everywhere else so a
+      // crafted archived directory name carrying ANSI/control bytes cannot
+      // reach the task prompt verbatim.
+      if (
+        (entry.isDirectory() || entry.isSymbolicLink()) &&
+        SKILL_NAME_PATTERN.test(entry.name)
+      ) {
+        names.add(entry.name);
+      }
     }
   } catch {
     // An unavailable archive contributes no reserved names.

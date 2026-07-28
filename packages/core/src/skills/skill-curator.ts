@@ -39,11 +39,16 @@ const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 // lstat→read TOCTOU window a bare readFile leaves open — and O_NONBLOCK keeps a
 // FIFO from hanging the open (the fstat guard then rejects it as non-regular).
 // Both constants are omitted on platforms that lack them (Windows), where they
-// reduce to plain O_RDONLY.
-const NO_FOLLOW_READ_FLAGS =
-  (fsConstants.O_RDONLY ?? 0) |
-  (fsConstants.O_NOFOLLOW ?? 0) |
-  (fsConstants.O_NONBLOCK ?? 0);
+// reduce to plain O_RDONLY. Resolved lazily rather than at module load so the
+// node:fs constants are not touched at import time — tests that mock node:fs
+// without a `constants` export install a proxy that throws on access.
+function noFollowReadFlags(): number {
+  return (
+    (fsConstants.O_RDONLY ?? 0) |
+    (fsConstants.O_NOFOLLOW ?? 0) |
+    (fsConstants.O_NONBLOCK ?? 0)
+  );
+}
 
 /**
  * Read an entire regular file with O_NOFOLLOW and a size bound taken from an
@@ -56,7 +61,7 @@ async function readRegularFileNoFollow(
   filePath: string,
   maxBytes: number,
 ): Promise<{ content: string; stat: import('node:fs').Stats }> {
-  const handle = await fs.open(filePath, NO_FOLLOW_READ_FLAGS);
+  const handle = await fs.open(filePath, noFollowReadFlags());
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) {
@@ -610,9 +615,9 @@ async function runLocked(
   } catch (error) {
     const rollbackErrors = await rollbackMoves(moved);
     if (rollbackErrors.length > 0) {
-      throw new Error(
-        `${error instanceof Error ? error.message : String(error)} Rollback failed: ${rollbackErrors.join('; ')}`,
-      );
+      throw new Error(`Rollback failed: ${rollbackErrors.join('; ')}`, {
+        cause: error,
+      });
     }
     throw error;
   }
@@ -882,7 +887,8 @@ export async function restoreArchivedAutoSkill(
         await fs.rename(destination, archived.directoryPath);
       } catch (rollbackError) {
         throw new Error(
-          `${error instanceof Error ? error.message : String(error)} Rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          `Rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          { cause: error },
         );
       }
       throw error;
