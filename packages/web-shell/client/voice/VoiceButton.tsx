@@ -5,17 +5,22 @@
  */
 
 import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  useConnection,
   useWorkspace,
   useWorkspaceEventSignals,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useVoiceCapture } from './useVoiceCapture';
+import {
+  loadVoiceStatus,
+  supportsVoiceCapture,
+  type VoiceStatusRevision,
+  type VoiceWorkspaceTarget,
+} from './voice-workspace-target';
 import styles from './VoiceButton.module.css';
 
-/** Daemon capability tag gating the mic (see serve/capabilities.ts). */
-const VOICE_FEATURE = 'voice_transcribe';
 /** Live waveform bar count in the recording pill. */
 const BAR_COUNT = 16;
 const NOTICE_TIMEOUT_MS = 2_000;
@@ -25,6 +30,8 @@ export interface VoiceButtonProps {
   onInsert: (text: string) => void;
   onActiveChange?: (active: boolean) => void;
   disabled?: boolean;
+  target: VoiceWorkspaceTarget | undefined;
+  statusRevision?: VoiceStatusRevision;
 }
 
 const MicIcon = (): React.JSX.Element => (
@@ -63,53 +70,103 @@ export function VoiceButton({
   onInsert,
   onActiveChange,
   disabled,
+  target,
+  statusRevision = { user: 0, workspace: 0 },
 }: VoiceButtonProps): React.JSX.Element | null {
   const workspace = useWorkspace();
-  const settingsVersion = useWorkspaceEventSignals()?.settingsVersion;
+  const connection = useConnection();
+  const signals = useWorkspaceEventSignals();
   const { t } = useI18n();
   const features = workspace.capabilities?.features ?? [];
-  const hasVoiceCapability = features.includes(VOICE_FEATURE);
+  const captureSupported = supportsVoiceCapture(target, features);
+  const settingsVersion =
+    target?.sessionId &&
+    target.sessionId === connection.sessionId &&
+    (!target.cwd || target.cwd === connection.workspaceCwd)
+      ? signals?.settingsVersion
+      : undefined;
+  const [localRevision, setLocalRevision] = useState(0);
+  const [capabilityRefreshFailed, setCapabilityRefreshFailed] = useState(false);
+  const queryKey = useMemo(
+    () =>
+      target
+        ? JSON.stringify([
+            target.workspaceKey,
+            target.ownerKey,
+            settingsVersion ?? null,
+            statusRevision.user,
+            statusRevision.workspace,
+            localRevision,
+          ])
+        : undefined,
+    [
+      localRevision,
+      settingsVersion,
+      statusRevision.user,
+      statusRevision.workspace,
+      target,
+    ],
+  );
   const [voiceGate, setVoiceGate] = useState<{
-    client: typeof workspace.client;
-    settingsVersion: number | undefined;
+    queryKey: string | undefined;
     enabled: boolean;
   }>(() => ({
-    client: workspace.client,
-    settingsVersion,
+    queryKey,
     enabled: false,
   }));
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  const requestGenerationRef = useRef(0);
+  const capabilityRefreshGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      capabilityRefreshGenerationRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    const generation = ++requestGenerationRef.current;
+    const requestTarget = targetRef.current;
     let current = true;
     setVoiceGate({
-      client: workspace.client,
-      settingsVersion,
+      queryKey,
       enabled: false,
     });
-    if (!hasVoiceCapability) return undefined;
+    if (
+      !requestTarget ||
+      !queryKey ||
+      !captureSupported ||
+      capabilityRefreshFailed
+    ) {
+      return undefined;
+    }
 
-    void workspace.client
-      .workspaceVoice()
+    void loadVoiceStatus(workspace.client, requestTarget)
       .then((voice) => {
-        if (current) {
+        if (current && requestGenerationRef.current === generation) {
           setVoiceGate({
-            client: workspace.client,
-            settingsVersion,
+            queryKey,
             enabled: voice.enabled === true,
           });
         }
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        console.warn('[web-shell] Voice status probe failed:', error);
+      });
 
     return () => {
       current = false;
     };
-  }, [hasVoiceCapability, settingsVersion, workspace.client]);
+  }, [capabilityRefreshFailed, captureSupported, queryKey, workspace.client]);
 
   const voiceEnabled =
-    hasVoiceCapability &&
-    voiceGate.client === workspace.client &&
-    voiceGate.settingsVersion === settingsVersion &&
+    captureSupported &&
+    !capabilityRefreshFailed &&
+    voiceGate.queryKey === queryKey &&
     voiceGate.enabled;
   // Surfaced when a recording finalizes with no transcript (e.g. silence).
   const [noticeMessage, setNoticeMessage] = useState<string | undefined>(
@@ -128,6 +185,9 @@ export function VoiceButton({
     useVoiceCapture({
       baseUrl: workspace.baseUrl,
       token: workspace.token,
+      target: target
+        ? { ownerKey: target.ownerKey, streamPath: target.streamPath }
+        : undefined,
       onFinal: (text) => {
         const trimmed = text.trim();
         if (trimmed) {
@@ -135,6 +195,35 @@ export function VoiceButton({
           onInsert(trimmed);
         } else {
           setNoticeMessage(t('voice.noSpeech'));
+        }
+      },
+      onUnexpectedClose: ({ code }) => {
+        if (code === 1013) return;
+        setLocalRevision((revision) => revision + 1);
+        if (code !== 1012) return;
+        const refreshOwnerKey = targetRef.current?.ownerKey;
+        const refreshGeneration = ++capabilityRefreshGenerationRef.current;
+        setCapabilityRefreshFailed(true);
+        const settleRefresh = () => {
+          if (
+            !mountedRef.current ||
+            capabilityRefreshGenerationRef.current !== refreshGeneration ||
+            targetRef.current?.ownerKey !== refreshOwnerKey
+          ) {
+            return;
+          }
+          setCapabilityRefreshFailed(false);
+          setLocalRevision((revision) => revision + 1);
+        };
+        try {
+          const refresh = workspace.refreshCapabilities?.();
+          if (refresh) {
+            void refresh.then(settleRefresh, settleRefresh);
+          } else {
+            settleRefresh();
+          }
+        } catch {
+          settleRefresh();
         }
       },
     });
@@ -184,12 +273,8 @@ export function VoiceButton({
     return () => clearInterval(id);
   }, [isRecording]);
 
-  const voiceWasEnabled = useRef(voiceEnabled);
-  useEffect(() => {
-    const wasEnabled = voiceWasEnabled.current;
-    voiceWasEnabled.current = voiceEnabled;
+  useLayoutEffect(() => {
     if (
-      wasEnabled &&
       !voiceEnabled &&
       (status === 'recording' ||
         status === 'connecting' ||
@@ -198,6 +283,15 @@ export function VoiceButton({
       abort();
     }
   }, [abort, status, voiceEnabled]);
+
+  const previousOwnerRef = useRef(target?.ownerKey);
+  useLayoutEffect(() => {
+    if (previousOwnerRef.current === target?.ownerKey) return;
+    previousOwnerRef.current = target?.ownerKey;
+    capabilityRefreshGenerationRef.current += 1;
+    setNoticeMessage(undefined);
+    setCapabilityRefreshFailed(false);
+  }, [target?.ownerKey]);
 
   if (!voiceEnabled) return null;
 

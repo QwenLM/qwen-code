@@ -44,6 +44,7 @@ import {
   AuthType,
   createContentGenerator,
   createContentGeneratorConfig,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
@@ -3581,6 +3582,7 @@ describe('Server Config (config.ts)', () => {
 
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
+      vi.mocked(resetPreloadedContentGenerator).mockClear();
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
@@ -3591,6 +3593,10 @@ describe('Server Config (config.ts)', () => {
         vi.mocked(resolveContentGeneratorConfigWithSources),
       ).toHaveBeenCalledTimes(2);
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledOnce();
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(
+        config.getContentGenerator(),
+      );
     });
 
     it('should preserve thoughts from history on model switch', async () => {
@@ -4534,6 +4540,12 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
     const config = new Config(baseParams);
+    const generator = {} as ContentGenerator;
+    (
+      config as unknown as {
+        contentGenerator: ContentGenerator;
+      }
+    ).contentGenerator = generator;
     const originalStorage = config.storage;
     const originalPersistenceRoot = originalStorage.getProjectRoot();
     const newDir = path.resolve('/path/to/other');
@@ -4551,6 +4563,7 @@ describe('Server Config (config.ts)', () => {
     ).resolves.toEqual({});
 
     expect(config.getTargetDir()).toBe(newDir);
+    expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(generator);
     expect(config.storage).toBe(originalStorage);
     expect(config.getSessionService().getProjectRoot()).toBe(
       originalPersistenceRoot,
@@ -5644,6 +5657,25 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('registers zoom_image unconditionally so it survives model switches', async () => {
+      const config = new Config(baseParams);
+      // A first-run / text-only session reports no image modality, yet the tool
+      // must still register: the gate moved to execute time so a hot /model
+      // switch to an image model picks it up without re-running initialize().
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({});
+
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.ZOOM_IMAGE);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
@@ -8096,6 +8128,79 @@ describe('Model Switching and Config Updates', () => {
 
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
+
+  describe('UserPromptSubmit dispatch through the hook execution bridge', () => {
+    it.each([
+      {
+        name: 'forwards a string submitted prompt',
+        submittedPrompt: 'submitted prompt',
+        expected: 'submitted prompt',
+      },
+      {
+        name: 'preserves surrounding whitespace on a non-empty prompt',
+        submittedPrompt: '  submitted prompt  ',
+        expected: '  submitted prompt  ',
+      },
+      {
+        name: 'drops an empty submitted prompt',
+        submittedPrompt: '',
+        expected: undefined,
+      },
+      {
+        name: 'drops a whitespace-only submitted prompt',
+        submittedPrompt: ' \t\n ',
+        expected: undefined,
+      },
+      {
+        name: 'drops a numeric submitted prompt',
+        submittedPrompt: 42,
+        expected: undefined,
+      },
+      {
+        name: 'drops an object submitted prompt',
+        submittedPrompt: { text: 'submitted prompt' },
+        expected: undefined,
+      },
+      {
+        name: 'drops a null submitted prompt',
+        submittedPrompt: null,
+        expected: undefined,
+      },
+      {
+        name: 'handles a missing submitted prompt',
+        submittedPrompt: undefined,
+        expected: undefined,
+      },
+    ])('$name', async ({ submittedPrompt, expected }) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireUserPromptSubmitEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'UserPromptSubmit',
+            input: {
+              prompt: 'model prompt',
+              submitted_prompt: submittedPrompt,
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        expected,
+      );
+      expect(response.success).toBe(true);
     });
   });
 
