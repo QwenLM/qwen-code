@@ -61,10 +61,11 @@ describe('Interactive file system', () => {
       await type(ptyProcess, writePrompt);
       await type(ptyProcess, '\r');
 
-      // The model usually calls write_file or edit, but occasionally
-      // describes the change in text without a tool call (non-deterministic,
-      // more common in docker sandbox). Accept either a tool call OR correct
-      // file content as success; fail only when both are missing.
+      // Tool call detection can miss real calls in docker/podman sandbox
+      // (telemetry log flush races, stdout fallback in readToolLogs), and
+      // the model may use run_shell_command instead of write_file/edit.
+      // Accept either a detected tool call OR correct file content as
+      // success; fail only when both are missing.
       const toolCall = await rig.waitForAnyToolCall(
         ['write_file', 'edit'],
         30000,
