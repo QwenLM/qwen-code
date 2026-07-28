@@ -1424,6 +1424,134 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('rejects a conflicting tool-selected full-turn model in a drain item', async () => {
+    setupMetricsMock();
+    const first = 'qwen3-vl-plus\0';
+    const second = 'qwen3-vl-max\0';
+    const accepted: Record<string, boolean> = {};
+
+    let notificationCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; toolUseId?: string; status: string },
+        ) => void)
+      | null = null;
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (cb) => {
+        notificationCallback = cb;
+      },
+    );
+
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, request, _signal, options) => {
+        if (request.callId === 'tool-main') {
+          notificationCallback?.('Agent done', 'Agent completed', {
+            agentId: 'bg-1',
+            status: 'completed',
+          });
+          return { responseParts: [{ text: 'main tool done' }] };
+        }
+        if (request.callId === 'drain-tool-a') {
+          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+          return {
+            responseParts: [{ text: 'drain image a' }],
+            modelOverride: first,
+          };
+        }
+        if (request.callId === 'drain-tool-b') {
+          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
+          return {
+            responseParts: [{ text: 'drain image b' }],
+            modelOverride: second,
+          };
+        }
+        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
+      },
+    );
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-main',
+              name: 'some_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-drain',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Main done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'drain-tool-a',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-drain',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'drain-tool-b',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-drain',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Drain done' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Do something',
+      'prompt-drain',
+    );
+
+    expect(accepted['a']).toBe(true);
+    expect(accepted['b']).toBe(false);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      4,
+      [{ text: 'drain image a' }, { text: 'drain image b' }],
+      expect.any(AbortSignal),
+      'prompt-drain',
+      { type: SendMessageType.ToolResult, modelOverride: first },
+    );
+  });
+
   describe('parallel tool execution', () => {
     const finishTurn: ServerGeminiStreamEvent[] = [
       { type: GeminiEventType.Content, value: 'done' },
