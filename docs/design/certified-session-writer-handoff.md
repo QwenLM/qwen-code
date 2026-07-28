@@ -113,6 +113,15 @@ If a normal release races managed shutdown and commits first, the missing
 primary is already a safe handoff and the replacement performs ordinary
 acquisition.
 
+Failure cleanup removes the fixed claim only after proving that the exact
+pre-transition primary was restored. If rollback cannot restore or verify that
+record, the claim remains even when another primary appears, because that path
+may be a losing ordinary-acquisition candidate that will remove itself after
+observing the claim. Rollback itself is attempted only while the fixed claim
+still contains this transition's exact record; a missing or replaced claim
+means the current primary must not be changed. Recovery then requires the same
+authoritative external writer fence as any other residual claim.
+
 ## Certified takeover
 
 Only a Config created under a trusted managed parent enables certified

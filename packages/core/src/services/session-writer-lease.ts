@@ -782,6 +782,49 @@ async function inspectExactRecord(
   }
 }
 
+async function removeTransitionClaimAfterFailure(
+  lockPath: string,
+  expectedPrimaryRaw: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  const primaryState = await inspectExactRecord(lockPath, expectedPrimaryRaw);
+  if (primaryState !== 'exact') {
+    throw new SessionWriterUnavailableError({
+      cause: new Error(
+        'Session writer primary was not restored; transition claim retained',
+      ),
+    });
+  }
+  await removeExactRecord(claimPath, claimRaw);
+}
+
+async function releaseTransitionClaim(
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(claimPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+  if (raw !== claimRaw) return;
+  try {
+    await fs.unlink(claimPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    const state = await inspectExactRecord(claimPath, claimRaw);
+    if (state === 'missing' || state === 'other') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
+
 async function transitionExactPrimary(
   lockPath: string,
   expectedRaw: string,
@@ -1147,7 +1190,7 @@ export class SessionWriterLease {
         options,
         proof.state,
       );
-      await removeExactRecord(claimPath, claimRaw);
+      await releaseTransitionClaim(claimPath, claimRaw);
       claimAcquired = false;
       await removeExactRecord(retiredPath, observed.raw).catch((error) => {
         debugLogger.debug(
@@ -1163,7 +1206,19 @@ export class SessionWriterLease {
       return lease;
     } catch (error) {
       const cleanupFailures: unknown[] = [];
-      if (transitionCommitted) {
+      const claimState = claimAcquired
+        ? await inspectExactRecord(claimPath, claimRaw)
+        : 'missing';
+      if (claimState === 'unknown') {
+        cleanupFailures.push(
+          new SessionWriterUnavailableError({
+            cause: new Error(
+              'Session writer transition claim ownership is unreadable',
+            ),
+          }),
+        );
+      }
+      if (transitionCommitted && claimState === 'exact') {
         try {
           await rollbackExactTransition(
             lockPath,
@@ -1175,9 +1230,14 @@ export class SessionWriterLease {
           cleanupFailures.push(cleanupError);
         }
       }
-      if (claimAcquired) {
+      if (claimState === 'exact') {
         try {
-          await removeExactRecord(claimPath, claimRaw);
+          await removeTransitionClaimAfterFailure(
+            lockPath,
+            observed.raw,
+            claimPath,
+            claimRaw,
+          );
         } catch (cleanupError) {
           cleanupFailures.push(cleanupError);
         }
@@ -1526,7 +1586,7 @@ export class SessionWriterLease {
       );
       transitionCommitted = true;
       await validateOpenTranscriptProof(this.transcriptPath, proof);
-      await removeExactRecord(this.claimPath, this.lockRecordRaw);
+      await releaseTransitionClaim(this.claimPath, this.lockRecordRaw);
       claimAcquired = false;
       this.released = true;
       await removeExactRecord(handoffRetiredPath, this.lockRecordRaw).catch(
@@ -1550,7 +1610,19 @@ export class SessionWriterLease {
       );
     } catch (error) {
       const cleanupFailures: unknown[] = [];
-      if (transitionCommitted) {
+      const claimState = claimAcquired
+        ? await inspectExactRecord(this.claimPath, this.lockRecordRaw)
+        : 'missing';
+      if (claimState === 'unknown') {
+        cleanupFailures.push(
+          new SessionWriterUnavailableError({
+            cause: new Error(
+              'Session writer transition claim ownership is unreadable',
+            ),
+          }),
+        );
+      }
+      if (transitionCommitted && claimState === 'exact') {
         try {
           await rollbackExactTransition(
             this.lockPath,
@@ -1562,9 +1634,14 @@ export class SessionWriterLease {
           cleanupFailures.push(cleanupError);
         }
       }
-      if (claimAcquired) {
+      if (claimState === 'exact') {
         try {
-          await removeExactRecord(this.claimPath, this.lockRecordRaw);
+          await removeTransitionClaimAfterFailure(
+            this.lockPath,
+            this.lockRecordRaw,
+            this.claimPath,
+            this.lockRecordRaw,
+          );
         } catch (cleanupError) {
           cleanupFailures.push(cleanupError);
         }

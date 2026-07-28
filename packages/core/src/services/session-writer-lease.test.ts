@@ -49,7 +49,19 @@ const transitionFault = vi.hoisted(() => ({
   afterRename: undefined as (() => Promise<void>) | undefined,
   linkFrom: undefined as string | undefined,
   linkTo: undefined as string | undefined,
+  afterLink: undefined as (() => Promise<void> | void) | undefined,
   throwAfterLink: false,
+}));
+
+const restoreLinkFault = vi.hoisted(() => ({
+  linkTo: undefined as string | undefined,
+  remainingFailures: 0,
+}));
+
+const unlinkFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  afterUnlink: undefined as (() => Promise<void> | void) | undefined,
+  throwAfterUnlink: false,
 }));
 
 const writeFault = vi.hoisted(() => ({
@@ -91,13 +103,39 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       existingPath: Parameters<typeof actual.link>[0],
       newPath: Parameters<typeof actual.link>[1],
     ) => {
+      if (
+        newPath === restoreLinkFault.linkTo &&
+        restoreLinkFault.remainingFailures > 0
+      ) {
+        restoreLinkFault.remainingFailures--;
+        throw Object.assign(new Error('injected restore link failure'), {
+          code: 'EIO',
+        });
+      }
       await actual.link(existingPath, newPath);
+      if (
+        existingPath === transitionFault.linkFrom &&
+        newPath === transitionFault.linkTo
+      ) {
+        await transitionFault.afterLink?.();
+      }
       if (
         transitionFault.throwAfterLink &&
         existingPath === transitionFault.linkFrom &&
         newPath === transitionFault.linkTo
       ) {
         throw Object.assign(new Error('injected error after link'), {
+          code: 'EIO',
+        });
+      }
+    },
+    unlink: async (filePath: Parameters<typeof actual.unlink>[0]) => {
+      await actual.unlink(filePath);
+      if (filePath === unlinkFault.path) {
+        await unlinkFault.afterUnlink?.();
+      }
+      if (unlinkFault.throwAfterUnlink && filePath === unlinkFault.path) {
+        throw Object.assign(new Error('injected error after unlink'), {
           code: 'EIO',
         });
       }
@@ -227,7 +265,13 @@ afterEach(async () => {
   transitionFault.afterRename = undefined;
   transitionFault.linkFrom = undefined;
   transitionFault.linkTo = undefined;
+  transitionFault.afterLink = undefined;
   transitionFault.throwAfterLink = false;
+  restoreLinkFault.linkTo = undefined;
+  restoreLinkFault.remainingFailures = 0;
+  unlinkFault.path = undefined;
+  unlinkFault.afterUnlink = undefined;
+  unlinkFault.throwAfterUnlink = false;
   writeFault.contains = undefined;
   writeFault.onEntered = undefined;
   writeFault.wait = undefined;
@@ -1146,6 +1190,153 @@ describe('SessionWriterLease', () => {
     });
   });
 
+  it('reconciles a sealing claim unlink error after effect', async () => {
+    const fixture = await createFixture('sealed-claim-unlink-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    unlinkFault.path = `${lockPath}.claim`;
+    unlinkFault.throwAfterUnlink = true;
+
+    await expect(first.sealForHandoff()).resolves.toBeUndefined();
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      state: 'sealed',
+    });
+  });
+
+  it('does not roll back after the released claim is replaced', async () => {
+    const fixture = await createFixture('sealed-replaced-claim-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const successorClaim = '{"successorClaim":true}';
+    unlinkFault.path = `${lockPath}.claim`;
+    unlinkFault.afterUnlink = () =>
+      fs.writeFile(`${lockPath}.claim`, successorClaim, 'utf8');
+    unlinkFault.throwAfterUnlink = true;
+
+    await expect(first.sealForHandoff()).resolves.toBeUndefined();
+    await expect(fs.readFile(`${lockPath}.claim`, 'utf8')).resolves.toBe(
+      successorClaim,
+    );
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      state: 'sealed',
+    });
+  });
+
+  it('does not roll back sealing after claim ownership changes', async () => {
+    const fixture = await createFixture('sealed-changed-claim-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const successorClaim = '{"successorClaim":true}';
+    transitionFault.linkFrom = `${lockPath}.sealed-candidate.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.afterLink = async () => {
+      await fs.unlink(`${lockPath}.claim`);
+      await fs.writeFile(`${lockPath}.claim`, successorClaim, 'utf8');
+      lstatFault.path = fixture.transcriptPath;
+      lstatFault.remainingFailures = 1;
+    };
+
+    await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.readFile(`${lockPath}.claim`, 'utf8')).resolves.toBe(
+      successorClaim,
+    );
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      state: 'sealed',
+    });
+  });
+
+  it('retains the claim when sealing rollback cannot restore the primary', async () => {
+    const fixture = await createFixture('sealed-rollback-failure-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const activeRaw = await fs.readFile(lockPath, 'utf8');
+    transitionFault.linkFrom = `${lockPath}.sealed-candidate.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.afterLink = () => {
+      lstatFault.path = fixture.transcriptPath;
+      lstatFault.remainingFailures = 1;
+      restoreLinkFault.linkTo = lockPath;
+      restoreLinkFault.remainingFailures = 1;
+    };
+
+    await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readFile(`${lockPath}.claim`, 'utf8')).resolves.toBe(
+      activeRaw,
+    );
+    await expect(
+      fs.readFile(
+        `${lockPath}.handoff.${encodeURIComponent(first.ownerId)}`,
+        'utf8',
+      ),
+    ).resolves.toBe(activeRaw);
+    await fs.appendFile(fixture.transcriptPath, '{"external":true}\n');
+    await expect(
+      SessionWriterLease.acquire(fixture.options),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+  });
+
+  it('removes the claim after sealing rollback restores the primary', async () => {
+    const fixture = await createFixture('sealed-rollback-success-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const activeRaw = await fs.readFile(lockPath, 'utf8');
+    transitionFault.linkFrom = `${lockPath}.sealed-candidate.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.afterLink = () => {
+      lstatFault.path = fixture.transcriptPath;
+      lstatFault.remainingFailures = 1;
+    };
+
+    await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(activeRaw);
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('never overwrites a primary installed during the sealing transition', async () => {
     const fixture = await createFixture('sealed-successor-session');
     const first = await SessionWriterLease.acquire(fixture.options);
@@ -1162,10 +1353,11 @@ describe('SessionWriterLease', () => {
       fs.writeFile(lockPath, successorRaw, 'utf8');
 
     await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
-      SessionWriterLostError,
+      SessionWriterUnavailableError,
     );
     expect(first.isReleased).toBe(true);
     await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(successorRaw);
+    await expect(fs.lstat(`${lockPath}.claim`)).resolves.toBeDefined();
   });
 
   it('elects exactly one certified replacement for a sealed session', async () => {
@@ -1218,6 +1410,119 @@ describe('SessionWriterLease', () => {
     await replacement.release();
   });
 
+  it('reconciles a takeover claim unlink error after effect', async () => {
+    const fixture = await createFixture('takeover-claim-unlink-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    unlinkFault.path = `${lockPath}.claim`;
+    unlinkFault.throwAfterUnlink = true;
+
+    const replacement = await SessionWriterLease.acquire({
+      ...fixture.options,
+      reclaimPolicy: 'never',
+      takeoverPolicy: 'certified',
+    });
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      state: 'active',
+      owner_id: replacement.ownerId,
+    });
+    await replacement.release();
+  });
+
+  it('does not roll back takeover after claim ownership changes', async () => {
+    const fixture = await createFixture('takeover-changed-claim-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const successorClaim = '{"successorClaim":true}';
+    transitionFault.linkFrom = `${lockPath}.claim`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.afterLink = async () => {
+      await fs.unlink(`${lockPath}.claim`);
+      await fs.writeFile(`${lockPath}.claim`, successorClaim, 'utf8');
+      lstatFault.path = fixture.transcriptPath;
+      lstatFault.remainingFailures = 1;
+    };
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    await expect(fs.readFile(`${lockPath}.claim`, 'utf8')).resolves.toBe(
+      successorClaim,
+    );
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      state: 'active',
+    });
+  });
+
+  it('retains the claim when takeover rollback cannot restore the primary', async () => {
+    const fixture = await createFixture('takeover-rollback-failure-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const sealedRaw = await fs.readFile(lockPath, 'utf8');
+    transitionFault.linkFrom = `${lockPath}.claim`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.afterLink = () => {
+      lstatFault.path = fixture.transcriptPath;
+      lstatFault.remainingFailures = 1;
+      restoreLinkFault.linkTo = lockPath;
+      restoreLinkFault.remainingFailures = 1;
+    };
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const claimRaw = await fs.readFile(`${lockPath}.claim`, 'utf8');
+    const claim = JSON.parse(claimRaw) as { owner_id: string; state: string };
+    expect(claim.state).toBe('active');
+    await expect(
+      fs.readFile(
+        `${lockPath}.sealed.${encodeURIComponent(
+          first.ownerId,
+        )}.${encodeURIComponent(claim.owner_id)}`,
+        'utf8',
+      ),
+    ).resolves.toBe(sealedRaw);
+    await fs.appendFile(fixture.transcriptPath, '{"external":true}\n');
+    await expect(
+      SessionWriterLease.acquire(fixture.options),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+  });
+
   it('never overwrites a primary installed during the takeover transition', async () => {
     const fixture = await createFixture('takeover-successor-session');
     const first = await SessionWriterLease.acquire(fixture.options);
@@ -1237,8 +1542,9 @@ describe('SessionWriterLease', () => {
         reclaimPolicy: 'never',
         takeoverPolicy: 'certified',
       }),
-    ).rejects.toBeInstanceOf(SessionWriterLostError);
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
     await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(successorRaw);
+    await expect(fs.lstat(`${lockPath}.claim`)).resolves.toBeDefined();
   });
 
   it.each(['append', 'truncate', 'replace'] as const)(
