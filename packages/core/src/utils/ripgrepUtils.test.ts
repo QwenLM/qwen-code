@@ -326,7 +326,7 @@ describe('ripgrepUtils', () => {
 
       expect(result).toMatchObject({
         stdout: 'file.ts:1:match\n',
-        incomplete: false,
+        incomplete: true,
         error,
         recovery: {
           selectionMode: 'builtin',
@@ -471,6 +471,37 @@ describe('ripgrepUtils', () => {
       expect(result).toMatchObject({
         stdout: '',
         incomplete: false,
+        error,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+        },
+      });
+      expect(result.recovery.failureKind).toBeUndefined();
+    });
+
+    it('marks canceled execution with partial stdout as incomplete and drops the last line', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const error = Object.assign(
+        createExecError('The operation was aborted'),
+        { name: 'AbortError' },
+      );
+      mockRipgrepAttempt({
+        error,
+        stdout: 'file.ts:1:complete\nfile.ts:2:partial',
+        stderr:
+          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
+      });
+
+      const result = await runRipgrep(
+        ['--json', '--threads', '4', '.'],
+        controller.signal,
+      );
+
+      expect(result).toMatchObject({
+        stdout: 'file.ts:1:complete',
+        incomplete: true,
         error,
         recovery: {
           selectionMode: 'builtin',

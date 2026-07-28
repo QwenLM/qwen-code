@@ -529,7 +529,8 @@ async function runRipgrepOnce(
           );
           const incomplete =
             (shouldDropLastLine(failureKind, canceled) ||
-              failureKind === 'eagain') &&
+              failureKind === 'eagain' ||
+              failureKind === 'exit') &&
             stdoutText.trim().length > 0;
           const partialOutput = shouldDropLastLine(failureKind, canceled)
             ? dropPossiblyIncompleteLastLine(stdoutText)
