@@ -497,6 +497,32 @@ describe('WriteFileTool', () => {
       });
     });
 
+    it.each([
+      ['notebook.ipynb', 'notebook'],
+      ['paper.pdf', 'pdf'],
+      ['photo.png', 'image'],
+      ['photo.jpeg', 'image'],
+      ['photo.jpg', 'image'],
+      ['diagram.svg', 'image'],
+      ['photo.webp', 'image'],
+    ])('infers artifact kind for %s as %s', async (fileName, expectedKind) => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', fileName);
+      const params = {
+        file_path: filePath,
+        content: 'artifact content',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.artifacts?.[0]).toMatchObject({
+        title: fileName,
+        kind: expectedKind,
+        storage: 'workspace',
+        workspacePath: `reports/${fileName}`,
+      });
+    });
+
     it('does not record artifact-like files when artifact recording is disabled', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
       const filePath = path.join(rootDir, 'reports', 'weather.html');
