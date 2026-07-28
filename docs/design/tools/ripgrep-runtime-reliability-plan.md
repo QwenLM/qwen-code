@@ -68,12 +68,11 @@ rg --threads 4
 退出码 1 + 非空 stdout           -> stdout 被丢弃，No matches found
 ```
 
-**修改后：** 只有退出码为 1 且 stdout、stderr 都为空时，才返回正常的无匹配项结果。退出码 1 但 stderr 不为空时按执行失败处理；stdout 不为空时保留其中的结果，并将本次搜索标记为未完整执行。
+**修改后：** 只有退出码为 1 且 stderr 为空时，才返回正常的无匹配项结果。退出码 1 但 stderr 不为空时按执行失败处理。stdout 不参与判定：ripgrep 的退出码 1 不可能携带匹配结果，而在 `--json` 模式下即使零匹配也会在 stdout 输出末尾的 summary 事件。
 
 ```text
-退出码 1 + 空 stdout + 空 stderr -> No matches found
-退出码 1 + 非空 stderr           -> 明确的执行错误
-退出码 1 + 非空 stdout           -> 保留部分结果并标记 incomplete
+退出码 1 + 空 stderr   -> No matches found
+退出码 1 + 非空 stderr -> 明确的执行错误
 ```
 
 ### 2.3 区分截断结果与未完整执行结果
@@ -306,7 +305,7 @@ npm run build
 
 - 一次确认的 ripgrep 线程 EAGAIN 最多触发一次单线程重试。
 - 取消操作和子进程启动失败绝不触发该重试。
-- 只有退出码 1 且 stdout、stderr 均为空时，才表示没有匹配项。
+- 只有退出码 1 且 stderr 为空时，才表示没有匹配项（不检查 stdout）。
 - 任何未完整执行路径都不能进入两个 `No matches found` 返回分支。
 - 部分匹配项对模型仍然有用，但必须明确标记为未完整执行。
 - Telemetry 能够衡量恢复情况，同时不采集查询内容或仓库内容。
@@ -337,6 +336,6 @@ npm run build
 - 移除对当前不可能出现的缺失线程参数和其他参数写法的支持；
 - 区分 `incomplete` 和 `truncated`；
 - 要求在两个无匹配项分支之前检查执行完整性；
-- 要求退出码 1 的无匹配项判定同时满足 stdout 和 stderr 均为空；
+- 要求退出码 1 的无匹配项判定以 stderr 为空为准（不检查 stdout）；
 - 添加单次结算和零有效匹配项的回归测试；
 - 恢复未来实施验证所需的仓库 build 步骤。
