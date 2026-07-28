@@ -28,9 +28,17 @@ export function getArgs() {
 
 /**
  * Read and parse a JSON file.
+ * Parse errors name the file — `JSON.parse` alone does not, which forces a
+ * manual bisect when one of many manifests is malformed mid-release.
  */
 export function readJson(filePath) {
-  return JSON.parse(readFileSync(filePath, 'utf-8'));
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch (error) {
+    throw new Error(
+      `Failed to parse ${filePath}: ${error instanceof Error ? error.message : error}`,
+    );
+  }
 }
 
 /**

@@ -133,4 +133,42 @@ describe('bumpWorkspaceVersions', () => {
     expect(desktop.version).toBe('0.21.0');
     expect(desktop.dependencies['@scope/base']).toBe('^0.21.0');
   });
+
+  it('fails loud on inter-workspace ranges that reject the new version', () => {
+    const root = setup();
+    const adapter = readPkg(root, 'packages/adapter/package.json');
+    adapter.dependencies['@scope/base'] = '0.21.0'; // exact pin
+    writeFile(root, 'packages/adapter/package.json', adapter);
+
+    expect(() =>
+      bumpWorkspaceVersions(root, '0.21.1-preview.0', {
+        exclude: ['@scope/sdk'],
+      }),
+    ).toThrow(
+      '"@scope/base@0.21.0" in dependencies does not satisfy the bumped version 0.21.1-preview.0',
+    );
+
+    adapter.dependencies['@scope/base'] = '>=0.21.0 <0.21.1'; // upper-bounded
+    writeFile(root, 'packages/adapter/package.json', adapter);
+    expect(() =>
+      bumpWorkspaceVersions(root, '0.21.1-preview.0', {
+        exclude: ['@scope/sdk'],
+      }),
+    ).toThrow('does not satisfy the bumped version');
+  });
+
+  it('leaves open-ended and protocol ranges untouched', () => {
+    const root = setup();
+    const adapter = readPkg(root, 'packages/adapter/package.json');
+    adapter.dependencies['@scope/base'] = '>=0.21.0';
+    writeFile(root, 'packages/adapter/package.json', adapter);
+
+    bumpWorkspaceVersions(root, '0.21.1-preview.0', {
+      exclude: ['@scope/sdk'],
+    });
+
+    const bumped = readPkg(root, 'packages/adapter/package.json');
+    expect(bumped.dependencies['@scope/base']).toBe('>=0.21.0');
+    expect(bumped.devDependencies['@scope/core']).toBe('file:../core');
+  });
 });

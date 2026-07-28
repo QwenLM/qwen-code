@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
+import semver from 'semver';
+import { readJson } from './lib/release-helpers.js';
 import { getWorkspacePackageJsonPaths } from './workspaces.js';
 
 const DEP_SECTIONS = [
@@ -14,10 +16,6 @@ const DEP_SECTIONS = [
   'peerDependencies',
   'optionalDependencies',
 ];
-
-function readJson(filePath) {
-  return JSON.parse(readFileSync(filePath, 'utf-8'));
-}
 
 function writeJson(filePath, data) {
   writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
@@ -61,12 +59,26 @@ export function bumpWorkspaceVersions(root, newVersion, { exclude = [] } = {}) {
     }
     for (const section of DEP_SECTIONS) {
       for (const [dep, range] of Object.entries(pkg[section] ?? {})) {
-        if (
-          versionedNames.has(dep) &&
-          (range.startsWith('^') || range.startsWith('~'))
-        ) {
+        if (!versionedNames.has(dep)) continue;
+        if (range.startsWith('^') || range.startsWith('~')) {
           pkg[section][dep] = `^${newVersion}`;
           changed = true;
+        } else if (
+          !range.includes(':') &&
+          range !== '*' &&
+          !(range.startsWith('>') && !range.includes('<')) &&
+          !semver.satisfies(newVersion, range)
+        ) {
+          // A range that survives the bump but rejects the new version under
+          // npm's strict prerelease rules (an exact pin, an upper-bounded
+          // compound range) makes npm backfill the stale registry build into
+          // this dependent — the failure this script exists to prevent. Fail
+          // loud instead of shipping it. Open-ended `>`/`>=` ranges are
+          // exempt: they ask for any newer version by construction.
+          throw new Error(
+            `${pkg.name}: inter-workspace range "${dep}@${range}" in ${section} ` +
+              `does not satisfy the bumped version ${newVersion}; widen it to ^${newVersion}`,
+          );
         }
       }
     }
