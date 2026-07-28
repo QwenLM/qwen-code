@@ -67,6 +67,11 @@ const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
   ['.webp', 'image'],
 ]);
 
+type WorkspaceToolArtifact = ToolArtifact & {
+  storage: 'workspace';
+  workspacePath: string;
+};
+
 /**
  * Parameters for the WriteFile tool
  */
@@ -685,7 +690,7 @@ function buildWorkspaceArtifactMetadata(
   config: Config,
   filePath: string,
   sizeBytes?: number,
-): ToolArtifact | null {
+): WorkspaceToolArtifact | null {
   const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
   if (!workspacePath) {
     return null;
