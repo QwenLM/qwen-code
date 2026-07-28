@@ -3541,6 +3541,161 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('reports the selected workspace, not the stale connection workspace, when no session is active', async () => {
+    // A cleared session leaves connection.workspaceCwd pointing at the old
+    // workspace (here: a secondary with a running task). Starting a new chat
+    // in the primary must report the primary, not route the host back to the
+    // stale workspace.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({
+      onSessionIdChange,
+      initialSelectedWorkspaceCwd: '/workspace',
+    });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      '/workspace',
+    );
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(
+      undefined,
+      'secondary',
+      '/work/secondary',
+    );
+  });
+
+  it('reports the primary workspace, not the stale connection workspace, when the selection is unset', async () => {
+    // The common new-chat path (sidebar "New task", /clear, /new) leaves
+    // selectedWorkspaceCwd undefined — that is how "primary" is spelled. The
+    // report must fall back to the primary workspace, not the stale
+    // connection.workspaceCwd left over from the previous session.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({ onSessionIdChange });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      '/workspace',
+    );
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(
+      undefined,
+      'secondary',
+      '/work/secondary',
+    );
+  });
+
+  it('keeps reporting the active session workspace despite a conflicting next-session selection', async () => {
+    // A selection for the next session must not leak into an active session's
+    // report: while a session is live the host is routed by that session's own
+    // workspace.
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({
+      onSessionIdChange,
+      initialSelectedWorkspaceCwd: '/workspace',
+    });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      'session-1',
+      'secondary',
+      '/work/secondary',
+    );
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(
+      'session-1',
+      undefined,
+      '/workspace',
+    );
+  });
+
+  it('notifies the host on each deferred workspace switch while no session is active', async () => {
+    // With no active session the report must re-run when the next-session
+    // workspace selection changes, so a routing host follows each switch
+    // rather than reacting to session-id changes alone.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+        {
+          id: 'tertiary',
+          cwd: '/work/tertiary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({ onSessionIdChange });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      '/workspace',
+    );
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/tertiary');
+    });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenLastCalledWith(
+      undefined,
+      'tertiary',
+      '/work/tertiary',
+    );
+  });
+
   it('creates scratch once, accepts refreshed capabilities, and opens a fresh chat', async () => {
     mockWorkspace.capabilities = {
       features: [
