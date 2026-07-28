@@ -8,10 +8,12 @@ import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider'
 import {
   getDaemonBaseUrl,
   getDaemonToken,
+  removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
+import { buildSessionPathname } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -97,11 +99,7 @@ function replaceStandaloneSessionUrl(
   workspaceId?: string,
 ): void {
   const url = new URL(window.location.href);
-  const sessionPath = url.pathname.match(/^(.*)\/session\/[^/]+\/?$/);
-  const basePath = sessionPath?.[1] ?? url.pathname.replace(/\/$/, '');
-  url.pathname = sessionId
-    ? `${basePath}/session/${encodeURIComponent(sessionId)}`
-    : basePath || '/';
+  url.pathname = buildSessionPathname(url.pathname, sessionId);
   if (sessionId && workspaceId) {
     url.searchParams.set('workspace', workspaceId);
   } else {
@@ -113,6 +111,7 @@ function replaceStandaloneSessionUrl(
   url.searchParams.delete('language');
   url.searchParams.delete('lang');
   if (!import.meta.env.DEV) {
+    url.searchParams.delete('token');
     url.searchParams.delete('daemon');
   }
   window.history.replaceState(null, '', url);
@@ -184,6 +183,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 
 async function main() {
   const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
+  removeDaemonTokenFromUrl();
 
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
