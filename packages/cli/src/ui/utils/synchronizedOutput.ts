@@ -58,6 +58,10 @@ export function terminalSupportsSynchronizedOutput(
   }
 
   const term = env['TERM'];
+  // Windows Terminal supports synchronized output (DEC mode 2026) since
+  // v1.6. Detect via WT_SESSION set by Windows Terminal. #7634.
+  if (env['WT_SESSION']) return true;
+
   return Boolean(env['KITTY_WINDOW_ID'] || term?.includes('kitty'));
 }
 

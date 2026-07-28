@@ -34,6 +34,7 @@ describe('terminalSupportsSynchronizedOutput', () => {
     [{ TERM_PROGRAM: 'iTerm.app' }, true],
     [{ TERM: 'xterm-kitty' }, true],
     [{ KITTY_WINDOW_ID: '1' }, true],
+    [{ WT_SESSION: 'console-12345' }, true],
     [{ TERM_PROGRAM: 'Apple_Terminal' }, false],
     [{ TERM_PROGRAM: 'JetBrains-JediTerm' }, false],
     [{ TERM_PROGRAM: 'WezTerm', TMUX: '/tmp/tmux' }, false],
