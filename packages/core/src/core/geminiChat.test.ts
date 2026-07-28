@@ -7575,6 +7575,68 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('retries an SDK-wrapped transport error whose code sits at cause depth 2', async () => {
+      // The OpenAI SDK wraps a pre-header socket reset as APIConnectionError ->
+      // TypeError('fetch failed') -> cause { code: 'ECONNRESET' }, so the code
+      // is two cause levels down. Drive the real inline shouldRetryOnError
+      // predicate through the retryWithBackoff options and assert it retries.
+      const transportError = Object.assign(new Error('Connection error.'), {
+        cause: Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('read ECONNRESET'), {
+            code: 'ECONNRESET',
+          }),
+        }),
+      });
+
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        try {
+          return await apiCall();
+        } catch (error) {
+          expect(options?.shouldRetryOnError?.(error)).toBe(true);
+          return apiCall();
+        }
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(transportError)
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Recovered from depth-2 RST' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-sdk-wrapped-depth2',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'Recovered from depth-2 RST',
+        ),
+      ).toBe(true);
+    });
+
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {
       // A definitive 4xx is a permanent client error; the socket-level cause
       // must not relabel it as retryable (classifier keeps 4xx authoritative).
