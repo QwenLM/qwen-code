@@ -1103,6 +1103,57 @@ describe('BackgroundTasksDialog', () => {
         lines.some((line) => line.includes('without hiding operational state')),
       ).toBe(true);
     });
+
+    it('appends runtime-discovered phases that are absent from meta.phases', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        currentPhase: 'RuntimePhase',
+        phases: ['Plan', 'RuntimePhase'],
+        meta: {
+          name: 'runtime-phases',
+          description: 'Discover phases at runtime.',
+          phases: [{ title: 'Plan' }],
+        },
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      // 'RuntimePhase' is observed but not declared, so the rail must append
+      // it rather than drop it.
+      expect(frame).toContain('● Plan');
+      expect(frame).toContain('◆ RuntimePhase');
+    });
+
+    it('marks declared-but-unobserved phases of a terminal run as skipped', () => {
+      const wf = workflowEntry({
+        status: 'failed',
+        currentPhase: 'Search',
+        phases: ['Scope', 'Search'],
+        error: 'Search blew up',
+        meta: {
+          name: 'deep-research',
+          description: 'Build a sourced engineering brief.',
+          phases: [
+            { title: 'Scope' },
+            { title: 'Search' },
+            { title: 'Verify' },
+            { title: 'Synthesize' },
+          ],
+        },
+      });
+
+      const h = openWorkflowDetail([wf]);
+      const frame = h.lastFrame() ?? '';
+
+      expect(frame).toContain('✖ Failed');
+      expect(frame).toContain('● Scope');
+      expect(frame).toContain('● Search');
+      // Declared phases the failed run never reached are skipped, not pending.
+      expect(frame).toContain('⊘ Verify');
+      expect(frame).toContain('⊘ Synthesize');
+      expect(frame).not.toContain('○ Verify');
+    });
   });
 
   describe('nested sub-agent display', () => {

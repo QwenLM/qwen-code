@@ -1129,7 +1129,7 @@ const MonitorDetailBody: React.FC<{
 const MAX_VISIBLE_PHASES = 20;
 const MAX_VISIBLE_LOG_LINES = 10;
 
-type WorkflowPhaseState = 'completed' | 'active' | 'queued';
+type WorkflowPhaseState = 'completed' | 'active' | 'queued' | 'skipped';
 
 interface WorkflowPhasePresentation {
   title: string;
@@ -1160,7 +1160,9 @@ function workflowPhaseRail(entry: WorkflowTask): WorkflowPhasePresentation[] {
         ? 'active'
         : observed.has(phase.title)
           ? 'completed'
-          : 'queued',
+          : entry.status !== 'running'
+            ? 'skipped'
+            : 'queued',
     };
   });
 }
@@ -1173,6 +1175,8 @@ function workflowPhaseMarker(state: WorkflowPhaseState): string {
       return '◆';
     case 'queued':
       return '○';
+    case 'skipped':
+      return '⊘';
     default: {
       const _exhaustive: never = state;
       throw new Error(`Unknown workflow phase state: ${String(_exhaustive)}`);
