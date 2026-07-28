@@ -280,34 +280,16 @@ describe('GitlabChannel', () => {
       expect(mockApi.Issues.show).toHaveBeenCalled();
     });
 
-    it('filters system notes', async () => {
+    it('skips todo authored by bot', async () => {
       await initWithoutLoop();
 
       const todo = makeTodo({ author: { id: 99999, username: 'test-bot' } });
-      const systemNote = makeNote({ system: true, body: 'assigned to @alice' });
-
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([systemNote]);
 
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
-    });
-
-    it('filters bot own notes', async () => {
-      await initWithoutLoop();
-
-      const todo = makeTodo({ author: { id: 99999, username: 'test-bot' } });
-      const botNote = makeNote({
-        author: { id: 99999, username: 'test-bot', name: 'Test Bot' },
-      });
-
-      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([botNote]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
     });
 
     it('skips todos with unconfigured action_name', async () => {

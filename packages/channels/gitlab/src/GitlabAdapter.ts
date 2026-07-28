@@ -163,6 +163,16 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         process.stderr.write(
           `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
         );
+        try {
+          await this.createNote(
+            chatId,
+            targetType,
+            todo.target.iid,
+            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+          );
+        } catch {
+          // best-effort error comment
+        }
       }
 
       this.cursor.lastProcessedAt = todo.updated_at;
@@ -214,6 +224,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       : description || todo.body || '';
     if (!text) return;
 
+    const isMentionAction =
+      todo.action_name === 'mentioned' ||
+      todo.action_name === 'directly_addressed';
+
     const envelope = this.buildEnvelope(
       text,
       todo.author.username,
@@ -228,6 +242,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         String(todo.id),
         description,
       ),
+      !isMentionAction,
     );
 
     await this.handleInbound(envelope);
@@ -253,8 +268,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         const issue = await this.api.Issues.show(iid, { projectId: chatId });
         description = (issue as { description?: string }).description || '';
       }
-    } catch {
-      // leave empty
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] fetchDescription failed for ${chatId} ${targetType}:${iid}: ${err}\n`,
+      );
     }
     this.descriptionCache.set(cacheKey, description);
     return description;
@@ -267,8 +284,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     threadId: string,
     messageId: string,
     metadata: string,
+    forceMentioned = false,
   ): Envelope {
-    const isMentioned = testBotMention(rawBody, this.botUsername);
+    const isMentioned =
+      forceMentioned || testBotMention(rawBody, this.botUsername);
     return {
       channelName: this.name,
       senderId: authorUsername.toLowerCase(),
