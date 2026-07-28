@@ -4997,11 +4997,13 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].force).toBe(false);
 
       // The outgoing request is clamped to the room left in the window:
-      // estimate = 170,000 + 1 ("hi"), room = 200,000 − 170,001 − 10,000.
+      // char/4("hi") = 1 token, inflated by the conservative safety factor
+      // (1.5x, ceil'd) to 2, estimate = 170,000 + 2,
+      // room = 200,000 − 170,002 − 10,000.
       const requestConfig = vi.mocked(
         mockContentGenerator.generateContentStream,
       ).mock.calls[0][0].config as { maxOutputTokens?: number };
-      expect(requestConfig.maxOutputTokens).toBe(19_999);
+      expect(requestConfig.maxOutputTokens).toBe(19_998);
       expect(170_000 + requestConfig.maxOutputTokens!).toBeLessThanOrEqual(
         200_000,
       );
@@ -10357,10 +10359,12 @@ describe('GeminiChat', async () => {
       const recoveryConfig = calls[1]![0].config as {
         maxOutputTokens?: number;
       };
-      // Initial: room = 131072 − 71350 − 10000 = 49722 (below the 64K ceiling).
-      expect(initialConfig.maxOutputTokens).toBe(49_722);
+      // Initial: char/4("hi")=1 token, inflated by the conservative safety
+      // factor (1.5x, ceil'd) to 2, room = 131072 − 71351 − 10000 = 49721
+      // (below the 64K ceiling).
+      expect(initialConfig.maxOutputTokens).toBe(49_721);
       // Recovery: prompt grew to ~121K → re-clamped to the 4,000 floor, NOT
-      // the stale 49,722 (which would overflow the window by ~40K).
+      // the stale 49,721 (which would overflow the window by ~40K).
       expect(recoveryConfig.maxOutputTokens).toBe(4_000);
     });
 
