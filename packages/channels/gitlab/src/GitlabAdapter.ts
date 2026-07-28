@@ -212,13 +212,29 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   ): Promise<void> {
     if (todo.author.username === this.botUsername) return;
 
-    const description = await this.fetchDescription(
-      chatId,
-      targetType,
-      todo.target.iid,
-    );
-
     const isNoteMention = /#note_\d+$/.test(todo.target_url);
+
+    let description = '';
+    if (isNoteMention) {
+      try {
+        description = await this.fetchDescription(
+          chatId,
+          targetType,
+          todo.target.iid,
+        );
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] fetchDescription failed (metadata only): ${err}\n`,
+        );
+      }
+    } else {
+      description = await this.fetchDescription(
+        chatId,
+        targetType,
+        todo.target.iid,
+      );
+    }
+
     const text = isNoteMention
       ? todo.body || ''
       : description || todo.body || '';
@@ -253,21 +269,15 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     const cached = this.descriptionCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    let description = '';
-    try {
-      if (targetType === 'mr') {
-        // gitbeaker types require numeric projectId; GitLab API accepts path strings at runtime
-        const pid = chatId as unknown as number;
-        const mr = await this.api.MergeRequests.show(pid, iid);
-        description = (mr as { description?: string }).description || '';
-      } else {
-        const issue = await this.api.Issues.show(iid, { projectId: chatId });
-        description = (issue as { description?: string }).description || '';
-      }
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] fetchDescription failed for ${chatId} ${targetType}:${iid}: ${err}\n`,
-      );
+    let description: string;
+    if (targetType === 'mr') {
+      // gitbeaker types require numeric projectId; GitLab API accepts path strings at runtime
+      const pid = chatId as unknown as number;
+      const mr = await this.api.MergeRequests.show(pid, iid);
+      description = (mr as { description?: string }).description || '';
+    } else {
+      const issue = await this.api.Issues.show(iid, { projectId: chatId });
+      description = (issue as { description?: string }).description || '';
     }
     this.descriptionCache.set(cacheKey, description);
     return description;
