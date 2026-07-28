@@ -16,8 +16,9 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   AvailableCommand,
-  ChannelLoopToolHandler,
   ChannelAgentBridge,
+  ChannelAgentBridgeSessionOptions,
+  ChannelLoopToolHandler,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
@@ -80,6 +81,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private readonly knownSessionIds = new Set<string>();
+  private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -135,6 +137,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       // channel start crash recovery, which reloads the persisted sessions.
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
+      this.sessionBindingTokens.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -197,15 +200,25 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     void this.registerChannelLoopMcpServer();
   }
 
-  async newSession(cwd: string): Promise<string> {
+  async newSession(
+    cwd: string,
+    _options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
     this.knownSessionIds.add(response.sessionId);
+    this.sessionBindingTokens.set(response.sessionId, bindingToken);
     return response.sessionId;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<string> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    _options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
     await conn.loadSession({
@@ -214,6 +227,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       mcpServers: [],
     });
     this.knownSessionIds.add(sessionId);
+    this.sessionBindingTokens.set(sessionId, bindingToken);
     return sessionId;
   }
 
@@ -275,6 +289,25 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
   }
 
+  async discardSession(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void> {
+    if (
+      expectedBindingToken !== undefined &&
+      this.sessionBindingTokens.get(sessionId) !== expectedBindingToken
+    ) {
+      return;
+    }
+    if (!this.knownSessionIds.delete(sessionId)) return;
+    this.sessionBindingTokens.delete(sessionId);
+    this.resolvePendingPermissions(sessionId);
+
+    const conn = this.connection;
+    if (!conn || !this.isConnected) return;
+    await conn.extMethod('qwen/control/session/close', { sessionId });
+  }
+
   async respondToPermission(
     requestId: string,
     response: RequestPermissionResponse,
@@ -295,6 +328,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
 
   stop(): void {
     this.resolvePendingPermissions();
+    this.knownSessionIds.clear();
+    this.sessionBindingTokens.clear();
     if (this.child) {
       this.child.kill();
       this.child = null;
