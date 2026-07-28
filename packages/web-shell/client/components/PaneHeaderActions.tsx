@@ -7,7 +7,6 @@
 import {
   Children,
   Fragment,
-  cloneElement,
   isValidElement,
   useLayoutEffect,
   useRef,
@@ -51,7 +50,10 @@ function flattenActionElements(node: ReactNode): ReactElement[] {
   return out;
 }
 
-function actionMenuLabel(element: ReactElement): ReactNode {
+function actionMenuLabel(
+  element: ReactElement,
+  defaultLabel: string,
+): ReactNode {
   const props = element.props as {
     'aria-label'?: string;
     title?: string;
@@ -59,10 +61,14 @@ function actionMenuLabel(element: ReactElement): ReactNode {
   };
   if (props['aria-label']) return props['aria-label'];
   if (props.title) return props.title;
-  if (props.children != null && props.children !== false) {
+  if (
+    props.children != null &&
+    props.children !== false &&
+    (typeof props.children === 'string' || typeof props.children === 'number')
+  ) {
     return props.children;
   }
-  return 'Action';
+  return defaultLabel;
 }
 
 /**
@@ -109,9 +115,9 @@ export function PaneHeaderActions({
         return;
       }
       const trailingWidth = trailingRef.current?.offsetWidth ?? 0;
-      const headerGap = 8; // matches `.header { gap }`
-      const actionsGap = trailingWidth > 0 ? 4 : 0; // matches `.headerActions`
       const style = getComputedStyle(header);
+      const headerGap = parseFloat(style.gap) || 0;
+      const actionsGap = trailingWidth > 0 ? 4 : 0; // matches `.headerActions`
       const padding =
         (parseFloat(style.paddingLeft) || 0) +
         (parseFloat(style.paddingRight) || 0);
@@ -161,12 +167,15 @@ export function PaneHeaderActions({
           }
           aria-hidden={collapsed || undefined}
         >
-          {actionElements.map((element, index) =>
-            cloneElement(element, {
-              key: element.key ?? `pane-header-action-${index}`,
-              'data-pane-header-action-index': String(index),
-            } as Partial<unknown> & ReactElement['props']),
-          )}
+          {actionElements.map((element, index) => (
+            <span
+              key={element.key ?? `pane-header-action-${index}`}
+              data-pane-header-action-index={String(index)}
+              style={{ display: 'contents' }}
+            >
+              {element}
+            </span>
+          ))}
         </div>
       )}
 
@@ -193,13 +202,14 @@ export function PaneHeaderActions({
                 <DropdownMenuItem
                   key={element.key ?? `pane-header-menu-${index}`}
                   onSelect={() => {
-                    const target = hostRef.current?.querySelector(
+                    const wrapper = hostRef.current?.querySelector(
                       `[data-pane-header-action-index="${index}"]`,
                     );
+                    const target = wrapper?.firstElementChild;
                     if (target instanceof HTMLElement) target.click();
                   }}
                 >
-                  {actionMenuLabel(element)}
+                  {actionMenuLabel(element, t('splitView.defaultActionLabel'))}
                 </DropdownMenuItem>
               ))}
             </div>

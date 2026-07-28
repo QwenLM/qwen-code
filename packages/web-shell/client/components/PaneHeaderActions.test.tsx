@@ -71,6 +71,7 @@ function stubWidths(opts: {
   header: number;
   hostActions: number;
   trailing?: number;
+  workspaceTag?: number;
 }): void {
   const header = container!.querySelector('header') as HTMLElement;
   const host = hostEl();
@@ -92,6 +93,17 @@ function stubWidths(opts: {
       configurable: true,
       value: opts.trailing ?? 26,
     });
+  }
+  if (opts.workspaceTag != null) {
+    const tag = container!.querySelector(
+      '[data-web-shell-pane-workspace]',
+    ) as HTMLElement;
+    if (tag) {
+      Object.defineProperty(tag, 'offsetWidth', {
+        configurable: true,
+        value: opts.workspaceTag,
+      });
+    }
   }
 }
 
@@ -288,5 +300,78 @@ describe('PaneHeaderActions', () => {
         .querySelector('[data-testid="host-action"]')
         ?.getAttribute('data-clicks'),
     ).toBe('1');
+  });
+
+  it('reserves width for the workspace tag when measuring', () => {
+    render(
+      <header>
+        <span data-web-shell-pane-workspace>ws</span>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <button type="button" data-testid="host-action">
+            Share
+          </button>
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    // Header 300px, actions 140px, tag 80px → available ≈ 122 → collapse
+    stubWidths({
+      header: 300,
+      hostActions: 140,
+      trailing: 26,
+      workspaceTag: 80,
+    });
+    act(() => {
+      resizeCallback?.([], {} as ResizeObserver);
+    });
+    expect(
+      container!.querySelector('[data-testid="pane-header-overflow"]'),
+    ).not.toBeNull();
+  });
+
+  it('expands host actions back inline when the pane widens', () => {
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <button type="button" data-testid="host-action">
+            Share
+          </button>
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    expect(
+      container!.querySelector('[data-testid="pane-header-overflow"]'),
+    ).not.toBeNull();
+    expect(
+      container!.querySelector('[data-testid="pane-header-actions-inline"]'),
+    ).toBeNull();
+
+    stubWidths({ header: 400, hostActions: 80, trailing: 26 });
+    act(() => {
+      resizeCallback?.([], {} as ResizeObserver);
+    });
+
+    expect(
+      container!.querySelector('[data-testid="pane-header-actions-inline"]'),
+    ).not.toBeNull();
+    expect(
+      container!.querySelector('[data-testid="pane-header-overflow"]'),
+    ).toBeNull();
   });
 });
