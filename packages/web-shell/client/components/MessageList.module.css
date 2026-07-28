@@ -178,23 +178,6 @@
   min-width: 0;
 }
 
-.turnContentClip {
-  display: grid;
-  grid-template-rows: 1fr;
-  min-height: 0;
-  overflow: hidden;
-  transition: grid-template-rows 180ms ease;
-}
-
-.turnContentCollapsed {
-  grid-template-rows: 0fr;
-}
-
-.turnContentInner {
-  min-height: 0;
-  overflow: hidden;
-}
-
 .sessionTimelineLayer {
   position: sticky;
   top: 50vh;

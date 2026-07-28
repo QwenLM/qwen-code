@@ -339,6 +339,123 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.capabilities?.workspaces?.[1]?.cwd).toBe('/other');
   });
 
+  it('does not let the initial request overwrite a newer refresh', async () => {
+    let resolveInitial!: (value: never) => void;
+    sdkMocks.capabilities.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveInitial = resolve)),
+    );
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    const accepted = {
+      workspaceCwd: '/mock-workspace',
+      features: [],
+      workspaces: [
+        { id: 'accepted', cwd: '/accepted', primary: false, trusted: true },
+      ],
+    };
+    sdkMocks.capabilities.mockResolvedValueOnce(accepted);
+
+    await act(async () => {
+      await context!.refreshCapabilities!();
+    });
+    await act(async () => {
+      resolveInitial({
+        workspaceCwd: '/mock-workspace',
+        features: [],
+        workspaces: [],
+      } as never);
+      await Promise.resolve();
+    });
+
+    expect(context?.capabilities).toBe(accepted);
+  });
+
+  it('makes superseded refreshes resolve to the accepted successor', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    let resolveFirst!: (value: never) => void;
+    let resolveSecond!: (value: never) => void;
+    sdkMocks.capabilities
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveFirst = resolve)),
+      )
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveSecond = resolve)),
+      );
+    const first = context!.refreshCapabilities!();
+    const second = context!.refreshCapabilities!();
+    const accepted = {
+      workspaceCwd: '/mock-workspace',
+      features: [],
+      workspaces: [
+        { id: 'accepted', cwd: '/accepted', primary: false, trusted: true },
+      ],
+    };
+    await act(async () => {
+      resolveSecond(accepted as never);
+      await second;
+    });
+    await act(async () => {
+      resolveFirst({
+        workspaceCwd: '/mock-workspace',
+        features: [],
+        workspaces: [],
+      } as never);
+      expect(await first).toBe(accepted);
+    });
+
+    expect(context?.capabilities).toBe(accepted);
+  });
+
+  it('propagates the accepted successor rejection to a superseded refresh', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    let resolveFirst!: (value: never) => void;
+    let rejectSecond!: (reason: Error) => void;
+    sdkMocks.capabilities
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveFirst = resolve)),
+      )
+      .mockImplementationOnce(
+        () => new Promise((_resolve, reject) => (rejectSecond = reject)),
+      );
+    const first = context!.refreshCapabilities!();
+    const second = context!.refreshCapabilities!();
+    const acceptedError = new Error('accepted refresh failed');
+    const firstOutcome = first.catch((error: unknown) => error);
+    const secondOutcome = second.catch((error: unknown) => error);
+
+    await act(async () => {
+      rejectSecond(acceptedError);
+      expect(await secondOutcome).toBe(acceptedError);
+      resolveFirst({
+        workspaceCwd: '/mock-workspace',
+        features: [],
+      } as never);
+      expect(await firstOutcome).toBe(acceptedError);
+    });
+  });
+
   it('throws when useDaemonWorkspace is used without provider', async () => {
     let error: Error | undefined;
 

@@ -180,11 +180,14 @@ export default {
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
+  'toolDisplayName.ZoomImage': 'toolDisplayName.ZoomImage',
   'toolDisplayName.Grep': 'toolDisplayName.Grep',
   'toolDisplayName.Glob': 'toolDisplayName.Glob',
   'toolDisplayName.Shell': 'toolDisplayName.Shell',
   'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',
   'toolDisplayName.TodoList': 'toolDisplayName.TodoList',
+  'toolDisplayName.Goal': 'toolDisplayName.Goal',
+  'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
@@ -202,6 +205,7 @@ export default {
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
+  'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -218,6 +222,7 @@ export default {
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
+  'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -286,6 +291,7 @@ export default {
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
   '? for shortcuts': '? for shortcuts',
+  'Pasting…': 'Pasting…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':
@@ -481,6 +487,12 @@ export default {
     'Create a new subagent with guided setup.',
   'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
     'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.',
+  'The local video could not be attached for /learn.':
+    'The local video could not be attached for /learn.',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -1139,8 +1151,8 @@ export default {
     'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Input to command is JSON with notification message and type.',
-  'Input to command is JSON with original user prompt text.':
-    'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
@@ -1482,6 +1494,8 @@ export default {
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1495,17 +1509,23 @@ export default {
     'Set the model for voice transcription',
   'Set the image-capable model used to transcribe images for a text-only main model':
     'Set the image-capable model used to transcribe images for a text-only main model',
+  'Set the model used to generate images':
+    'Set the model used to generate images',
   'Persist the model selection to the project settings (workspace scope)':
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
     'Persist the model selection to the user settings (global scope)',
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
+  'Select Image Model': 'Select Image Model',
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
+  'Image Model': 'Image Model',
   'Voice Model': 'Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
+  'Selected image model is unavailable.':
+    'Selected image model is unavailable.',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
   'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
@@ -1753,8 +1773,16 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.",
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.",
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.",
   none: 'none',
   unknown: 'unknown',
   // ============================================================================
@@ -1936,6 +1964,11 @@ export default {
   reviewed: 'reviewed',
   'Code Changes:': 'Code Changes:',
   Performance: 'Performance',
+  'Generation Metrics': 'Generation Metrics',
+  'Latest Request': 'Latest Request',
+  'Generation Time': 'Generation Time',
+  'Average TTFT': 'Average TTFT',
+  'Session TPS': 'Session TPS',
   'Wall Time:': 'Wall Time:',
   'Agent Active:': 'Agent Active:',
   'API Time:': 'API Time:',
@@ -2604,8 +2637,14 @@ export default {
     'A new version of Qwen Code is available! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} is up to date!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Failed to check for updates. Please check your network or registry configuration.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update check skipped ({{reason}}) — run /update to retry.',
+  'registry did not respond within {{seconds}}s':
+    'registry did not respond within {{seconds}}s',
+  'registry unreachable': 'registry unreachable',
+  'registry error': 'registry error',
   'Unable to check for updates: {{reason}}':
     'Unable to check for updates: {{reason}}',
   'Update successful! The new version will be used on your next run.':

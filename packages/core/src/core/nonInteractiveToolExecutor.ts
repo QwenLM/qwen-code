@@ -20,6 +20,9 @@ export interface ExecuteToolCallOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
+  onToolResultFullTurnModel?: (model: string) => boolean;
+  /** Direct calls record by default; aggregate callers can defer recording. */
+  recordToolResult?: boolean;
 }
 
 /**
@@ -34,7 +37,10 @@ export async function executeToolCall(
   return new Promise<ToolCallResponseInfo>((resolve, reject) => {
     new CoreToolScheduler({
       config,
-      chatRecordingService: config.getChatRecordingService(),
+      chatRecordingService:
+        options.recordToolResult === false
+          ? undefined
+          : config.getChatRecordingService(),
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
         if (options.onAllToolCallsComplete) {
@@ -43,6 +49,7 @@ export async function executeToolCall(
         resolve(completedToolCalls[0].response);
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
+      onToolResultFullTurnModel: options.onToolResultFullTurnModel,
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })

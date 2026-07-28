@@ -308,6 +308,7 @@ describe('Config safe mode', () => {
       const config = new Config({ ...baseParams, safeMode: true });
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
+      expect(config.getAutoMemoryPrompt()).toBe('');
       expect(config.getGeminiMdFileCount()).toBe(0);
     });
 

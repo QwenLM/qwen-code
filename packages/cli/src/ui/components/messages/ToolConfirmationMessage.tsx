@@ -61,6 +61,7 @@ export const ToolConfirmationMessage: React.FC<
   compactMode = false,
 }) => {
   const { onConfirm } = confirmationDetails;
+  const autoModeFallback = confirmationDetails.autoModeFallback;
 
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
@@ -182,14 +183,23 @@ export const ToolConfirmationMessage: React.FC<
     const MARGIN_BODY_BOTTOM = compactMode ? 0 : 1;
     const HEIGHT_QUESTION = 1;
     const MARGIN_QUESTION_BOTTOM = compactMode ? 0 : 1;
-    const HEIGHT_OPTIONS = compactMode ? 3 : options.length;
+    const HEIGHT_OPTIONS = compactMode
+      ? 3
+      : options.length + (autoModeFallback ? 1 : 0);
+    const AUTO_MODE_FALLBACK_HEIGHT = autoModeFallback
+      ? wrapAnsi(`⚠ ${autoModeFallback.message}`, warningContentWidth, {
+          trim: false,
+          hard: true,
+        }).split('\n').length + 1
+      : 0;
 
     const surroundingElementsHeight =
       PADDING_OUTER_Y +
       MARGIN_BODY_BOTTOM +
       HEIGHT_QUESTION +
       MARGIN_QUESTION_BOTTOM +
-      HEIGHT_OPTIONS;
+      HEIGHT_OPTIONS +
+      AUTO_MODE_FALLBACK_HEIGHT;
     return Math.max(availableTerminalHeight - surroundingElementsHeight, 1);
   }
 
@@ -644,6 +654,32 @@ export const ToolConfirmationMessage: React.FC<
     });
   }
 
+  if (autoModeFallback) {
+    const cancelIndex = options.findIndex(
+      (option) => option.value === ToolConfirmationOutcome.Cancel,
+    );
+    const switchOption: RadioSelectItem<ToolConfirmationOutcome> = {
+      key: 'switch-default-and-proceed-once',
+      label: t('Switch to Default Mode and allow once (recommended)'),
+      value: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    };
+    options.splice(
+      cancelIndex === -1 ? options.length : cancelIndex,
+      0,
+      switchOption,
+    );
+    bodyContent = (
+      <Box flexDirection="column">
+        <Box paddingX={1} marginLeft={1} marginBottom={1}>
+          <Text color={theme.status.warning}>
+            ⚠ {autoModeFallback.message}
+          </Text>
+        </Box>
+        {bodyContent}
+      </Box>
+    );
+  }
+
   // For exec/mcp confirmations the type-specific question text would
   // restate what the body already shows (the full command, or the labeled
   // server + tool). Use the generic prompt so the question line acts as a
@@ -666,6 +702,17 @@ export const ToolConfirmationMessage: React.FC<
             label: t('Yes, allow once'),
             value: ToolConfirmationOutcome.ProceedOnce,
           },
+          ...(autoModeFallback
+            ? [
+                {
+                  key: 'switch-default-and-proceed-once',
+                  label: t(
+                    'Switch to Default Mode and allow once (recommended)',
+                  ),
+                  value: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+                },
+              ]
+            : []),
           ...(!confirmationDetails.hideAlwaysAllow
             ? [
                 {

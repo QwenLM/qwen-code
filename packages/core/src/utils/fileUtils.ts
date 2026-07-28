@@ -9,11 +9,8 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
-import {
-  iconvDecode,
-  iconvEncodingExists,
-  isUtf8CompatibleEncoding,
-} from './iconvHelper.js';
+import { isUtf8CompatibleEncoding } from './encoding.js';
+import { loadIconvLite } from './load-iconv-lite.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
@@ -60,9 +57,14 @@ const PDF_PAGED_TEXT_EXTRACTION_MAX_MB = 512;
 
 // --- Unicode BOM detection & decoding helpers --------------------------------
 
-type UnicodeEncoding = 'utf8' | 'utf16le' | 'utf16be' | 'utf32le' | 'utf32be';
+export type UnicodeEncoding =
+  | 'utf8'
+  | 'utf16le'
+  | 'utf16be'
+  | 'utf32le'
+  | 'utf32be';
 
-interface BOMInfo {
+export interface BOMInfo {
   encoding: UnicodeEncoding;
   bomLength: number;
 }
@@ -160,7 +162,7 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
  * Check whether a buffer is valid UTF-8 by attempting a strict decode.
  * If any invalid byte sequence is encountered, TextDecoder with `fatal: true` throws.
  */
-function isValidUtf8(buffer: Buffer): boolean {
+export function isValidUtf8(buffer: Buffer): boolean {
   try {
     new TextDecoder('utf-8', { fatal: true }).decode(buffer);
     return true;
@@ -185,7 +187,9 @@ export interface FileReadResult {
   bom: boolean;
 }
 
-export function decodeBufferWithEncodingInfo(full: Buffer): FileReadResult {
+export async function decodeBufferWithEncodingInfoAsync(
+  full: Buffer,
+): Promise<FileReadResult> {
   if (full.length === 0) {
     return { content: '', encoding: 'utf-8', bom: false };
   }
@@ -210,9 +214,10 @@ export function decodeBufferWithEncodingInfo(full: Buffer): FileReadResult {
   const detected = detectEncodingFromBuffer(full);
   if (detected && !isUtf8CompatibleEncoding(detected)) {
     try {
-      if (iconvEncodingExists(detected)) {
+      const iconvLite = await loadIconvLite();
+      if (iconvLite.encodingExists(detected)) {
         return {
-          content: iconvDecode(full, detected),
+          content: iconvLite.decode(full, detected),
           encoding: detected,
           bom: false,
         };
@@ -232,7 +237,7 @@ export function decodeBufferWithEncodingInfo(full: Buffer): FileReadResult {
  * Internal helper: decode a buffer given a BOMInfo.
  * Returns the decoded string for each supported BOM encoding.
  */
-function decodeBOMBuffer(buf: Buffer, bomInfo: BOMInfo): string {
+export function decodeBOMBuffer(buf: Buffer, bomInfo: BOMInfo): string {
   const content = buf.subarray(bomInfo.bomLength);
   switch (bomInfo.encoding) {
     case 'utf8':
@@ -254,7 +259,7 @@ function decodeBOMBuffer(buf: Buffer, bomInfo: BOMInfo): string {
 /**
  * Map a BOMInfo encoding to a canonical encoding name string.
  */
-function bomEncodingToName(bomEncoding: UnicodeEncoding): string {
+export function bomEncodingToName(bomEncoding: UnicodeEncoding): string {
   switch (bomEncoding) {
     case 'utf8':
       return 'utf-8';
@@ -289,7 +294,7 @@ export async function readFileWithEncodingInfo(
     filePath,
     signal === undefined ? undefined : { signal },
   );
-  return decodeBufferWithEncodingInfo(full);
+  return await decodeBufferWithEncodingInfoAsync(full);
 }
 
 /**
@@ -769,6 +774,17 @@ function isTextMime(lookedUpMimeType: string): boolean {
 }
 
 /**
+ * Video containers whose MIME type `mime/lite` does not carry in its default
+ * "standard" database. `.m4v`'s `video/x-m4v` mapping lives only in the
+ * non-default "other" set, so `mime.getType('clip.m4v')` returns null and —
+ * without this override — {@link detectFileType} falls through to the content
+ * sampler and misclassifies a real video as binary.
+ */
+const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
+  ['.m4v', 'video/x-m4v'],
+]);
+
+/**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
  * @returns Promise that resolves to a FileType string.
@@ -794,7 +810,12 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     return 'notebook';
   }
 
-  const lookedUpMimeType = mime.getType(filePath); // Returns null if not found, or the mime type string
+  // Returns null if not found, or the mime type string. `mime/lite` omits a
+  // few video containers (see MIME_LITE_MISSING_VIDEO_TYPES), so fall back to
+  // that override before giving up — otherwise a real video falls through to
+  // the content sampler and is misclassified as binary.
+  const lookedUpMimeType =
+    mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
       return 'image';
@@ -933,8 +954,8 @@ export interface ProcessSingleFileContentOptions {
   pages?: string;
   /**
    * When true, keep an image inline for a text-only model instead of replacing
-   * it with an "unsupported" note. Only the interactive `@`-resolution path
-   * sets this after deciding the vision bridge should handle the image.
+   * it with an "unsupported" note. Vision Bridge callers set this only after
+   * confirming that another model can interpret the image.
    */
   preserveUnsupportedImage?: boolean;
   /**
@@ -1092,9 +1113,9 @@ export async function processSingleFileContent(
       !!modalities.image &&
       largePdfBehavior !== 'reference';
     // Text-only main model on a bridge-capable path: prepare bounded PDF page
-    // images for the caller to transcribe. `preserveUnsupportedImage` is the
-    // interactive `@` path; `preparePdfForVisionBridge` is PDF-only so enabling
-    // read_file fallback never changes ordinary image reads.
+    // images for the caller to transcribe. `preserveUnsupportedImage` also
+    // keeps ordinary images available to a bridge-capable caller, while
+    // `preparePdfForVisionBridge` changes PDF handling only.
     const renderForBridge =
       fileType === 'pdf' &&
       !modalities.image &&
@@ -1414,7 +1435,12 @@ export async function processSingleFileContent(
           llmContent: {
             inlineData: {
               data: base64Data,
-              mimeType: mime.getType(filePath) || 'application/octet-stream',
+              mimeType:
+                mime.getType(filePath) ??
+                MIME_LITE_MISSING_VIDEO_TYPES.get(
+                  path.extname(filePath).toLowerCase(),
+                ) ??
+                'application/octet-stream',
               displayName,
             },
           },

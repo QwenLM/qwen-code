@@ -22,6 +22,12 @@ vi.mock('../components/MainContent.js', () => ({
   MainContent: () => <Text>MainContent</Text>,
 }));
 
+vi.mock('../components/UpdateNotification.js', () => ({
+  UpdateNotification: ({ message }: { message: string }) => (
+    <Text>{`UpdateNotification: ${message}`}</Text>
+  ),
+}));
+
 vi.mock('../components/DialogManager.js', () => ({
   DialogManager: () => (
     <Text>
@@ -136,6 +142,32 @@ describe('DefaultAppLayout', () => {
       output.indexOf('MainContent'),
     );
     expect(output.indexOf('StickyTodoList')).toBeLessThan(
+      output.indexOf('Composer'),
+    );
+  });
+
+  it('renders an update that arrives after startup above the composer', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('UpdateNotification: Update successful!');
+    expect(output.indexOf('UpdateNotification')).toBeLessThan(
       output.indexOf('Composer'),
     );
   });
@@ -256,5 +288,31 @@ describe('DefaultAppLayout', () => {
     expect(output).not.toContain('StickyTodoList');
     expect(output).toContain('AgentChatView');
     expect(output).toContain('AgentComposer');
+  });
+
+  it('renders update notifications in an agent tab view', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'agent-1',
+      agents: new Map([['agent-1', {}]]),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('UpdateNotification: Update successful!');
+    expect(output.indexOf('UpdateNotification')).toBeLessThan(
+      output.indexOf('AgentComposer'),
+    );
   });
 });

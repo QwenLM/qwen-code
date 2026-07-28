@@ -13,6 +13,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "serve": {
+      "description": "Persistent qwen serve settings.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "modelProviders": {
       "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
       "type": "object",
@@ -558,6 +563,11 @@
       "type": "string",
       "default": ""
     },
+    "imageModel": {
+      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.",
+      "type": "string",
+      "default": ""
+    },
     "visionBridgeTimeoutMs": {
       "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
       "type": "integer",
@@ -670,6 +680,16 @@
             "maxRetries": {
               "description": "Maximum number of retries for failed requests.",
               "type": "number"
+            },
+            "retryInitialDelayMs": {
+              "description": "Initial delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
+            },
+            "retryMaxDelayMs": {
+              "description": "Maximum delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
             },
             "enableCacheControl": {
               "description": "Enable cache control for DashScope providers.",
@@ -882,6 +902,27 @@
           "items": {
             "type": "string"
           }
+        },
+        "defaultDisabled": {
+          "description": "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. skills.disabled always wins.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "description": "Explicit opt-ins that override matching skills.defaultDisabled entries. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "directories": {
+          "description": "Additional directories to scan for skills (SKILL.md files). Entries should be absolute paths or ~-prefixed; relative paths resolve against the working directory. Each directory is scanned one level deep for subdirectories containing a SKILL.md file. Skills from these directories are loaded at user level, after the default user skill directories; a custom skill with the same name as one in the default user directories will not override it. Only point this at trusted locations, since skills can define hooks and commands.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -1014,6 +1055,26 @@
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
           "type": "string"
         },
+        "webSearch": {
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.",
+              "type": "boolean",
+              "default": false
+            },
+            "model": {
+              "description": "Model selector for the search side request, resolved against modelProviders like fastModel (\"modelId\" or \"authType:modelId\"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.",
+              "type": "string"
+            },
+            "webExtractor": {
+              "description": "Let the search agent open and read result pages (DashScope web_extractor) for better-grounded answers. Billed separately by DashScope. Env override: WEB_SEARCH_EXTRACTOR.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
         "toolSearch": {
           "description": "Settings for the ToolSearch discovery mechanism.",
           "type": "object",
@@ -1137,7 +1198,7 @@
           "default": 1000
         },
         "toolOutputBatchBudget": {
-          "description": "Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.",
+          "description": "Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.",
           "type": "number",
           "default": 200000
         },
@@ -1320,6 +1381,20 @@
               "type": "string",
               "default": "inherit"
             }
+          }
+        },
+        "modelGrades": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Maps semantic model grade names exposed to the Agent tool to concrete model selectors."
+        },
+        "allowedGrades": {
+          "description": "Optional whitelist of model grade names the Agent tool may use.",
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
         "maxParallelAgents": {
@@ -1599,6 +1674,109 @@
         },
         "Stop": {
           "description": "Hooks that execute after agent processing. Can post-process responses or log interactions.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "StopFailure": {
+          "description": "Hooks that execute when a turn ends due to an API error or loop detection, instead of the normal Stop hooks. Receives error type and details.",
           "type": "array",
           "items": {
             "description": "A hook definition with an optional matcher and a list of hook configurations.",
@@ -2949,6 +3127,11 @@
         },
         "todoStopGuard": {
           "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionWriterLease": {
+          "description": "Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
           "type": "boolean",
           "default": false
         },

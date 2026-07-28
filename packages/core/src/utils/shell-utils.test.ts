@@ -323,6 +323,20 @@ describe('checkCommandPermissions', () => {
       });
     });
 
+    it('should not let a backslash inside single quotes hide a blocked command', async () => {
+      // `echo 'a\'; rm ...` is two commands to the shell. If the splitter
+      // mistakes `\'` for an escaped quote it sees a single `echo` command
+      // and the deny rule never gets to look at `rm`.
+      config.getPermissionsDeny = () => ['ShellTool(rm)'];
+      const result = await checkCommandPermissions(
+        "echo 'a\\'; rm -rf /tmp/x",
+        config,
+      );
+      expect(result.allAllowed).toBe(false);
+      expect(result.isHardDenial).toBe(true);
+      expect(result.disallowedCommands).toEqual(['rm -rf /tmp/x']);
+    });
+
     it('should return a detailed failure object for a command not on a strict allowlist', async () => {
       config.getCoreTools = () => ['ShellTool(ls)'];
       const result = await checkCommandPermissions('git status && ls', config);
@@ -563,6 +577,26 @@ describe('getCommandRoots', () => {
     expect(getCommandRoots('"C:\\Program Files\\foo\\bar.exe" arg1')).toEqual([
       'bar.exe',
     ]);
+  });
+
+  it('should treat a backslash inside single quotes as literal, not an escape', async () => {
+    // The shell performs no escaping inside single quotes, so `'a\'` closes
+    // the quote and `;` separates two commands:
+    //   $ echo 'a\'; rm -rf /tmp/x   ->   prints "a\", then runs rm
+    // Treating `\'` as an escaped quote would leave the parser inside the
+    // quote and swallow `rm` entirely.
+    expect(getCommandRoots("echo 'a\\'; rm -rf /tmp/x")).toEqual([
+      'echo',
+      'rm',
+    ]);
+  });
+
+  it('should still honour backslash escapes outside single quotes', async () => {
+    // Inside double quotes a backslash *does* escape, so the quote stays open
+    // and the whole string is one command.
+    expect(getCommandRoots('echo "a\\"; rm -rf /tmp/x"')).toEqual(['echo']);
+    // An escaped separator outside quotes is likewise not a separator.
+    expect(getCommandRoots('echo a\\; rm -rf /tmp/x')).toEqual(['echo']);
   });
 });
 

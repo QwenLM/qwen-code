@@ -48,14 +48,21 @@ const makeFrame = (text: string): ReadonlyFrame => ({
       value,
       fullWidth: false,
       styles: [],
+      selectable: true,
+      flowId: 1,
     })),
   ],
+  boundaries: [Array.from({ length: text.length }, () => null)],
 });
 
 const makeTwoLineFrame = (first: string, second: string): ReadonlyFrame => ({
   width: Math.max(first.length, second.length),
   height: 2,
   cells: [makeFrame(first).cells[0], makeFrame(second).cells[0]],
+  boundaries: [
+    Array.from({ length: Math.max(first.length, second.length) }, () => null),
+    Array.from({ length: Math.max(first.length, second.length) }, () => null),
+  ],
 });
 
 const makeWideFrame = (): ReadonlyFrame => ({
@@ -63,12 +70,41 @@ const makeWideFrame = (): ReadonlyFrame => ({
   height: 1,
   cells: [
     [
-      { type: 'char', value: 'a', fullWidth: false, styles: [] },
-      { type: 'char', value: '中', fullWidth: true, styles: [] },
-      { type: 'char', value: '', fullWidth: false, styles: [] },
-      { type: 'char', value: 'b', fullWidth: false, styles: [] },
+      {
+        type: 'char',
+        value: 'a',
+        fullWidth: false,
+        styles: [],
+        selectable: true,
+        flowId: 1,
+      },
+      {
+        type: 'char',
+        value: '中',
+        fullWidth: true,
+        styles: [],
+        selectable: true,
+        flowId: 1,
+      },
+      {
+        type: 'char',
+        value: '',
+        fullWidth: false,
+        styles: [],
+        selectable: true,
+        flowId: 1,
+      },
+      {
+        type: 'char',
+        value: 'b',
+        fullWidth: false,
+        styles: [],
+        selectable: true,
+        flowId: 1,
+      },
     ],
   ],
+  boundaries: [Array.from({ length: 4 }, () => null)],
 });
 
 const makeEvent = (

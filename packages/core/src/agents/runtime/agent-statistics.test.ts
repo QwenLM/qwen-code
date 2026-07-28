@@ -16,6 +16,30 @@ describe('AgentStatistics', () => {
   });
 
   describe('basic statistics tracking', () => {
+    it('should reset all statistics for a new turn', () => {
+      stats.start(baseTime);
+      stats.setRounds(3);
+      stats.recordToolCall('file_read', false, 100, 'failed');
+      stats.recordTokens(100, 50, 10, 5, 160);
+
+      stats.reset();
+
+      expect(stats.getSummary(baseTime + 5000)).toEqual({
+        rounds: 0,
+        totalDurationMs: 0,
+        totalToolCalls: 0,
+        successfulToolCalls: 0,
+        failedToolCalls: 0,
+        successRate: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        toolUsage: [],
+      });
+    });
+
     it('should track execution time', () => {
       stats.start(baseTime);
       const summary = stats.getSummary(baseTime + 5000);

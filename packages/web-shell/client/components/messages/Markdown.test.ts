@@ -1312,13 +1312,11 @@ describe('Markdown code highlighting while streaming', () => {
     container.remove();
   });
 
-  it('highlights the block as it streams, and the appended chunk too', async () => {
+  it('keeps a growing block plain and highlights it once settled', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
 
-    // First streamed chunk: gets highlighted (async grammar load, then the
-    // synchronous re-highlight).
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -1327,19 +1325,25 @@ describe('Markdown code highlighting while streaming', () => {
         }),
       );
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    });
-    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const a = 1;');
 
-    // Appended chunk (still streaming): the new line is re-highlighted
-    // synchronously — content never lags out of the DOM.
     await act(async () => {
       root.render(
         createElement(Markdown, {
           content: '```ts\nconst a = 1;\nconst b = 2;\n```',
           isStreaming: true,
+        }),
+      );
+    });
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.textContent).toContain('const b = 2;');
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst a = 1;\nconst b = 2;\n```',
+          isStreaming: false,
         }),
       );
     });
@@ -1401,11 +1405,8 @@ describe('Markdown code highlighting while streaming', () => {
     });
     expect(container.textContent).toContain('const aaa');
 
-    // Replace the content while streaming. `ts` is already warm, so the
-    // synchronous re-highlight produces the new block's HTML immediately; the
-    // stale highlight (of `const aaa`) must NOT be shown — `const zzz` is.
-    // (The cold-language variant of this — where the new grammar is still
-    // loading — is covered deterministically in Markdown.coldHighlight.test.tsx.)
+    // Replaced streaming content is shown as current plain text, never as the
+    // stale highlight from the previous settled response.
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -1414,11 +1415,11 @@ describe('Markdown code highlighting while streaming', () => {
         }),
       );
     });
+    expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const zzz');
     expect(container.textContent).not.toContain('const aaa');
 
-    // Positive case: once the regenerated content settles, it is actually
-    // highlighted (re-highlighted synchronously — not stuck on plain text).
+    // Once regenerated content settles, it is highlighted.
     await act(async () => {
       root.render(
         createElement(Markdown, {

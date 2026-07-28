@@ -14,7 +14,7 @@ import type {
   Tool,
   Schema,
 } from '@google/genai';
-import { FunctionCallingConfigMode } from '@google/genai';
+import { FunctionCallingConfigMode } from './genai-compat.js';
 import type { Config } from '../config/config.js';
 import type {
   ContentGenerator,

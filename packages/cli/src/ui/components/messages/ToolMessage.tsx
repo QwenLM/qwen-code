@@ -33,7 +33,7 @@ import {
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME, ICON } from '../../constants.js';
 import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -95,7 +95,11 @@ function sliceTextForMaxHeight(
   text: string,
   maxHeight: number | undefined,
   maxWidth: number,
-): { text: string; hiddenLinesCount: number } {
+): {
+  text: string;
+  hiddenLinesCount: number;
+  sourceBoundaries?: Array<{ kind: 'soft' | 'hard'; joiner: string }>;
+} {
   if (maxHeight === undefined) {
     return { text, hiddenLinesCount: 0 };
   }
@@ -103,41 +107,49 @@ function sliceTextForMaxHeight(
   const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
   const visibleContentHeight = targetMaxHeight - 1;
   const visualWidth = Math.max(1, Math.floor(maxWidth));
-  const visibleLines: string[] = [];
+  const visibleLines: Array<{
+    text: string;
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null;
+  }> = [];
   let visualLineCount = 0;
   let currentLine = '';
   let currentLineWidth = 0;
 
-  const appendVisibleLine = (line: string) => {
+  const appendVisibleLine = (
+    line: string,
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
     visualLineCount += 1;
-    visibleLines.push(line);
+    visibleLines.push({ text: line, breakAfter });
     if (visibleLines.length > visibleContentHeight) {
       visibleLines.shift();
     }
   };
 
-  const flushCurrentLine = () => {
-    appendVisibleLine(currentLine);
+  const flushCurrentLine = (
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
+    appendVisibleLine(currentLine, breakAfter);
     currentLine = '';
     currentLineWidth = 0;
   };
 
   for (const char of toCodePoints(text)) {
     if (char === '\n') {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'hard', joiner: '\n' });
       continue;
     }
 
     const charWidth = Math.max(getCachedStringWidth(char), 1);
     if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'soft', joiner: '' });
     }
 
     currentLine += char;
     currentLineWidth += charWidth;
   }
 
-  flushCurrentLine();
+  flushCurrentLine(null);
 
   if (visualLineCount <= targetMaxHeight) {
     return { text, hiddenLinesCount: 0 };
@@ -145,8 +157,11 @@ function sliceTextForMaxHeight(
 
   const hiddenLinesCount = visualLineCount - visibleContentHeight;
   return {
-    text: visibleLines.join('\n'),
+    text: visibleLines.map((line) => line.text).join('\n'),
     hiddenLinesCount,
+    sourceBoundaries: visibleLines
+      .slice(0, -1)
+      .map((line) => line.breakAfter ?? { kind: 'hard', joiner: '\n' }),
   };
 }
 
@@ -328,7 +343,7 @@ const SubagentApprovalContext: React.FC<{
             ? '✖'
             : call.status === 'success'
               ? '✔'
-              : '○';
+              : ICON.CIRCLE_EMPTY;
         const displayName = localizeToolDisplayName(
           TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
         );
@@ -580,6 +595,7 @@ const StringResultRenderer: React.FC<{
       maxHeight={availableHeight}
       maxWidth={childWidth}
       additionalHiddenLinesCount={sliced.hiddenLinesCount}
+      sourceBoundaries={sliced.sourceBoundaries}
     >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
@@ -670,6 +686,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  visionBridgeNotice,
   detailedDisplay,
   status,
   availableTerminalHeight,
@@ -811,11 +828,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
     ? resultDisplay
     : undefined;
-  const visionBridgeNoticeText = visionBridgeNoticeDisplay
-    ? sanitizeTerminalText(
-        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
-      )
-    : undefined;
+  const visionBridgeNoticeText = [
+    visionBridgeNoticeDisplay
+      ? formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay)
+      : undefined,
+    visionBridgeNotice,
+  ]
+    .filter((notice): notice is string => notice !== undefined)
+    .map((notice) => sanitizeTerminalText(notice))
+    .join('\n');
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay
     : visionBridgeNoticeDisplay
@@ -847,7 +868,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       effectiveDisplayRenderer.type === 'ansi');
 
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
+    <Box paddingY={0} flexDirection="column">
       <Box minHeight={1}>
         <ToolStatusIndicator status={status} name={name} />
         <ToolInfo

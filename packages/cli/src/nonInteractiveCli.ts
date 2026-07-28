@@ -49,6 +49,7 @@ import {
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   ToolErrorType,
+  finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -76,6 +77,8 @@ import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
 
 /**
  * Maximum wait, in milliseconds, for in-flight background tasks to emit
@@ -453,6 +456,7 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitorId?: string;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -466,6 +470,13 @@ export async function runNonInteractive(
     }
     const localQueue: LocalQueueItem[] = [];
     const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
+    const isCancelledMonitorEvent = (item: LocalQueueItem) =>
+      Boolean(
+        item.monitorId &&
+          item.sdkNotification?.status === 'running' &&
+          config.getMonitorRegistry().get(item.monitorId)?.status ===
+            'cancelled',
+      );
     const emitNotificationToSdk = (item: LocalQueueItem) => {
       if (item.sendMessageType !== SendMessageType.Notification) return;
       adapter.emitUserMessage([{ text: item.displayText }]);
@@ -475,7 +486,10 @@ export async function runNonInteractive(
     };
     const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
       while (queue.length > 0) {
-        emitNotificationToSdk(queue.shift()!);
+        const item = queue.shift()!;
+        if (!isCancelledMonitorEvent(item)) {
+          emitNotificationToSdk(item);
+        }
       }
     };
     let captureMonitorTurnsInLocalQueue = true;
@@ -648,6 +662,17 @@ export async function runNonInteractive(
         permissionMode,
       );
       adapter.emitMessage(systemMessage);
+
+      const resumedSessionData = config.getResumedSessionData();
+      if (resumedSessionData) {
+        const restoredSessions =
+          restoredBackgroundAgentSessions.get(config) ?? new Set<string>();
+        if (!restoredSessions.has(sessionId)) {
+          await config.loadPausedBackgroundAgents(sessionId);
+          restoredSessions.add(sessionId);
+          restoredBackgroundAgentSessions.set(config, restoredSessions);
+        }
+      }
 
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
@@ -831,10 +856,7 @@ export async function runNonInteractive(
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (
-        !options.continueInterrupted &&
-        config.getResumedSessionData()
-      ) {
+      } else if (!options.continueInterrupted && resumedSessionData) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -856,6 +878,16 @@ export async function runNonInteractive(
         } catch (error) {
           debugLogger.warn(`worktree restore failed (non-fatal):`, error);
         }
+      }
+
+      const recoveredAgentsNotice =
+        resumedSessionData &&
+        !options.continueInterrupted &&
+        !isSlashCommand(input)
+          ? config.consumePendingRecoveredAgentsNotice()
+          : null;
+      if (recoveredAgentsNotice) {
+        initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
       const initialParts = normalizePartList(initialPartList);
@@ -914,6 +946,7 @@ export async function runNonInteractive(
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
+              monitorId: meta.monitorId,
               sdkNotification: {
                 task_id: meta.monitorId,
                 tool_use_id: meta.toolUseId,
@@ -1081,9 +1114,16 @@ export async function runNonInteractive(
 
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
-        setModelOverride: (override: string | undefined) => void,
+        setModelOverride: (override: string | undefined) => boolean,
       ): Promise<ToolCallBatchResult> => {
-        const toolResponseParts: Part[] = [];
+        const responseByRequest = new Map<
+          ToolCallRequestInfo,
+          ToolCallResponseInfo
+        >();
+        const statusByResponse = new Map<
+          ToolCallResponseInfo,
+          'success' | 'error' | 'cancelled'
+        >();
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
@@ -1134,8 +1174,6 @@ export async function runNonInteractive(
 
         const respondedRequests = new Set<ToolCallRequestInfo>();
         const executableBatchRequests: ToolCallRequestInfo[] = [];
-        const duplicatePendingResponses: Part[] = [];
-
         for (const requestInfo of uniqueBatchRequests) {
           const providerCallId = getProviderResponseId(requestInfo);
           if (!providerCallId) {
@@ -1161,13 +1199,8 @@ export async function runNonInteractive(
           );
           respondedRequests.add(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
-          duplicatePendingResponses.push(...toolResponse.responseParts);
+          responseByRequest.set(requestInfo, toolResponse);
         }
-
-        // Duplicate responses must always reach the model. They pair with a
-        // tool call the provider already emitted, even when structured_output
-        // is the only executable sibling in this batch.
-        toolResponseParts.push(...duplicatePendingResponses);
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -1282,7 +1315,17 @@ export async function runNonInteractive(
             requestInfo,
             abortController.signal,
             {
+              recordToolResult: false,
+              onToolResultFullTurnModel: (model) => {
+                if (inlineModelOverrideActive) return false;
+                return setModelOverride(model);
+              },
               outputUpdateHandler,
+              onAllToolCallsComplete: async (completedCalls) => {
+                for (const call of completedCalls) {
+                  statusByResponse.set(call.response, call.status);
+                }
+              },
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -1321,16 +1364,13 @@ export async function runNonInteractive(
           }
 
           adapter.emitToolResult(requestInfo, toolResponse);
+          responseByRequest.set(requestInfo, toolResponse);
           config
             .getGeminiClient()
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
             );
-
-          if (toolResponse.responseParts) {
-            toolResponseParts.push(...toolResponse.responseParts);
-          }
 
           // Capture model override from skill tool results.
           // Use `in` so that undefined (from inherit/no-model skills)
@@ -1375,8 +1415,14 @@ export async function runNonInteractive(
             error,
             errorType: ToolErrorType.EXECUTION_DENIED,
           });
+          responseByRequest.set(requestInfo, {
+            callId: requestInfo.callId,
+            responseParts,
+            resultDisplay: error.message,
+            error,
+            errorType: ToolErrorType.EXECUTION_DENIED,
+          });
           executedRequests.add(requestInfo);
-          toolResponseParts.push(...responseParts);
         };
 
         const maxToolConcurrency = parsePositiveIntegerEnv(
@@ -1520,14 +1566,15 @@ export async function runNonInteractive(
                 },
               },
             ];
-            adapter.emitToolResult(call, {
+            const toolResponse: ToolCallResponseInfo = {
               callId: call.callId,
               responseParts,
               resultDisplay: skippedOutput,
               error: undefined,
               errorType: undefined,
-            });
-            toolResponseParts.push(...responseParts);
+            };
+            adapter.emitToolResult(call, toolResponse);
+            responseByRequest.set(call, toolResponse);
           }
         }
 
@@ -1542,7 +1589,38 @@ export async function runNonInteractive(
           const toolResponse =
             createDuplicateProviderToolCallResponse(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
-          toolResponseParts.push(...toolResponse.responseParts);
+          responseByRequest.set(requestInfo, toolResponse);
+        }
+
+        const orderedResponses = batchRequests.flatMap((request) => {
+          const response = responseByRequest.get(request);
+          return response ? [{ request, response }] : [];
+        });
+        const finalized = await finalizeToolResponses(
+          config,
+          orderedResponses.map(({ request, response }) => ({
+            callId: request.callId,
+            toolName: request.name,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+          })),
+        );
+
+        const chatRecordingService = config.getChatRecordingService?.();
+        const toolResponseParts: Part[] = [];
+        for (let index = 0; index < orderedResponses.length; index++) {
+          const { request, response } = orderedResponses[index];
+          const finalizedParts = finalized[index].responseParts;
+          toolResponseParts.push(...finalizedParts);
+          chatRecordingService?.recordToolResult?.(finalizedParts, {
+            callId: request.callId,
+            status:
+              statusByResponse.get(response) ??
+              (response.error ? 'error' : 'success'),
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+          });
         }
 
         return {
@@ -1700,9 +1778,12 @@ export async function runNonInteractive(
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
           } = await processToolCallBatch(toolCallRequests, (override) => {
-            if (!inlineModelOverrideActive) {
-              modelOverride = override;
+            if (inlineModelOverrideActive) return false;
+            if (modelOverride?.endsWith('\0') && modelOverride !== override) {
+              return false;
             }
+            modelOverride = override;
+            return true;
           });
 
           if (structuredSubmission !== undefined) {
@@ -1822,7 +1903,9 @@ export async function runNonInteractive(
                 splitIdx++;
               }
             }
-            const batch = localQueue.splice(0, splitIdx);
+            const batch = localQueue
+              .splice(0, splitIdx)
+              .filter((item) => !isCancelledMonitorEvent(item));
 
             if (batch.length === 0) return;
 
@@ -1942,7 +2025,14 @@ export async function runNonInteractive(
                 } = await processToolCallBatch(
                   itemToolCallRequests,
                   (override) => {
+                    if (
+                      itemModelOverride?.endsWith('\0') &&
+                      itemModelOverride !== override
+                    ) {
+                      return false;
+                    }
                     itemModelOverride = override;
+                    return true;
                   },
                 );
 

@@ -14,6 +14,13 @@ import {
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
 import {
+  DingTalkMediaUploadError,
+  findImageMarkers,
+  readValidatedImage,
+  replaceImageMarkers,
+  uploadDingTalkImage,
+} from './outbound-image.js';
+import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
@@ -50,6 +57,11 @@ interface DingTalkRepliedMsg {
   };
 }
 
+interface DingTalkAtUser {
+  dingtalkId?: string;
+  staffId?: string;
+}
+
 interface DingTalkMessageData {
   msgId?: string;
   msgtype?: string;
@@ -62,6 +74,7 @@ interface DingTalkMessageData {
   senderNick?: string;
   chatbotUserId?: string;
   isInAtList?: boolean;
+  atUsers?: DingTalkAtUser[];
   text?: {
     content?: string;
     isReplyMsg?: boolean;
@@ -98,10 +111,45 @@ const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
 const TEXT_MESSAGE_LIMIT = 3800;
 const mentionTarget = Symbol('mentionTarget');
+const IMAGE_INSTRUCTIONS = [
+  '',
+  'If you created an image file (screenshot, chart, etc.), you can send it to the user by writing:',
+  '`[IMAGE: /absolute/path/to/file.png]` (without the backticks)',
+  '',
+  'The marker is stripped from text and the image is uploaded automatically.',
+  '',
+  'Only use a real image file inside the workspace or system temporary directory.',
+].join('\n');
 
 type MentionTargetEnvelope = Envelope & {
   [mentionTarget]?: string;
 };
+
+function withNonBotMentionContext(
+  data: DingTalkMessageData,
+  text: string,
+): string {
+  if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
+    return text;
+  }
+
+  const mentions = new Set<string>();
+  for (const user of data.atUsers) {
+    if (!user) continue;
+    const dingtalkId =
+      typeof user.dingtalkId === 'string' ? user.dingtalkId : undefined;
+    // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
+    if (dingtalkId === data.chatbotUserId) continue;
+    const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
+    const stableId = dingtalkId || staffId;
+    if (stableId) mentions.add(stableId);
+  }
+
+  if (mentions.size === 0) return text;
+  const memberLabel = mentions.size === 1 ? 'member' : 'members';
+  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
+  return text ? `${context}\n${text}` : context;
+}
 
 interface DingTalkTokenResponse {
   errcode?: number;
@@ -182,6 +230,16 @@ export class DingtalkChannel extends ChannelBase {
 
     this.atSender =
       (config as unknown as Record<string, unknown>)['atSender'] === true;
+    if (!this.config.instructions) {
+      this.config.instructions = [
+        '## DingTalk Channel',
+        '',
+        'You are responding through DingTalk.',
+        IMAGE_INSTRUCTIONS,
+      ].join('\n');
+    } else if (!this.config.instructions.includes('[IMAGE:')) {
+      this.config.instructions += IMAGE_INSTRUCTIONS;
+    }
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -391,7 +449,64 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  private async sendReply(chatId: string, text: string): Promise<void> {
+  private async prepareOutgoingText(text: string): Promise<string> {
+    const markers = findImageMarkers(text);
+    if (markers.length === 0) return text;
+
+    const replacements: string[] = [];
+    for (const marker of markers) {
+      const fileName =
+        basename(marker.path)
+          .replace(/[\r\n[\]]+/g, '_')
+          .slice(0, 100) || 'image';
+      try {
+        const image = readValidatedImage(marker.path, {
+          workspaceDir: this.config.cwd,
+        });
+        let mediaId: string | undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const token = await this.getProactiveToken();
+          try {
+            mediaId = await uploadDingTalkImage(image, token);
+            break;
+          } catch (error) {
+            if (
+              error instanceof DingTalkMediaUploadError &&
+              error.authFailure &&
+              attempt === 0
+            ) {
+              this.proactiveToken = undefined;
+              continue;
+            }
+            throw error;
+          }
+        }
+        if (!mediaId) {
+          throw new Error('DingTalk media upload returned no MediaID');
+        }
+        replacements.push(`![image](${mediaId})`);
+      } catch (error) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] outbound image upload failed (${sanitizeLogText(
+            fileName,
+            100,
+          )}): ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        replacements.push(`[Image delivery failed: ${fileName}]`);
+      }
+    }
+
+    return replaceImageMarkers(text, markers, replacements);
+  }
+
+  private async sendReply(
+    chatId: string,
+    text: string,
+    atUserId?: string,
+  ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
@@ -401,17 +516,21 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
 
-    const chunks = normalizeDingTalkMarkdown(text);
-    const title = extractTitle(text);
+    const outgoingText = await this.prepareOutgoingText(text);
+    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
+    const chunks = normalizeDingTalkMarkdown(mentionPrefix + outgoingText);
+    const title = extractTitle(outgoingText);
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
+      const isMention = i === 0 && atUserId !== undefined;
       const body = {
         msgtype: 'markdown',
         markdown: {
           title: i === 0 ? title : `${title} (cont.)`,
           text: chunk,
         },
+        ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
       };
 
       const resp = await fetch(webhook, {
@@ -502,6 +621,16 @@ export class DingtalkChannel extends ChannelBase {
     );
   }
 
+  protected override supportsProactiveDeliveryTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
   protected override supportsProactiveWebhookTarget(
     target: SessionTarget,
   ): boolean {
@@ -522,8 +651,9 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (!text.trim()) return;
 
-    const chunks = normalizeDingTalkMarkdown(text);
-    const title = extractTitle(text);
+    const outgoingText = await this.prepareOutgoingText(text);
+    const chunks = normalizeDingTalkMarkdown(outgoingText);
+    const title = extractTitle(outgoingText);
 
     for (let i = 0; i < chunks.length; i++) {
       await this.sendProactiveChunk(
@@ -980,6 +1110,10 @@ export class DingtalkChannel extends ChannelBase {
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
     if (this.textReplySessions.has(sessionId)) {
+      if (findImageMarkers(text).length > 0) {
+        await this.sendReply(chatId, text, atUserId);
+        return;
+      }
       await this.sendTextReply(chatId, text, atUserId);
       return;
     }
@@ -1307,9 +1441,11 @@ export class DingtalkChannel extends ChannelBase {
       const content = this.extractContent(data);
       let cleanText = content.text;
 
-      // Strip first @mention (the bot) from text, keep other @mentions intact
+      // Strip first @mention (the bot) from text, keep other @mentions intact.
+      // Anchor to start-of-string so @ symbols inside URLs or emails
+      // (e.g. git@host:path) are not accidentally stripped (#7402).
       if (isMentioned) {
-        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
+        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context
@@ -1320,7 +1456,10 @@ export class DingtalkChannel extends ChannelBase {
       // After stripping the bot @mention, cleanText may legitimately be empty
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
-      const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+      const messageText = isMentioned ? cleanText : cleanText || content.text;
+      const envelopeText = isGroup
+        ? withNonBotMentionContext(data, messageText)
+        : messageText;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 

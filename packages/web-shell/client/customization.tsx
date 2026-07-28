@@ -91,6 +91,22 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+/** Context passed to the chat header renderer. */
+export interface ChatHeaderRenderInfo {
+  /** Current session id, if connected. */
+  sessionId?: string;
+  /** Display name for the current session. */
+  sessionName?: string;
+  /** Workspace cwd for the current session. */
+  workspaceCwd?: string;
+}
+
+/**
+ * Custom renderer shown at the top of the chat view, above the message list.
+ * Only rendered when a session is active (not in the welcome/empty state).
+ */
+export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
+
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
@@ -302,6 +318,9 @@ export type ComposerToolbarRightRenderer =
 export type ComposerHeaderRenderer =
   ComponentType<WebShellComposerToolbarRenderInfo>;
 
+export type ComposerFooterRenderer =
+  ComponentType<WebShellComposerToolbarRenderInfo>;
+
 // ---- Background task info (public type for footer renderer) ----
 
 interface WebShellTaskBase {
@@ -406,6 +425,7 @@ export interface WebShellCustomization {
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   renderComposerHeader?: ComposerHeaderRenderer;
+  renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**

@@ -37,6 +37,10 @@ const submitButton = () =>
   Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
     (b) => b.getAttribute('type') === 'submit',
   )!;
+const browseButton = () =>
+  Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
+    (button) => button.textContent === 'Browse…',
+  )!;
 
 function typeInto(target: HTMLInputElement, value: string) {
   act(() => {
@@ -174,6 +178,26 @@ describe('AddWorkspaceDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('hides persistence and always submits false when unsupported', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={onAdd}
+        persistenceSupported={false}
+      />,
+    );
+
+    expect(document.querySelector('[role="switch"]')).toBeNull();
+    type('/abs/project');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith('/abs/project', false);
+  });
+
   it('surfaces an onAdd failure as an inline error and stays open', async () => {
     const onAdd = vi.fn().mockRejectedValue(new Error('daemon unreachable'));
     const onClose = vi.fn();
@@ -278,6 +302,64 @@ describe('AddWorkspaceDialog', () => {
         'coding-katas/',
       ]);
       expect(input().getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('opens the system picker and fills the selected absolute path', async () => {
+      const onPick = vi.fn().mockResolvedValue('/Users/me/code');
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+      });
+
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(input().value).toBe('/Users/me/code');
+    });
+
+    it('leaves the path unchanged when the system picker is cancelled', async () => {
+      const onPick = vi.fn().mockResolvedValue(undefined);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+      });
+
+      expect(input().value).toBe('');
+    });
+
+    it('shows an error when the system picker fails', async () => {
+      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(alert()?.textContent).toContain(
+        'Unable to open the system folder picker',
+      );
     });
 
     it('never queries for a non-absolute value', async () => {

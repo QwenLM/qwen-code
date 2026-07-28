@@ -56,8 +56,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 
 const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
 const { I18nProvider } = await import('../../i18n');
+const { WebShellPortalRootContext } = await import('../../portalRoot');
 
 let container: HTMLDivElement | null = null;
+let portalRoot: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 async function mount(
@@ -84,18 +86,24 @@ async function mount(
     servers: [],
   });
   container = document.createElement('div');
+  portalRoot = document.createElement('div');
+  portalRoot.setAttribute('data-web-shell-portal-root', '');
+  portalRoot.setAttribute('data-web-shell-shadcn', '');
   document.body.appendChild(container);
+  document.body.appendChild(portalRoot);
   root = createRoot(container);
   await act(async () => {
     root!.render(
-      <I18nProvider language="en">
-        <ScheduledTasksDialog
-          onRunPrompt={opts.onRunPrompt ?? vi.fn()}
-          onCreateViaChat={vi.fn()}
-          onOpenSession={opts.onOpenSession}
-          onError={opts.onError ?? vi.fn()}
-        />
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={portalRoot}>
+        <I18nProvider language="en">
+          <ScheduledTasksDialog
+            onRunPrompt={opts.onRunPrompt ?? vi.fn()}
+            onCreateViaChat={vi.fn()}
+            onOpenSession={opts.onOpenSession}
+            onError={opts.onError ?? vi.fn()}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
     );
   });
   await flush();
@@ -160,8 +168,10 @@ function dispatchClipboardEvent(
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  portalRoot?.remove();
   root = null;
   container = null;
+  portalRoot = null;
   vi.clearAllMocks();
 });
 
@@ -255,6 +265,55 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({
         prompt: promptText,
+      }),
+      undefined,
+    );
+  });
+
+  it('removes a prompt reference tag and its adjacent spacer', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+    expect(removeButtons[0]?.getAttribute('aria-label')).toBe(
+      'Remove clickhouse',
+    );
+
+    click(removeButtons[1]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse @mcp:repo-tools',
+      }),
+      undefined,
+    );
+  });
+
+  it('removes spacing before a trailing prompt reference tag', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+
+    click(removeButtons[2]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse /review',
       }),
       undefined,
     );
@@ -467,6 +526,29 @@ describe('ScheduledTasksDialog editing', () => {
     await flush();
     expect(findButtonContaining('review')).toBeTruthy();
     expect(findButtonContaining('alibabacloud-compute-suite')).toBeUndefined();
+  });
+
+  it('renders the reference picker inside the Web Shell portal root', async () => {
+    await mount([]);
+    actions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    click(findButtonContaining('Skills'));
+    await flush();
+
+    const picker = document.querySelector('[role="listbox"]');
+    expect(picker).not.toBeNull();
+    expect(portalRoot?.contains(picker)).toBe(true);
   });
 
   it('drops plain text only into the prompt editor', async () => {

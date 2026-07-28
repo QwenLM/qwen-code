@@ -70,6 +70,7 @@ function renderSection(
     onOpenGitDiff: (cwd: string) => void;
     client: DaemonClient;
     reloadToken: number;
+    expanded: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -79,6 +80,7 @@ function renderSection(
           workspace={overrides.workspace ?? trustedWorkspace}
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
+          expanded={overrides.expanded}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
@@ -132,10 +134,38 @@ describe('WorkspaceSection label', () => {
     expect(container.textContent).toContain('Payments API');
     expect(container.textContent).not.toContain('project');
   });
+
+  it('shows the complete read-only session name in a native tooltip', async () => {
+    const listWorkspaceSessions = vi.fn().mockResolvedValue([
+      {
+        sessionId: 'session-1',
+        displayName: 'A very long session name',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      } as DaemonSessionSummary,
+    ]);
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[title="A very long session name"]'),
+    ).not.toBeNull();
+  });
 });
 
 describe('WorkspaceSection git chip', () => {
-  it('renders a git chip inside a dropdown trigger for a trusted repo', async () => {
+  it('renders a clickable git chip for a trusted repo', async () => {
     const status: DaemonWorkspaceGitStatus = {
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -150,12 +180,22 @@ describe('WorkspaceSection git chip', () => {
 
     const chip = gitChip();
     expect(chip).not.toBeNull();
-    // The chip is now a read-only OUTPUT inside a DropdownMenuTrigger
-    // (the dropdown offers "Changes" and "New Worktree Task").
+    // The chip is a read-only OUTPUT inside a button that opens the changes
+    // view on click.
     expect(chip?.tagName).toBe('OUTPUT');
     expect(chip?.getAttribute('data-dirty')).toBe('true');
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
+
+    // The chip itself is a read-only OUTPUT; the wrapping button is what opens
+    // the Changes view. Click it to prove the onClick handler is actually wired
+    // — a miswire (e.g. a deleted onClick) would otherwise go undetected.
+    const button = chip?.closest('button');
+    expect(button).not.toBeNull();
+    act(() => {
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
@@ -214,6 +254,23 @@ describe('WorkspaceSection git chip', () => {
     renderSection({ client, reloadToken: 1, onOpenGitDiff });
     await flush();
     expect(workspaceGit).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-fetch git status when only the diff handler changes', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const client = makeClient();
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
   });
 
   it('hides the chip when the workspace is not a git repo (null branch)', async () => {

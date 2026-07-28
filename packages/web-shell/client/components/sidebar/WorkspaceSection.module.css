@@ -86,6 +86,12 @@
   display: inline-flex;
   flex: 1 1 auto;
   min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
   cursor: pointer;
 }
 

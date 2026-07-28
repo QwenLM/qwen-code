@@ -1973,6 +1973,7 @@ export class QQChannel extends ChannelBase {
                 onReady();
               })
               .catch(() => {
+                this.fixRestoredSessions();
                 process.stderr.write(
                   `[QQ:${this.name}] WARNING: router session restore failed — cron messages will be dropped until sessions re-establish\n`,
                 );

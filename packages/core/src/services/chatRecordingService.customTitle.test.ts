@@ -16,6 +16,7 @@ import {
   type CustomTitleRecordPayload,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { SessionWriterLease } from './session-writer-lease.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -29,9 +30,42 @@ vi.mock('node:crypto', () => ({
 }));
 vi.mock('../utils/jsonl-utils.js');
 
+function resumedSessionWithTitle(
+  title: string,
+  source?: 'manual' | 'auto',
+): NonNullable<ReturnType<Config['getResumedSessionData']>> {
+  return {
+    conversation: {
+      sessionId: 'test-session-id',
+      projectHash: 'test-project',
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+      messages: [
+        {
+          uuid: 'title-uuid',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          type: 'system',
+          subtype: 'custom_title',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          systemPayload: {
+            customTitle: title,
+            ...(source ? { titleSource: source } : {}),
+          },
+        },
+      ],
+    },
+    filePath: '/test/session.jsonl',
+    lastCompletedUuid: null,
+  };
+}
+
 describe('ChatRecordingService - recordCustomTitle', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
+  let mockLease: SessionWriterLease;
 
   let uuidCounter = 0;
 
@@ -79,11 +113,37 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    chatRecordingService = new ChatRecordingService(mockConfig);
-
     // writeLine is async; mockResolvedValue lets the writeChain settle on flush.
     vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
+    mockLease = {
+      sessionId: 'test-session-id',
+      ownerId: 'test-owner-id',
+      appendJsonLine: vi.fn((record: unknown) =>
+        jsonl.writeLine('/test/session.jsonl', record),
+      ),
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      release: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease;
+    chatRecordingService = activateRecording(
+      new ChatRecordingService(mockConfig),
+    );
   });
+
+  function activateRecording(
+    service: ChatRecordingService,
+  ): ChatRecordingService {
+    const resumed = mockConfig.getResumedSessionData();
+    service.activate(
+      mockLease,
+      resumed && !resumed.conversation
+        ? {
+            conversation: { messages: [] },
+            lastCompletedUuid: resumed.lastCompletedUuid,
+          }
+        : resumed,
+    );
+    return service;
+  }
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -167,7 +227,9 @@ describe('ChatRecordingService - recordCustomTitle', () => {
 
   it('returns false after an async failure and permanently rejects later titles', async () => {
     const failureListener = vi.fn();
-    const service = new ChatRecordingService(mockConfig, failureListener);
+    const service = activateRecording(
+      new ChatRecordingService(mockConfig, failureListener),
+    );
     const callback = vi.fn();
     service.setTitleRecordedCallback(callback);
     const writeError = new Error('disk full');
@@ -198,8 +260,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     expect(chatRecordingService.getCurrentTitleSource()).toBe('manual');
   });
 
-  it('allows retry after a synchronous conversation-file failure', async () => {
-    const service = new ChatRecordingService(mockConfig);
+  it('allows legacy retry after a synchronous conversation-file failure', async () => {
+    const service = new ChatRecordingService(mockConfig, undefined, false);
     vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
       throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
     });
@@ -384,8 +446,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
 
     it('should not re-append a resumed title without new content', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
-        lastCompletedUuid: null,
-      } as unknown as ReturnType<Config['getResumedSessionData']>);
+        ...resumedSessionWithTitle('resumed-title', 'manual'),
+      });
       const getSessionTitleInfo = vi.fn().mockReturnValue({
         title: 'resumed-title',
         source: 'manual',
@@ -398,7 +460,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
         }
       ).getSessionService = () => ({ getSessionTitleInfo });
 
-      const svc = new ChatRecordingService(mockConfig);
+      const svc = activateRecording(new ChatRecordingService(mockConfig));
       svc.finalize();
       await svc.flush();
 
@@ -518,8 +580,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       // resuming a legacy session on a current build would silently
       // reclassify it the first time the threshold fires.
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
-        lastCompletedUuid: null,
-      } as unknown as ReturnType<Config['getResumedSessionData']>);
+        ...resumedSessionWithTitle('legacy-title'),
+      });
       const getSessionTitleInfo = vi
         .fn()
         .mockReturnValue({ title: 'legacy-title', source: undefined });
@@ -531,7 +593,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
         }
       ).getSessionService = () => ({ getSessionTitleInfo });
 
-      const svc = new ChatRecordingService(mockConfig);
+      const svc = activateRecording(new ChatRecordingService(mockConfig));
       await svc.flush();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
 

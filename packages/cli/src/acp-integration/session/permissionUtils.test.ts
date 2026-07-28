@@ -99,6 +99,36 @@ describe('permissionUtils', () => {
         }),
       );
     });
+
+    it('offers switch-to-Default before Reject and hides persistent choices', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'classifier_unavailable',
+          message: 'Classifier unavailable.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+          name: 'Switch to Default Mode and allow once (recommended)',
+          kind: 'allow_once',
+        },
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
+    });
   });
 
   describe('interactionMetaFields', () => {
@@ -156,6 +186,35 @@ describe('permissionUtils', () => {
     ]);
     expect(content[0]).toMatchObject({
       content: { text: 'Unknown safety' },
+    });
+  });
+
+  it('places classifier fallback guidance before other content', () => {
+    const content = buildPermissionRequestContent({
+      type: 'edit',
+      title: 'Confirm edit',
+      fileName: 'a.txt',
+      filePath: '/tmp/a.txt',
+      fileDiff: 'diff',
+      originalContent: 'a',
+      newContent: 'b',
+      warnings: ['Existing warning'],
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message: 'Classifier unavailable. Default Mode is recommended.',
+      },
+      onConfirm: async () => undefined,
+    });
+
+    expect(content.map((item) => item.type)).toEqual([
+      'content',
+      'content',
+      'diff',
+    ]);
+    expect(content[0]).toMatchObject({
+      content: {
+        text: 'Classifier unavailable. Default Mode is recommended.',
+      },
     });
   });
 

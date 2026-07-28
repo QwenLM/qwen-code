@@ -43,11 +43,28 @@ function filterAlwaysAllowOptions(
 ): PermissionOption[] {
   const hideAlwaysAllow =
     forceHideAlwaysAllow ||
+    confirmation.autoModeFallback !== undefined ||
     (supportsHideAlwaysAllow(confirmation) &&
       confirmation.hideAlwaysAllow === true);
-  return hideAlwaysAllow
+  const visibleOptions = hideAlwaysAllow
     ? options.filter((option) => option.kind !== 'allow_always')
     : options;
+  if (!confirmation.autoModeFallback) return visibleOptions;
+
+  const switchOption: PermissionOption = {
+    optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    name: 'Switch to Default Mode and allow once (recommended)',
+    kind: 'allow_once',
+  };
+  const rejectIndex = visibleOptions.findIndex(
+    (option) => option.kind === 'reject_once',
+  );
+  if (rejectIndex === -1) return [...visibleOptions, switchOption];
+  return [
+    ...visibleOptions.slice(0, rejectIndex),
+    switchOption,
+    ...visibleOptions.slice(rejectIndex),
+  ];
 }
 
 function formatExecPermissionScopeLabel(
@@ -87,6 +104,16 @@ export function buildPermissionRequestContent(
   confirmation: ToolCallConfirmationDetails,
 ): ToolCallContent[] {
   const content: ToolCallContent[] = [];
+
+  if (confirmation.autoModeFallback) {
+    content.push({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: confirmation.autoModeFallback.message,
+      },
+    });
+  }
 
   const warnings =
     confirmation.type === 'exec' || confirmation.type === 'edit'

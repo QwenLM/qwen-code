@@ -1804,6 +1804,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       expect.any(Object),
       expect.any(Object),
+      {
+        privateParentCapability: undefined,
+      },
     );
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),
@@ -2205,6 +2208,7 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
+    pushKittyProtocolFlags: vi.fn(),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({

@@ -799,8 +799,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
-  'Input to command is JSON with original user prompt text.':
-    'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der Textprojektion der unterstützten interaktiven TUI).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':
@@ -1446,6 +1446,11 @@ export default {
   reviewed: 'überprüft',
   'Code Changes:': 'Codeänderungen:',
   Performance: 'Leistung',
+  'Generation Metrics': 'Generierungsmetriken',
+  'Latest Request': 'Letzte Anfrage',
+  'Generation Time': 'Generierungszeit',
+  'Average TTFT': 'Durchschnittliche TTFT',
+  'Session TPS': 'Sitzungs-TPS',
   'Wall Time:': 'Gesamtzeit:',
   'Agent Active:': 'Agent aktiv:',
   'API Time:': 'API-Zeit:',
@@ -1948,6 +1953,7 @@ export default {
   'Reverse search history': 'Verlauf rückwärts durchsuchen',
   'Press ? again to close': 'Erneut ? drücken, um zu schließen',
   '? for shortcuts': '? für Tastenkürzel',
+  'Pasting…': 'Einfügen…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     'Ungültiger Freigabemodus "{{arg}}". Gültige Modi: {{modes}}',
   'Approval mode set to "{{mode}}"': 'Freigabemodus auf "{{mode}}" gesetzt',
@@ -2146,8 +2152,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Eine neue Version von Qwen Code ist verfügbar! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Suche nach Updates fehlgeschlagen. Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Suche nach Updates fehlgeschlagen ({{reason}}). Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update-Prüfung übersprungen ({{reason}}) — mit /update erneut versuchen.',
+  'registry did not respond within {{seconds}}s':
+    'Registry hat nicht innerhalb von {{seconds}}s geantwortet',
+  'registry unreachable': 'Registry nicht erreichbar',
+  'registry error': 'Registry-Fehler',
   'Unable to check for updates: {{reason}}':
     'Updates können nicht geprüft werden: {{reason}}',
   'Update successful! The new version will be used on your next run.':

@@ -35,6 +35,7 @@ describe('SettingsSchema', () => {
         'advanced',
         'plansDirectory',
         'voiceModel',
+        'imageModel',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -121,6 +122,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -179,6 +191,16 @@ describe('SettingsSchema', () => {
       expect(voiceModel.showInDialog).toBe(false);
     });
 
+    it('should define the image model setting', () => {
+      const imageModel = getSettingsSchema().imageModel;
+
+      expect(imageModel.type).toBe('string');
+      expect(imageModel.category).toBe('Model');
+      expect(imageModel.default).toBe('');
+      expect(imageModel.requiresRestart).toBe(false);
+      expect(imageModel.showInDialog).toBe(false);
+    });
+
     it('should define the built-in Explore model setting', () => {
       const exploreModel =
         getSettingsSchema().agents.properties.builtin.properties.exploreModel;
@@ -188,6 +210,19 @@ describe('SettingsSchema', () => {
       expect(exploreModel.default).toBe('inherit');
       expect(exploreModel.requiresRestart).toBe(true);
       expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
     });
 
     it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {

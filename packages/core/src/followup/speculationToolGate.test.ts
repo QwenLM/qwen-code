@@ -162,6 +162,7 @@ describe('speculationToolGate', () => {
       ToolNames.ENTER_PLAN_MODE,
       ToolNames.TEAM_PLAN_APPROVAL,
       ToolNames.WEB_FETCH,
+      ToolNames.WEB_SEARCH,
     ])('hits boundary for %s', async (toolName) => {
       const result = await evaluateToolCall(
         toolName,

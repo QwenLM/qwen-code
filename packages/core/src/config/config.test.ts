@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -38,11 +38,13 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { InputFormat } from '../output/types.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
   createContentGenerator,
   createContentGeneratorConfig,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
@@ -63,7 +65,15 @@ import {
 } from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
+} from '../memory/store.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
+  getUserAutoMemoryIndexPath,
+} from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
   TeamMemoryRootSecurityError,
@@ -77,7 +87,13 @@ import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+} from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { checkPriorRead } from '../tools/priorReadEnforcement.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -165,8 +181,8 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 }));
 
 vi.mock('../memory/store.js', () => ({
-  readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
-  readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
+  readUserAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
@@ -352,6 +368,19 @@ const MEMORY_PRESSURE_ENV_KEYS = [
   'QWEN_MEMORY_PRESSURE_CRITICAL',
 ];
 
+let mockAutoMemoryInode = 1;
+function mockAutoMemoryIndexRead(content: string) {
+  return {
+    content,
+    stats: {
+      dev: 1,
+      ino: mockAutoMemoryInode++,
+      mtimeMs: 1,
+      size: Buffer.byteLength(content),
+    } as fs.Stats,
+  };
+}
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -471,6 +500,7 @@ describe('Server Config (config.ts)', () => {
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
+    chatRecording: false,
     usageStatisticsEnabled: false,
     overrideExtensions: [],
   };
@@ -478,6 +508,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    mockAutoMemoryInode = 1;
     for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
       delete process.env[envName];
     }
@@ -516,7 +547,14 @@ describe('Server Config (config.ts)', () => {
     it('drops its session entry on shutdown — no daemon leak', async () => {
       const sessionId = 'cfg-shutdown-test-session';
       const config = new Config({ ...baseParams, sessionId });
-      // Registered in the constructor, resolvable while alive.
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
       expect(getSessionProjectDir(sessionId)).toBeDefined();
       await config.shutdown();
       // In daemon mode this is what stops the map growing per session.
@@ -2119,6 +2157,34 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('rejects a session switch while the current recorder owns the writer lease', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const originalSessionId = config.getSessionId();
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const recorder = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => true,
+      };
+      (
+        config as unknown as {
+          chatRecordingService: typeof recorder;
+        }
+      ).chatRecordingService = recorder;
+
+      expect(() => config.startNewSession('replacement-session')).toThrow(
+        expect.objectContaining({
+          name: 'SessionWriterUnavailableError',
+          errorKind: 'session_writer_unavailable',
+        }),
+      );
+      expect(config.getSessionId()).toBe(originalSessionId);
+      expect(config.getChatRecordingService()).toBe(recorder);
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -2165,9 +2231,14 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService?: {
             finalize: () => void;
             flush: () => Promise<void>;
+            hasWriteOwnership: () => boolean;
           };
         }
-      ).chatRecordingService = { finalize, flush };
+      ).chatRecordingService = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => false,
+      };
 
       config.startNewSession();
 
@@ -2220,6 +2291,7 @@ describe('Server Config (config.ts)', () => {
         await expect(recorder.flush()).rejects.toBe(error);
 
         expect(listener).toHaveBeenCalledOnce();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
         expect(listener).toHaveBeenCalledWith({ sessionId, error });
       } finally {
         writeLine.mockRestore();
@@ -2262,6 +2334,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            close: () => Promise<void>;
           };
         }
       ).initialized = true;
@@ -2270,6 +2343,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            close: () => Promise<void>;
           };
         }
       ).chatRecordingService = {
@@ -2277,6 +2351,7 @@ describe('Server Config (config.ts)', () => {
         flush: async () => {
           notify(config, event);
         },
+        close: async () => {},
       };
 
       await config.shutdown();
@@ -2546,6 +2621,119 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      [
+        'an ACP session without an opt-in',
+        { experimentalZedIntegration: true },
+      ],
+      [
+        'a non-ACP session with the setting enabled',
+        { sessionWriterLeaseEnabled: true },
+      ],
+      [
+        'an ACP session with an invalid truthy opt-in',
+        {
+          experimentalZedIntegration: true,
+          sessionWriterLeaseEnabled: 'true' as unknown as boolean,
+        },
+      ],
+    ])(
+      'uses the legacy recorder without acquiring a writer lease for %s',
+      async (_name, params) => {
+        const acquire = vi.spyOn(SessionWriterLease, 'acquire');
+        const config = new Config({
+          ...baseParams,
+          ...params,
+          chatRecording: true,
+        });
+
+        await (
+          config as unknown as { activateChatRecording(): Promise<void> }
+        ).activateChatRecording();
+
+        expect(acquire).not.toHaveBeenCalled();
+        expect(config.isSessionWriterLeaseEnabled()).toBe(false);
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        await expect(
+          config
+            .getChatRecordingService()
+            ?.runWithWriteBarrier(async () => 'legacy'),
+        ).resolves.toBe('legacy');
+        acquire.mockRestore();
+      },
+    );
+
+    it('preserves activation and lease release failures', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      expect(config.isSessionWriterLeaseEnabled()).toBe(true);
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue({
+          transcriptExistedAtAcquire: false,
+          release,
+        } as unknown as SessionWriterLease);
+      vi.spyOn(
+        config.getSessionService(),
+        'getSessionLocation',
+      ).mockRejectedValue(activationError);
+
+      const result = await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      )
+        .activateChatRecording()
+        .catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        errorKind: 'session_writer_unavailable',
+        rpcCode: -32023,
+        httpStatus: 503,
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([activationError, releaseError]);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('preserves initialization and recording close failures', async () => {
+      const config = new Config(baseParams);
+      const initializationError = new Error('initialization failed');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockRejectedValue(initializationError);
+      (
+        config as unknown as {
+          chatRecordingService: { close: () => Promise<void> };
+        }
+      ).chatRecordingService = {
+        close: vi.fn().mockRejectedValue(closeError),
+      };
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([initializationError, closeError]);
+    });
+
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
@@ -2656,6 +2844,85 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it.each([
+      ['interactive', { interactive: true }],
+      ['ACP', { experimentalZedIntegration: true }],
+      ['stream-json', { inputFormat: InputFormat.STREAM_JSON }],
+    ] as const)(
+      'registers user-interaction tools in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+        expect(registeredNames).toContain(ToolNames.ENTER_PLAN_MODE);
+        expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+      },
+    );
+
+    it('registers ask_user_question but not plan tools in SDK mode with interaction support', async () => {
+      // ask_user_question is gated only by the resolved interaction mode, while
+      // enter_plan_mode/exit_plan_mode are additionally gated by !sdkMode. Guard
+      // this asymmetry so a future symmetric `!this.sdkMode` on the question gate
+      // cannot silently drop the tool from SDK-mode interactive sessions.
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: true,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('does not register user-interaction tools in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('keeps exit_plan_mode available for plan-required teammate filtering', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
     it('does not register artifact tools when artifacts are disabled', async () => {
       const config = new Config({ ...baseParams, artifactEnabled: false });
       await config.initialize();
@@ -2665,6 +2932,137 @@ describe('Server Config (config.ts)', () => {
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers image_gen when an image-only model route is selected', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: `openai:qwen-image-2.0\0${baseUrl}`,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.IMAGE_GEN);
+      expect(config.getImageGenerationConfig()).toEqual({
+        model: 'qwen-image-2.0',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('does not register image_gen without an image model selection', async () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl: 'https://images.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.IMAGE_GEN);
+    });
+
+    it('does not use a protocol default as the image generation endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: 'openai:qwen-image-2.0',
+      });
+
+      expect(config.getImageGenerationConfig()).toBeUndefined();
+    });
+
+    it('registers image_gen immediately when the image model changes at runtime', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
+    it('does not register image_gen when the permission manager disables it', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      (
+        config as unknown as {
+          permissionManager: { isToolEnabled: () => Promise<boolean> };
+        }
+      ).permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+      };
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
     });
 
     it('registers both artifact tools by default for interactive sessions', async () => {
@@ -3228,6 +3626,7 @@ describe('Server Config (config.ts)', () => {
 
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
+      vi.mocked(resetPreloadedContentGenerator).mockClear();
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
@@ -3238,6 +3637,10 @@ describe('Server Config (config.ts)', () => {
         vi.mocked(resolveContentGeneratorConfigWithSources),
       ).toHaveBeenCalledTimes(2);
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledOnce();
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(
+        config.getContentGenerator(),
+      );
     });
 
     it('should preserve thoughts from history on model switch', async () => {
@@ -3691,7 +4094,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
-  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+  it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -3701,15 +4104,151 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(
-      '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+      mockAutoMemoryIndexRead(
+        '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+      ),
     );
 
     await config.refreshHierarchicalMemory();
 
+    // Context files stay in userMemory; the volatile auto-memory section is
+    // kept separate so prompt assembly can order stable → context → volatile.
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      '[Project Memory](project.md)',
+    );
+  });
+
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+    const userIndexPath = getUserAutoMemoryIndexPath();
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await mkdir(path.dirname(userIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
+    await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# managed memory\n',
+        stats: await stat(managedIndexPath),
+      });
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# user memory\n',
+        stats: await stat(userIndexPath),
+      });
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toEqual({ ok: true });
+      await expect(
+        checkPriorRead(config.getFileReadCache(), userIndexPath, 'overwriting'),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshHierarchicalMemory records the stats captured with the auto-memory index read', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(
+      path.join(os.tmpdir(), 'auto-memory-cache-race-'),
+    );
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# old managed memory\n', 'utf-8');
+    const oldStats = await stat(managedIndexPath);
+    await writeFile(
+      managedIndexPath,
+      '# newer managed memory with extra bytes\n',
+      'utf-8',
+    );
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# old managed memory\n',
+        stats: oldStats,
+      });
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+      });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
@@ -3899,14 +4438,18 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
-      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(
+        '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+      ),
     );
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -3927,7 +4470,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining("model's 1,000 token context window"),
@@ -3945,7 +4490,9 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -3978,7 +4525,7 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
 
     await config.refreshHierarchicalMemory();
 
@@ -3986,13 +4533,19 @@ describe('Server Config (config.ts)', () => {
       config
         .getWarnings()
         .some((warning) =>
-          warning.includes('Loaded QWEN.md/context instructions'),
+          warning.includes(
+            'Loaded always-on context (QWEN.md context files + auto-memory)',
+          ),
         ),
     ).toBe(false);
   });
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
+    const disposeResidentAgents = vi.spyOn(
+      config.getBackgroundTaskRegistry(),
+      'disposeResidentAgents',
+    );
     const newDir = path.resolve('/path/to/other');
     const workspaceContext = config.getWorkspaceContext();
     const directoriesChanged = vi.fn();
@@ -4012,6 +4565,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getWorkspaceContext()).toBe(workspaceContext);
     expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
     expect(config.storage.getProjectRoot()).toBe(newDir);
+    expect(disposeResidentAgents).toHaveBeenCalledOnce();
     expect(directoriesChanged).toHaveBeenCalled();
     expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
       newDir,
@@ -4026,6 +4580,43 @@ describe('Server Config (config.ts)', () => {
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
+    const config = new Config(baseParams);
+    const generator = {} as ContentGenerator;
+    (
+      config as unknown as {
+        contentGenerator: ContentGenerator;
+      }
+    ).contentGenerator = generator;
+    const originalStorage = config.storage;
+    const originalPersistenceRoot = originalStorage.getProjectRoot();
+    const newDir = path.resolve('/path/to/other');
+    (
+      config as unknown as {
+        chatRecordingService: { hasWriteOwnership: () => boolean };
+      }
+    ).chatRecordingService = { hasWriteOwnership: () => true };
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, newDir, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).resolves.toEqual({});
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(generator);
+    expect(config.storage).toBe(originalStorage);
+    expect(config.getSessionService().getProjectRoot()).toBe(
+      originalPersistenceRoot,
+    );
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toMatchObject(
+      {
+        errorKind: 'session_writer_unavailable',
+      },
+    );
   });
 
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
@@ -4057,9 +4648,15 @@ describe('Server Config (config.ts)', () => {
           finalize: () => void;
           flush: () => Promise<void>;
           resetStoragePaths: () => void;
+          hasWriteOwnership: () => boolean;
         };
       }
-    ).chatRecordingService = { finalize, flush, resetStoragePaths };
+    ).chatRecordingService = {
+      finalize,
+      flush,
+      resetStoragePaths,
+      hasWriteOwnership: () => false,
+    };
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
     });
@@ -4077,7 +4674,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
-    const config = new Config(baseParams);
+    const config = new Config({ ...baseParams, chatRecording: true });
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -4178,7 +4775,11 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
-    const config = new Config(baseParams);
+    const config = new Config({ ...baseParams, chatRecording: true });
+    const disposeResidentAgents = vi.spyOn(
+      config.getBackgroundTaskRegistry(),
+      'disposeResidentAgents',
+    );
     const oldDir = config.getTargetDir();
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
@@ -4232,6 +4833,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTargetDir()).toBe(oldDir);
     expect(config.storage.getProjectRoot()).toBe(oldDir);
     expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+    expect(disposeResidentAgents).not.toHaveBeenCalled();
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -4375,13 +4977,16 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      'MEMORY.md is currently empty',
+    );
   });
 
   it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
@@ -4397,13 +5002,14 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
-    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(config.getAutoMemoryPrompt()).toBe('');
+    expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
   });
 
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
@@ -4425,9 +5031,9 @@ describe('Server Config (config.ts)', () => {
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
-    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
   });
 
   describe('isManagedMemoryAvailable', () => {
@@ -5095,6 +5701,25 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('registers zoom_image unconditionally so it survives model switches', async () => {
+      const config = new Config(baseParams);
+      // A first-run / text-only session reports no image modality, yet the tool
+      // must still register: the gate moved to execute time so a hot /model
+      // switch to an image model picks it up without re-running initialize().
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({});
+
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.ZOOM_IMAGE);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
@@ -5201,6 +5826,83 @@ describe('Server Config (config.ts)', () => {
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
+    });
+
+    it('registers web_search when enabled with a usable env-declared backend', async () => {
+      process.env['WEB_SEARCH_GATE_TEST_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          webSearch: {
+            enabled: true,
+            model: 'qwen3.6-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'WEB_SEARCH_GATE_TEST_KEY',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['WEB_SEARCH_GATE_TEST_KEY'];
+      }
+    });
+
+    it('does not register web_search or push a notice when the feature is disabled', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+      expect(
+        config.getWarnings().filter((w) => w.includes('WebSearch')),
+      ).toEqual([]);
+    });
+
+    it('pushes a one-time notice when web_search is enabled but misconfigured', async () => {
+      // Enabled without a model: the tool must stay off with a diagnostic
+      // notice, pushed exactly once across registry rebuilds.
+      const config = new Config({
+        ...baseParams,
+        webSearch: { enabled: true },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+
+      const webSearchNotices = () =>
+        config.getWarnings().filter((w) => w.includes('WebSearch'));
+      expect(webSearchNotices()).toHaveLength(1);
+      expect(webSearchNotices()[0]).toContain('no search model');
+
+      // A registry rebuild must not duplicate the notice.
+      await config.createToolRegistry(undefined, { skipDiscovery: true });
+      expect(webSearchNotices()).toHaveLength(1);
     });
 
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
@@ -5736,6 +6438,7 @@ describe('setApprovalMode with folder trust', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
@@ -5848,6 +6551,183 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
       config.setApprovalMode(ApprovalMode.DEFAULT);
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
+    });
+
+    it('queues a one-shot manual plan-exit notice on a manual exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+      // One-shot: consumed on first read.
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for an approved plan exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('clears a stale exit notice when plan mode is re-entered', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for non-plan mode changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('claims the latest non-plan mode and supports a matching restore', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.YOLO);
+
+      const notice = config.takePendingManualPlanExitNotice();
+      expect(notice).toEqual({
+        version: expect.any(Number),
+        currentMode: ApprovalMode.YOLO,
+      });
+      expect(config.takePendingManualPlanExitNotice()).toBeUndefined();
+
+      config.restorePendingManualPlanExitNotice(notice!.version);
+      expect(config.takePendingManualPlanExitNotice()).toEqual(notice);
+    });
+
+    it('ignores a restore after a newer mode event', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      const staleNotice = config.takePendingManualPlanExitNotice()!;
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.restorePendingManualPlanExitNotice(staleNotice.version);
+
+      const currentNotice = config.takePendingManualPlanExitNotice();
+      expect(currentNotice?.version).toBeGreaterThan(staleNotice.version);
+      expect(currentNotice?.currentMode).toBe(ApprovalMode.AUTO_EDIT);
+      expect(config.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
+    it('delivers the same inherited event once to each conversation', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      const child = Object.create(parent) as Config;
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+      const parentNotice = parent.takePendingManualPlanExitNotice();
+      const childNotice = child.takePendingManualPlanExitNotice();
+      expect(parentNotice).toEqual(childNotice);
+      expect(parent.takePendingManualPlanExitNotice()).toBeUndefined();
+      expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
+    it('lets a newly created conversation claim the latest inherited event', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      const parentNotice = parent.takePendingManualPlanExitNotice();
+      const child = Object.create(parent) as Config;
+
+      expect(child.takePendingManualPlanExitNotice()).toEqual(parentNotice);
+    });
+
+    it('copies the event when a child first owns its approval mode', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      const child = Object.create(parent) as Config;
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      child.setApprovalMode(ApprovalMode.AUTO_EDIT);
+
+      expect(child.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+      expect(parent.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.DEFAULT,
+      );
+
+      child.setApprovalMode(ApprovalMode.PLAN);
+      child.setApprovalMode(ApprovalMode.YOLO);
+      expect(child.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.YOLO,
+      );
+      expect(parent.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
+    it('isolates an inherited event when approval mode is owned directly', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+      const child = Object.create(parent) as Config;
+      Object.defineProperty(child, 'approvalMode', {
+        value: ApprovalMode.AUTO_EDIT,
+        writable: true,
+        configurable: true,
+      });
+
+      expect(child.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+      expect(parent.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.DEFAULT,
+      );
+    });
+
+    it('only exposes the latest event after rapid Plan round trips', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.YOLO);
+
+      expect(config.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.YOLO,
+      );
+      expect(config.takePendingManualPlanExitNotice()).toBeUndefined();
     });
 
     it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
@@ -6433,6 +7313,16 @@ describe('setApprovalMode with folder trust', () => {
       vi.clearAllMocks();
     });
 
+    it('registers the background-agent roster tool', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.LIST_AGENTS)).toBe(
+        true,
+      );
+    });
+
     it('should register grep tool when useRipgrep is true and it is available', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({ ...baseParams, useRipgrep: true });
@@ -6551,6 +7441,7 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('initializes from `disabledTools` ConfigParameters', () => {
@@ -6613,6 +7504,7 @@ describe('visibleTools', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('initializes from `visibleTools` ConfigParameters', () => {
@@ -6659,6 +7551,7 @@ describe('computer use settings', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('exposes the configured idle timeout', () => {
@@ -6697,6 +7590,7 @@ describe('BaseLlmClient Lifecycle', () => {
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
+    chatRecording: false,
     usageStatisticsEnabled: false,
   };
 
@@ -6727,6 +7621,20 @@ describe('BaseLlmClient Lifecycle', () => {
       config,
     );
   });
+
+  it('clears per-model generators when provider config is reloaded', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: { model: 'gemini-flash', apiKey: 'test-key' },
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    const llmService = config.getBaseLlmClient();
+    config.reloadModelProvidersConfig({});
+
+    expect(llmService.clearPerModelGeneratorCache).toHaveBeenCalledOnce();
+  });
 });
 
 describe('Model Switching and Config Updates', () => {
@@ -6735,6 +7643,7 @@ describe('Model Switching and Config Updates', () => {
     targetDir: '/path/to/target',
     debugMode: false,
     model: 'qwen3-coder-plus',
+    chatRecording: false,
     usageStatisticsEnabled: false,
     telemetry: { enabled: false },
   };
@@ -7263,6 +8172,79 @@ describe('Model Switching and Config Updates', () => {
 
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
+
+  describe('UserPromptSubmit dispatch through the hook execution bridge', () => {
+    it.each([
+      {
+        name: 'forwards a string submitted prompt',
+        submittedPrompt: 'submitted prompt',
+        expected: 'submitted prompt',
+      },
+      {
+        name: 'preserves surrounding whitespace on a non-empty prompt',
+        submittedPrompt: '  submitted prompt  ',
+        expected: '  submitted prompt  ',
+      },
+      {
+        name: 'drops an empty submitted prompt',
+        submittedPrompt: '',
+        expected: undefined,
+      },
+      {
+        name: 'drops a whitespace-only submitted prompt',
+        submittedPrompt: ' \t\n ',
+        expected: undefined,
+      },
+      {
+        name: 'drops a numeric submitted prompt',
+        submittedPrompt: 42,
+        expected: undefined,
+      },
+      {
+        name: 'drops an object submitted prompt',
+        submittedPrompt: { text: 'submitted prompt' },
+        expected: undefined,
+      },
+      {
+        name: 'drops a null submitted prompt',
+        submittedPrompt: null,
+        expected: undefined,
+      },
+      {
+        name: 'handles a missing submitted prompt',
+        submittedPrompt: undefined,
+        expected: undefined,
+      },
+    ])('$name', async ({ submittedPrompt, expected }) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireUserPromptSubmitEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'UserPromptSubmit',
+            input: {
+              prompt: 'model prompt',
+              submitted_prompt: submittedPrompt,
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        expected,
+      );
+      expect(response.success).toBe(true);
     });
   });
 

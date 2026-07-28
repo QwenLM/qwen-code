@@ -488,6 +488,21 @@ describe('<ModelStatsDisplay />', () => {
         expect(lastFrame()).toContain('0.0001');
       });
 
+      it('should display $0.0000 rather than N/A for a model priced at zero', () => {
+        const { lastFrame } = renderCostTest(
+          { 'qwen3-coder:free': mainOnly(makeCore(1000, 2000, 0)) },
+          {
+            'qwen3-coder:free': {
+              inputPerMillionTokens: 0,
+              outputPerMillionTokens: 0,
+            },
+          },
+        );
+        expect(lastFrame()).toContain('Estimated');
+        expect(lastFrame()).toContain('0.0000');
+        expect(lastFrame()).not.toContain('N/A');
+      });
+
       it('should include thoughts tokens in cost calculation (regression)', () => {
         const { lastFrame } = renderCostTest(
           { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 5)) },

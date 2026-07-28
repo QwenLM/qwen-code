@@ -339,6 +339,17 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  const managedUpdateVersion =
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+  if (managedUpdateVersion) {
+    delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    const { installManagedNpmUpdate } = await import(
+      './utils/managed-npm-update.js'
+    );
+    await installManagedNpmUpdate(managedUpdateVersion);
+    return;
+  }
+
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
 
@@ -410,7 +421,7 @@ export function isExpectedPtyRaceError(error: unknown): boolean {
 
 export async function handleCriticalError(error: unknown): Promise<void> {
   const [{ FatalError }, { AlreadyReportedError }] = await Promise.all([
-    import('@qwen-code/qwen-code-core'),
+    import('./utils/deferred-core-runtime.js'),
     import('./utils/errors.js'),
   ]);
 
