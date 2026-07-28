@@ -4,21 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useState, type Ref } from 'react';
+import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
+  PencilIcon,
   RadioTowerIcon,
   RotateCwIcon,
+  Trash2Icon,
 } from 'lucide-react';
 import type {
   DaemonChannelInstanceSnapshot,
   DaemonChannelRuntimeState,
+  DaemonChannelTypeDescriptor,
+  DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
 import { useChannels, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../ui/alert-dialog';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import {
@@ -39,6 +52,7 @@ import {
 } from '../ui/empty';
 import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
+import { ChannelEditorDialog } from './ChannelEditorDialog';
 import styles from './ChannelsManagerPage.module.css';
 import {
   isChannelPlatformAvailable,
@@ -89,6 +103,8 @@ export function ChannelsManagerPage({
     loading,
     error,
     reload,
+    createOrUpdate,
+    remove,
     setStartup,
     start,
     stop,
@@ -103,6 +119,27 @@ export function ChannelsManagerPage({
     action: ChannelAction;
   } | null>(null);
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [editor, setEditor] = useState<{
+    workspaceCwd?: string;
+    descriptor: DaemonChannelTypeDescriptor;
+    instance?: DaemonChannelInstanceSnapshot;
+  }>();
+  const [deleteTarget, setDeleteTarget] = useState<{
+    workspaceCwd?: string;
+    instance: DaemonChannelInstanceSnapshot;
+  }>();
+  const [deleteError, setDeleteError] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    setBusy(null);
+    setActionErrors({});
+    setEditor(undefined);
+    setDeleteTarget(undefined);
+    setDeleteError(undefined);
+    setDeleting(false);
+  }, [workspace.workspaceCwd]);
+
   const availablePlatforms = useMemo(
     () => catalog.filter(isChannelPlatformAvailable),
     [catalog],
@@ -127,6 +164,43 @@ export function ChannelsManagerPage({
     },
     [catalog],
   );
+
+  const descriptorFor = useCallback(
+    (channel: DaemonChannelInstanceSnapshot) =>
+      availablePlatforms.find(
+        (descriptor) => descriptor.type === channel.config.type,
+      ),
+    [availablePlatforms],
+  );
+
+  const saveChannel = useCallback(
+    (name: string, request: DaemonChannelUpsertRequest) =>
+      createOrUpdate(name, request),
+    [createOrUpdate],
+  );
+
+  const deleteChannel = useCallback(async () => {
+    if (
+      !deleteTarget ||
+      deleteTarget.workspaceCwd !== workspace.workspaceCwd ||
+      !snapshot ||
+      deleting
+    ) {
+      return;
+    }
+    setDeleting(true);
+    setDeleteError(undefined);
+    try {
+      await remove(deleteTarget.instance.name, {
+        expectedRevision: snapshot.revision,
+      });
+      setDeleteTarget(undefined);
+    } catch (removeError) {
+      setDeleteError(extractErrorDetail(removeError));
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteTarget, deleting, remove, snapshot, workspace.workspaceCwd]);
 
   const runAction = useCallback(
     async (
@@ -298,6 +372,7 @@ export function ChannelsManagerPage({
         {instances.length > 0 ? (
           <div className={styles.channelGrid}>
             {instances.map((channel) => {
+              const descriptor = descriptorFor(channel);
               const runtimeError =
                 actionErrors[channel.name] ?? channel.runtime.lastError;
               return (
@@ -353,9 +428,9 @@ export function ChannelsManagerPage({
                       />
                       {t('channels.startsWithServe')}
                     </label>
-                    {channel.runtime.state !== 'stopped' &&
-                    channel.runtime.state !== 'error' ? (
-                      <div className={styles.lifecycleActions}>
+                    <div className={styles.lifecycleActions}>
+                      {channel.runtime.state !== 'stopped' &&
+                      channel.runtime.state !== 'error' ? (
                         <Button
                           size="sm"
                           variant="ghost"
@@ -374,8 +449,47 @@ export function ChannelsManagerPage({
                           )}
                           {t('channels.action.restart')}
                         </Button>
-                      </div>
-                    ) : null}
+                      ) : null}
+                      {descriptor ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={!canManage || busy !== null || !snapshot}
+                          aria-label={t('channels.action.editNamed', {
+                            name: channel.name,
+                          })}
+                          onClick={() =>
+                            setEditor({
+                              workspaceCwd: workspace.workspaceCwd,
+                              descriptor,
+                              instance: channel,
+                            })
+                          }
+                        >
+                          <PencilIcon />
+                          {t('channels.action.edit')}
+                        </Button>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        disabled={!canManage || busy !== null || !snapshot}
+                        aria-label={t('channels.action.deleteNamed', {
+                          name: channel.name,
+                        })}
+                        onClick={() => {
+                          setDeleteError(undefined);
+                          setDeleteTarget({
+                            workspaceCwd: workspace.workspaceCwd,
+                            instance: channel,
+                          });
+                        }}
+                      >
+                        <Trash2Icon />
+                        {t('channels.action.delete')}
+                      </Button>
+                    </div>
                   </CardFooter>
                 </Card>
               );
@@ -396,10 +510,21 @@ export function ChannelsManagerPage({
           </div>
           <div className={styles.platformGrid}>
             {availablePlatforms.map((platform) => (
-              <div
+              <button
                 key={platform.type}
+                type="button"
                 className={styles.platformCard}
                 data-testid={`channel-platform-${platform.type}`}
+                disabled={!canManage || !snapshot}
+                aria-label={t('channels.platform.configureNamed', {
+                  platform: platform.displayName,
+                })}
+                onClick={() =>
+                  setEditor({
+                    workspaceCwd: workspace.workspaceCwd,
+                    descriptor: platform,
+                  })
+                }
               >
                 <span className={styles.platformMark} aria-hidden="true">
                   {PLATFORM_MARKS[platform.type]}
@@ -407,14 +532,94 @@ export function ChannelsManagerPage({
                 <div className={styles.platformCopy}>
                   <p className={styles.platformName}>{platform.displayName}</p>
                   <p className={styles.platformHint}>
-                    {t('channels.platform.available')}
+                    {t('channels.platform.configure')}
                   </p>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         </section>
       ) : null}
+
+      {editor && editor.workspaceCwd === workspace.workspaceCwd && snapshot ? (
+        <ChannelEditorDialog
+          open
+          descriptor={editor.descriptor}
+          instance={editor.instance}
+          expectedRevision={snapshot.revision}
+          existingNames={instances
+            .filter((channel) => channel.name !== editor.instance?.name)
+            .map((channel) => channel.name)}
+          onOpenChange={(open) => {
+            if (!open) setEditor(undefined);
+          }}
+          onSave={saveChannel}
+          onReload={reload}
+        />
+      ) : null}
+
+      <AlertDialog
+        open={Boolean(
+          deleteTarget && deleteTarget.workspaceCwd === workspace.workspaceCwd,
+        )}
+        onOpenChange={(open) => {
+          if (!open && !deleting) {
+            setDeleteTarget(undefined);
+            setDeleteError(undefined);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t('channels.delete.title', {
+                name: deleteTarget?.instance.name ?? '',
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('channels.delete.description')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteError ? (
+            <Alert variant="destructive">
+              <AlertCircleIcon />
+              <AlertTitle>{t('channels.delete.error')}</AlertTitle>
+              <AlertDescription>{deleteError}</AlertDescription>
+              <Button
+                className="mt-2 w-fit"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  void reload().then(
+                    () => {
+                      setDeleteTarget(undefined);
+                      setDeleteError(undefined);
+                    },
+                    (reloadError: unknown) => {
+                      setDeleteError(extractErrorDetail(reloadError));
+                    },
+                  );
+                }}
+              >
+                {t('channels.editor.reloadLatest')}
+              </Button>
+            </Alert>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>
+              {t('channels.editor.cancel')}
+            </AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={deleting}
+              onClick={() => void deleteChannel()}
+            >
+              {deleting ? <Spinner /> : null}
+              {t('channels.action.delete')}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
