@@ -2863,10 +2863,24 @@ export class Config {
     // Also gated on `!options?.skipMcpDiscovery` — the ACP
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
+    //
+    // Safe/bare mode still skip discovery when there's nothing to discover
+    // (the common case: no top-tier servers supplied) — this block predates
+    // the safe-mode `getMcpServers()` fix (PR #7827) and was written when
+    // `getMcpServers()` always returned `{}` under both modes, making the
+    // unconditional skip a harmless no-op regardless. Now that
+    // caller-supplied top-tier servers survive safe mode AND bare mode,
+    // unconditionally skipping discovery in either would silently strand
+    // them: `getMcpServers()` reports them as configured, but nothing ever
+    // connects to them or registers their tools (a live repro of exactly
+    // this — `qwen --bare --mcp-config` with a top-tier server — surfaced
+    // the bare-mode half of this gate was never updated alongside safe
+    // mode's). Checking `getMcpServers()` (not `topTierMcpServers` directly)
+    // also respects the `allowedMcpServers` filter already applied there.
+    const hasMcpServers = Object.keys(this.getMcpServers() ?? {}).length > 0;
     if (
       skipInlineMcpDiscovery &&
-      !this.getBareMode() &&
-      !this.isSafeMode() &&
+      (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
@@ -4952,8 +4966,17 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.isSafeMode()) return {};
-    let mcpServers = this.getMergedMcpServers();
+    // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
+    // project `.mcp.json`) — not the caller's own explicit, per-invocation
+    // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
+    // `--mcp-config`) is that explicit request, so it survives safe mode;
+    // everything `getMergedMcpServers()` would otherwise fold in does not.
+    // Still runs through the `allowedMcpServers` filter below like any other
+    // source — safe mode isn't an exemption from a session's own
+    // `--allowed-mcp-server-names` upper bound (Copilot review, PR #7827).
+    let mcpServers = this.isSafeMode()
+      ? { ...this.topTierMcpServers }
+      : this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(

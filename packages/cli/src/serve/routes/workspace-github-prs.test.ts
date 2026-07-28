@@ -7,10 +7,15 @@
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchGitHubPullRequests } from '@qwen-code/qwen-code-core';
+import {
+  createGitHubPullRequest,
+  fetchGitHubPullRequests,
+  getDefaultBranch,
+} from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
@@ -19,10 +24,17 @@ import { registerWorkspaceQualifiedGitHubPrsRoutes } from './workspace-github-pr
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  createGitHubPullRequest: vi.fn(),
   fetchGitHubPullRequests: vi.fn(),
+  getDefaultBranch: vi.fn(),
 }));
 
+const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
+const getDefaultBranchMock = vi.mocked(getDefaultBranch);
+
+const passthroughMutate = () =>
+  ((_req: unknown, _res: unknown, next: () => void) => next()) as never;
 
 function runtime(
   workspaceId: string,
@@ -34,8 +46,9 @@ function runtime(
     workspaceCwd,
     primary: workspaceId === 'primary',
     trusted,
+    env: { mode: 'parent-process', overlayKeys: [] },
     bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
-  } as WorkspaceRuntime;
+  } as unknown as WorkspaceRuntime;
 }
 
 function registry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
@@ -47,6 +60,7 @@ function mount(deps: { cacheTtlMs?: number } = {}) {
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
     sendBridgeError,
+    mutate: passthroughMutate,
     ...deps,
   });
   return app;
@@ -80,6 +94,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([primary, secondary]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/secondary/github/prs');
@@ -91,7 +106,10 @@ describe('workspace GitHub PR routes', () => {
       available: true,
       pullRequests: [PR],
     });
-    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith('/work/secondary');
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      '/work/secondary',
+      undefined,
+    );
   });
 
   it('returns available:false when the workspace is not a git repository', async () => {
@@ -100,6 +118,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -121,6 +140,7 @@ describe('workspace GitHub PR routes', () => {
         runtime('untrusted', '/work/untrusted', false),
       ]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/untrusted/github/prs');
@@ -135,6 +155,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/missing/github/prs');
@@ -152,6 +173,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -170,6 +192,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -196,6 +219,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -206,18 +230,177 @@ describe('workspace GitHub PR routes', () => {
     expect(response.body.error.length).toBeLessThanOrEqual(512);
   });
 
+  it('sanitizes the git root (not just the workspace cwd) on PR create failure', async () => {
+    // gh runs at the git root, which may be a parent of the workspace cwd; a
+    // failure message can embed that root, so it must be redacted too.
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'fatal: /work is not a GitHub remote',
+      gitRoot: '/work',
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(502);
+    expect(response.body).toMatchObject({
+      error: 'fatal: <workspace> is not a GitHub remote',
+      code: 'github_pr_create_failed',
+    });
+    expect(response.body.error).not.toContain('/work');
+  });
+
+  it('maps a not-a-repo result to 404 on PR create', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({ kind: 'not_a_repo' });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: 'not_a_git_repository' });
+  });
+
+  it('maps a missing gh binary to 502 on PR create', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_cli_unavailable');
+  });
+
   it('falls back to the bridge error mapper on unexpected throws', async () => {
     fetchGitHubPullRequestsMock.mockRejectedValue(new Error('boom'));
     const app = express();
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
 
     expect(response.status).toBe(500);
     expect(response.body.error).toBe('boom');
+  });
+
+  it('returns runtime-unavailable on default-branch when the generation is closed', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const guarded = {
+      ...runtime('primary', '/work/main', true),
+      generationGuard,
+    };
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([guarded]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/default-branch',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('creates a pull request and returns 201 with url and number', async () => {
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'ok',
+      url: 'https://github.com/o/r/pull/43',
+      number: 43,
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      url: 'https://github.com/o/r/pull/43',
+      number: 43,
+    });
+    expect(createGitHubPullRequestMock).toHaveBeenCalledWith(
+      '/work/main',
+      {
+        title: 'Add a thing',
+        body: undefined,
+        base: undefined,
+        head: undefined,
+      },
+      undefined,
+    );
+  });
+
+  it('returns the default branch for a trusted workspace', async () => {
+    getDefaultBranchMock.mockResolvedValue('origin/main');
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/default-branch',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ branch: 'origin/main' });
+    expect(getDefaultBranchMock).toHaveBeenCalledWith('/work/main', undefined);
+  });
+
+  it('falls back to origin/main when getDefaultBranch returns null', async () => {
+    getDefaultBranchMock.mockResolvedValue(null);
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/default-branch',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ branch: 'origin/main' });
   });
 });
 

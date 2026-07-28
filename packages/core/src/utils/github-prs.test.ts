@@ -15,6 +15,7 @@ vi.mock('node:child_process', () => ({
 
 import { execFile } from 'node:child_process';
 import {
+  createGitHubPullRequest,
   fetchGitHubPullRequests,
   parseGhPrList,
   GITHUB_PR_LIST_LIMIT,
@@ -296,5 +297,70 @@ describe('fetchGitHubPullRequests', () => {
     const result = await fetchGitHubPullRequests(dir);
 
     expect(result.kind).toBe('failed');
+  });
+});
+
+describe('createGitHubPullRequest', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-create-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it('clears repository-shifting git env vars when spawning gh pr create', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    vi.stubEnv('GIT_DIR', '/somewhere/else/.git');
+    vi.stubEnv('GIT_WORK_TREE', '/somewhere/else');
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/42\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    const result = await createGitHubPullRequest(dir, { title: 'My PR' });
+
+    expect(result).toEqual({
+      kind: 'ok',
+      url: 'https://github.com/o/r/pull/42',
+      number: 42,
+    });
+    expect(seenEnv).toBeDefined();
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+    expect(seenEnv).not.toHaveProperty('GIT_WORK_TREE');
+  });
+
+  it('forwards a workspace env while still stripping repository selectors', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    const result = await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      { GH_TOKEN: 'ws-token', GH_REPO: 'evil/repo', PATH: '/usr/bin' },
+    );
+
+    expect(result).toEqual({
+      kind: 'ok',
+      url: 'https://github.com/o/r/pull/7',
+      number: 7,
+    });
+    expect(seenEnv).toBeDefined();
+    expect(seenEnv?.['GH_TOKEN']).toBe('ws-token');
+    expect(seenEnv).not.toHaveProperty('GH_REPO');
   });
 });
