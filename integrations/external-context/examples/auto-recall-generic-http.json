@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "timeoutMs": 5000,
   "autoRecall": {
     "repositoryRoot": "/absolute/path/to/repository",
     "timeoutMs": 1500

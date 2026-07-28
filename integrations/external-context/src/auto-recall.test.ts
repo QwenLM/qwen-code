@@ -109,13 +109,41 @@ describe('createAutoRecallQuery', () => {
     ).toBeUndefined();
   });
 
-  it('sanitizes near-limit repeated secret keywords without pathological delay', async () => {
+  it('caps sanitizer work so a backtracking-shaped prompt cannot stall the Hook', async () => {
     const { createAutoRecallQuery } = await import('./auto-recall.js');
-    const submittedPrompt = 'token'.repeat(200_000);
+    // Hyphens are word boundaries, so without the input bound the assignment
+    // regex backtracks quadratically across this run and stalls the Hook.
+    const submittedPrompt = 'a-'.repeat(25_000);
     const startedAt = Date.now();
+    const query = createAutoRecallQuery(submittedPrompt, '');
+    const elapsed = Date.now() - startedAt;
 
-    expect(createAutoRecallQuery(submittedPrompt, '')).toBeUndefined();
-    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(elapsed).toBeLessThan(2000);
+    expect(query ?? '').not.toContain('a-a');
+  });
+
+  it('redacts a secret assignment claimed by a leading label', async () => {
+    const { createAutoRecallQuery } = await import('./auto-recall.js');
+
+    const query = createAutoRecallQuery(
+      'Deploy failed: api_key=sk-live-SECRET-ABC123 and Bearer eyJhbGciOiJIUzI1NiJ9. What is the release policy?',
+      '',
+    );
+
+    expect(query).not.toContain('sk-live-SECRET-ABC123');
+    expect(query).not.toContain('api_key');
+    expect(query).toContain('What is the release policy?');
+  });
+
+  it('leaves a benign labeled sentence untouched', async () => {
+    const { createAutoRecallQuery } = await import('./auto-recall.js');
+
+    expect(
+      createAutoRecallQuery(
+        'Deploy failed: the release branch is red, please look at CI',
+        '',
+      ),
+    ).toBe('Deploy failed: the release branch is red, please look at CI');
   });
 });
 
@@ -487,7 +515,12 @@ describe('runAutoRecallCli', () => {
   it('aborts an in-flight request at the internal wall-clock budget', async () => {
     vi.useFakeTimers();
     const fixture = await createRepositoryFixture();
-    loadConfig.mockResolvedValue(config(fixture.root));
+    // Keep the provider timeout above the 6500 ms wall-clock budget so this
+    // test exercises the internal timer rather than the provider timeout.
+    loadConfig.mockResolvedValue({
+      ...config(fixture.root),
+      autoRecall: { repositoryRoot: fixture.root, timeoutMs: 10_000 },
+    });
     let providerSignal: AbortSignal | undefined;
     search.mockImplementation(
       ({ signal }: { signal: AbortSignal }) =>

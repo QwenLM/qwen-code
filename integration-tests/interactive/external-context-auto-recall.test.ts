@@ -15,6 +15,15 @@ import {
 } from '../fake-openai-server.js';
 import { TestRig, type } from '../test-helper.js';
 
+// Container sandbox (QWEN_SANDBOX=docker/podman): the CLI runs inside the
+// container and cannot reach the host-loopback context provider and fake
+// model this test binds, nor the host-absolute Hook paths it pins. Skip under
+// any container sandbox, matching the cron-interactive precedent.
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+const IS_SANDBOX = Boolean(
+  SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
+);
+
 const ENVIRONMENT_KEYS = [
   'QWEN_HOME',
   'QWEN_CODE_SYSTEM_SETTINGS_PATH',
@@ -25,7 +34,7 @@ const ENVIRONMENT_KEYS = [
   'no_proxy',
 ] as const;
 
-describe('external context auto recall', () => {
+(IS_SANDBOX ? describe.skip : describe)('external context auto recall', () => {
   let fakeModel: FakeOpenAIServer | undefined;
   let closeContextProvider: (() => Promise<void>) | undefined;
   let rig: TestRig;

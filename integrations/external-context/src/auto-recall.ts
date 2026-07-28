@@ -16,6 +16,11 @@ import type { ProviderConfig } from './types.js';
 const MAX_HOOK_INPUT_BYTES = 1024 * 1024;
 const MAX_AUTO_QUERY_CHARACTERS = 512;
 const HOOK_WALL_CLOCK_TIMEOUT_MS = 6500;
+// Bounds the input before the redaction regexes run. Only
+// MAX_AUTO_QUERY_CHARACTERS code points survive, and capping the work here
+// keeps a worst-case prompt from driving the assignment regex into quadratic
+// backtracking that would block the event loop past the wall-clock budget.
+const MAX_SANITIZER_INPUT_CHARACTERS = 4096;
 const ASSIGNMENT_PATTERN =
   /\b([A-Za-z_][A-Za-z0-9_-]*)\s*(?:=|:)\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi;
 const SECRET_NAME_PATTERN = /(?:api[_-]?key|token|password|secret)/i;
@@ -97,7 +102,11 @@ export function createAutoRecallQuery(
   submittedPrompt: string,
   credential: string,
 ): string | undefined {
-  let query = submittedPrompt
+  let query = submittedPrompt;
+  if (query.length > MAX_SANITIZER_INPUT_CHARACTERS) {
+    query = Array.from(query).slice(0, MAX_SANITIZER_INPUT_CHARACTERS).join('');
+  }
+  query = query
     .replace(/(```|~~~)[\s\S]*?\1/g, ' ')
     .replace(/(?:```|~~~)[\s\S]*$/g, ' ');
 
@@ -106,8 +115,8 @@ export function createAutoRecallQuery(
   }
 
   query = query
-    .replace(ASSIGNMENT_PATTERN, (assignment, name: string) =>
-      SECRET_NAME_PATTERN.test(name) ? ' ' : assignment,
+    .replace(ASSIGNMENT_PATTERN, (assignment: string) =>
+      SECRET_NAME_PATTERN.test(assignment) ? ' ' : assignment,
     )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, ' ')
     .replace(
@@ -160,8 +169,7 @@ async function readHookInput(
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const source of inputStream) {
-    const chunk =
-      typeof source === 'string' ? Buffer.from(source) : Buffer.from(source);
+    const chunk = Buffer.from(source);
     total += chunk.byteLength;
     if (total > MAX_HOOK_INPUT_BYTES) {
       return undefined;

@@ -88,7 +88,6 @@ Version 1 remains the exact on-demand schema. Version 2 is the auto-recall schem
 ```json
 {
   "version": 2,
-  "timeoutMs": 5000,
   "autoRecall": {
     "repositoryRoot": "/absolute/path/to/repository",
     "timeoutMs": 1500
@@ -101,7 +100,7 @@ Version 1 remains the exact on-demand schema. Version 2 is the auto-recall schem
 }
 ```
 
-`autoRecall.timeoutMs` defaults to 1500 milliseconds and must be from 1 through 5000. `repositoryRoot` must be an existing absolute directory. Startup resolves it through `realpath` and rejects a filesystem root. The event `cwd` is also resolved through `realpath`; retrieval runs only when it is the configured root or a descendant. Textual prefix comparisons are never used for containment.
+`autoRecall.timeoutMs` defaults to 1500 milliseconds and must be from 1 through 5000; it is the only timeout the auto-recall Hook reads. A top-level `timeoutMs` is still accepted for forward compatibility with the on-demand MCP profile, but has no effect on auto recall. `repositoryRoot` must be an existing absolute directory. Startup resolves it through `realpath` and rejects a filesystem root. The event `cwd` is also resolved through `realpath`; retrieval runs only when it is the configured root or a descendant. Textual prefix comparisons are never used for containment.
 
 The repository root is an accidental-misrouting guard, not authorization. The provider credential, project, index, or corpus remains the security boundary. The configuration file, its path, credential, and binding must be administrator-controlled and immutable for the Qwen session. Switching repositories or corpora requires a new process. Rolling back to a binary that understands only v1 requires restoring the preserved v1 file.
 
@@ -160,7 +159,7 @@ Non-empty results use the Phase 1 envelope:
 }
 ```
 
-The renderer keeps at most five items and 1000 Unicode code points per content field. It encodes literal angle brackets as JSON Unicode escapes and measures the final serialized string against a 4000 JavaScript-code-unit budget. The Hook returns that string only as `UserPromptSubmit.hookSpecificOutput.additionalContext`, which Qwen appends to user-layer content rather than system instructions.
+The renderer keeps at most five items and 1000 Unicode code points per content field. It encodes literal angle brackets as JSON Unicode escapes and measures the final serialized string against a 4000 JavaScript-code-unit budget. The Hook returns that string only as `UserPromptSubmit.hookSpecificOutput.additionalContext`, which Qwen appends to user-layer content rather than system instructions. Retrieved context joins the conversation history and is therefore resent to the model on later turns; the bounds above limit each injection, not its session-lifetime accumulation.
 
 Structural isolation and bounds do not make retrieved content trustworthy. The model can still follow malicious instructions embedded in external results.
 
