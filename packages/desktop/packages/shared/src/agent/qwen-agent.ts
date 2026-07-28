@@ -210,6 +210,8 @@ type SlashCommandInvocation = {
 };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 120_000;
 const PERMISSION_REQUEST_TIMEOUT_MS = 5 * 60_000;
@@ -446,12 +448,18 @@ class SharedQwenAcpProcess {
         const sessionId = asString(record.sessionId);
         const owner = sessionId ? this.sessionOwners.get(sessionId) : undefined;
         if (owner) return owner.onExtMethod(method, record);
+        if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+          return { claimed: false, hasQueuedPrompt: false };
+        }
 
         for (const subscriber of [...this.subscribers]) {
           const result = await subscriber.onExtMethod(method, record);
           if (Object.keys(result).length > 0) return result;
         }
-        return method === MID_TURN_QUEUE_DRAIN_METHOD ? { messages: [] } : {};
+        if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
+          return { messages: [], hasQueuedPrompt: false };
+        }
+        return {};
       },
     };
   }
@@ -641,8 +649,15 @@ async function callQwenSettingsAcpMethod(
     {
       onSessionUpdate: () => {},
       onPermissionRequest: async () => ({ outcome: { outcome: 'cancelled' } }),
-      onExtMethod: async (extMethod) =>
-        extMethod === MID_TURN_QUEUE_DRAIN_METHOD ? { messages: [] } : {},
+      onExtMethod: async (extMethod) => {
+        if (extMethod === MID_TURN_QUEUE_DRAIN_METHOD) {
+          return { messages: [], hasQueuedPrompt: false };
+        }
+        if (extMethod === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+          return { claimed: false, hasQueuedPrompt: false };
+        }
+        return {};
+      },
       onProcessExit: () => {},
       onDebug: options.debug ?? (() => {}),
     },
@@ -2842,7 +2857,10 @@ export class QwenAgent extends BaseAgent {
     method: string,
     params: JsonRecord,
   ): Promise<JsonRecord> {
-    if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
+    if (
+      method !== MID_TURN_QUEUE_DRAIN_METHOD &&
+      method !== TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD
+    ) {
       return {};
     }
 
@@ -2854,10 +2872,14 @@ export class QwenAgent extends BaseAgent {
     if (!isCurrentSession) {
       if (sessionId) {
         this.debug(
-          `Ignored mid-turn queue drain for non-current session ${sessionId}`,
+          `Ignored ${method} for non-current session ${sessionId}`,
         );
       }
       return {};
+    }
+
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      return { claimed: true, hasQueuedPrompt: false };
     }
 
     const entries = this.midTurnMessageQueue.splice(0);
@@ -2877,7 +2899,10 @@ export class QwenAgent extends BaseAgent {
           ),
         );
       }
-      return { messages: entries.map((entry) => entry.message) };
+      return {
+        messages: entries.map((entry) => entry.message),
+        hasQueuedPrompt: false,
+      };
     }
 
     const items: Array<{ content: ContentBlock[]; displayText: string }> = [];
@@ -2932,6 +2957,7 @@ export class QwenAgent extends BaseAgent {
 
     return {
       items,
+      hasQueuedPrompt: false,
     };
   }
 

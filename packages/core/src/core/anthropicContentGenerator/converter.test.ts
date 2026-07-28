@@ -88,6 +88,103 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    describe('staticSystemPrefix split', () => {
+      const staticPrefix = 'core prompt + memory';
+      const volatileSuffix = '\n\n# Git Status\nbranch: main';
+      const fullSystem = staticPrefix + volatileSuffix;
+
+      it('splits the system prompt at the static prefix boundary, scoping only the prefix', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: fullSystem },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+          {
+            // The volatile tail (git status, session-start context) always
+            // carries the per-session shape — it differs across sessions,
+            // so a global entry here would churn cache for zero hits.
+            type: 'text',
+            text: volatileSuffix,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+      });
+
+      it('splits without scope when useGlobalCacheScope is off', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: fullSystem },
+          },
+          { staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral' },
+          },
+          {
+            type: 'text',
+            text: volatileSuffix,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+      });
+
+      it('falls back to a single block when the prefix does not match (subagent prompt)', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'a different subagent prompt' },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'a different subagent prompt',
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+      });
+
+      it('falls back to a single block when there is no suffix beyond the prefix', () => {
+        // Not a git repo → the system prompt IS the static prefix. A split
+        // would leave an empty second block, which Anthropic rejects.
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: staticPrefix },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+      });
+    });
+
     it('converts a plain string content into a user message', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',

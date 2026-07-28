@@ -31,6 +31,15 @@ The runner is disabled unless `QWEN_FIRST_OUTPUT_BENCHMARK=1`. Its two input mod
 
 `BENCHMARK_POST_SESSION_DWELL_MS` is comparison-only, accepts exactly `0`, `100`, or `500`, and defaults to `0`. `BENCHMARK_MEASURED_PAIRS` is also comparison-only and accepts exactly `10` or `30`; it defaults to `10` for the 500 ms diagnostic and `30` otherwise. A 500 ms run requires 10 pairs and the 0/100 ms runs require 30, so a diagnostic cannot be mislabeled as decision-bearing. Formal Phase 2 runs invoke the runner separately for the three dwell scenarios; samples from different dwell values are never pooled. Missing or mixed modes, identical comparison bundles, unreadable paths, unsupported dwell or pair counts, and mismatched dwell/sample plans fail as `invalid_configuration` before sampling.
 
+The dwell is anchored to SSE readiness rather than session readiness. The SSE connect sits between the two, so anchoring to `sessionReady` would let a slow connect consume the whole window and silently reduce a 100 ms scenario to an immediate-prompt run that still reported its configured dwell. `sseReadyToPromptMs` records the idle window each sample actually received.
+
+Millisecond-scale figures are only meaningful when nothing else competes for the host, so the runner is excluded from the shared integration config and has its own serial config at `integration-tests/vitest.firstoutput.config.ts` (`fileParallelism: false`, serial execution, `retry: 0`). The pure helper tests continue to run in the shared suite. Run the benchmark with:
+
+```text
+QWEN_FIRST_OUTPUT_BENCHMARK=1 QWEN_SANDBOX=false BENCHMARK_CLI_PATH=... \
+  npx vitest run --config integration-tests/vitest.firstoutput.config.ts
+```
+
 Artifacts are written below `.qwen/investigations/daemon-first-output-benchmark/`, outside the integration harness's disposable run directory. This keeps successful, failed, and negative-result runs after global teardown without requiring `KEEP_OUTPUT`.
 
 ## Measurement contract
@@ -43,6 +52,7 @@ All latency timestamps use `performance.now()` in the parent harness. No duratio
 | -------------------------- | ---------------------------------------------------------------------------------- |
 | `processSpawnAt`           | Immediately before daemon `spawn`                                                  |
 | `sessionReadyAt`           | Successful session response fully read and validated                               |
+| `sseReadyAt`               | First SSE epoch callback observed; the dwell anchor                                |
 | `promptStartedAt`          | Immediately before starting the non-blocking prompt request                        |
 | `promptAcceptedAt`         | HTTP `202` body validated, including top-level `promptId` and replay cursor        |
 | `providerRequestArrivalAt` | Fake Provider accepts the measured request, before its fixed delay                 |
@@ -56,6 +66,7 @@ The raw timestamps produce these exact metrics:
 | Metric                              | Calculation                                     |
 | ----------------------------------- | ----------------------------------------------- |
 | `processToSessionReadyMs`           | `sessionReadyAt - processSpawnAt`               |
+| `sseReadyToPromptMs`                | `promptStartedAt - sseReadyAt`, diagnostic      |
 | `promptToProviderRequestArrivalMs`  | `providerRequestArrivalAt - promptStartedAt`    |
 | `promptToFirstModelOutputMs`        | `firstModelOutputAt - promptStartedAt`          |
 | `promptToFirstAnswerTextMs`         | `firstAnswerTextAt - promptStartedAt`, nullable |
@@ -67,7 +78,7 @@ The raw timestamps produce these exact metrics:
 
 ### Prompt and event correlation
 
-The SSE collector is active before the prompt, or resumes from the cursor preceding it, and buffers a fixed number of events until the `202` yields the accepted top-level `promptId`. The acceptance envelope must contain a non-empty `promptId` and a non-negative integer `lastEventId`; a legacy synchronous result is recognized only by its `stopReason`, while any other malformed response is rejected. A prompt acceptance timeout aborts the underlying request before sample teardown. The collector then evaluates buffered and live events in original arrival order and accepts only an exact top-level ID match. Earlier, absent-ID, and unrelated prompt events are ignored; buffer overflow fails rather than dropping events.
+The SSE collector is active before the prompt, or resumes from the cursor preceding it, and buffers a fixed number of events until the `202` yields the accepted top-level `promptId`. The acceptance envelope must contain a non-empty `promptId` and a non-negative integer `lastEventId`; a legacy synchronous result is recognized only by its `stopReason`, while any other malformed response is rejected. A prompt acceptance timeout aborts the underlying request before sample teardown. The collector then evaluates buffered and live events in original arrival order and accepts only an exact top-level ID match. Earlier, absent-ID, and unrelated prompt events are ignored; on buffer overflow the tracker latches the failure and stops buffering, so the sample is invalidated and the excess events are dropped.
 
 Provider requests do not carry the daemon `promptId`. Each isolated fake Provider therefore permits only one expected measured request at a time and matches its unique fixed-length prompt sentinel. Its timestamp can be buffered before the `202`; an extra, missing, early, or concurrent request fails the sample.
 
@@ -87,7 +98,7 @@ The loopback-only OpenAI-compatible fake Provider records request arrival, valid
 
 Every baseline process and every comparison arm gets a fresh daemon/ACP process tree, workspace, home and `QWEN_HOME`, ephemeral daemon/Provider ports, event collector, and request ledger. Samples run serially.
 
-Node compile caches are empty at formal-run start, isolated by bundle and mode, populated only by excluded warmups, and then reused only by that same bundle. Control and candidate never share them. Warmup observations remain in the artifact with `measured: false`.
+Node compile caches are empty at formal-run start, isolated by bundle and mode, populated only by excluded warmups, and then reused only by that same bundle. The artifact records each cache directory for provenance, but a clean run removes it during teardown, so the recorded path is not expected to exist afterwards. Control and candidate never share them. Warmup observations remain in the artifact with `measured: false`.
 
 The child starts from a minimal environment allowlist. It uses fixed locale/timezone, isolated writable paths, disabled telemetry/update checks, dummy Provider configuration, and cleared real credentials and proxy variables. The artifact records only deliberately supplied non-secret values.
 
@@ -102,27 +113,31 @@ Run 2 excluded warmup processes, then 50 measured processes. Each measured proce
 3. keeps the first session open, creates a distinct `sessionScope: thread` session on the same ACP child process; and
 4. sends one same-length prompt with a distinct sentinel (`warm`).
 
-The runner records the ACP child PID after both turns and invalidates the sample unless exactly one unchanged child served them. Only after the second turn does it close both sessions. The second session therefore has a fresh per-session lazy Provider wrapper but warm ACP process-wide ESM/runtime caches. The pair estimates cold process-level Provider loading without conversation-history confounding. Both sessions still construct their own Provider on prompt, so work the prototype may move into the dwell is not credited; the gate is conservative. Second-session process-to metrics are diagnostic.
+The runner records the ACP child PID after both turns and invalidates the sample unless exactly one unchanged child served them. Only after the second turn does it close both sessions. The second session therefore has a fresh per-session lazy Provider wrapper but warm ACP process-wide ESM/runtime caches. The pair bounds the one-time local cost of a process's first trip through the prompt path, without conversation-history confounding. Provider construction is one component of that cost; the first prompt also pays for the first daemon route hit, the first ACP IPC round trip, JIT warm-up, and any unrelated lazy import. The delta is therefore an upper bound on what preloading the Provider could recover, not an estimate of Provider loading, and a passing gate does not establish that the Provider accounts for any particular share of it. Attribution is what the Phase 2 paired comparison tests. Both sessions still construct their own Provider on prompt, so work the prototype may move into the dwell is not credited; the gate is conservative. Second-session process-to metrics are diagnostic.
 
-The baseline expects exactly two Provider requests per process. All 50 cold/warm pairs must be valid. With:
+The baseline expects exactly two Provider requests per process. All 50 cold/warm pairs must be valid. Cold and warm share a process, so their deltas are paired rather than independent samples, and the gate is decided on the paired median with its seeded bootstrap 95% interval:
 
 ```text
-providerDelta =
-  P50(cold promptToProviderRequestArrivalMs) -
-  P50(warm promptToProviderRequestArrivalMs)
+providerDelta[i] =
+  cold promptToProviderRequestArrivalMs[i] -
+  warm promptToProviderRequestArrivalMs[i]
+
+providerDeltaCiLow = lower bound of the 95% CI of median(providerDelta)
 ```
 
 Phase 1 passes when either:
 
 ```text
-providerDelta >= 25 ms
+providerDeltaCiLow >= 25 ms
 ```
 
 or:
 
 ```text
-providerDelta >= 10% * P50(cold promptToFirstModelOutputMs)
+providerDeltaCiLow >= 10% * P50(cold promptToFirstModelOutputMs)
 ```
+
+The lower bound rather than the point estimate must clear the threshold, so a delta that only just exceeds it cannot authorize a prototype on the strength of noise. The difference of the two P50s is still recorded for continuity but no longer decides anything. Cold is always the first session, so the pair cannot be order-balanced the way a Phase 2 comparison is; this is a known limitation of the construct, not an omission.
 
 Otherwise the artifact is retained and production work stops.
 
@@ -134,7 +149,9 @@ Failed arms remain in raw output and invalidate their pairs. They are not replac
 
 For each metric, report nearest-rank P50/P90/P99 and mean for each arm, paired median delta, wins/ties, and AB/BA subgroup medians. P90/P99 are descriptive only at 30 pairs; no P95 or tail-latency conclusion is made without at least 100 pairs.
 
-The paired-median 95% confidence interval uses 10,000 seeded bootstrap resamples of valid pair deltas with replacement; seed and iteration count are stored. Its bounds are the nearest-rank 2.5th and 97.5th percentiles. `orderSensitive` is true when AB and BA median deltas have opposite signs and either absolute median is at least 10 ms. Order sensitivity makes the run inconclusive rather than being averaged away.
+Two definitions of median coexist deliberately and a reader comparing columns should expect them to differ on an even number of samples. The per-arm `p50` is nearest-rank, so it is always an observed value. The paired `median delta`, and the medians resampled inside the bootstrap, average the two middle values on even counts. A Markdown row can therefore show a `p50` and a `median delta` that do not reconcile arithmetically without either being wrong.
+
+The paired-median 95% confidence interval uses 10,000 seeded bootstrap resamples of valid pair deltas with replacement; seed and iteration count are stored. Its bounds are the nearest-rank 2.5th and 97.5th percentiles. Each metric's seed is offset by its position in the metric list, so inserting or reordering a metric shifts the bootstrap bounds of every later metric and makes artifacts on either side of the change incomparable even for identical raw samples; the per-metric stored `seed` keeps this auditable. `orderSensitive` is true when AB and BA median deltas have opposite signs and either absolute median is at least 10 ms. Order sensitivity makes the run inconclusive rather than being averaged away.
 
 A paired artifact's top-level outcome describes only its primary metric in that one scenario. It does not evaluate the cross-scenario, resource, functional, or publication gates and cannot by itself authorize a Phase 2 pull request.
 

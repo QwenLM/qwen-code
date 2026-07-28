@@ -1004,6 +1004,57 @@ describe('resolveGitDir', () => {
   });
 });
 
+describe('getGitWorkingTreeStatus stash count in a linked worktree', () => {
+  let main: string;
+
+  beforeEach(async () => {
+    main = await makeRepo();
+    await fs.writeFile(path.join(main, 'a.txt'), 'hi\n');
+    await git(main, 'add', '.');
+    await git(main, 'commit', '-q', '-m', 'init');
+    // Two entries so the assertion cannot pass on an off-by-one.
+    await fs.writeFile(path.join(main, 'a.txt'), 'one\n');
+    await git(main, 'stash', '-q');
+    await fs.writeFile(path.join(main, 'a.txt'), 'two\n');
+    await git(main, 'stash', '-q');
+  });
+
+  afterEach(async () => {
+    await fs.rm(main, { recursive: true, force: true });
+  });
+
+  it('counts the shared stash from inside a linked worktree', async () => {
+    const wtPath = path.join(main, 'wt');
+    await git(main, 'worktree', 'add', '-q', wtPath, '-b', 'side');
+
+    // `git stash list` reports both entries from either working tree, because
+    // the stash is one ref for the whole repository. Reading the reflog from
+    // the per-worktree gitdir found nothing and reported 0.
+    expect((await getGitWorkingTreeStatus(wtPath))?.stashCount).toBe(2);
+    // Same number from the main worktree: the two must not diverge.
+    expect((await getGitWorkingTreeStatus(main))?.stashCount).toBe(2);
+  });
+
+  it('still reports the per-worktree operation, not the shared one', async () => {
+    // The guard against over-correcting. Only refs are shared; MERGE_HEAD and
+    // friends are per-worktree, so redirecting everything to the common dir
+    // would make a merge in one worktree appear in all of them.
+    const wtPath = path.join(main, 'wt');
+    await git(main, 'worktree', 'add', '-q', wtPath, '-b', 'side');
+    await fs.writeFile(
+      path.join(main, '.git', 'MERGE_HEAD'),
+      '0000000000000000000000000000000000000000\n',
+    );
+
+    expect((await getGitWorkingTreeStatus(main))?.operation).toBe('merge');
+    expect((await getGitWorkingTreeStatus(wtPath))?.operation).toBeUndefined();
+  });
+
+  it('still counts the stash in a plain repository', async () => {
+    expect((await getGitWorkingTreeStatus(main))?.stashCount).toBe(2);
+  });
+});
+
 describe('fetchGitDiff transient-state detection', () => {
   let repo: string;
   beforeEach(async () => {
