@@ -134,14 +134,14 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
 
     // First poll: drain all pre-existing todos without processing them.
     if (!this.cursor.initialized) {
-      this.cursor.initialized = true;
       if (allTodos.length > 0) {
-        const maxId = Math.max(...allTodos.map((t) => t.id));
+        const maxId = allTodos.reduce((m, t) => (t.id > m ? t.id : m), 0);
         for (const t of allTodos) {
           this.api.TodoLists.done({ todoId: t.id }).catch(() => {});
         }
         this.cursor.lastProcessedId = maxId;
       }
+      this.cursor.initialized = true;
       return;
     }
 

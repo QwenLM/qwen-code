@@ -410,6 +410,45 @@ describe('GitlabChannel', () => {
       expect(channel.cursor.lastProcessedId).toBe(2);
     });
 
+    it('delivers both todos when updated_at is identical', async () => {
+      await initWithoutLoop();
+
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({ id: 1, updated_at: '2026-07-02T10:00:00.000Z' }),
+        makeTodo({ id: 2, updated_at: '2026-07-02T10:00:00.000Z' }),
+      ]);
+      mockApi.IssueNotes.all.mockResolvedValue([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.cursor.lastProcessedId).toBe(2);
+    });
+
+    it('orders by todo id even when updated_at disagrees', async () => {
+      await initWithoutLoop();
+
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({
+          id: 1,
+          body: 'first',
+          updated_at: '2026-07-02T12:00:00.000Z',
+        }),
+        makeTodo({
+          id: 2,
+          body: 'second',
+          updated_at: '2026-07-02T10:00:00.000Z',
+        }),
+      ]);
+      mockApi.IssueNotes.all.mockResolvedValue([]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('first');
+      expect(channel.inboundEnvelopes[1]!.text).toContain('second');
+    });
+
     it('handles MR todos with correct threadId', async () => {
       await initWithoutLoop();
 
