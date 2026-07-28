@@ -825,51 +825,173 @@ async function releaseTransitionClaim(
   }
 }
 
+type ClaimedPrimaryState =
+  | 'source'
+  | 'candidate'
+  | 'missing'
+  | 'other'
+  | 'unknown';
+
+async function inspectClaimedPrimary(
+  lockPath: string,
+  sourceRaw: string,
+  sessionId: string,
+): Promise<ClaimedPrimaryState> {
+  try {
+    const stat = await fs.lstat(lockPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return 'other';
+    const raw = await fs.readFile(lockPath, 'utf8');
+    if (raw === sourceRaw) return 'source';
+    const record = parseLockRecord(raw);
+    return record?.schema_version === LOCK_SCHEMA_VERSION &&
+      record.state === 'active' &&
+      record.session_id === sessionId
+      ? 'candidate'
+      : 'other';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? 'missing'
+      : 'unknown';
+  }
+}
+
+async function assertExactTransitionClaim(
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  const claimState = await inspectExactRecord(claimPath, claimRaw);
+  if (claimState !== 'exact') {
+    throw new SessionWriterUnavailableError({
+      cause: new Error('Session writer transition claim ownership was lost'),
+    });
+  }
+}
+
+async function linkClaimedPrimary(
+  lockPath: string,
+  sourcePath: string,
+  sourceRaw: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  for (;;) {
+    await assertExactTransitionClaim(claimPath, claimRaw);
+    try {
+      await fs.link(sourcePath, lockPath);
+      return;
+    } catch (error) {
+      const state = await inspectClaimedPrimary(lockPath, sourceRaw, sessionId);
+      if (state === 'source') return;
+      if (state === 'candidate') {
+        // A schema-v2 acquirer can pass its first claim check immediately
+        // before this transition creates the claim. It must remove its primary
+        // candidate after the second check, so keep the predecessor and wait.
+        await delay(MALFORMED_RETRY_DELAY_MS);
+        continue;
+      }
+      if (state === 'other') throw new SessionWriterLostError();
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+  }
+}
+
+async function removeClaimedPrimary(
+  lockPath: string,
+  sourceRaw: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  for (;;) {
+    await assertExactTransitionClaim(claimPath, claimRaw);
+    const state = await inspectClaimedPrimary(lockPath, sourceRaw, sessionId);
+    if (state === 'missing') return;
+    if (state === 'candidate') {
+      await delay(MALFORMED_RETRY_DELAY_MS);
+      continue;
+    }
+    if (state === 'other') throw new SessionWriterLostError();
+    if (state === 'unknown') throw new SessionWriterUnavailableError();
+    try {
+      await fs.unlink(lockPath);
+      return;
+    } catch (error) {
+      const afterState = await inspectClaimedPrimary(
+        lockPath,
+        sourceRaw,
+        sessionId,
+      );
+      if (afterState === 'missing') return;
+      if (afterState === 'candidate') {
+        await delay(MALFORMED_RETRY_DELAY_MS);
+        continue;
+      }
+      if (afterState === 'other') throw new SessionWriterLostError();
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+  }
+}
+
 async function transitionExactPrimary(
   lockPath: string,
   expectedRaw: string,
   replacementPath: string,
   replacementRaw: string,
   retiredPath: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
 ): Promise<void> {
   try {
     await fs.rename(lockPath, retiredPath);
-    await fs.link(replacementPath, lockPath);
-    return;
   } catch (error) {
-    const [primaryState, primaryExpectedState, retiredState] =
-      await Promise.all([
-        inspectExactRecord(lockPath, replacementRaw),
-        inspectExactRecord(lockPath, expectedRaw),
-        inspectExactRecord(retiredPath, expectedRaw),
-      ]);
-    if (primaryState === 'exact' && retiredState === 'exact') return;
+    const [primaryExpectedState, retiredState] = await Promise.all([
+      inspectExactRecord(lockPath, expectedRaw),
+      inspectExactRecord(retiredPath, expectedRaw),
+    ]);
     if (primaryExpectedState === 'exact' && retiredState === 'missing') {
       throw new SessionWriterUnavailableError({
         cause: error instanceof Error ? error : undefined,
       });
     }
-    if (primaryState === 'missing' && retiredState === 'exact') {
-      try {
-        await fs.link(retiredPath, lockPath);
-        await fs.unlink(retiredPath).catch(() => {});
-      } catch (restoreError) {
-        throw new SessionWriterUnavailableError({
-          cause: new AggregateError(
-            [error, restoreError],
-            'Session writer primary transition could not be restored',
-          ),
-        });
-      }
+    if (retiredState !== 'exact') {
       throw new SessionWriterUnavailableError({
         cause: error instanceof Error ? error : undefined,
       });
     }
-    if (retiredState === 'exact') {
-      await fs.unlink(retiredPath).catch(() => {});
-    }
-    if (primaryState === 'other' && primaryExpectedState === 'other') {
-      throw new SessionWriterLostError();
+  }
+  try {
+    await linkClaimedPrimary(
+      lockPath,
+      replacementPath,
+      replacementRaw,
+      sessionId,
+      claimPath,
+      claimRaw,
+    );
+  } catch (error) {
+    try {
+      await linkClaimedPrimary(
+        lockPath,
+        retiredPath,
+        expectedRaw,
+        sessionId,
+        claimPath,
+        claimRaw,
+      );
+      await removeExactRecord(retiredPath, expectedRaw);
+    } catch (restoreError) {
+      throw new SessionWriterUnavailableError({
+        cause: new AggregateError(
+          [error, restoreError],
+          'Session writer primary transition could not be restored',
+        ),
+      });
     }
     throw new SessionWriterUnavailableError({
       cause: error instanceof Error ? error : undefined,
@@ -882,15 +1004,17 @@ async function rollbackExactTransition(
   replacementRaw: string,
   retiredPath: string,
   expectedRaw: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
 ): Promise<void> {
-  const primaryState = await inspectExactRecord(lockPath, replacementRaw);
-  if (primaryState === 'exact') {
-    await removeExactRecord(lockPath, replacementRaw);
-  } else if (primaryState !== 'missing') {
-    throw primaryState === 'other'
-      ? new SessionWriterLostError()
-      : new SessionWriterUnavailableError();
-  }
+  await removeClaimedPrimary(
+    lockPath,
+    replacementRaw,
+    sessionId,
+    claimPath,
+    claimRaw,
+  );
   const retiredState = await inspectExactRecord(retiredPath, expectedRaw);
   if (retiredState !== 'exact') {
     throw retiredState === 'other'
@@ -898,8 +1022,15 @@ async function rollbackExactTransition(
       : new SessionWriterUnavailableError();
   }
   try {
-    await fs.link(retiredPath, lockPath);
-    await fs.unlink(retiredPath).catch(() => {});
+    await linkClaimedPrimary(
+      lockPath,
+      retiredPath,
+      expectedRaw,
+      sessionId,
+      claimPath,
+      claimRaw,
+    );
+    await removeExactRecord(retiredPath, expectedRaw);
   } catch (error) {
     throw new SessionWriterUnavailableError({
       cause: error instanceof Error ? error : undefined,
@@ -1154,6 +1285,7 @@ export class SessionWriterLease {
       observed.record.owner_id,
     )}.${encodeURIComponent(lockRecord.owner_id)}`;
     let claimAcquired = false;
+    let transitionStarted = false;
     let transitionCommitted = false;
     try {
       assertSealedProofMatches(observed.record, relativePath, proof);
@@ -1175,12 +1307,16 @@ export class SessionWriterLease {
       }
       await validateOpenTranscriptProof(options.transcriptPath, proof);
       assertSealedProofMatches(current.record, relativePath, proof);
+      transitionStarted = true;
       await transitionExactPrimary(
         lockPath,
         observed.raw,
         claimPath,
         claimRaw,
         retiredPath,
+        options.sessionId,
+        claimPath,
+        claimRaw,
       );
       transitionCommitted = true;
       await validateOpenTranscriptProof(options.transcriptPath, proof);
@@ -1225,6 +1361,9 @@ export class SessionWriterLease {
             claimRaw,
             retiredPath,
             observed.raw,
+            options.sessionId,
+            claimPath,
+            claimRaw,
           );
         } catch (cleanupError) {
           cleanupFailures.push(cleanupError);
@@ -1232,12 +1371,16 @@ export class SessionWriterLease {
       }
       if (claimState === 'exact') {
         try {
-          await removeTransitionClaimAfterFailure(
-            lockPath,
-            observed.raw,
-            claimPath,
-            claimRaw,
-          );
+          if (transitionStarted) {
+            await removeTransitionClaimAfterFailure(
+              lockPath,
+              observed.raw,
+              claimPath,
+              claimRaw,
+            );
+          } else {
+            await releaseTransitionClaim(claimPath, claimRaw);
+          }
         } catch (cleanupError) {
           cleanupFailures.push(cleanupError);
         }
@@ -1558,6 +1701,7 @@ export class SessionWriterLease {
       this.ownerId,
     )}`;
     let claimAcquired = false;
+    let transitionStarted = false;
     let transitionCommitted = false;
     try {
       if (!sameTranscriptState(proof.state, this.expectedTranscriptState)) {
@@ -1577,12 +1721,16 @@ export class SessionWriterLease {
       claimAcquired = true;
       await this.readOwnedLock();
       await validateOpenTranscriptProof(this.transcriptPath, proof);
+      transitionStarted = true;
       await transitionExactPrimary(
         this.lockPath,
         this.lockRecordRaw,
         sealedCandidatePath,
         sealedRaw,
         handoffRetiredPath,
+        this.sessionId,
+        this.claimPath,
+        this.lockRecordRaw,
       );
       transitionCommitted = true;
       await validateOpenTranscriptProof(this.transcriptPath, proof);
@@ -1629,6 +1777,9 @@ export class SessionWriterLease {
             sealedRaw,
             handoffRetiredPath,
             this.lockRecordRaw,
+            this.sessionId,
+            this.claimPath,
+            this.lockRecordRaw,
           );
         } catch (cleanupError) {
           cleanupFailures.push(cleanupError);
@@ -1636,12 +1787,16 @@ export class SessionWriterLease {
       }
       if (claimState === 'exact') {
         try {
-          await removeTransitionClaimAfterFailure(
-            this.lockPath,
-            this.lockRecordRaw,
-            this.claimPath,
-            this.lockRecordRaw,
-          );
+          if (transitionStarted) {
+            await removeTransitionClaimAfterFailure(
+              this.lockPath,
+              this.lockRecordRaw,
+              this.claimPath,
+              this.lockRecordRaw,
+            );
+          } else {
+            await releaseTransitionClaim(this.claimPath, this.lockRecordRaw);
+          }
         } catch (cleanupError) {
           cleanupFailures.push(cleanupError);
         }

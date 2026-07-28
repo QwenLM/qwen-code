@@ -84,6 +84,14 @@ the current active-lock fast path and local stale-owner recovery while making
 both paths respect a handoff transition. Mixed-version writers remain
 unsupported because an older writer does not know about the fixed claim.
 
+An acquirer can pass its first claim check immediately before a transition
+creates the claim, then install its active candidate during the transition's
+primary-path gap. The transition recognizes that same-session schema-v2 active
+record as a claim-aware candidate, preserves the retired predecessor, and
+waits for the candidate's mandatory second check to remove it before retrying
+the hard link. Unknown, malformed, or cross-session successors are never
+removed or overwritten.
+
 ## Sealing
 
 Managed shutdown synchronously stops session and recorder admission, then
@@ -121,6 +129,12 @@ observing the claim. Rollback itself is attempted only while the fixed claim
 still contains this transition's exact record; a missing or replaced claim
 means the current primary must not be changed. Recovery then requires the same
 authoritative external writer fence as any other residual claim.
+
+Failures before the primary transition starts are different: the claimant has
+not created a primary-path gap or moved the predecessor, so it releases only
+its own exact claim even if another certified contender already replaced the
+observed sealed primary. This prevents a delayed losing contender from
+stranding a claim after the winner becomes active.
 
 ## Certified takeover
 
