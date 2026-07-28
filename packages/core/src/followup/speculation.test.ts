@@ -227,6 +227,64 @@ describe('startSpeculation', () => {
 
     await abortSpeculation(state);
   });
+
+  it('strips speculative tool images without a vision side query', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: {
+        inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+      },
+      returnDisplay: 'captured screen',
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-image',
+                        name: 'read_file',
+                        args: { path: 'image.png' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'inspect image.png');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    const speculativeResponse = state.messages[2].parts?.[0].functionResponse;
+    expect(speculativeResponse?.response?.['output']).toMatch(
+      /omitted during speculative execution/i,
+    );
+    expect(speculativeResponse).not.toHaveProperty('parts');
+
+    await abortSpeculation(state);
+  });
 });
 
 describe.each([

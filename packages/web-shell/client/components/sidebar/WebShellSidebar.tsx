@@ -309,6 +309,7 @@ interface WebShellSidebarProps {
    * trusted workspace's folder header, where a live git chip fires it on click.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  onOpenCommit?: (workspaceCwd: string) => void;
   /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
    * registration is unavailable; locked workspaces hide the action separately.
@@ -521,6 +522,7 @@ export function WebShellSidebar({
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
+  onOpenCommit,
   onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
@@ -4189,6 +4191,7 @@ export function WebShellSidebar({
                             groupActionsDisabled={groupBusy}
                             excludePinned
                             onOpenGitDiff={onOpenGitDiff}
+                            onOpenCommit={onOpenCommit}
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}

@@ -34,11 +34,7 @@ export function buildPullRequestQuery(numbers) {
         pr${index}: pullRequest(number: ${number}) {
           number
           body
-          additions
-          deletions
-          changedFiles
           labels(first: 20) { nodes { name } }
-          files(first: 40) { nodes { path } }
         }`,
     )
     .join('\n');
@@ -262,14 +258,7 @@ function compactEntry(entry) {
   return {
     number: entry.number,
     title: entry.title,
-    body: (entry.body || '').slice(0, 3000),
-    labels: (entry.labels || []).map((label) =>
-      typeof label === 'string' ? label : label.name,
-    ),
-    files: (entry.files || []).slice(0, 40),
-    additions: entry.additions,
-    deletions: entry.deletions,
-    changedFiles: entry.changedFiles,
+    body: (entry.body || '').slice(0, 700),
     category: classifyChange(entry),
   };
 }
@@ -375,15 +364,10 @@ export function enrichEntries(entries, metadata) {
   const byNumber = new Map(metadata.map((item) => [item.number, item]));
   return entries.map((entry) => {
     const details = byNumber.get(entry.number) || {};
-    const files = details.files?.nodes || details.files || [];
     return {
       ...entry,
       body: details.body || '',
       labels: details.labels?.nodes || details.labels || [],
-      files: files.map((file) => (typeof file === 'string' ? file : file.path)),
-      additions: details.additions || 0,
-      deletions: details.deletions || 0,
-      changedFiles: details.changedFiles || files.length,
     };
   });
 }
@@ -419,6 +403,8 @@ function promptFor(request) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const CONTENT_VALIDATION_ERROR_MESSAGE =
+  'Model response did not contain message content.';
 
 function isRetryableModelError(error) {
   // AbortSignal.timeout raises TimeoutError; older paths may surface AbortError.
@@ -426,6 +412,12 @@ function isRetryableModelError(error) {
     return true;
   }
   const match = /HTTP (\d{3})/.exec(error?.message ?? '');
+  // Content-validation errors from our own code are deterministic — retrying
+  // the same prompt will reproduce the same failure. Only network-level errors
+  // (no HTTP status) are transient.
+  if (error?.message === CONTENT_VALIDATION_ERROR_MESSAGE) {
+    return false;
+  }
   if (!match) {
     // Network-level failure (DNS, reset, TLS): worth another attempt.
     return true;
@@ -449,11 +441,18 @@ export function createOpenAiCompleter({
   return async (request) => {
     const prompt = promptFor(request);
     let attempt = 0;
+    let lastError;
+    const deadlineError = () =>
+      new Error(
+        `Model generation time budget exhausted: ${lastError?.message ?? 'unknown error'}`,
+        { cause: lastError },
+      );
     for (;;) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        throw new Error('Model generation time budget exhausted.');
+        throw deadlineError();
       }
+      const attemptStartedAt = Date.now();
       try {
         const response = await fetchImpl(endpoint, {
           method: 'POST',
@@ -479,13 +478,20 @@ export function createOpenAiCompleter({
         const data = await response.json();
         const content = data?.choices?.[0]?.message?.content;
         if (typeof content !== 'string' || !content.trim()) {
-          throw new Error('Model response did not contain message content.');
+          throw new Error(CONTENT_VALIDATION_ERROR_MESSAGE);
         }
+        console.error(
+          `Model ${request.kind} request succeeded in ${Date.now() - attemptStartedAt}ms (prompt ${prompt.user.length} chars).`,
+        );
         return content;
       } catch (error) {
+        lastError = error;
         attempt += 1;
+        console.error(
+          `Model ${request.kind} request failed after ${Date.now() - attemptStartedAt}ms (prompt ${prompt.user.length} chars): ${escapeWorkflowCommand(error.message)}`,
+        );
         if (Date.now() >= deadline) {
-          throw new Error('Model generation time budget exhausted.');
+          throw deadlineError();
         }
         if (attempt > maxRetries || !isRetryableModelError(error)) {
           throw error;
@@ -493,7 +499,7 @@ export function createOpenAiCompleter({
         const delayMs =
           baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random());
         if (Date.now() + delayMs >= deadline) {
-          throw new Error('Model generation time budget exhausted.');
+          throw deadlineError();
         }
         console.error(
           `Model request retry ${attempt}/${maxRetries} after ${escapeWorkflowCommand(error.message)}; backing off ${Math.round(delayMs)}ms.`,

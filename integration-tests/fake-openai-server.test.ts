@@ -110,6 +110,26 @@ describe('fake OpenAI server', () => {
     await response.text();
   });
 
+  it('closes non-streaming response connections when keepAlive is disabled', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'no reuse' }), {
+      keepAlive: false,
+    });
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
   it('preserves a caller-requested close for default non-streaming responses', async () => {
     server = await startFakeOpenAIServer(() => ({ content: 'closed' }));
 

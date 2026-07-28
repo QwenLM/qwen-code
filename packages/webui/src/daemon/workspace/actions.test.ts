@@ -394,4 +394,59 @@ describe('workspace actions', () => {
     );
     expect(workspaceByCwd).not.toHaveBeenCalled();
   });
+
+  it('forwards the directory picker to the daemon client', async () => {
+    const pickerResult = {
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    };
+    const workspaceDirectoryPicker = vi.fn().mockResolvedValue(pickerResult);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ workspaceDirectoryPicker }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.pickWorkspaceDirectory()).resolves.toEqual(
+      pickerResult,
+    );
+    expect(workspaceDirectoryPicker).toHaveBeenCalledOnce();
+  });
+
+  it('applies the 320s timeout to the directory picker', async () => {
+    vi.useFakeTimers();
+    const workspaceDirectoryPicker = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ workspaceDirectoryPicker }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    const result = actions.pickWorkspaceDirectory().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(320_000);
+
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({
+      message: 'Open directory picker timed out after 320000ms',
+    });
+  });
+
+  it('rejects the directory picker without a connected client', async () => {
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => undefined,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.pickWorkspaceDirectory()).rejects.toThrow(
+      'Open directory picker failed: DaemonClient is not connected',
+    );
+  });
 });

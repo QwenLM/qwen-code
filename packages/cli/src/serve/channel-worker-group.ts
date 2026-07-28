@@ -13,6 +13,12 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
+import { CHANNEL_LOOP_MCP_SERVER_NAME } from '@qwen-code/channel-base';
+import {
+  CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  type ClientMcpOverWsRuntimeConfig,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ChannelDeliveryError } from './channel-delivery-ipc.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
@@ -242,6 +248,84 @@ export function createChannelWorkerGroup(
       ...(opts.shared.heartbeatTimeoutMs !== undefined
         ? { heartbeatTimeoutMs: opts.shared.heartbeatTimeoutMs }
         : {}),
+      registerChannelLoopMcp: async ({ sessionId, ownerId, sendMessage }) => {
+        runtime.clientMcpSenderRegistry.setSession(
+          CHANNEL_LOOP_MCP_SERVER_NAME,
+          sessionId,
+          sendMessage,
+          ownerId,
+        );
+        try {
+          const config: ClientMcpOverWsRuntimeConfig = {
+            type: 'sdk',
+            [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+          };
+          const result = await runtime.bridge.addSessionRuntimeMcpServer(
+            sessionId,
+            CHANNEL_LOOP_MCP_SERVER_NAME,
+            config,
+            ownerId,
+          );
+          if ((result as { skipped?: boolean }).skipped) {
+            throw new Error(
+              `runtime MCP add skipped: ${
+                (result as { reason?: string }).reason ?? 'unknown'
+              }`,
+            );
+          }
+          if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
+            throw new Error(
+              `channel loop MCP server conflicts with a configured MCP server`,
+            );
+          }
+          if (
+            !runtime.clientMcpSenderRegistry.ownsSession(
+              CHANNEL_LOOP_MCP_SERVER_NAME,
+              sessionId,
+              ownerId,
+            )
+          ) {
+            throw new Error('Channel loop MCP registration was superseded.');
+          }
+        } catch (error) {
+          if (
+            runtime.clientMcpSenderRegistry.deleteSession(
+              CHANNEL_LOOP_MCP_SERVER_NAME,
+              sessionId,
+              ownerId,
+            )
+          ) {
+            await runtime.bridge
+              .removeSessionRuntimeMcpServer(
+                sessionId,
+                CHANNEL_LOOP_MCP_SERVER_NAME,
+                ownerId,
+              )
+              .catch(() => {});
+          }
+          throw error;
+        }
+      },
+      unregisterChannelLoopMcp: async (sessionId, ownerId) => {
+        if (
+          !runtime.clientMcpSenderRegistry.deleteSession(
+            CHANNEL_LOOP_MCP_SERVER_NAME,
+            sessionId,
+            ownerId,
+          )
+        ) {
+          return;
+        }
+        try {
+          await runtime.bridge.removeSessionRuntimeMcpServer(
+            sessionId,
+            CHANNEL_LOOP_MCP_SERVER_NAME,
+            ownerId,
+          );
+        } catch (error) {
+          if (!(error instanceof SessionNotFoundError)) throw error;
+        }
+      },
       ...(opts.onReady
         ? {
             onReady: (snapshot) => {

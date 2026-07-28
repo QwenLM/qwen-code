@@ -295,7 +295,15 @@ export function wrapToVisualLines(text: string, width: number): string[] {
     let currentLine = '';
     let currentWidth = 0;
     for (const char of logicalLine) {
-      const charWidth = getCachedStringWidth(char);
+      // Clamped to 1, matching sliceTextByVisualHeight. `string-width` reports
+      // 0 for TAB, ZWJ and combining marks, so without this a run of them was
+      // charged nothing and the whole run counted as a single row: 50 tabs at
+      // width 10 came back as 1 row here and 5 there, for the same input. Any
+      // caller mixing the two -- scroll offsets, pending-render height -- then
+      // disagreed with itself. Erring high is the safe direction for a
+      // terminal: reserving a row too many costs a blank line, while counting
+      // one too few overflows the region and pushes content off screen.
+      const charWidth = Math.max(getCachedStringWidth(char), 1);
       if (currentWidth + charWidth > width && currentWidth > 0) {
         visualLines.push(currentLine);
         currentLine = '';

@@ -20,6 +20,7 @@ export interface ExecuteToolCallOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
+  onToolResultFullTurnModel?: (model: string) => boolean;
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
 }
@@ -48,6 +49,7 @@ export async function executeToolCall(
         resolve(completedToolCalls[0].response);
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
+      onToolResultFullTurnModel: options.onToolResultFullTurnModel,
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })
