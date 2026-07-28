@@ -799,6 +799,7 @@ import {
   fetchAllowedGitHub,
   createWorkspaceMcpBudget,
   deliverClientMcpMessage,
+  selectVisibleHistoryRecords,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -16487,5 +16488,57 @@ describe('deliverClientMcpMessage — reverse tool channel (#5626)', () => {
       payload: message,
       sessionId: 'session-1',
     });
+  });
+});
+
+describe('selectVisibleHistoryRecords', () => {
+  function makeRecord(
+    overrides: Partial<{
+      type: string;
+      subtype: string;
+      systemPayload: unknown;
+      forkedFrom: { sessionId: string; messageUuid: string };
+    }> = {},
+  ) {
+    return {
+      uuid: `uuid-${Math.random().toString(36).slice(2)}`,
+      parentUuid: null,
+      sessionId: 'test-session',
+      timestamp: '2025-01-01T00:00:00Z',
+      type: 'user',
+      ...overrides,
+    } as never;
+  }
+
+  const sourceBoundary = makeRecord({
+    type: 'system',
+    subtype: 'session_source',
+    systemPayload: { sourceType: 'side_task', sourceId: 'parent-1' },
+  });
+
+  it('filters records before a side-task source boundary regardless of hideInheritedHistory', () => {
+    const inherited = makeRecord({
+      forkedFrom: { sessionId: 'parent-1', messageUuid: 'm1' },
+    });
+    const before = makeRecord();
+    const after = makeRecord();
+    const records = [inherited, before, sourceBoundary, after];
+
+    const withHide = selectVisibleHistoryRecords(records, true);
+    const withoutHide = selectVisibleHistoryRecords(records, false);
+
+    expect(withHide).toEqual([sourceBoundary, after]);
+    expect(withoutHide).toEqual([sourceBoundary, after]);
+  });
+
+  it('filters forkedFrom records when hideInheritedHistory is true and no boundary exists', () => {
+    const inherited = makeRecord({
+      forkedFrom: { sessionId: 'parent-1', messageUuid: 'm1' },
+    });
+    const own = makeRecord();
+    const records = [inherited, own];
+
+    expect(selectVisibleHistoryRecords(records, true)).toEqual([own]);
+    expect(selectVisibleHistoryRecords(records, false)).toEqual(records);
   });
 });

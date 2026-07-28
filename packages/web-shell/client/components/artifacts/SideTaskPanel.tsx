@@ -186,6 +186,7 @@ function SideTaskSession({
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
 >) {
+  const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
   const blocks = useTranscriptBlocks();
@@ -226,10 +227,10 @@ function SideTaskSession({
             lastError = error;
           }
         }
-        onError?.(lastError, 'Failed to name side task');
+        onError?.(lastError, t('sideTask.renameFailed'));
       })();
     },
-    [actions, onError, onTitleChange, tabId],
+    [actions, onError, onTitleChange, t, tabId],
   );
 
   if (!connection.sessionId) {

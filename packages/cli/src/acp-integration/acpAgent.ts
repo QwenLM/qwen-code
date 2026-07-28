@@ -629,7 +629,7 @@ function shouldHideInheritedHistory(params: LoadSessionRequest): boolean {
   return meta?.[LOAD_REPLAY_HIDE_INHERITED_META_KEY] === true;
 }
 
-function selectVisibleHistoryRecords(
+export function selectVisibleHistoryRecords(
   records: ChatRecord[],
   hideInheritedHistory: boolean,
 ): ChatRecord[] {

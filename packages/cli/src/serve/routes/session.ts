@@ -2300,6 +2300,12 @@ export function registerSessionRoutes(
           if (!result.attached) {
             runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })
+              .then((killed) => {
+                if (!killed) return undefined;
+                return new SessionService(runtime.workspaceCwd!).removeSession(
+                  result.sessionId,
+                );
+              })
               .catch(() => {});
           } else {
             runtime.bridge

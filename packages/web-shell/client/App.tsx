@@ -8811,7 +8811,7 @@ export function App({
               >
             <div
               ref={chatPaneRef}
-              data-testid="chat-pane"
+              data-testid="chat-pane-container"
               className={[
                 styles.chatPane,
                 mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,

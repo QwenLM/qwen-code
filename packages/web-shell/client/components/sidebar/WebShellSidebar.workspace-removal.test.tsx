@@ -151,6 +151,7 @@ const capabilities = {
     'workspace_runtime_removal',
     'session_archive',
     'workspace_qualified_rest_core',
+    'session_source_metadata',
   ],
   workspaces: [
     {

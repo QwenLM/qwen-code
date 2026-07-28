@@ -4037,7 +4037,7 @@ describe('App session callbacks', () => {
     expect(environmentPanel?.getAttribute('data-floating')).toBe('true');
     expect(
       environmentPanel?.parentElement?.contains(
-        container.querySelector('[data-testid="chat-pane"]'),
+        container.querySelector('[data-testid="chat-pane-container"]'),
       ),
     ).toBe(true);
   });
@@ -4058,7 +4058,8 @@ describe('App session callbacks', () => {
     } as typeof ResizeObserver;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
       function () {
-        if (this.dataset['testid'] !== 'chat-pane') return new DOMRect();
+        if (this.dataset['testid'] !== 'chat-pane-container')
+          return new DOMRect();
         const panel = document.querySelector<HTMLElement>(
           '[data-testid="environment-panel"]',
         );

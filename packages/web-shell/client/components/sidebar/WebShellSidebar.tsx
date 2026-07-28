@@ -564,6 +564,9 @@ export function WebShellSidebar({
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const sourceMetadataEnabled = Boolean(
+    connection.capabilities?.features?.includes('session_source_metadata'),
+  );
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
@@ -605,7 +608,9 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
-    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+    ...(sourceMetadataEnabled
+      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+      : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -626,7 +631,9 @@ export function WebShellSidebar({
       enabled: organizationEnabled && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
-      sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+      ...(sourceMetadataEnabled
+        ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+        : {}),
       view: 'organized',
       group: 'pinned',
     });
@@ -650,7 +657,9 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
-    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+    ...(sourceMetadataEnabled
+      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+      : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -1057,7 +1066,9 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'active',
-            sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+            ...(sourceMetadataEnabled
+              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+              : {}),
             view: 'organized',
             group: 'pinned',
           });
@@ -1080,6 +1091,7 @@ export function WebShellSidebar({
   }, [
     displayedWorkspaces,
     organizationEnabled,
+    sourceMetadataEnabled,
     workspace.client,
     workspaceSessionsReloadToken,
   ]);
@@ -1131,7 +1143,9 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'archived',
-            sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+            ...(sourceMetadataEnabled
+              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+              : {}),
             ...(organizationEnabled
               ? { view: 'organized' as const, group: 'all' }
               : {}),
@@ -1172,6 +1186,7 @@ export function WebShellSidebar({
     organizationEnabled,
     secondaryArchivedReloadToken,
     sessionArchiveEnabled,
+    sourceMetadataEnabled,
     workspace.client,
     workspaceQualifiedRestCoreEnabled,
     workspaceSessionsReloadToken,
