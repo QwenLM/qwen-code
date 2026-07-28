@@ -50,12 +50,21 @@ function node() {
 
 class MockAudioContext {
   static latest: MockAudioContext | undefined;
+  static latestProcessor:
+    | (ReturnType<typeof node> & {
+        onaudioprocess: ((event: AudioProcessingEvent) => void) | null;
+      })
+    | undefined;
 
   state = 'running';
   sampleRate = 16_000;
   readonly destination = {};
   createMediaStreamSource = vi.fn(() => node());
-  createScriptProcessor = vi.fn(() => ({ ...node(), onaudioprocess: null }));
+  createScriptProcessor = vi.fn(() => {
+    const processor = { ...node(), onaudioprocess: null };
+    MockAudioContext.latestProcessor = processor;
+    return processor;
+  });
   createGain = vi.fn(() => ({ ...node(), gain: { value: 1 } }));
   resume = vi.fn(async () => {});
   close = vi.fn(async () => {
@@ -125,6 +134,7 @@ beforeEach(() => {
   streamPath = 'voice/stream';
   MockWebSocket.latest = undefined;
   MockAudioContext.latest = undefined;
+  MockAudioContext.latestProcessor = undefined;
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
     configurable: true,
@@ -393,6 +403,176 @@ describe('useVoiceCapture', () => {
     expect(track.stop).toHaveBeenCalledOnce();
     expect(context.close).toHaveBeenCalledOnce();
     expect(ws.readyState).toBe(3);
+  });
+
+  it('flushes buffered audio before a pending stop when the socket opens', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+    const processor = MockAudioContext.latestProcessor;
+    if (!processor?.onaudioprocess) {
+      throw new Error('Audio processor was not ready');
+    }
+
+    expect(processor.connect).toHaveBeenCalledOnce();
+    await act(async () => {
+      processor.onaudioprocess?.({
+        inputBuffer: {
+          getChannelData: () => new Float32Array([0.5, -0.5]),
+        },
+      } as AudioProcessingEvent);
+      result.stop();
+    });
+    expect(capture?.status).toBe('connecting');
+    expect(processor.onaudioprocess).toBeNull();
+
+    ws.readyState = MockWebSocket.OPEN;
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent[0]).toBe(JSON.stringify({ type: 'start' }));
+    expect(Array.from(new Int16Array(ws.sent[1] as ArrayBuffer))).toEqual([
+      16383, -16384,
+    ]);
+    expect(ws.sent[2]).toBe(JSON.stringify({ type: 'stop' }));
+    expect(capture?.status).toBe('transcribing');
+  });
+
+  it('fails and stops buffering when pre-open audio exceeds the limit', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    const processor = MockAudioContext.latestProcessor;
+    if (!ws || !processor?.onaudioprocess) {
+      throw new Error('Voice capture was not ready');
+    }
+    ws.readyState = 0;
+
+    const event = {
+      inputBuffer: {
+        getChannelData: () => new Float32Array(4096),
+      },
+    } as AudioProcessingEvent;
+    await act(async () => {
+      for (let frame = 0; frame < 235; frame += 1) {
+        processor.onaudioprocess?.(event);
+      }
+    });
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(
+      'Voice capture buffer limit reached while starting.',
+    );
+    expect(capture?.status).toBe('error');
+    expect(processor.onaudioprocess).toBeNull();
+    expect(ws.sent).toEqual([]);
+    expect(track.stop).toHaveBeenCalledOnce();
+  });
+
+  it('does not start capturing after release while microphone access is pending', async () => {
+    let resolveStream: (stream: {
+      getTracks: () => (typeof track)[];
+    }) => void = () => undefined;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(
+          () =>
+            new Promise<{ getTracks: () => (typeof track)[] }>((resolve) => {
+              resolveStream = resolve;
+            }),
+        ),
+      },
+      configurable: true,
+    });
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+      result.stop();
+    });
+    await act(async () => {
+      resolveStream({ getTracks: () => [track] });
+      await Promise.resolve();
+    });
+    const ws = MockWebSocket.latest;
+    const processor = MockAudioContext.latestProcessor;
+    if (!ws || !processor) throw new Error('Voice capture was not ready');
+
+    expect(processor.connect).not.toHaveBeenCalled();
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent).toEqual([
+      JSON.stringify({ type: 'start' }),
+      JSON.stringify({ type: 'stop' }),
+    ]);
+    expect(capture?.status).toBe('transcribing');
+  });
+
+  it('clears a pending stop when capture is aborted', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+
+    await act(async () => {
+      result.stop();
+      result.abort();
+    });
+    ws.readyState = MockWebSocket.OPEN;
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent).toEqual([]);
+    expect(capture?.status).toBe('idle');
+  });
+
+  it('clears the start timeout when stop is deferred until connect', async () => {
+    vi.useFakeTimers();
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+
+    await act(async () => {
+      result.stop();
+    });
+    expect(capture?.status).toBe('connecting');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(capture?.status).toBe('connecting');
+
+    ws.readyState = MockWebSocket.OPEN;
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent[0]).toBe(JSON.stringify({ type: 'start' }));
+    expect(ws.sent[1]).toBe(JSON.stringify({ type: 'stop' }));
+    expect(capture?.status).toBe('transcribing');
   });
 
   it('does not leak a transcription timer when stop is called twice', async () => {

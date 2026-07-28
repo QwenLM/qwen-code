@@ -5,8 +5,12 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ChannelWebhookTask } from '@qwen-code/channel-base';
+import {
+  CHANNEL_LOOP_MCP_SERVER_NAME,
+  type ChannelWebhookTask,
+} from '@qwen-code/channel-base';
 import { createChannelWorkerGroup } from './channel-worker-group.js';
+import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -137,6 +141,82 @@ const deliveryRequest: ChannelDeliveryRequest = {
 };
 
 describe('createChannelWorkerGroup', () => {
+  it('wires loop MCP to the exact workspace session with owner-safe cleanup', async () => {
+    const addSessionRuntimeMcpServer = vi.fn(async () => ({ toolCount: 3 }));
+    const removeSessionRuntimeMcpServer = vi.fn(async () => ({}));
+    const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    const secondary = {
+      ...fakeRuntime(SECONDARY, false),
+      bridge: {
+        addSessionRuntimeMcpServer,
+        removeSessionRuntimeMcpServer,
+      },
+      clientMcpSenderRegistry,
+    } as unknown as WorkspaceRuntime;
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true), secondary]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    createChannelWorkerGroup({
+      groups: [
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    const oldSender = vi.fn(async (payload: unknown) => payload);
+
+    await recorded[0]!.opts.registerChannelLoopMcp?.({
+      sessionId: 'session-1',
+      ownerId: 'worker-old',
+      sendMessage: oldSender,
+    });
+
+    expect(addSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      'session-1',
+      CHANNEL_LOOP_MCP_SERVER_NAME,
+      {
+        type: 'sdk',
+        __clientMcpOverWs: true,
+      },
+      'worker-old',
+    );
+    const reverseSender = clientMcpSenderRegistry.lookup(
+      CHANNEL_LOOP_MCP_SERVER_NAME,
+    );
+    await expect(
+      reverseSender?.(
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { sessionId: 'session-1' },
+      ),
+    ).resolves.toMatchObject({ method: 'tools/list' });
+    expect(oldSender).toHaveBeenCalledOnce();
+
+    const newSender = vi.fn(async () => ({ owner: 'new' }));
+    clientMcpSenderRegistry.setSession(
+      CHANNEL_LOOP_MCP_SERVER_NAME,
+      'session-1',
+      newSender,
+      'worker-new',
+    );
+    await recorded[0]!.opts.unregisterChannelLoopMcp?.(
+      'session-1',
+      'worker-old',
+    );
+
+    expect(removeSessionRuntimeMcpServer).not.toHaveBeenCalled();
+    await expect(
+      clientMcpSenderRegistry.lookup(CHANNEL_LOOP_MCP_SERVER_NAME)?.(
+        { jsonrpc: '2.0', id: 2, method: 'ping' },
+        { sessionId: 'session-1' },
+      ),
+    ).resolves.toEqual({ owner: 'new' });
+  });
+
   it('routes delivery to the exact workspace owner', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),

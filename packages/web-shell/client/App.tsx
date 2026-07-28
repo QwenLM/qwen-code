@@ -3516,6 +3516,43 @@ export function App({
       sessionActions,
     ],
   );
+
+  const resolveSessionForWorkspace = useCallback(
+    async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
+      try {
+        if (!forceCreate) {
+          // Reuse the connected session only when it owns the target checkout.
+          // For a linked-worktree session the owned checkout is the worktree
+          // path, not the base workspace (activeWorkspaceCwd), so a Commit
+          // opened on the base workspace must not borrow the worktree session.
+          const sessionOwnerCwd = sessionWorktree?.path ?? activeWorkspaceCwd;
+          if (connection.sessionId && sessionOwnerCwd === cwd) {
+            return connection.sessionId;
+          }
+          // Fetch the most recent session for this workspace.
+          const sessions = await workspace.client
+            .workspaceByCwd(cwd)
+            .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
+          if (sessions.length > 0) return sessions[0].sessionId;
+        }
+        // No session exists or forced: create one.
+        const result = await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).createSession({ workspaceCwd: cwd });
+        return result.sessionId;
+      } catch {
+        return undefined;
+      }
+    },
+    [
+      connection.sessionId,
+      activeWorkspaceCwd,
+      workspace.client,
+      sessionActions,
+      sessionWorktree,
+    ],
+  );
+
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -3544,6 +3581,14 @@ export function App({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
       view: 'diff',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenCommit = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'commit',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
@@ -7484,6 +7529,8 @@ export function App({
               workspaceCwd={gitDialog.workspaceCwd}
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
+              sessionId={connection.sessionId}
+              resolveSessionForWorkspace={resolveSessionForWorkspace}
               onClose={() => setGitDialog(undefined)}
             />
           )}
@@ -7785,7 +7832,28 @@ export function App({
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
-                    setGitDialog({ workspaceCwd, view: 'diff' })
+                    setGitDialog({
+                      workspaceCwd,
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'diff',
+                    })
+                  }
+                  onOpenCommit={(workspaceCwd) =>
+                    setGitDialog({
+                      workspaceCwd,
+                      // A worktree session commits in the worktree checkout,
+                      // not the base workspace cwd — but only for the active
+                      // session's own workspace chip; another workspace's chip
+                      // has no association with this session's worktree.
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'commit',
+                    })
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
@@ -8680,12 +8748,18 @@ export function App({
                                     undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
+                          gitCwd={sessionWorktree?.path}
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd
                               ? handleOpenGitDiff
+                              : undefined
+                          }
+                          onOpenCommit={
+                            gitDiffWorkspaceCwd
+                              ? handleOpenCommit
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}
