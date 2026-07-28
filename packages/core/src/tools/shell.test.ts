@@ -1292,9 +1292,10 @@ describe('ShellTool', () => {
         };
       };
 
-      const startBackgroundAndExit = async (deferred: {
-        end: Mock;
-      }): Promise<{ shellId: string }> => {
+      const startBackgroundAndExit = async (
+        deferred: { end: Mock },
+        { expectFlushRequested = true } = {},
+      ): Promise<{ shellId: string }> => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           deferred as unknown as fs.WriteStream,
         );
@@ -1318,8 +1319,10 @@ describe('ShellTool', () => {
         });
         // Flush the .then() microtask attached to resultPromise.
         await new Promise((r) => setImmediate(r));
-        // The stream has been asked to flush…
-        expect(deferred.end).toHaveBeenCalledTimes(1);
+        if (expectFlushRequested) {
+          // The stream has been asked to flush…
+          expect(deferred.end).toHaveBeenCalledTimes(1);
+        }
         return { shellId: entry.shellId };
       };
 
@@ -1340,8 +1343,9 @@ describe('ShellTool', () => {
           expect.any(Number),
         );
 
-        // Exactly once: a late duplicate event must not re-transition.
-        deferred.emit('finish');
+        // Exactly once: the still-armed 'error' listener firing later
+        // must not re-transition. (A second 'finish' emit would be
+        // vacuous — `once` semantics already drained its handler.)
         deferred.emit('error');
         expect(registry.complete).toHaveBeenCalledTimes(1);
       });
@@ -1365,10 +1369,10 @@ describe('ShellTool', () => {
       });
 
       it('transitions after the flush timeout when the stream never settles', async () => {
-        // Wedged fd whose 'finish'/'error' never fire (e.g. destroyed
-        // by an earlier write error): the 10s timer is the backstop.
-        // Fake only the timer functions so the setImmediate-based
-        // microtask flush in the helper stays real.
+        // Wedged fd whose 'finish'/'error' never fire (e.g. stuck
+        // mid-flush on an unresponsive filesystem): the 10s timer is
+        // the backstop. Fake only the timer functions so the
+        // setImmediate-based microtask flush in the helper stays real.
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
         try {
           const registry = mockConfig.getBackgroundShellRegistry();
@@ -1387,6 +1391,113 @@ describe('ShellTool', () => {
           // The finish landing after the timeout must not double-fire.
           deferred.emit('finish');
           expect(registry.complete).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('settles immediately when the stream was already destroyed by a write error', async () => {
+        // fs.WriteStream has autoDestroy — an earlier EIO/ENOSPC write
+        // error destroys the stream long before the child exits. On a
+        // destroyed writable `.end()` is a silent no-op and neither
+        // 'finish' nor 'error' will ever fire, so waiting would stall
+        // the transition (and every /tasks or sidecar reader) for the
+        // full flush timeout with nothing left to flush.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = { ...makeDeferredStream(), destroyed: true };
+        const { shellId } = await startBackgroundAndExit(deferred, {
+          expectFlushRequested: false,
+        });
+
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+        // The dead stream is not asked to flush at all.
+        expect(deferred.end).not.toHaveBeenCalled();
+      });
+
+      it('settles immediately when the stream has already finished flushing', async () => {
+        // writableFinished means every byte reached the fd and 'finish'
+        // already fired — nothing left to wait for. (The guard must NOT
+        // use writableEnded: that flag is already true mid-flush, which
+        // is exactly the window these tests exist to protect.)
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = { ...makeDeferredStream(), writableFinished: true };
+        const { shellId } = await startBackgroundAndExit(deferred, {
+          expectFlushRequested: false,
+        });
+
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+        expect(deferred.end).not.toHaveBeenCalled();
+      });
+
+      it('still waits when the stream has ended but not yet finished flushing', async () => {
+        // writableEnded flips true the moment `.end()` is called while
+        // bytes can still sit in the libuv queue — writableFinished
+        // only turns true with 'finish'. The short-circuit must NOT
+        // fire in this state: settling here is exactly the truncation
+        // window the flush wait exists to prevent.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = {
+          ...makeDeferredStream(),
+          writableEnded: true,
+          writableFinished: false,
+        };
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // Mid-flush: the transition is still held…
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        // …until the flush actually completes.
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('disarms the flush timer when stream.end() throws synchronously', async () => {
+        // The catch path settles immediately — but it must also clear
+        // the already-armed timer, or 10s later it fires and logs a
+        // misleading flush-timeout warning for a shell that settled
+        // long ago.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          deferred.end.mockImplementation(() => {
+            throw new Error('EBADF: bad file descriptor, close');
+          });
+          const { shellId } = await startBackgroundAndExit(deferred);
+
+          // Settled via the catch path, immediately.
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('closing output stream on settle threw'),
+          );
+
+          // The timer must be gone: advancing past the timeout fires
+          // nothing and logs nothing.
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+            expect.stringContaining('flush timed out'),
+          );
         } finally {
           vi.useRealTimers();
         }
