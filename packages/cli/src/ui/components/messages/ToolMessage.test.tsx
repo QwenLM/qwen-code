@@ -198,6 +198,20 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('dashscope.aliyuncs.com');
   });
 
+  it('shows a tool-result vision notice without replacing its display', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        visionBridgeNotice="Converted 1 image via qwen3-vl-plus."
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).toContain('MockMarkdown:Test result');
+  });
+
   it('sanitizes terminal controls in the vision bridge display summary', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
