@@ -3413,6 +3413,50 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('preserves Todo Stop Guard lineage for a sent sub-session completion', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'worker-related',
+      });
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      expect(spawn).toBeTypeOf('function');
+      await spawn?.({
+        prompt: 'finish the delegated work',
+        completion: 'sent',
+      });
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-related',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{
+              taskId: string;
+              continuesTodoStopGuardWorkChain: boolean;
+            }>;
+          }
+        ).notificationQueue,
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: 'worker-related',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      );
+    });
+
     it('drops oldest background notifications when the queue reaches its cap', () => {
       (
         session as unknown as {

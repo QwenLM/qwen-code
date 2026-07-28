@@ -819,11 +819,11 @@ export interface BackgroundNotificationQueueItem {
   taskId: string;
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
-  continuesTodoStopGuardWorkChain: boolean;
   toolUseId?: string;
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
+  continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
 }
 
@@ -1604,7 +1604,7 @@ export class Session implements SessionContext {
   }
 
   #notificationContinuesTodoStopGuardWorkChain(
-    item: BackgroundNotificationQueueItem,
+    item: QueuedBackgroundNotification,
   ): boolean {
     return item.continuesTodoStopGuardWorkChain;
   }
@@ -1781,6 +1781,9 @@ export class Session implements SessionContext {
         throw new Error(
           'create_sub_session: bridge returned non-string sessionId',
         );
+      }
+      if (req.completion === 'sent') {
+        this.relatedAgentIds.add(resp['sessionId']);
       }
       return {
         sessionId: resp['sessionId'],
@@ -5779,7 +5782,12 @@ export class Session implements SessionContext {
 
     this.persistedBackgroundNotificationTaskIds.add(item.taskId);
     if (!this.disposed && !this.closing) {
-      this.#enqueueBackgroundNotification({ ...item, persisted: true });
+      this.#enqueueBackgroundNotification({
+        ...item,
+        continuesTodoStopGuardWorkChain:
+          this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
+        persisted: true,
+      });
     }
     return true;
   }
