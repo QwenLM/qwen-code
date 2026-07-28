@@ -4,16 +4,39 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { TestRig } from '../test-helper.js';
 import {
-  TestRig,
-  printDebugInfo,
-  validateModelOutput,
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
 } from '../test-helper.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+const ENV_KEYS = [
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+  'QWEN_MODEL',
+  'NO_PROXY',
+  'no_proxy',
+] as const;
+
 describe('list_directory', () => {
+  let savedEnv: Record<string, string | undefined> = {};
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedEnv[key];
+      }
+    }
+    savedEnv = {};
+  });
+
   it('should be able to list a directory', async () => {
     const rig = new TestRig();
     await rig.setup('should be able to list a directory');
@@ -21,52 +44,62 @@ describe('list_directory', () => {
     rig.mkdir('subdir');
     rig.sync();
 
-    // Poll for filesystem changes to propagate in containers
     await rig.poll(
       () => {
-        // Check if the files exist in the test directory
         const file1Path = join(rig.testDir!, 'file1.txt');
         const subdirPath = join(rig.testDir!, 'subdir');
         return existsSync(file1Path) && existsSync(subdirPath);
       },
-      1000, // 1 second max wait
-      50, // check every 50ms
+      1000,
+      50,
     );
 
-    const prompt = `Call the list_directory tool on the current directory. You must use the tool — do not answer from the folder structure in your context.`;
+    const noProxy = IS_CONTAINER_SANDBOX
+      ? CONTAINER_SANDBOX_NO_PROXY
+      : '127.0.0.1,localhost';
 
-    const result = await rig.run(prompt);
+    const fakeServer = await startFakeOpenAIServer(
+      ({ requestIndex }) => {
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('list_directory', { path: '.' }, 'list-dir'),
+            ],
+          };
+        }
+        return { content: 'The directory contains file1.txt and subdir.' };
+      },
+      IS_CONTAINER_SANDBOX
+        ? {
+            listenHost: '0.0.0.0' as const,
+            baseUrlHost: 'host.docker.internal',
+          }
+        : undefined,
+    );
 
-    const foundToolCall = await rig.waitForToolCall('list_directory');
-
-    // The model sometimes answers from the folder structure already present in
-    // the system prompt instead of calling the tool. Accept either a tool call
-    // OR correct text output so the test doesn't flake on model variability.
-    const hasCorrectOutput =
-      result.includes('file1.txt') && result.includes('subdir');
-
-    // Add debugging information
-    if (!foundToolCall && !hasCorrectOutput) {
-      const allTools = printDebugInfo(rig, result, {
-        'Found tool call': foundToolCall,
-        'Contains file1.txt': result.includes('file1.txt'),
-        'Contains subdir': result.includes('subdir'),
-      });
-
-      console.error(
-        'List directory calls:',
-        allTools
-          .filter((t) => t.toolRequest.name === 'list_directory')
-          .map((t) => t.toolRequest.args),
-      );
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
     }
+    process.env['OPENAI_API_KEY'] = 'fake-key';
+    process.env['OPENAI_BASE_URL'] = fakeServer.baseUrl;
+    process.env['OPENAI_MODEL'] = 'fake-model';
+    process.env['QWEN_MODEL'] = 'fake-model';
+    process.env['NO_PROXY'] = noProxy;
+    process.env['no_proxy'] = noProxy;
 
-    expect(
-      foundToolCall || hasCorrectOutput,
-      'Expected a list_directory tool call or correct directory listing in output',
-    ).toBeTruthy();
+    try {
+      const prompt = `Call the list_directory tool on the current directory.`;
+      const result = await rig.run(prompt);
 
-    // Validate model output - will throw if no output, warn if missing expected content
-    validateModelOutput(result, ['file1.txt', 'subdir'], 'List directory test');
+      const foundToolCall = await rig.waitForToolCall('list_directory');
+
+      expect(
+        foundToolCall ||
+          (result.includes('file1.txt') && result.includes('subdir')),
+        'Expected a list_directory tool call or correct directory listing in output',
+      ).toBeTruthy();
+    } finally {
+      await fakeServer.close();
+    }
   });
 });

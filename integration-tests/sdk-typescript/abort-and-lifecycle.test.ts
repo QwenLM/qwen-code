@@ -21,8 +21,36 @@ import {
   createSharedTestOptions,
   createResultWaiter,
 } from './test-helper.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import {
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
+
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? CONTAINER_SANDBOX_NO_PROXY
+  : '127.0.0.1,localhost';
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+
+function fakeModelOptions(baseUrl: string) {
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+      no_proxy: LOCAL_OPENAI_NO_PROXY,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
+  };
+}
+
+const LONG_CONTENT_CHUNKS = Array.from({ length: 30 }, (_, i) => `chunk${i} `);
 
 describe('AbortController and Process Lifecycle (E2E)', () => {
   let helper: SDKTestHelper;
@@ -42,10 +70,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const TARGET_CHARS = 50;
       let accumulatedText = '';
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { contentChunks: LONG_CONTENT_CHUNKS };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Write a very long story about TypeScript programming',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           includePartialMessages: true,
@@ -91,16 +124,22 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(accumulatedText.length).toBeGreaterThanOrEqual(TARGET_CHARS);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
     it('should handle abort during query execution', async () => {
       const controller = new AbortController();
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello! How can I help you today?' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           debug: false,
@@ -126,16 +165,22 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(receivedFirstMessage).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
     it('should handle abort immediately after query starts', async () => {
       const controller = new AbortController();
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { contentChunks: LONG_CONTENT_CHUNKS };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Write a very long essay',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           debug: false,
@@ -156,16 +201,22 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(error instanceof AbortError).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
   });
 
   describe('Process Lifecycle Monitoring', () => {
     it('should handle normal process completion', async () => {
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello! How can I help you?' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
         },
@@ -187,16 +238,22 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(false).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
         expect(completedSuccessfully).toBe(true);
         expect(receivedAssistantMessage).toBe(true);
       }
     });
 
     it('should handle process cleanup after error', async () => {
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello world! This is a test response.' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Hello world',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
         },
@@ -220,6 +277,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       } finally {
         // Should cleanup successfully even after error
         await q.close();
+        await fakeServer.close();
         expect(true).toBe(true); // Cleanup completed
       }
     });
@@ -227,10 +285,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
   describe('Input Stream Control', () => {
     it('should support endInput() method', async () => {
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello! How can I help you?' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
         },
@@ -254,12 +317,17 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(endInputCalled).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
   });
 
   describe('Closed stdin behavior (asyncGenerator prompt)', () => {
     it('should reject control requests after stdin closes', async () => {
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'OK' };
+      }, FAKE_SERVER_OPTIONS);
+
       const resultWaiter = createResultWaiter(1);
       let promptDoneResolve: () => void = () => {};
       const promptDonePromise = new Promise<void>((resolve) => {
@@ -285,6 +353,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         prompt: createPrompt(),
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
         },
@@ -310,12 +379,30 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         );
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
 
     it('should handle control responses when stdin closes before replies', async () => {
       const testFilePath = await helper.getPath('test.txt');
       await helper.createFile('test.txt', 'original content');
+
+      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex === 0) {
+          return { content: 'OK' };
+        }
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: testFilePath,
+                content: 'updated',
+              }),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      }, FAKE_SERVER_OPTIONS);
 
       // Bounded promise with explicit timer arming and clearing on settle.
       // `startTimer()` lets each phase begin counting only when its phase
@@ -406,6 +493,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         prompt: createPrompt(),
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           permissionMode: 'default',
           coreTools: ['read_file', 'write_file'],
@@ -471,6 +559,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       } finally {
         for (const t of pendingTimers) t.clear();
         await q.close();
+        await fakeServer.close();
       }
     });
   });
@@ -505,10 +594,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should throw AbortError with correct properties', async () => {
       const controller = new AbortController();
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { contentChunks: LONG_CONTENT_CHUNKS };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Explain the concept of async programming',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           debug: false,
@@ -530,6 +624,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect((error as Error).message).toBeDefined();
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
   });
@@ -538,10 +633,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should capture stderr messages when debug is enabled', async () => {
       const stderrMessages: string[] = [];
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello!' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: true,
           stderr: (msg: string) => {
@@ -556,6 +656,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         }
       } finally {
         await q.close();
+        await fakeServer.close();
         expect(stderrMessages.length).toBeGreaterThan(0);
       }
     });
@@ -563,10 +664,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should not capture stderr when debug is disabled', async () => {
       const stderrMessages: string[] = [];
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello!' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
           stderr: (msg: string) => {
@@ -581,6 +687,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         }
       } finally {
         await q.close();
+        await fakeServer.close();
         // Should have minimal or no stderr output when debug is false
         expect(stderrMessages.length).toBeLessThan(10);
       }
@@ -591,10 +698,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should cleanup properly after abort', async () => {
       const controller = new AbortController();
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { contentChunks: LONG_CONTENT_CHUNKS };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Write a very long essay about programming',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           debug: false,
@@ -616,6 +728,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         }
       } finally {
         await q.close();
+        await fakeServer.close();
         expect(true).toBe(true); // Cleanup completed after abort
       }
     });
@@ -623,10 +736,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should handle multiple abort calls gracefully', async () => {
       const controller = new AbortController();
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { contentChunks: LONG_CONTENT_CHUNKS };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Count to 100',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           debug: false,
@@ -646,16 +764,22 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(isAbortError(error)).toBe(true);
       } finally {
         await q.close();
+        await fakeServer.close();
       }
     });
   });
 
   describe('Resource Management Edge Cases', () => {
     it('should handle close() called multiple times', async () => {
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello!' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
         },
@@ -669,6 +793,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       await q.close();
       await q.close();
       await q.close();
+      await fakeServer.close();
 
       // Should not throw
       expect(true).toBe(true);
@@ -677,10 +802,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should handle abort after close', async () => {
       const controller = new AbortController();
 
+      const fakeServer = await startFakeOpenAIServer(() => {
+        return { content: 'Hello!' };
+      }, FAKE_SERVER_OPTIONS);
+
       const q = query({
         prompt: 'Hello',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           abortController: controller,
           debug: false,
@@ -694,6 +824,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
       // Abort after close
       controller.abort();
+      await fakeServer.close();
 
       // Should not throw
       expect(true).toBe(true);
