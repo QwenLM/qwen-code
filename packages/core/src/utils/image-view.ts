@@ -180,8 +180,8 @@ async function prepareImage(
   } catch {
     signal.throwIfAborted();
     throw new ImageViewError(
-      'unsupported_image',
-      `Unsupported image. Expected a static PNG, JPEG, or WebP file: ${filePath}`,
+      'decode_failed',
+      `Failed to decode image metadata (file may be corrupt): ${filePath}`,
     );
   }
   signal.throwIfAborted();

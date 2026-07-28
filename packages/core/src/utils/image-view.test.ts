@@ -110,4 +110,13 @@ describe('image views', () => {
     expect(metadata).toMatchObject({ width: 80, height: 80, format: 'jpeg' });
     expect(view.bytes.length).toBeLessThanOrEqual(9 * 1024 * 1024);
   });
+
+  it('reports decode_failed for a corrupt canonical image', async () => {
+    const filePath = path.join(root, 'corrupt.png');
+    await fs.writeFile(filePath, 'not a real png');
+
+    await expect(renderImageOverview(filePath, signal)).rejects.toMatchObject({
+      code: 'decode_failed',
+    });
+  });
 });

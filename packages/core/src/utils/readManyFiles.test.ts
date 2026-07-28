@@ -193,7 +193,7 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.filePath).toBe(absolutePath);
     });
 
-    it('preserves unsupported images when the bridge handoff flag is set', async () => {
+    it('renders canonical images through the overview pipeline even when the bridge handoff flag is set', async () => {
       const relativePath = 'screenshot.png';
       const absolutePath = path.join(tempRootDir, relativePath);
       await sharp({
