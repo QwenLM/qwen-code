@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
@@ -26,6 +26,12 @@ const ENV_KEYS = [
 
 describe('list_directory', () => {
   let savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+    }
+  });
 
   afterEach(() => {
     for (const key of ENV_KEYS) {
@@ -58,10 +64,6 @@ describe('list_directory', () => {
     const noProxy = IS_CONTAINER_SANDBOX
       ? CONTAINER_SANDBOX_NO_PROXY
       : '127.0.0.1,localhost';
-
-    for (const key of ENV_KEYS) {
-      savedEnv[key] = process.env[key];
-    }
 
     const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
       if (requestIndex === 0) {

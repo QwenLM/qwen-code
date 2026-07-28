@@ -793,11 +793,14 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const iterator = q[Symbol.asyncIterator]();
       await iterator.next();
 
-      // Close multiple times
-      await q.close();
-      await q.close();
-      await q.close();
-      await fakeServer.close();
+      try {
+        // Close multiple times
+        await q.close();
+        await q.close();
+        await q.close();
+      } finally {
+        await fakeServer.close();
+      }
 
       // Should not throw
       expect(true).toBe(true);
@@ -824,14 +827,17 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       // Start and close immediately
       const iterator = q[Symbol.asyncIterator]();
       await iterator.next();
-      await q.close();
+      try {
+        await q.close();
 
-      // Abort after close
-      controller.abort();
-      await fakeServer.close();
+        // Abort after close
+        controller.abort();
 
-      // Should not throw
-      expect(true).toBe(true);
+        // Should not throw
+        expect(true).toBe(true);
+      } finally {
+        await fakeServer.close();
+      }
     });
   });
 });
