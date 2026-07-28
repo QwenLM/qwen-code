@@ -8710,6 +8710,40 @@ describe('createServeApp', () => {
       expect(spawnCallCount).toBe(1);
     });
 
+    it('releases inFlightSessionIds after a spawn failure (finally cleanup)', async () => {
+      let spawnCallCount = 0;
+      const bridge = fakeBridge({
+        spawnImpl: (req) => {
+          spawnCallCount++;
+          if (spawnCallCount === 1) {
+            return Promise.reject(new Error('spawn boom'));
+          }
+          return Promise.resolve({
+            sessionId: req.sessionId ?? 'fake-retry',
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-retry',
+          });
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sid = '550e8400-e29b-41d4-a716-446655440000';
+      const makeReq = () =>
+        request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: sid });
+      const firstRes = await makeReq();
+      expect(firstRes.status).toBe(500);
+      const secondRes = await makeReq();
+      expect(secondRes.status).toBe(200);
+      expect(spawnCallCount).toBe(2);
+    });
+
     it('400 when sessionId is not a UUID (path traversal guard)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
