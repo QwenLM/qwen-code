@@ -136,6 +136,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       .filter((t) => t.updated_at > windowSince)
       .sort((a, b) => a.updated_at.localeCompare(b.updated_at));
 
+    for (const t of allTodos) {
+      if (t.updated_at <= windowSince) {
+        this.api.TodoLists.done({ todoId: t.id }).catch(() => {});
+      }
+    }
+
     for (const todo of todos) {
       if (
         !todo.project ||
@@ -213,26 +219,30 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     if (todo.author.username === this.botUsername) return;
 
     const isNoteMention = /#note_\d+$/.test(todo.target_url);
+    const needsDescription =
+      !isNoteMention || template.includes('%description%');
 
     let description = '';
-    if (isNoteMention) {
-      try {
+    if (needsDescription) {
+      if (isNoteMention) {
+        try {
+          description = await this.fetchDescription(
+            chatId,
+            targetType,
+            todo.target.iid,
+          );
+        } catch (err) {
+          process.stderr.write(
+            `[Channel:${this.name}] fetchDescription failed (metadata only): ${err}\n`,
+          );
+        }
+      } else {
         description = await this.fetchDescription(
           chatId,
           targetType,
           todo.target.iid,
         );
-      } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] fetchDescription failed (metadata only): ${err}\n`,
-        );
       }
-    } else {
-      description = await this.fetchDescription(
-        chatId,
-        targetType,
-        todo.target.iid,
-      );
     }
 
     const text = isNoteMention

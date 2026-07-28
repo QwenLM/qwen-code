@@ -141,18 +141,19 @@ The adapter detects mentions by scanning the text for `@bot-username` using a ca
 The adapter uses GitLab's Todos API as the message source:
 
 1. **Poll** `GET /todos?state=pending` for new todos
-2. **Filter** by `updated_at > cursor` and configured `action_prompt_template`
-3. **Detect mention type** via `target_url` anchor:
+2. **Clean up stale todos**: todos with `updated_at <= cursor` are marked done (best-effort) to prevent them from being re-fetched on every poll
+3. **Filter** by `updated_at > cursor` and configured `action_prompt_template`
+4. **Detect mention type** via `target_url` anchor:
    - `#note_123` present → comment mention → text is `todo.body` (the comment)
    - No anchor → description mention → text is the issue/MR description
-4. **Dispatch** the envelope through `handleInbound` (GroupGate applies mention policy)
-5. **Advance cursor** and **mark todo done** (best-effort)
+5. **Dispatch** the envelope through `handleInbound` (GroupGate applies mention policy)
+6. **Advance cursor** and **mark todo done** (best-effort)
 
-The cursor (`lastProcessedAt`) advances regardless of dispatch success or failure. Failed dispatches are logged but not retried — the user can re-mention the bot to trigger a new todo.
+The cursor (`lastProcessedAt`) advances regardless of dispatch success or failure. Failed dispatches post a ⚠️ error comment on the issue/MR and are not retried — the user can re-mention the bot to trigger a new todo.
 
 ## Known Limitations
 
-- **First start skips existing pending todos.** The cursor initializes to "now" on first launch.
+- **First start skips existing pending todos.** The cursor initializes to "now" on first launch. Pre-existing pending todos are marked done on the first poll cycle to avoid perpetual re-fetching.
 - The bot does not read prior conversation history — only the triggering content is processed.
 - **Confidential (internal) notes:** If someone @mentions the bot in a confidential note, the todo body contains that internal text and the agent will process it. The bot's reply is always posted as a **public** note, potentially exposing internal discussion. GitLab's todo API does not expose note visibility, so the adapter cannot filter this. Avoid @mentioning the bot in confidential notes.
 - Requires `read_api` + `api` PAT scopes. Group-level or project-level tokens work if they have these scopes.
