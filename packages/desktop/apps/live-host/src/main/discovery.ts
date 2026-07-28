@@ -139,15 +139,19 @@ export async function readDiscoveryFile(
 export class DiscoveryMonitor {
   private timer: NodeJS.Timeout | undefined;
   private lastIdentity = '';
+  private pollInFlight: Promise<void> | undefined;
+  private lifecycleGeneration = 0;
 
   constructor(
     readonly path: string,
     private readonly listener: (result: DiscoveryResult) => void,
     private readonly intervalMs = 1_000,
+    private readonly reader = readDiscoveryFile,
   ) {}
 
   start(): void {
     if (this.timer) return;
+    this.lifecycleGeneration += 1;
     void this.poll();
     this.timer = setInterval(() => void this.poll(), this.intervalMs);
     this.timer.unref();
@@ -156,10 +160,26 @@ export class DiscoveryMonitor {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.lifecycleGeneration += 1;
+    this.pollInFlight = undefined;
+    this.lastIdentity = '';
   }
 
   async poll(): Promise<void> {
-    const result = await readDiscoveryFile(this.path);
+    if (this.pollInFlight) return await this.pollInFlight;
+    const generation = this.lifecycleGeneration;
+    const operation = this.pollOnce(generation);
+    this.pollInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.pollInFlight === operation) this.pollInFlight = undefined;
+    }
+  }
+
+  private async pollOnce(generation: number): Promise<void> {
+    const result = await this.reader(this.path);
+    if (generation !== this.lifecycleGeneration) return;
     const identity =
       result.kind === 'ready'
         ? `ready:${result.signature}`

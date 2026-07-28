@@ -72,7 +72,6 @@ function readyHello(overrides: Partial<LiveHostHello> = {}): LiveHostHello {
     instanceNonce: 'host_instance_nonce_0001',
     permissions: {
       microphone: 'granted',
-      inputMonitoring: 'granted',
       accessibility: 'granted',
       screenRecording: 'granted',
     },
@@ -94,6 +93,7 @@ function coordinator(
     getProviderReadiness: () => ({ state: 'ready' }),
     ...options,
   });
+  value.setAppshotReadiness({ state: 'ready' });
   coordinators.push(value);
   return value;
 }
@@ -114,6 +114,23 @@ afterEach(() => {
 });
 
 describe('LiveHostCoordinator', () => {
+  it('fails closed until Appshot has been verified', () => {
+    const value = new LiveHostCoordinator({
+      daemonInstanceNonce: 'daemon_instance_nonce_0002',
+      getProviderReadiness: () => ({ state: 'ready' }),
+      shortcut: 'Command+Shift+L',
+    });
+    coordinators.push(value);
+    connectReady(value);
+
+    expect(value.getStatus()).toMatchObject({
+      available: false,
+      blocker: 'appshot',
+      shortcut: 'Command+Shift+L',
+      requirements: { appshot: 'unavailable' },
+    });
+  });
+
   it('requires the discovery nonce before accepting a Host', () => {
     const value = coordinator();
     const socket = new FakeSocket();
@@ -141,7 +158,6 @@ describe('LiveHostCoordinator', () => {
       requirements: {
         host: 'ready',
         microphone: 'ready',
-        inputMonitoring: 'ready',
         accessibility: 'ready',
         screenRecording: 'ready',
         audioInput: 'ready',
@@ -164,49 +180,36 @@ describe('LiveHostCoordinator', () => {
     expect(duplicate.closeCode).toBe(4009);
   });
 
-  it('sends daemon-validated WebShell targets only to a handshaken Host', () => {
+  it('never sends WebShell session locators to the native Host', () => {
     const value = coordinator();
-    const socket = new FakeSocket();
-    value.attachHost(socket as unknown as WebSocket, value.daemonInstanceNonce);
-    const target = {
-      workspaceId: 'workspace-1',
-      workspaceCwd: '/work/one',
-      sessionId: 'session-1',
-    };
-
-    expect(value.sendOpenSession(target)).toBe(false);
-    socket.receive(readyHello());
-    expect(value.sendOpenSession(target)).toBe(true);
-
-    expect(socket.messages()).toContainEqual({
-      type: 'host.open_session',
-      target,
-    });
-  });
-
-  it('contains an asynchronously rejected open-session handler', async () => {
-    const value = coordinator({
-      handlers: {
-        onOpenSession: async () => {
-          throw new Error('open failed');
-        },
-      },
-    });
     const socket = connectReady(value);
-
-    socket.receive({
-      type: 'host.action',
-      action: 'open_session',
-      locator: { workspaceCwd: '/work/one', sessionId: 'session-1' },
+    const call = value.start('new');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/private/conversations/coordinator',
+      sessionId: 'coordinator-session',
     });
+    value.setWorkers(call.epoch, [
+      {
+        workspaceCwd: '/private/conversations/worker',
+        sessionId: 'worker-session',
+      },
+    ]);
 
-    await vi.waitFor(() => {
-      expect(socket.messages()).toContainEqual({
-        type: 'host.error',
-        code: 'unsupported_action',
-        message: 'Opening the session failed.',
-      });
+    expect(value.getStatus()).toMatchObject({
+      coordinator: { sessionId: 'coordinator-session' },
+      workers: [{ sessionId: 'worker-session' }],
     });
+    expect(value.isActiveSession('coordinator-session')).toBe(true);
+    expect(value.isActiveSession('worker-session')).toBe(true);
+    expect(value.isActiveSession('unrelated-session')).toBe(false);
+    for (const message of socket.messages()) {
+      if (message.type !== 'host.welcome' && message.type !== 'host.state') {
+        continue;
+      }
+      expect(message.status).not.toHaveProperty('coordinator');
+      expect(message.status).not.toHaveProperty('workers');
+      expect(JSON.stringify(message)).not.toContain('/private/conversations');
+    }
   });
 
   it('hard-gates start on every permission and self-check', () => {
@@ -289,6 +292,177 @@ describe('LiveHostCoordinator', () => {
     expect(value.getStatus().state).toBe('idle');
   });
 
+  it('keeps the stopping call epoch until the session drain succeeds', async () => {
+    let finishStop: (() => void) | undefined;
+    const onStop = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStop = resolve;
+        }),
+    );
+    const value = coordinator({ handlers: { onStop } });
+    connectReady(value);
+    const call = value.start('resume');
+
+    expect(value.stop()).toMatchObject({
+      state: 'stopping',
+      callId: call.callId,
+    });
+    expect(value.setTranscript(call.epoch, 'late final transcript')).toBe(true);
+    expect(value.getStatus()).toMatchObject({
+      state: 'stopping',
+      callId: call.callId,
+      transcript: 'late final transcript',
+    });
+
+    finishStop?.();
+    await vi.waitFor(() => {
+      expect(value.getStatus()).toMatchObject({ state: 'idle' });
+      expect(value.getStatus().callId).toBeUndefined();
+    });
+  });
+
+  it('starts a replacement only after the exact pending input is persisted', async () => {
+    let finishPersistence!: () => void;
+    const persisted = new Promise<void>((resolve) => {
+      finishPersistence = resolve;
+    });
+    const lifecycle: string[] = [];
+    const onStart = vi.fn((call: { mode: 'resume' | 'new' }) => {
+      lifecycle.push(`start:${call.mode}`);
+    });
+    const onStop = vi.fn(async () => {
+      lifecycle.push('stop:requested');
+      await persisted;
+      lifecycle.push('persist:exact-final');
+    });
+    const value = coordinator({ handlers: { onStart, onStop } });
+    connectReady(value);
+    const first = value.start('resume');
+
+    const pending = value.start('new');
+
+    expect(pending).toMatchObject({
+      epoch: first.epoch,
+      callId: first.callId,
+      status: { state: 'stopping', callId: first.callId },
+    });
+    expect(onStart).toHaveBeenCalledOnce();
+    expect(lifecycle).toEqual(['start:resume', 'stop:requested']);
+
+    finishPersistence();
+    await vi.waitFor(() => expect(onStart).toHaveBeenCalledTimes(2));
+
+    expect(lifecycle).toEqual([
+      'start:resume',
+      'stop:requested',
+      'persist:exact-final',
+      'start:new',
+    ]);
+    expect(value.getStatus()).toMatchObject({ state: 'starting' });
+    expect(value.getStatus().callId).not.toBe(first.callId);
+  });
+
+  it('does not rotate when persistence fails during replacement', async () => {
+    const onStart = vi.fn();
+    const value = coordinator({
+      handlers: {
+        onStart,
+        onStop: async () => ({
+          error: 'Exact final transcript was not saved.',
+        }),
+      },
+    });
+    connectReady(value);
+    value.start('resume');
+
+    value.start('new');
+
+    await vi.waitFor(() => {
+      expect(value.getStatus()).toMatchObject({
+        state: 'error',
+        message: 'Exact final transcript was not saved.',
+      });
+    });
+    expect(onStart).toHaveBeenCalledOnce();
+  });
+
+  it('lets an explicit stop cancel a pending replacement', async () => {
+    let finishStop!: () => void;
+    const onStart = vi.fn();
+    const value = coordinator({
+      handlers: {
+        onStart,
+        onStop: () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      },
+    });
+    connectReady(value);
+    value.start('resume');
+    value.start('new');
+
+    value.stop();
+    finishStop();
+
+    await vi.waitFor(() =>
+      expect(value.getStatus()).toMatchObject({ state: 'idle' }),
+    );
+    expect(onStart).toHaveBeenCalledOnce();
+  });
+
+  it('publishes a visible error when the session drain cannot be confirmed', async () => {
+    let finishStop: ((outcome: { error: string }) => void) | undefined;
+    const onStop = vi.fn(
+      () =>
+        new Promise<{ error: string }>((resolve) => {
+          finishStop = resolve;
+        }),
+    );
+    const value = coordinator({ handlers: { onStop } });
+    connectReady(value);
+    value.start('resume');
+    value.stop();
+
+    finishStop?.({ error: 'The final spoken input was not persisted.' });
+    await vi.waitFor(() => {
+      expect(value.getStatus()).toMatchObject({
+        state: 'error',
+        message: 'The final spoken input was not persisted.',
+      });
+    });
+  });
+
+  it('rejects the removed permission and session actions', () => {
+    const removedActions = [
+      {
+        type: 'host.action',
+        action: 'request_permission',
+        permission: 'microphone',
+      },
+      {
+        type: 'host.action',
+        action: 'open_session',
+        locator: { workspaceCwd: '/work/one', sessionId: 'session-1' },
+      },
+    ];
+
+    for (const action of removedActions) {
+      const value = coordinator();
+      const socket = connectReady(value);
+
+      socket.receive(action);
+
+      expect(socket.closeCode).toBe(1002);
+      expect(socket.messages()).toContainEqual({
+        type: 'host.error',
+        code: 'invalid_message',
+        message: 'Invalid Live Host message.',
+      });
+    }
+  });
+
   it('contains a synchronous start-handler failure in the call state', async () => {
     const value = coordinator({
       handlers: {
@@ -325,10 +499,32 @@ describe('LiveHostCoordinator', () => {
     value.setMute({ inputMuted: true, outputMuted: true });
     socket.receiveAudio(call.epoch, [2, 0]);
     expect(onInputAudio).toHaveBeenCalledTimes(1);
-    expect(value.sendOutputAudio(call.epoch, Buffer.from([0, 0]))).toBe(false);
+    const sentBeforeMutedOutput = socket.sent.length;
+    expect(value.sendOutputAudio(call.epoch, Buffer.from([0, 0]))).toBe(true);
+    expect(value.sendOutputAudio(call.epoch, Buffer.from([1, 0]))).toBe(true);
+    expect(socket.sent).toHaveLength(sentBeforeMutedOutput);
+    expect(value.getStatus()).toMatchObject({
+      callId: call.callId,
+      outputMuted: true,
+    });
     expect(socket.messages()).toContainEqual({
       type: 'host.clear_output',
       epoch: call.epoch,
+    });
+  });
+
+  it('fails the call when the provider audio path rejects a frame', () => {
+    const value = coordinator({
+      handlers: { onInputAudio: () => false },
+    });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+
+    socket.receiveAudio(call.epoch, [0, 0]);
+
+    expect(value.getStatus()).toMatchObject({
+      state: 'error',
+      message: 'Live Voice audio transport dropped input.',
     });
   });
 
@@ -404,6 +600,39 @@ describe('LiveHostCoordinator', () => {
     });
   });
 
+  it('retains session ownership while readiness-loss persistence drains', async () => {
+    let finishStop: (() => void) | undefined;
+    const stopPending = new Promise<void>((resolve) => {
+      finishStop = resolve;
+    });
+    const value = coordinator({
+      handlers: { onStop: () => stopPending },
+    });
+    connectReady(value);
+    const call = value.start('resume');
+    value.setCoordinator(call.epoch, {
+      workspaceCwd: '/conversations/live-1',
+      sessionId: 'session-live-1',
+    });
+
+    value.setProviderReachability({
+      state: 'unavailable',
+      blocker: 'provider_unreachable',
+    });
+
+    expect(value.isActiveSession('session-live-1')).toBe(true);
+    expect(value.getStatus()).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      callId: call.callId,
+    });
+
+    finishStop?.();
+    await vi.waitFor(() => {
+      expect(value.isActiveSession('session-live-1')).toBe(false);
+    });
+  });
+
   it('keeps the active call while provider readiness is checking but rejects a new start', () => {
     const onStop = vi.fn();
     const value = coordinator({ handlers: { onStop } });
@@ -433,6 +662,63 @@ describe('LiveHostCoordinator', () => {
 
     value.setProviderReachability(undefined);
     value.stop();
+  });
+
+  it('stops an active call when Appshot is lost while the provider is checking', () => {
+    const onStop = vi.fn();
+    const value = coordinator({ handlers: { onStop } });
+    connectReady(value);
+    const call = value.start('resume');
+    value.setProviderReachability({ state: 'checking' });
+
+    value.setAppshotReadiness({
+      state: 'unavailable',
+      message: 'Appshot tools became unavailable.',
+    });
+
+    expect(value.getStatus()).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      blocker: 'appshot',
+      message: 'Appshot tools became unavailable.',
+      requirements: { provider: 'checking', appshot: 'unavailable' },
+    });
+    expect(value.getStatus().callId).toBeUndefined();
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(onStop).toHaveBeenCalledWith({
+      epoch: call.epoch,
+      callId: call.callId,
+    });
+  });
+
+  it('stops an active call when a permission is lost while the provider is checking', () => {
+    const onStop = vi.fn();
+    const value = coordinator({ handlers: { onStop } });
+    const socket = connectReady(value);
+    const call = value.start('resume');
+    value.setProviderReachability({ state: 'checking' });
+
+    socket.receive(
+      readyHello({
+        permissions: {
+          ...readyHello().permissions,
+          screenRecording: 'denied',
+        },
+      }),
+    );
+
+    expect(value.getStatus()).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      blocker: 'screen_recording_permission',
+      requirements: { provider: 'checking', screenRecording: 'denied' },
+    });
+    expect(value.getStatus().callId).toBeUndefined();
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(onStop).toHaveBeenCalledWith({
+      epoch: call.epoch,
+      callId: call.callId,
+    });
   });
 
   it('stops exactly once when readiness changes during an explicit stop', () => {

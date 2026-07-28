@@ -1,8 +1,8 @@
 import { ipcRenderer } from 'electron';
-import { CaptureRecoveryPolicy } from './capture-recovery-policy.ts';
+import { HostAudioLifecycle } from './audio-lifecycle.ts';
+import { scheduleOutputFrame } from './audio-output-queue.ts';
 
 const OUTPUT_SAMPLE_RATE = 24_000;
-const MAX_QUEUED_OUTPUT_SECONDS = 10;
 
 type AudioSelfCheck = {
   audioInput: boolean;
@@ -29,26 +29,47 @@ export class HostAudioEngine {
   private inputMuted = false;
   private captureEpoch: number | undefined;
   private captureGeneration = 0;
-  private captureRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly captureRecoveryPolicy = new CaptureRecoveryPolicy();
   private mediaDeviceListenerInstalled = false;
   private microphoneAllowed = false;
+  private serviceActive = false;
+  private selfCheckGeneration = 0;
+  private readonly lifecycle = new HostAudioLifecycle();
 
   private readonly handleDeviceChange = (): void => {
-    if (this.captureRequested && this.inputMuted) return;
-    if (this.captureRequested && this.captureStream) {
-      this.scheduleCaptureRecovery();
-      return;
-    }
-    ipcRenderer.send('live:audio:capture-error', {
-      code: 'audio_input_device_changed',
-    });
-    void this.initialize(this.microphoneAllowed);
+    void this.recheck('audio_device_changed');
   };
 
-  async initialize(microphoneAllowed: boolean): Promise<void> {
-    this.microphoneAllowed = microphoneAllowed;
-    this.installMediaDeviceListener();
+  initialize(microphoneAllowed: boolean): Promise<void> {
+    return this.lifecycle.activate(async () => {
+      this.serviceActive = true;
+      this.microphoneAllowed = microphoneAllowed;
+      this.installMediaDeviceListener();
+      await this.recheckCurrent('audio_initialize');
+    });
+  }
+
+  recheck(reason: string): Promise<void> {
+    return this.lifecycle.runIfCurrent(() => this.recheckCurrent(reason));
+  }
+
+  private async recheckCurrent(reason: string): Promise<void> {
+    if (!this.serviceActive) return;
+    const generation = ++this.selfCheckGeneration;
+    this.captureRequested = false;
+    this.captureEpoch = undefined;
+    ipcRenderer.send('live:audio:self-check', {
+      audioInput: false,
+      audioOutput: false,
+      inputError: reason,
+      outputError: reason,
+    } satisfies AudioSelfCheck);
+    if (!this.serviceActive || generation !== this.selfCheckGeneration) return;
+    await this.resetAudioContexts();
+    if (!this.serviceActive || generation !== this.selfCheckGeneration) return;
+    await this.runSelfCheck(generation);
+  }
+
+  private async runSelfCheck(generation: number): Promise<void> {
     const result: AudioSelfCheck = {
       audioInput: false,
       audioOutput: false,
@@ -60,7 +81,7 @@ export class HostAudioEngine {
       result.outputError = errorCode(error);
     }
 
-    if (microphoneAllowed) {
+    if (this.microphoneAllowed) {
       try {
         await this.checkInput();
         result.audioInput = true;
@@ -68,14 +89,24 @@ export class HostAudioEngine {
         result.inputError = errorCode(error);
       }
     }
-    ipcRenderer.send('live:audio:self-check', result);
+    if (this.serviceActive && generation === this.selfCheckGeneration) {
+      ipcRenderer.send('live:audio:self-check', result);
+    }
   }
 
-  async setCapture(
+  setCapture(enabled: boolean, muted: boolean, epoch?: number): Promise<void> {
+    return this.lifecycle.runIfCurrent(() =>
+      this.setCaptureCurrent(enabled, muted, epoch),
+    );
+  }
+
+  private async setCaptureCurrent(
     enabled: boolean,
     muted: boolean,
     epoch?: number,
   ): Promise<void> {
+    if (enabled && !this.serviceActive)
+      throw new Error('audio_service_inactive');
     if (
       enabled &&
       !muted &&
@@ -88,7 +119,6 @@ export class HostAudioEngine {
     this.inputMuted = muted;
     this.captureEpoch = epoch;
     if (!enabled || muted) {
-      this.cancelCaptureRecovery();
       await this.stopCapture();
       return;
     }
@@ -103,6 +133,7 @@ export class HostAudioEngine {
 
   async play(frame: Uint8Array): Promise<void> {
     if (
+      !this.serviceActive ||
       this.outputMuted ||
       frame.byteLength === 0 ||
       frame.byteLength % 2 !== 0
@@ -112,8 +143,6 @@ export class HostAudioEngine {
     const generation = this.outputGeneration;
     const context = await this.ensureOutputContext();
     if (generation !== this.outputGeneration || this.outputMuted) return;
-    const queuedSeconds = Math.max(0, this.outputCursor - context.currentTime);
-    if (queuedSeconds >= MAX_QUEUED_OUTPUT_SECONDS) this.clearOutput();
 
     const samples = frame.byteLength / 2;
     const audioBuffer = context.createBuffer(1, samples, OUTPUT_SAMPLE_RATE);
@@ -122,15 +151,19 @@ export class HostAudioEngine {
     for (let index = 0; index < samples; index += 1) {
       channel[index] = view.getInt16(index * 2, true) / 0x8000;
     }
+    const schedule = scheduleOutputFrame(
+      context.currentTime,
+      this.outputCursor,
+      audioBuffer.duration,
+    );
 
     const source = context.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(context.destination);
     source.onended = () => this.outputSources.delete(source);
     this.outputSources.add(source);
-    const startAt = Math.max(context.currentTime + 0.01, this.outputCursor);
-    source.start(startAt);
-    this.outputCursor = startAt + audioBuffer.duration;
+    source.start(schedule.startAt);
+    this.outputCursor = schedule.endAt;
   }
 
   clearOutput(): void {
@@ -146,21 +179,30 @@ export class HostAudioEngine {
     this.outputCursor = this.outputContext?.currentTime ?? 0;
   }
 
-  async dispose(): Promise<void> {
-    this.clearOutput();
-    this.captureRequested = false;
-    this.captureEpoch = undefined;
-    this.cancelCaptureRecovery();
-    await this.stopCapture();
-    await this.outputContext?.close();
-    this.outputContext = undefined;
-    if (this.mediaDeviceListenerInstalled) {
-      navigator.mediaDevices.removeEventListener(
-        'devicechange',
-        this.handleDeviceChange,
-      );
-      this.mediaDeviceListenerInstalled = false;
-    }
+  dispose(): Promise<void> {
+    let captureClose = Promise.resolve();
+    return this.lifecycle.deactivate(
+      () => {
+        this.serviceActive = false;
+        this.selfCheckGeneration += 1;
+        this.clearOutput();
+        this.captureRequested = false;
+        this.captureEpoch = undefined;
+        this.microphoneAllowed = false;
+        captureClose = this.stopCapture();
+        if (this.mediaDeviceListenerInstalled) {
+          navigator.mediaDevices.removeEventListener(
+            'devicechange',
+            this.handleDeviceChange,
+          );
+          this.mediaDeviceListenerInstalled = false;
+        }
+      },
+      async () => {
+        await captureClose;
+        await this.resetAudioContexts();
+      },
+    );
   }
 
   private async checkInput(): Promise<void> {
@@ -321,14 +363,13 @@ export class HostAudioEngine {
       for (const track of stream.getAudioTracks()) {
         const handleUnavailable = (): void => {
           if (generation === this.captureGeneration) {
-            this.scheduleCaptureRecovery();
+            void this.recheck('audio_input_track_unavailable');
           }
         };
         track.addEventListener('ended', handleUnavailable, { once: true });
         track.addEventListener('mute', handleUnavailable, { once: true });
       }
       if (context.state === 'suspended') await context.resume();
-      this.captureRecoveryPolicy.reset();
     } catch (error) {
       for (const track of stream.getTracks()) track.stop();
       await context.close().catch(() => undefined);
@@ -349,6 +390,15 @@ export class HostAudioEngine {
     await context?.close().catch(() => undefined);
   }
 
+  private async resetAudioContexts(): Promise<void> {
+    this.clearOutput();
+    await this.stopCapture();
+    const outputContext = this.outputContext;
+    this.outputContext = undefined;
+    this.outputCursor = 0;
+    await outputContext?.close().catch(() => undefined);
+  }
+
   private installMediaDeviceListener(): void {
     if (this.mediaDeviceListenerInstalled) return;
     navigator.mediaDevices.addEventListener(
@@ -356,37 +406,5 @@ export class HostAudioEngine {
       this.handleDeviceChange,
     );
     this.mediaDeviceListenerInstalled = true;
-  }
-
-  private scheduleCaptureRecovery(): void {
-    if (
-      !this.captureRequested ||
-      this.inputMuted ||
-      this.captureRecoveryTimer
-    ) {
-      return;
-    }
-    const delay = this.captureRecoveryPolicy.nextDelayMs();
-    if (delay === undefined) {
-      this.captureRequested = false;
-      ipcRenderer.send('live:audio:capture-error', {
-        code: 'audio_input_recovery_exhausted',
-      });
-      void this.stopCapture();
-      return;
-    }
-
-    void this.stopCapture();
-    this.captureRecoveryTimer = setTimeout(() => {
-      this.captureRecoveryTimer = undefined;
-      if (!this.captureRequested || this.inputMuted) return;
-      void this.startCapture().catch(() => this.scheduleCaptureRecovery());
-    }, delay);
-  }
-
-  private cancelCaptureRecovery(): void {
-    if (this.captureRecoveryTimer) clearTimeout(this.captureRecoveryTimer);
-    this.captureRecoveryTimer = undefined;
-    this.captureRecoveryPolicy.reset();
   }
 }

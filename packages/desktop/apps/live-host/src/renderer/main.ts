@@ -1,5 +1,5 @@
 import type { HostPublicState, LiveHostApi } from '../shared/host-api.ts';
-import type { HostPermissions, SessionLocator } from '../shared/protocol.ts';
+import type { HostPermissions } from '../shared/protocol.ts';
 
 declare global {
   interface Window {
@@ -18,23 +18,12 @@ function button(
 ): HTMLButtonElement {
   const element = document.createElement('button');
   element.type = 'button';
+  element.dataset.liveInteractive = '';
   element.textContent = label;
   element.disabled = options?.disabled ?? false;
   if (options?.primary) element.className = 'primary';
   element.addEventListener('click', action);
   return element;
-}
-
-function sessionRow(label: string, locator: SessionLocator): HTMLElement {
-  const row = document.createElement('div');
-  row.className = 'session-link';
-  const title = document.createElement('span');
-  title.textContent = label;
-  row.append(
-    title,
-    button('打开', () => void window.qwenLiveHost.openSession(locator)),
-  );
-  return row;
 }
 
 function permissionRow(
@@ -66,6 +55,7 @@ function render(state: HostPublicState): void {
   app.replaceChildren();
   const panel = document.createElement('section');
   panel.className = 'panel';
+  panel.dataset.liveInteractive = '';
 
   const header = document.createElement('div');
   header.className = 'header';
@@ -79,7 +69,7 @@ function render(state: HostPublicState): void {
   identity.append(orb, title);
   const hint = document.createElement('span');
   hint.className = 'hint';
-  hint.textContent = '⌘ ⌘';
+  hint.textContent = state.live.shortcut;
   header.append(identity, hint);
   panel.append(header);
 
@@ -95,7 +85,7 @@ function render(state: HostPublicState): void {
   const transcript = document.createElement('div');
   transcript.className = 'transcript';
   transcript.textContent =
-    state.live.transcript || '双击 Command 开始 Live 对话。';
+    state.live.transcript || `按 ${state.live.shortcut} 开始 Live 对话。`;
   panel.append(transcript);
 
   const active = !['idle', 'unavailable', 'error'].includes(state.live.state);
@@ -133,39 +123,36 @@ function render(state: HostPublicState): void {
   );
   panel.append(actions);
 
-  if (!state.live.available) {
+  if (state.connection === 'ready' && !state.live.available) {
     const permissions = document.createElement('div');
     permissions.className = 'permissions';
     permissions.append(
       permissionRow('麦克风', 'microphone', state.permissions.microphone),
-      permissionRow(
-        '输入监控（DoubleCommand）',
-        'inputMonitoring',
-        state.permissions.inputMonitoring,
-      ),
-      permissionRow(
-        '辅助功能（Appshot）',
-        'accessibility',
-        state.permissions.accessibility,
-      ),
-      permissionRow(
-        '屏幕录制（Appshot）',
-        'screenRecording',
-        state.permissions.screenRecording,
-      ),
     );
+    if (state.cuaInstalled) {
+      permissions.append(
+        permissionRow(
+          '辅助功能（Appshot）',
+          'accessibility',
+          state.permissions.accessibility,
+        ),
+        permissionRow(
+          '屏幕录制（Appshot）',
+          'screenRecording',
+          state.permissions.screenRecording,
+        ),
+      );
+    } else {
+      const missing = document.createElement('div');
+      missing.className = 'permission missing';
+      const title = document.createElement('span');
+      title.textContent = 'CuaDriver';
+      const status = document.createElement('span');
+      status.textContent = '未安装';
+      missing.append(title, status);
+      permissions.append(missing);
+    }
     panel.append(permissions);
-  }
-
-  if (state.live.coordinator || state.live.workers?.length) {
-    const sessions = document.createElement('div');
-    sessions.className = 'sessions';
-    if (state.live.coordinator)
-      sessions.append(sessionRow('当前对话', state.live.coordinator));
-    state.live.workers?.forEach((worker, index) => {
-      sessions.append(sessionRow(`任务 ${index + 1}`, worker));
-    });
-    panel.append(sessions);
   }
 
   app.append(panel);

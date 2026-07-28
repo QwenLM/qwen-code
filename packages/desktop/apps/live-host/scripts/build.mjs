@@ -1,7 +1,6 @@
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
 import { build as esbuild } from 'esbuild';
 import { build as viteBuild } from 'vite';
 
@@ -9,15 +8,6 @@ const appDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(appDir, 'dist');
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
-
-const nativeResult = spawnSync(
-  process.execPath,
-  [join(appDir, 'scripts', 'build-native-helper.mjs')],
-  {
-    stdio: 'inherit',
-  },
-);
-if (nativeResult.status !== 0) process.exit(nativeResult.status ?? 1);
 
 await esbuild({
   entryPoints: [join(appDir, 'src', 'main', 'index.ts')],

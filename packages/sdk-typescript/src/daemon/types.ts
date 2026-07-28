@@ -670,7 +670,10 @@ export interface DaemonBranchInfo {
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
+  /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from `workspaceCwd`. */
+  currentCwd?: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
   /**
@@ -2481,7 +2484,6 @@ export type DaemonLiveBlocker =
   | 'host_disconnected'
   | 'host_version'
   | 'microphone_permission'
-  | 'input_monitoring_permission'
   | 'accessibility_permission'
   | 'screen_recording_permission'
   | 'audio_input'
@@ -2508,6 +2510,7 @@ export interface DaemonLiveStatus {
   v: 1;
   available: boolean;
   state: DaemonLiveState;
+  shortcut: string;
   blocker?: DaemonLiveBlocker;
   message?: string;
   callId?: string;
@@ -2520,7 +2523,6 @@ export interface DaemonLiveStatus {
     Record<
       | 'host'
       | 'microphone'
-      | 'inputMonitoring'
       | 'accessibility'
       | 'screenRecording'
       | 'audioInput'
@@ -2535,7 +2537,6 @@ export interface DaemonLiveStatus {
     version?: string;
     protocolVersion?: number;
   };
-  installUrl?: string;
 }
 
 export interface DaemonLiveMuteUpdate {

@@ -159,6 +159,88 @@ function createRemovalController(
 }
 
 describe('owned workspace runtime publication', () => {
+  it('allows only the daemon-owned Live runtime to nest under the primary workspace', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test', { primary: true }),
+    ]);
+    const runtime = makeRuntime(
+      '/Users/test/Documents/Qwen Code/Conversations',
+      {
+        provenance: 'live-conversation',
+        removable: false,
+      },
+    );
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).resolves.toBe(runtime);
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+  });
+
+  it('keeps nested owned runtimes blocked for non-Live provenance', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/Users/test/nested-scratch', {
+      provenance: 'managed-scratch',
+    });
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'managed-scratch',
+        () => undefined,
+      ),
+    ).rejects.toThrow('nests with an existing workspace');
+    expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+  });
+
+  it('does not let the Live root contain an existing workspace', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test/Documents/Qwen Code/Conversations/project', {
+        primary: true,
+      }),
+    ]);
+    const runtime = makeRuntime(
+      '/Users/test/Documents/Qwen Code/Conversations',
+      {
+        provenance: 'live-conversation',
+        removable: false,
+      },
+    );
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).rejects.toThrow('nests with an existing workspace');
+    expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+  });
+
   it('shares registry publication and runtime-added hooks', async () => {
     const registry = createMockRegistry([
       makeRuntime('/primary', { primary: true }),

@@ -40,8 +40,7 @@ body {
 
 .header,
 .actions,
-.permission,
-.session-link {
+.permission {
   display: flex;
   align-items: center;
 }
@@ -165,27 +164,28 @@ button:disabled {
   opacity: 0.42;
 }
 
-.permissions,
-.sessions {
+.permissions {
   display: grid;
   gap: 5px;
   overflow: auto;
 }
 
-.permission,
-.session-link {
+.permission {
   justify-content: space-between;
   gap: 8px;
   font-size: 11px;
   color: #cbd0de;
 }
 
-.permission button,
-.session-link button {
+.permission button {
   min-height: 23px;
   font-size: 10px;
 }
 
 .granted {
   color: #67dda7;
+}
+
+.missing {
+  color: #ffaaa5;
 }

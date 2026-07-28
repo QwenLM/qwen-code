@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { LiveDaemonConnection } from '../daemon-connection.ts';
+import {
+  canSendHostControlMessage,
+  LiveDaemonConnection,
+} from '../daemon-connection.ts';
 import { BoundedReconnectPolicy } from '../reconnect-policy.ts';
 import {
   INPUT_AUDIO_EPOCH_BYTES,
   LIVE_PROTOCOL_VERSION,
+  MAX_SOCKET_BUFFERED_BYTES,
+  type HostAction,
   type HostControlMessage,
 } from '../../shared/protocol.ts';
 
@@ -72,14 +77,12 @@ describe('LiveDaemonConnection', () => {
     );
     const snapshots: string[] = [];
     const outputFrames: Uint8Array[] = [];
-    const openedSessions: string[] = [];
     const connection = new LiveDaemonConnection(
       '0.0.5',
       {
         getReadiness: () => ({
           permissions: {
             microphone: 'granted',
-            inputMonitoring: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -93,7 +96,6 @@ describe('LiveDaemonConnection', () => {
         onSnapshot: (snapshot) => snapshots.push(snapshot.phase),
         onOutputAudio: (frame) => outputFrames.push(frame),
         onClearOutput: () => undefined,
-        onOpenSession: (target) => openedSessions.push(target.sessionId),
       },
       discoveryPath,
     );
@@ -116,6 +118,30 @@ describe('LiveDaemonConnection', () => {
     assert.equal(hello.protocolVersion, LIVE_PROTOCOL_VERSION);
     assert.equal(hello.bundleId, 'com.alibaba.qwen-code.live-host');
 
+    const requiredActions: HostAction[] = [
+      { type: 'host.action', action: 'stop', epoch: 0 },
+      { type: 'host.action', action: 'toggle', epoch: 0 },
+      {
+        type: 'host.action',
+        action: 'mute',
+        inputMuted: true,
+        outputMuted: false,
+        epoch: 0,
+      },
+    ];
+    for (const action of requiredActions) {
+      assert.equal(connection.sendAction(action), false);
+      assert.equal(
+        canSendHostControlMessage(
+          action,
+          true,
+          true,
+          MAX_SOCKET_BUFFERED_BYTES + 1,
+        ),
+        false,
+      );
+    }
+
     peer.send(
       JSON.stringify({
         type: 'host.welcome',
@@ -123,7 +149,12 @@ describe('LiveDaemonConnection', () => {
         daemonInstanceNonce: 'abcdefghijklmnop',
         heartbeatIntervalMs: 1_000,
         epoch: 0,
-        status: { v: 1, available: true, state: 'idle' },
+        status: {
+          v: 1,
+          available: true,
+          state: 'idle',
+          shortcut: 'Command+Q',
+        },
       }),
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -150,19 +181,6 @@ describe('LiveDaemonConnection', () => {
     peer.send(Buffer.alloc(1_920), { binary: true });
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(outputFrames.at(-1)?.byteLength, 1_920);
-
-    peer.send(
-      JSON.stringify({
-        type: 'host.open_session',
-        target: {
-          workspaceId: 'live-conversation',
-          workspaceCwd: '/tmp/live-conversation',
-          sessionId: 'worker-1',
-        },
-      }),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.deepEqual(openedSessions, ['worker-1']);
   });
 
   it('keeps retrying the same discovery identity slowly after the fast budget', async () => {
@@ -206,7 +224,12 @@ describe('LiveDaemonConnection', () => {
           daemonInstanceNonce: 'sameidentitynonce',
           heartbeatIntervalMs: 1_000,
           epoch: 0,
-          status: { v: 1, available: true, state: 'idle' },
+          status: {
+            v: 1,
+            available: true,
+            state: 'idle',
+            shortcut: 'Command+Q',
+          },
         }),
       );
     });
@@ -218,7 +241,6 @@ describe('LiveDaemonConnection', () => {
         getReadiness: () => ({
           permissions: {
             microphone: 'granted',
-            inputMonitoring: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -232,7 +254,6 @@ describe('LiveDaemonConnection', () => {
         onSnapshot: (snapshot) => errors.push(snapshot.error),
         onOutputAudio: () => undefined,
         onClearOutput: () => undefined,
-        onOpenSession: () => undefined,
       },
       discoveryPath,
       {

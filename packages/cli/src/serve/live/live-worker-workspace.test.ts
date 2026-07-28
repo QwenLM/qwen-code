@@ -9,13 +9,15 @@ import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { afterEach, describe, expect, it } from 'vitest';
+import { SessionService } from '@qwen-code/qwen-code-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSubSessionLauncher } from '../create-sub-session.js';
 import { LiveConversationWorkspace } from './conversation-workspace.js';
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -56,6 +58,7 @@ function createBridge(options: {
   let sequence = 0;
 
   const bridge = {
+    getSessionSummary: (sessionId: string) => ({ sessionId }),
     spawnOrAttach: async () => {
       const sessionId = `worker-${++sequence}`;
       operations.push(`spawn:${sessionId}`);
@@ -225,6 +228,9 @@ describe('Live worker workspace isolation', () => {
       directoryRetained,
     }) => {
       const { workspace, root } = await createConversationWorkspace();
+      const removeSession = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue(true);
       const fake = createBridge({
         boundWorkspace: root,
         failCwdChange: true,
@@ -264,6 +270,11 @@ describe('Live worker workspace isolation', () => {
       } else {
         expect(fake.killed).toEqual(['worker-1']);
         expect(fake.detached).toEqual([]);
+      }
+      if (!attached && killSessionResult) {
+        expect(removeSession).toHaveBeenCalledWith('worker-1');
+      } else {
+        expect(removeSession).not.toHaveBeenCalled();
       }
       if (directoryRetained) {
         expect((await lstat(fake.cwdChanges[0]!.path)).isDirectory()).toBe(

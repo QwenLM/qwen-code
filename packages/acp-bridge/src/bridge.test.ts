@@ -674,6 +674,10 @@ describe('createAcpSessionBridge', () => {
       allowedRoots: [WS_A],
       managedRelocation: 'live-conversation',
     });
+    const attached = await bridge.resumeSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+    });
 
     expect(sessionCdCalls).toEqual([
       {
@@ -683,6 +687,11 @@ describe('createAcpSessionBridge', () => {
         managedRelocation: 'live-conversation',
       },
     ]);
+    expect(attached).toMatchObject({
+      workspaceCwd: WS_A,
+      currentCwd: target,
+      attached: true,
+    });
     await bridge.shutdown();
   });
 
@@ -6545,6 +6554,39 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('signals prompt admission only after the pending queue owns the prompt', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const admitted = vi.fn();
+
+      await expect(
+        bridge.sendPrompt(
+          'missing-session',
+          {
+            sessionId: 'missing-session',
+            prompt: [{ type: 'text', text: 'not admitted' }],
+          },
+          undefined,
+          { onPromptAdmitted: admitted },
+        ),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(admitted).not.toHaveBeenCalled();
+
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'admitted' }],
+        },
+        undefined,
+        { onPromptAdmitted: admitted },
+      );
+      expect(admitted).toHaveBeenCalledOnce();
+
+      await bridge.shutdown();
+    });
+
     it('FIFO-serializes concurrent prompts on the same session', async () => {
       const order: string[] = [];
       let resolveFirst: (() => void) | undefined;
@@ -11304,6 +11346,39 @@ describe('createAcpSessionBridge', () => {
       expect(first.value?.originatorClientId).toBe(session.clientId);
 
       abort.abort();
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('executes from the session current cwd after relocation', async () => {
+      const target = path.join(WS_A, 'conversation-shell');
+      const shellSpy = mockShellExecute();
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionCd
+            ? { previousCwd: WS_A, newCwd: target, warnings: [] }
+            : {},
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.changeSessionCwd(session.sessionId, { path: target });
+
+      await bridge.executeShellCommand(session.sessionId, 'pwd', undefined, {
+        clientId: session.clientId,
+      });
+
+      expect(shellSpy).toHaveBeenCalledWith(
+        'pwd',
+        target,
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        { terminalWidth: 120, terminalHeight: 40 },
+        { streamStdout: true },
+      );
       await bridge.shutdown();
       shellSpy.mockRestore();
     });

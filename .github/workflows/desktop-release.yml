@@ -76,7 +76,7 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
 
@@ -187,7 +187,7 @@ jobs:
 
           branch="release/${RELEASE_TAG}"
           git switch -C "$branch"
-          git add package.json apps/electron/package.json packages/shared/package.json
+          git add package.json apps/electron/package.json apps/live-host/package.json packages/shared/package.json
 
           if git diff --staged --quiet; then
             echo "No desktop version changes to commit."
@@ -224,7 +224,7 @@ jobs:
         include:
           - name: 'macOS'
             os: 'macos-latest'
-            command: 'bun run dist:mac:no-publish'
+            command: 'bun run dist:mac:no-publish && bun run live-host:dist:mac:no-publish'
           - name: 'Windows'
             os: 'windows-latest'
             command: 'bun run dist:win:no-publish'
@@ -234,7 +234,7 @@ jobs:
 
     steps:
       - name: 'Check out source'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ needs.release_metadata.outputs.release_ref }}'
 
@@ -489,6 +489,37 @@ jobs:
         # behavior stays centralized.
         run: '${{ matrix.command }}'
 
+      - name: 'Verify published Qwen Live Host'
+        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        working-directory: 'packages/desktop'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+
+          app_count=0
+          while IFS= read -r -d '' app; do
+            app_count=$((app_count + 1))
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl -a -vv -t exec "$app"
+            xcrun stapler validate "$app"
+          done < <(find apps/live-host/release -type d -name '*.app' -print0)
+
+          if [ "$app_count" -eq 0 ]; then
+            echo '::error::No packaged Qwen Live Host application was found.'
+            exit 1
+          fi
+
+          dmg_count=0
+          while IFS= read -r -d '' dmg; do
+            dmg_count=$((dmg_count + 1))
+            hdiutil verify "$dmg"
+          done < <(find apps/live-host/release -type f -name '*.dmg' -print0)
+
+          if [ "$dmg_count" -eq 0 ]; then
+            echo '::error::No Qwen Live Host disk image was found.'
+            exit 1
+          fi
+
       - name: 'Upload installer artifacts'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
@@ -502,6 +533,8 @@ jobs:
             packages/desktop/apps/electron/release/*.exe
             packages/desktop/apps/electron/release/*.yml
             packages/desktop/apps/electron/release/*.zip
+            packages/desktop/apps/live-host/release/*.dmg
+            packages/desktop/apps/live-host/release/*.zip
 
   publish:
     name: 'Publish GitHub Release'

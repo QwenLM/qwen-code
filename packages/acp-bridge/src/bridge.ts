@@ -455,6 +455,7 @@ interface ChannelInfo {
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
+  currentCwd: string;
   createdAt: string;
   displayName?: string;
   /** Id of the session that spawned this one (via `create_sub_session`).
@@ -3831,6 +3832,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
+      currentCwd: workspaceCwd,
       createdAt: new Date().toISOString(),
       ...(options.parentSessionId
         ? { parentSessionId: options.parentSessionId }
@@ -4376,6 +4378,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
+        ...(existing.currentCwd !== existing.workspaceCwd
+          ? { currentCwd: existing.currentCwd }
+          : {}),
         attached: true,
         clientId,
         createdAt: existing.createdAt,
@@ -4630,6 +4635,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
+          ...(racedEntry.currentCwd !== racedEntry.workspaceCwd
+            ? { currentCwd: racedEntry.currentCwd }
+            : {}),
           attached: true,
           clientId,
           createdAt: racedEntry.createdAt,
@@ -5155,6 +5163,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
+            ...(existing.currentCwd !== existing.workspaceCwd
+              ? { currentCwd: existing.currentCwd }
+              : {}),
             attached: true,
             clientId,
             createdAt: existing.createdAt,
@@ -5378,6 +5389,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         state: isQueued ? 'queued' : 'running',
       };
       entry.pendingPromptList.push(pendingEntry);
+      try {
+        context?.onPromptAdmitted?.();
+      } catch (error) {
+        opts.onDiagnosticLine?.(
+          `qwen serve: prompt admission observer failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          'warn',
+        );
+      }
       // DAEMON-003: absolute wallclock deadline. Armed at admission (the
       // 202 point) so it covers queue wait AND execution. On expiry the
       // prompt gets its formal `turn_error{code:'prompt_deadline_exceeded'}`
@@ -6351,6 +6370,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(originatorClientId ? { originatorClientId } : {}),
           });
         }
+        entry.currentCwd = extResult.newCwd;
 
         return extResult;
       });
@@ -7738,7 +7758,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { exitCode: null, output: '', aborted: true };
       }
 
-      const cwd = entry.workspaceCwd;
+      const cwd = entry.currentCwd;
 
       entry.events.publish({
         type: 'user_shell_command',

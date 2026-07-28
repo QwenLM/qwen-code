@@ -195,6 +195,7 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -964,6 +965,8 @@ export interface RunQwenServeDeps {
   liveConversationWorkspace?: LiveConversationWorkspace;
   /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
   liveDiscoveryStableBaseDir?: string;
+  /** Test/embed override for stable Live locator ownership handoff. */
+  liveDiscoveryRetryDelayMs?: number;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -4794,6 +4797,7 @@ async function runQwenServeImpl(
     } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
+        if (runtimeAdded.provenance === 'live-conversation') return;
         channelWebhookEnvByWorkspace.set(
           runtimeAdded.workspaceCwd,
           workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
@@ -4831,7 +4835,11 @@ async function runQwenServeImpl(
           invalidatePrimaryServeFeaturesCache();
         }
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
-        channelWorkerManager?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        if (runtimeToDrain.provenance !== 'live-conversation') {
+          channelWorkerManager?.beginWorkspaceDrain(
+            runtimeToDrain.workspaceCwd,
+          );
+        }
         workspaceVoiceCoordinator.beginWorkspaceDrain(runtimeToDrain);
         channelWebhookEnvByWorkspace.delete(runtimeToDrain.workspaceCwd);
         channelWebhookConfigVersion += 1;
@@ -4857,15 +4865,21 @@ async function runQwenServeImpl(
           bridgeRef = runtimeToDrain.bridge;
           invalidatePrimaryServeFeaturesCache();
         }
-        channelWorkerManager?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
+        if (runtimeToDrain.provenance !== 'live-conversation') {
+          channelWorkerManager?.cancelWorkspaceDrain(
+            runtimeToDrain.workspaceCwd,
+          );
+        }
         totalSessionAdmission.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         workspaceVoiceCoordinator.cancelWorkspaceDrain(runtimeToDrain);
-        channelWebhookEnvByWorkspace.set(
-          runtimeToDrain.workspaceCwd,
-          workspaceRuntimeEffectiveEnv(runtimeToDrain, daemonRuntimeBaseEnv),
-        );
-        channelWebhookConfigVersion += 1;
-        refreshChannelWebhookConfigs?.();
+        if (runtimeToDrain.provenance !== 'live-conversation') {
+          channelWebhookEnvByWorkspace.set(
+            runtimeToDrain.workspaceCwd,
+            workspaceRuntimeEffectiveEnv(runtimeToDrain, daemonRuntimeBaseEnv),
+          );
+          channelWebhookConfigVersion += 1;
+          refreshChannelWebhookConfigs?.();
+        }
         const app =
           serveAppForRuntimeLifecycle.current ??
           runtimeApp ??
@@ -4894,9 +4908,11 @@ async function runQwenServeImpl(
             runtimeToDrain.workspaceCwd,
           ).inFlight,
           channelWorkers:
-            channelWorkerManager?.workspaceActivity(
-              runtimeToDrain.workspaceCwd,
-            ) ?? 0,
+            runtimeToDrain.provenance === 'live-conversation'
+              ? 0
+              : (channelWorkerManager?.workspaceActivity(
+                  runtimeToDrain.workspaceCwd,
+                ) ?? 0),
           voiceSessions:
             workspaceVoiceCoordinator.getWorkspaceActivity(runtimeToDrain),
         };
@@ -4938,7 +4954,11 @@ async function runQwenServeImpl(
           } catch {
             // Continue to bridge teardown.
           }
-          if (reason !== 'daemon_shutdown' && channelWorkerManager) {
+          if (
+            reason !== 'daemon_shutdown' &&
+            channelWorkerManager &&
+            runtimeToDrain.provenance !== 'live-conversation'
+          ) {
             await channelWorkerManager
               .removeWorkspace(runtimeToDrain.workspaceCwd)
               .catch((err) => {
@@ -5791,9 +5811,51 @@ async function runQwenServeImpl(
         pid: number;
       }> = [];
       let liveDiscoveryPublish: Promise<void> | undefined;
+      let liveDiscoveryRetryTimer: NodeJS.Timeout | undefined;
+      let liveDiscoveryRetryTask: Promise<void> | undefined;
+      let liveDiscoveryRetryStopped = false;
+      let attemptPendingLiveDiscovery: (() => Promise<void>) | undefined;
+      const pendingLiveDiscoveryBaseDirs = new Set<string>();
+      const warnedLiveDiscoveryOwners = new Set<string>();
+      const liveDiscoveryRetryDelayMs =
+        deps.liveDiscoveryRetryDelayMs !== undefined &&
+        Number.isFinite(deps.liveDiscoveryRetryDelayMs) &&
+        deps.liveDiscoveryRetryDelayMs >= 10
+          ? Math.min(deps.liveDiscoveryRetryDelayMs, 60_000)
+          : DEFAULT_LIVE_DISCOVERY_RETRY_MS;
+      const scheduleLiveDiscoveryRetry = (): void => {
+        if (
+          liveDiscoveryRetryStopped ||
+          liveDiscoveryRetryTimer ||
+          liveDiscoveryRetryTask ||
+          pendingLiveDiscoveryBaseDirs.size === 0 ||
+          !attemptPendingLiveDiscovery
+        ) {
+          return;
+        }
+        liveDiscoveryRetryTimer = setTimeout(() => {
+          liveDiscoveryRetryTimer = undefined;
+          if (liveDiscoveryRetryStopped || !attemptPendingLiveDiscovery) return;
+          const retry = attemptPendingLiveDiscovery().finally(() => {
+            if (liveDiscoveryRetryTask === retry) {
+              liveDiscoveryRetryTask = undefined;
+            }
+            scheduleLiveDiscoveryRetry();
+          });
+          liveDiscoveryRetryTask = retry;
+        }, liveDiscoveryRetryDelayMs);
+        liveDiscoveryRetryTimer.unref();
+      };
+      const stopLiveDiscoveryRetry = (): void => {
+        liveDiscoveryRetryStopped = true;
+        if (!liveDiscoveryRetryTimer) return;
+        clearTimeout(liveDiscoveryRetryTimer);
+        liveDiscoveryRetryTimer = undefined;
+      };
       const publishLiveDiscovery = (
         candidateApp: Application,
       ): Promise<void> => {
+        if (liveDiscoveryRetryStopped) return Promise.resolve();
         if (!resolveAcpHttpEnabled()) return Promise.resolve();
         if (candidateApp.locals?.['liveVoiceEnabledAtBoot'] !== true)
           return Promise.resolve();
@@ -5807,8 +5869,10 @@ async function runQwenServeImpl(
           .then(
             async ({
               getStableLiveDiscoveryBaseDir,
+              LiveDiscoveryOwnerActiveError,
               writeLiveDiscoveryFile,
             }) => {
+              if (liveDiscoveryRetryStopped) return;
               const stableBaseDir = path.resolve(
                 deps.liveDiscoveryStableBaseDir ??
                   getStableLiveDiscoveryBaseDir(),
@@ -5823,6 +5887,9 @@ async function runQwenServeImpl(
               if (liveVoiceEnabledAtBoot) {
                 targetBaseDirs.add(stableBaseDir);
               }
+              for (const baseDir of targetBaseDirs) {
+                pendingLiveDiscoveryBaseDirs.add(baseDir);
+              }
               const record = {
                 url,
                 ...(token ? { token } : {}),
@@ -5830,22 +5897,41 @@ async function runQwenServeImpl(
                 pid: process.pid,
                 instanceNonce,
               };
-              for (const runtimeBaseDir of targetBaseDirs) {
-                try {
-                  await writeLiveDiscoveryFile(runtimeBaseDir, record);
-                  liveDiscoveryOwners.push({
-                    runtimeBaseDir,
-                    instanceNonce,
-                    pid: process.pid,
-                  });
-                } catch (err) {
-                  daemonLog.warn(
-                    `failed to publish Live Host discovery at ${runtimeBaseDir}: ${
-                      err instanceof Error ? err.message : String(err)
-                    }`,
-                  );
+              attemptPendingLiveDiscovery = async () => {
+                for (const runtimeBaseDir of [
+                  ...pendingLiveDiscoveryBaseDirs,
+                ]) {
+                  if (liveDiscoveryRetryStopped) return;
+                  try {
+                    await writeLiveDiscoveryFile(runtimeBaseDir, record);
+                    pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
+                    warnedLiveDiscoveryOwners.delete(runtimeBaseDir);
+                    liveDiscoveryOwners.push({
+                      runtimeBaseDir,
+                      instanceNonce,
+                      pid: process.pid,
+                    });
+                  } catch (err) {
+                    if (err instanceof LiveDiscoveryOwnerActiveError) {
+                      if (!warnedLiveDiscoveryOwners.has(runtimeBaseDir)) {
+                        warnedLiveDiscoveryOwners.add(runtimeBaseDir);
+                        daemonLog.warn(
+                          `failed to publish Live Host discovery at ${runtimeBaseDir}: ${err.message}`,
+                        );
+                      }
+                      continue;
+                    }
+                    pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
+                    daemonLog.warn(
+                      `failed to publish Live Host discovery at ${runtimeBaseDir}: ${
+                        err instanceof Error ? err.message : String(err)
+                      }`,
+                    );
+                  }
                 }
-              }
+              };
+              await attemptPendingLiveDiscovery();
+              scheduleLiveDiscoveryRetry();
             },
           )
           .catch((err) => {
@@ -5858,7 +5944,9 @@ async function runQwenServeImpl(
         return liveDiscoveryPublish;
       };
       const cleanupLiveDiscovery = async (): Promise<void> => {
+        stopLiveDiscoveryRetry();
         await liveDiscoveryPublish;
+        await liveDiscoveryRetryTask;
         const owners = liveDiscoveryOwners.splice(0);
         if (owners.length === 0) return;
         let removeLiveDiscoveryFile: LiveDiscoveryRuntime['removeLiveDiscoveryFile'];
@@ -6105,7 +6193,9 @@ async function runQwenServeImpl(
             'Workspace registry is not available for channel workers.',
           );
         }
-        const runtimes = registry.list();
+        const runtimes = registry
+          .list()
+          .filter((runtime) => runtime.provenance !== 'live-conversation');
         if (runtimes.length <= 1 && operation === 'initial') {
           const primary = registry.primary;
           if (!primary.trusted) {
@@ -6144,6 +6234,7 @@ async function runQwenServeImpl(
               workspaceCwd: runtime.workspaceCwd,
               primary: runtime.primary,
               trusted: runtime.trusted,
+              provenance: runtime.provenance,
             };
           }),
           selection: channelSelection,
@@ -6460,6 +6551,7 @@ async function runQwenServeImpl(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            stopLiveDiscoveryRetry();
             channelControlDraining = true;
             const initiallyMountedApp = runtimeApp ?? runtimeAppForCleanup;
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[

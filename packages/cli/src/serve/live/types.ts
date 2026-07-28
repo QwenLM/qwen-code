@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const LIVE_HOST_PROTOCOL_VERSION = 2 as const;
+export const LIVE_HOST_PROTOCOL_VERSION = 3 as const;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host' as const;
 export const LIVE_INPUT_AUDIO_EPOCH_BYTES = 8;
 
@@ -23,7 +23,6 @@ export type LiveBlocker =
   | 'host_disconnected'
   | 'host_version'
   | 'microphone_permission'
-  | 'input_monitoring_permission'
   | 'accessibility_permission'
   | 'screen_recording_permission'
   | 'audio_input'
@@ -45,14 +44,11 @@ export interface LiveSessionLocator {
   sessionId: string;
 }
 
-export interface LiveOpenSessionTarget extends LiveSessionLocator {
-  workspaceId: string;
-}
-
 export interface LiveStatus {
   v: 1;
   available: boolean;
   state: LiveState;
+  shortcut: string;
   blocker?: LiveBlocker;
   message?: string;
   callId?: string;
@@ -65,7 +61,6 @@ export interface LiveStatus {
     Record<
       | 'host'
       | 'microphone'
-      | 'inputMonitoring'
       | 'accessibility'
       | 'screenRecording'
       | 'audioInput'
@@ -80,8 +75,9 @@ export interface LiveStatus {
     version?: string;
     protocolVersion?: number;
   };
-  installUrl?: string;
 }
+
+export type LiveHostStatus = Omit<LiveStatus, 'coordinator' | 'workers'>;
 
 export type LivePermissionState = 'granted' | 'denied' | 'not_determined';
 
@@ -93,7 +89,6 @@ export interface LiveHostHello {
   instanceNonce: string;
   permissions: {
     microphone: LivePermissionState;
-    inputMonitoring: LivePermissionState;
     accessibility: LivePermissionState;
     screenRecording: LivePermissionState;
   };
@@ -117,22 +112,6 @@ export type LiveHostAction =
       inputMuted?: boolean;
       outputMuted?: boolean;
       epoch?: number;
-    }
-  | {
-      type: 'host.action';
-      action: 'open_session';
-      locator: LiveSessionLocator;
-      epoch?: number;
-    }
-  | {
-      type: 'host.action';
-      action: 'request_permission';
-      permission:
-        | 'microphone'
-        | 'inputMonitoring'
-        | 'accessibility'
-        | 'screenRecording';
-      epoch?: number;
     };
 
 export interface LiveHostPong {
@@ -149,15 +128,14 @@ export type LiveDaemonMessage =
       daemonInstanceNonce: string;
       heartbeatIntervalMs: number;
       epoch: number;
-      status: LiveStatus;
+      status: LiveHostStatus;
     }
-  | { type: 'host.state'; epoch: number; status: LiveStatus }
+  | { type: 'host.state'; epoch: number; status: LiveHostStatus }
   | { type: 'host.ping'; pingId: string }
   | { type: 'host.clear_output'; epoch: number }
-  | { type: 'host.open_session'; target: LiveOpenSessionTarget }
   | {
       type: 'host.error';
-      code: 'unsupported_action' | 'invalid_message' | 'stale_epoch';
+      code: 'invalid_message' | 'stale_epoch';
       message: string;
     };
 

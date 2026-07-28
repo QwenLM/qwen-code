@@ -41,6 +41,14 @@ export interface LiveDiscoveryOwner {
   instanceNonce: string;
 }
 
+interface ExistingLiveDiscoveryRecord {
+  url: string;
+  token?: string;
+  protocolVersion: number;
+  pid: number;
+  instanceNonce: string;
+}
+
 export class LiveDiscoveryOwnerActiveError extends Error {
   constructor(readonly ownerPid: number) {
     super(`Live discovery is owned by active daemon pid ${ownerPid}.`);
@@ -58,7 +66,7 @@ export function getLiveDiscoveryPath(runtimeBaseDir: string): string {
   return path.join(runtimeBaseDir, LIVE_DISCOVERY_RELATIVE_PATH);
 }
 
-function assertRecord(record: LiveDiscoveryRecord): void {
+function assertSafeRecord(record: ExistingLiveDiscoveryRecord): void {
   if (
     typeof record.url !== 'string' ||
     typeof record.instanceNonce !== 'string' ||
@@ -86,7 +94,8 @@ function assertRecord(record: LiveDiscoveryRecord): void {
     throw new Error('Live discovery URL must be a loopback HTTP URL.');
   }
   if (
-    record.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION ||
+    !Number.isSafeInteger(record.protocolVersion) ||
+    record.protocolVersion <= 0 ||
     !Number.isSafeInteger(record.pid) ||
     record.pid <= 0 ||
     !NONCE_PATTERN.test(record.instanceNonce) ||
@@ -97,7 +106,17 @@ function assertRecord(record: LiveDiscoveryRecord): void {
   }
 }
 
+function assertRecord(record: LiveDiscoveryRecord): void {
+  assertSafeRecord(record);
+  if (record.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION) {
+    throw new Error('Live discovery record is invalid.');
+  }
+}
+
 function processIsAlive(pid: number): boolean {
+  // PID reuse is intentionally fail-closed. The locator has no independent
+  // authenticated nonce probe, so a live replacement process must not be
+  // mistaken for proof that the recorded daemon is stale.
   try {
     process.kill(pid, 0);
     return true;
@@ -108,7 +127,7 @@ function processIsAlive(pid: number): boolean {
 
 async function readExistingRecord(
   filePath: string,
-): Promise<LiveDiscoveryRecord | undefined> {
+): Promise<ExistingLiveDiscoveryRecord | undefined> {
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
     stat = await fs.lstat(filePath);
@@ -135,9 +154,9 @@ async function readExistingRecord(
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('Existing Live discovery record is invalid.');
   }
-  const record = parsed as LiveDiscoveryRecord;
+  const record = parsed as ExistingLiveDiscoveryRecord;
   try {
-    assertRecord(record);
+    assertSafeRecord(record);
   } catch {
     throw new Error('Existing Live discovery record is invalid.');
   }

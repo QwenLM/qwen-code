@@ -15,7 +15,6 @@ import {
   type HostPermissions,
   type HostSelfChecks,
   type LiveStatus,
-  type OpenSessionTarget,
 } from '../shared/protocol.ts';
 import {
   buildHostWebSocketUrl,
@@ -48,15 +47,24 @@ export type HostReadiness = {
   selfChecks: HostSelfChecks;
 };
 
+export function canSendHostControlMessage(
+  message: Parameters<typeof encodeHostControlMessage>[0],
+  socketOpen: boolean,
+  welcomed: boolean,
+  bufferedAmount: number,
+): boolean {
+  return (
+    socketOpen &&
+    (message.type === 'host.hello' || welcomed) &&
+    bufferedAmount <= MAX_SOCKET_BUFFERED_BYTES
+  );
+}
+
 type ConnectionCallbacks = {
   getReadiness: () => HostReadiness;
   onSnapshot: (snapshot: ConnectionSnapshot) => void;
   onOutputAudio: (audio: Uint8Array) => void;
   onClearOutput: () => void;
-  onOpenSession: (
-    target: OpenSessionTarget,
-    daemon: { url: string; token?: string },
-  ) => void;
 };
 
 function rawDataToBuffer(data: RawData): Buffer {
@@ -113,6 +121,14 @@ export class LiveDaemonConnection {
     this.cancelReconnect();
     if (!this.currentRecord) return;
     this.closeSocket(1001, 'host readiness changed');
+    this.connect(this.currentRecord);
+  }
+
+  forceReconnectNow(): void {
+    this.reconnectPolicy.reset();
+    this.cancelReconnect();
+    if (!this.currentRecord) return;
+    this.terminateSocket();
     this.connect(this.currentRecord);
   }
 
@@ -281,12 +297,6 @@ export class LiveDaemonConnection {
             this.callbacks.onClearOutput();
           }
           break;
-        case 'host.open_session':
-          this.callbacks.onOpenSession(message.target, {
-            url: record.url,
-            ...(record.token ? { token: record.token } : {}),
-          });
-          break;
         case 'host.error':
           this.publish({
             ...this.snapshot,
@@ -353,9 +363,17 @@ export class LiveDaemonConnection {
     message: Parameters<typeof encodeHostControlMessage>[0],
   ): boolean {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    if (message.type !== 'host.hello' && !this.welcomed) return false;
-    if (socket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) return false;
+    if (
+      !socket ||
+      !canSendHostControlMessage(
+        message,
+        socket.readyState === WebSocket.OPEN,
+        this.welcomed,
+        socket.bufferedAmount,
+      )
+    ) {
+      return false;
+    }
     socket.send(encodeHostControlMessage(message));
     return true;
   }
@@ -369,6 +387,17 @@ export class LiveDaemonConnection {
     this.clearHandshakeTimer();
     this.clearHeartbeatTimer();
     socket.close(code, reason);
+  }
+
+  private terminateSocket(): void {
+    const socket = this.socket;
+    if (!socket) return;
+    this.intentionalClose = true;
+    this.socket = undefined;
+    this.welcomed = false;
+    this.clearHandshakeTimer();
+    this.clearHeartbeatTimer();
+    socket.terminate();
   }
 
   private cancelReconnect(): void {

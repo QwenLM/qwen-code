@@ -102,7 +102,13 @@ export interface BridgeSpawnRequest {
 
 export interface BridgeSession {
   sessionId: string;
+  /**
+   * Runtime ownership root used for routing and persisted-session lookup.
+   * This does not change when the agent session changes cwd.
+   */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from {@link workspaceCwd}. */
+  currentCwd?: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
   /**
@@ -515,6 +521,12 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal synchronous admission signal. The bridge invokes it only after
+   * the prompt owns a pending-queue slot. Transport routes never populate it
+   * from request input.
+   */
+  onPromptAdmitted?: () => void;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`

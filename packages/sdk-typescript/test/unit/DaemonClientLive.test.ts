@@ -47,10 +47,10 @@ const readyStatus = {
   v: 1 as const,
   available: true,
   state: 'idle' as const,
+  shortcut: 'Command+Q',
   requirements: {
     host: 'ready' as const,
     microphone: 'ready' as const,
-    inputMonitoring: 'ready' as const,
     accessibility: 'ready' as const,
     screenRecording: 'ready' as const,
     provider: 'ready' as const,

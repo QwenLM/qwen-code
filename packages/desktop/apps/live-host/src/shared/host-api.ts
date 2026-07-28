@@ -2,7 +2,6 @@ import type {
   HostPermissions,
   HostSelfChecks,
   LiveStatus,
-  SessionLocator,
 } from './protocol.ts';
 
 export type HostPublicState = {
@@ -16,6 +15,7 @@ export type HostPublicState = {
   live: LiveStatus;
   permissions: HostPermissions;
   selfChecks: HostSelfChecks;
+  cuaInstalled: boolean;
 };
 
 export type LiveHostApi = {
@@ -24,7 +24,6 @@ export type LiveHostApi = {
   stop: () => Promise<void>;
   setInputMuted: (muted: boolean) => Promise<void>;
   setOutputMuted: (muted: boolean) => Promise<void>;
-  openSession: (locator: SessionLocator) => Promise<void>;
   requestPermission: (permission: keyof HostPermissions) => Promise<void>;
   getState: () => Promise<HostPublicState>;
   onState: (listener: (state: HostPublicState) => void) => () => void;

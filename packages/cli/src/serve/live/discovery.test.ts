@@ -134,6 +134,68 @@ describe('Live discovery file', () => {
     ).toEqual(replacement);
   });
 
+  it('reclaims a valid legacy-protocol record whose owner is stale', async () => {
+    const runtime = await temporaryRuntime();
+    const discoveryPath = getLiveDiscoveryPath(runtime);
+    const previous = {
+      ...record('daemon_instance_nonce_legacy_01', 999_998),
+      protocolVersion: 2,
+    };
+    const replacement = record('daemon_instance_nonce_current_01');
+    await fs.mkdir(path.dirname(discoveryPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await fs.writeFile(discoveryPath, `${JSON.stringify(previous)}\n`, {
+      mode: 0o600,
+    });
+
+    await expect(
+      writeLiveDiscoveryFile(runtime, replacement, {
+        isProcessAlive: (pid) => {
+          expect(pid).toBe(previous.pid);
+          return false;
+        },
+      }),
+    ).resolves.toBe(discoveryPath);
+    expect(JSON.parse(await fs.readFile(discoveryPath, 'utf8'))).toEqual(
+      replacement,
+    );
+    expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('does not replace a live owner only because its protocol is legacy', async () => {
+    const runtime = await temporaryRuntime();
+    const discoveryPath = getLiveDiscoveryPath(runtime);
+    const previous = {
+      ...record('daemon_instance_nonce_legacy_02', 999_997),
+      protocolVersion: 2,
+    };
+    await fs.mkdir(path.dirname(discoveryPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await fs.writeFile(discoveryPath, `${JSON.stringify(previous)}\n`, {
+      mode: 0o600,
+    });
+
+    await expect(
+      writeLiveDiscoveryFile(
+        runtime,
+        record('daemon_instance_nonce_current_02'),
+        {
+          isProcessAlive: (pid) => {
+            expect(pid).toBe(previous.pid);
+            return true;
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(LiveDiscoveryOwnerActiveError);
+    expect(JSON.parse(await fs.readFile(discoveryPath, 'utf8'))).toEqual(
+      previous,
+    );
+  });
+
   it('does not overwrite an invalid existing record', async () => {
     const runtime = await temporaryRuntime();
     const discoveryPath = getLiveDiscoveryPath(runtime);

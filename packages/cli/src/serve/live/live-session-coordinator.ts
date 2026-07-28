@@ -15,6 +15,10 @@ import type {
   AcpSessionBridge,
   BridgeSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  SessionArchivedError,
+  SessionNotFoundError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
@@ -26,17 +30,20 @@ import {
   type RealtimeDelegateCall,
 } from './qwen-realtime-session.js';
 import type { LiveProviderCredential } from './provider-credentials.js';
+import {
+  isCompatibleLiveSessionSource,
+  LIVE_SESSION_SOURCE_PREFIX,
+} from './session-source.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
-export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:p1:h1:a1:';
+export { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
 
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
-const MAX_RECENT_TRANSCRIPT_CHARS = 8_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
 const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
 const SESSION_SCAN_SIZE = 100;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 750, 1_500] as const;
-const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 2_000;
+const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
 const DEFAULT_MAX_REALTIME_CONNECTION_AGE_MS = 110 * 60_000;
 const DEFAULT_ROTATION_DRAIN_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_PROVIDER_REPROBE_DELAY_MS = 30_000;
@@ -100,19 +107,32 @@ interface LiveCallContext {
   observerAbort?: AbortController;
   workers: LiveSessionLocator[];
   workerIds: Set<string>;
+  pendingWorkerIds: Set<string>;
   delegateTail: Promise<void>;
   delegatesInFlight: number;
+  pendingCommittedInputItemIds: Set<string>;
+  unattributedCommittedInputCount: number;
+  emptyFinalInputItemIds: Set<string>;
+  completedInputTranscripts: Map<string, string>;
+  admittedInputItemIds: Set<string>;
+  stopFailureEvidenceAdmitted: boolean;
   responseInFlight: boolean;
   speechInProgress: boolean;
   inputCommitPending: boolean;
   inputAwaitingResponse: boolean;
   authorizedResponsesPending: number;
+  authorizedResponseInFlight: boolean;
+  activeUntrustedResponseId?: string;
+  activeUntrustedResponseInputItemId?: string;
+  untrustedResponsePending: boolean;
   rotationDue: boolean;
   rotationDeadlineTimer?: ReturnType<typeof setTimeout>;
   pendingCoordinatorUpdates: string[];
   stopping: boolean;
-  stopTailObserved: boolean;
   stopDrainTimer?: ReturnType<typeof setTimeout>;
+  stopCompletion?: Promise<void | { error: string }>;
+  finishStop?: (outcome?: { error: string }) => void;
+  stopFailureStarted: boolean;
 }
 
 interface CollectedTurn {
@@ -126,14 +146,26 @@ function errorMessage(error: unknown): string {
   ).slice(0, 500);
 }
 
+type ProviderFailureBlocker =
+  | 'provider_config'
+  | 'provider_unreachable'
+  | undefined;
+
 function reconnectableRealtimeError(error: unknown): boolean {
-  if (!(error instanceof QwenRealtimeError)) return false;
-  return (
-    error.code === 'connection_closed' ||
-    error.code === 'connection_failed' ||
-    error.code === 'connection_timeout' ||
-    error.code === 'socket_error'
-  );
+  return error instanceof QwenRealtimeError && error.kind === 'transient';
+}
+
+function providerFailureBlocker(error: unknown): ProviderFailureBlocker {
+  if (!(error instanceof QwenRealtimeError)) return undefined;
+  if (error.kind === 'configuration') return 'provider_config';
+  if (error.kind === 'transient') return 'provider_unreachable';
+  return undefined;
+}
+
+function retryDelayMs(baseDelayMs: number, error: unknown): number {
+  return error instanceof QwenRealtimeError && error.retryAfterMs !== undefined
+    ? Math.max(baseDelayMs, error.retryAfterMs)
+    : baseDelayMs;
 }
 
 function normalizeReconnectBackoff(value: readonly number[] | undefined) {
@@ -190,6 +222,25 @@ function updateSource(update: Record<string, unknown>): string | undefined {
   return typeof source === 'string' ? source : undefined;
 }
 
+function updateBackgroundTaskId(
+  update: Record<string, unknown>,
+): string | undefined {
+  const meta = update['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return undefined;
+  }
+  const backgroundTask = (meta as Record<string, unknown>)['backgroundTask'];
+  if (
+    !backgroundTask ||
+    typeof backgroundTask !== 'object' ||
+    Array.isArray(backgroundTask)
+  ) {
+    return undefined;
+  }
+  const taskId = (backgroundTask as Record<string, unknown>)['taskId'];
+  return typeof taskId === 'string' ? taskId : undefined;
+}
+
 function updateText(update: Record<string, unknown>): string {
   const content = update['content'];
   if (!content || typeof content !== 'object' || Array.isArray(content)) {
@@ -215,21 +266,18 @@ function titleFromRequest(request: string): string {
 function isCompatibleLiveSession(item: SessionListItem): boolean {
   return (
     item.parentSessionId === undefined &&
-    item.sourceType === 'default' &&
-    item.sourceId?.startsWith(LIVE_SESSION_SOURCE_PREFIX) === true
+    isCompatibleLiveSessionSource({
+      sourceType: item.sourceType,
+      sourceId: item.sourceId,
+    })
   );
 }
 
 function buildDelegationPrompt(
   request: string,
-  recentTranscript: string | undefined,
   newConversationControl: string,
 ): string {
   const boundedRequest = request.slice(0, MAX_COORDINATOR_REQUEST_CHARS);
-  const boundedTranscript = recentTranscript?.slice(
-    0,
-    MAX_RECENT_TRANSCRIPT_CHARS,
-  );
   return [
     '<realtime_delegation>',
     '<coordinator_instructions>',
@@ -241,11 +289,6 @@ function buildDelegationPrompt(
     'A request to create an independent task, separate session, or follow-up is not a reset of the current Live voice conversation. For those requests, call create_sub_session with completion="sent" and a short name. Report the created session link and do not claim the independent work is already complete.',
     '</coordinator_instructions>',
     `<request>${escapeXml(boundedRequest)}</request>`,
-    ...(boundedTranscript
-      ? [
-          `<recent_transcript>${escapeXml(boundedTranscript)}</recent_transcript>`,
-        ]
-      : []),
     '</realtime_delegation>',
   ].join('\n');
 }
@@ -254,28 +297,35 @@ function buildNewConversationControl(nonce: string): string {
   return `<qwen_live_control nonce="${nonce}">start_new_live_conversation</qwen_live_control>`;
 }
 
-function workerIdsFromEvent(event: BridgeEvent): string[] {
+function workerIdFromEvent(event: BridgeEvent): string | undefined {
   const update = sessionUpdate(event);
   if (
     update?.['sessionUpdate'] !== 'tool_call_update' ||
     update['status'] !== 'completed'
   ) {
-    return [];
+    return undefined;
   }
   const meta = update['_meta'];
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return [];
-  if ((meta as Record<string, unknown>)['toolName'] !== 'create_sub_session') {
-    return [];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return undefined;
+  }
+  const metaRecord = meta as Record<string, unknown>;
+  if (
+    metaRecord['toolName'] !== 'create_sub_session' ||
+    metaRecord['provenance'] !== 'builtin'
+  ) {
+    return undefined;
   }
   const rawOutput = update['rawOutput'];
-  if (typeof rawOutput !== 'string') return [];
-  const serialized = rawOutput.slice(0, 256_000);
-  const ids = new Set<string>();
-  const pattern = /qwen-session:\/\/([A-Za-z0-9._:-]{1,128})/g;
-  for (const match of serialized.matchAll(pattern)) {
-    if (match[1]) ids.add(match[1]);
+  if (typeof rawOutput !== 'string') return undefined;
+  const match =
+    /^\[🧵 ([A-Za-z0-9._:-]{1,8})\]\(qwen-session:\/\/([A-Za-z0-9._:-]{1,128})\) (?:started|completed(?: \(stopReason: [A-Za-z0-9._:-]{1,64}\))?)$/.exec(
+      rawOutput,
+    );
+  if (!match?.[1] || !match[2] || match[1] !== match[2].slice(0, 8)) {
+    return undefined;
   }
-  return [...ids];
+  return match[2];
 }
 
 export class LiveSessionCoordinator {
@@ -347,17 +397,26 @@ export class LiveSessionCoordinator {
       realtimeGeneration: 0,
       workers: [],
       workerIds: new Set(),
+      pendingWorkerIds: new Set(),
       delegateTail: Promise.resolve(),
       delegatesInFlight: 0,
+      pendingCommittedInputItemIds: new Set(),
+      unattributedCommittedInputCount: 0,
+      emptyFinalInputItemIds: new Set(),
+      completedInputTranscripts: new Map(),
+      admittedInputItemIds: new Set(),
+      stopFailureEvidenceAdmitted: false,
       responseInFlight: false,
       speechInProgress: false,
       inputCommitPending: false,
       inputAwaitingResponse: false,
       authorizedResponsesPending: 0,
+      authorizedResponseInFlight: false,
+      untrustedResponsePending: false,
       rotationDue: false,
       pendingCoordinatorUpdates: [],
       stopping: false,
-      stopTailObserved: false,
+      stopFailureStarted: false,
     };
     this.active = context;
     this.options.host.setProviderReachability({ state: 'checking' });
@@ -366,14 +425,11 @@ export class LiveSessionCoordinator {
       if (!this.isActive(context)) return;
       context.runtime = runtime;
       if (call.mode === 'resume') {
-        const sessions = this.options.listRecentSessions
-          ? await this.options.listRecentSessions(runtime)
-          : (
-              await new SessionService(runtime.workspaceCwd).listSessions({
-                size: SESSION_SCAN_SIZE,
-              })
-            ).items;
-        context.resumeCandidate = sessions.find(isCompatibleLiveSession);
+        context.resumeCandidate = this.options.listRecentSessions
+          ? (await this.options.listRecentSessions(runtime)).find(
+              isCompatibleLiveSession,
+            )
+          : await this.findRecentCompatibleSession(runtime);
       }
       if (!this.isActive(context)) return;
       context.credential = this.options.getProviderCredential();
@@ -383,20 +439,24 @@ export class LiveSessionCoordinator {
       this.failContext(
         context,
         `Live Voice failed to start: ${errorMessage(error)}`,
-        reconnectableRealtimeError(error),
+        providerFailureBlocker(error),
+        error,
       );
     }
   }
 
-  stop(call: { epoch: number; callId: string }): void {
+  stop(call: {
+    epoch: number;
+    callId: string;
+  }): Promise<void | { error: string }> {
     if (
       !this.active ||
       this.active.epoch !== call.epoch ||
       this.active.callId !== call.callId
     ) {
-      return;
+      return Promise.resolve();
     }
-    this.beginGracefulStop(this.active);
+    return this.beginGracefulStop(this.active);
   }
 
   pushAudio(call: { epoch: number; callId: string; pcm16: Buffer }): boolean {
@@ -421,6 +481,27 @@ export class LiveSessionCoordinator {
     for (const abort of this.inFlightTurnAborts) abort.abort();
   }
 
+  private async findRecentCompatibleSession(
+    runtime: WorkspaceRuntime,
+  ): Promise<SessionListItem | undefined> {
+    const service = new SessionService(runtime.workspaceCwd);
+    let cursor: number | undefined;
+    const seenCursors = new Set<number>();
+    while (true) {
+      const page = await service.listSessions({
+        size: SESSION_SCAN_SIZE,
+        archiveState: 'active',
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      const match = page.items.find(isCompatibleLiveSession);
+      if (match) return match;
+      if (!page.hasMore || page.nextCursor === undefined) return undefined;
+      if (seenCursors.has(page.nextCursor)) return undefined;
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+  }
+
   private callbacksFor(
     context: LiveCallContext,
     generation: number,
@@ -436,15 +517,20 @@ export class LiveSessionCoordinator {
         this.options.host.setCallState(context.epoch, 'listening');
       },
       onSpeechStopped: () => {
-        if (!this.isInteractiveSocket(context, generation)) return;
+        if (!this.isCurrentSocket(context, generation)) return;
         context.speechInProgress = false;
-        this.options.host.setCallState(context.epoch, 'thinking');
+        if (!context.stopping) {
+          this.options.host.setCallState(context.epoch, 'thinking');
+        }
         this.maybeRotateAtIdleBoundary(context, generation);
       },
-      onInputCommitted: () => {
+      onInputCommitted: ({ itemId }) => {
         if (!this.isCurrentSocket(context, generation)) return;
+        context.speechInProgress = false;
         context.inputCommitPending = false;
         context.inputAwaitingResponse = true;
+        if (itemId) context.pendingCommittedInputItemIds.add(itemId);
+        else context.unattributedCommittedInputCount += 1;
         this.maybeRotateAtIdleBoundary(context, generation);
       },
       onInputTranscriptDelta: ({ text }) => {
@@ -452,19 +538,65 @@ export class LiveSessionCoordinator {
           this.options.host.setTranscript?.(context.epoch, text);
         }
       },
-      onInputTranscriptDone: ({ text }) => {
+      onInputTranscriptDone: ({ itemId, text }) => {
         if (this.isCurrentSocket(context, generation)) {
+          context.speechInProgress = false;
+          context.inputCommitPending = false;
+          this.resolveCommittedInput(context, itemId);
           this.options.host.setTranscript?.(context.epoch, text);
+          if (text.trim()) {
+            if (itemId) context.emptyFinalInputItemIds.delete(itemId);
+            context.completedInputTranscripts.set(
+              itemId ?? `unattributed:${randomUUID()}`,
+              text,
+            );
+          } else if (itemId) {
+            context.emptyFinalInputItemIds.add(itemId);
+            if (context.activeUntrustedResponseInputItemId === itemId) {
+              context.untrustedResponsePending = false;
+            }
+          }
+          this.maybeFinishGracefulStop(context);
         }
       },
       onDelegateCall: (event) => {
         if (!this.isCurrentSocket(context, generation)) return;
         const source = context.realtime;
         if (!source) return;
+        let trackedInputItemId = event.itemId;
+        if (!trackedInputItemId) {
+          const matchingInputs = [
+            ...context.completedInputTranscripts.entries(),
+          ].filter(([, transcript]) => transcript === event.request);
+          trackedInputItemId =
+            matchingInputs.length === 1
+              ? matchingInputs[0]![0]
+              : `delegate:${event.callId}`;
+        }
+        this.resolveCommittedInput(context, event.itemId);
+        if (context.activeUntrustedResponseId === event.responseId) {
+          context.untrustedResponsePending = false;
+        }
+        if (event.request.trim()) {
+          context.completedInputTranscripts.set(
+            trackedInputItemId,
+            event.request,
+          );
+        }
         context.delegatesInFlight += 1;
-        context.stopTailObserved = true;
         context.delegateTail = context.delegateTail
-          .then(() => this.handleDelegate(context, event, generation, source))
+          .then(async () => {
+            const persisted = await this.handleDelegate(
+              context,
+              event,
+              generation,
+              source,
+              () => context.admittedInputItemIds.add(trackedInputItemId),
+            );
+            if (!persisted) return;
+            context.completedInputTranscripts.delete(trackedInputItemId);
+            context.admittedInputItemIds.delete(trackedInputItemId);
+          })
           .catch(() => undefined)
           .finally(() => {
             context.delegatesInFlight = Math.max(
@@ -475,56 +607,73 @@ export class LiveSessionCoordinator {
             this.maybeFinishGracefulStop(context);
           });
       },
-      onNewConversationRequest: () => {
-        if (!this.isInteractiveSocket(context, generation)) return;
-        try {
-          void Promise.resolve(this.options.startNewConversation()).catch(
-            (error) => {
-              if (!this.isActive(context)) return;
-              this.failContext(
-                context,
-                `Starting a new Live conversation failed: ${errorMessage(error)}`,
-                false,
-              );
-            },
-          );
-        } catch (error) {
-          this.failContext(
-            context,
-            `Starting a new Live conversation failed: ${errorMessage(error)}`,
-            false,
-          );
-        }
-      },
-      onResponseCreated: () => {
+      onResponseCreated: ({ responseId, inputItemId }) => {
         if (!this.isCurrentSocket(context, generation)) return;
-        if (context.authorizedResponsesPending > 0) {
+        context.authorizedResponseInFlight =
+          context.authorizedResponsesPending > 0;
+        if (context.authorizedResponseInFlight) {
           context.authorizedResponsesPending -= 1;
+          context.activeUntrustedResponseId = undefined;
+          context.activeUntrustedResponseInputItemId = undefined;
+          context.untrustedResponsePending = false;
+        } else {
+          context.activeUntrustedResponseId = responseId;
+          context.activeUntrustedResponseInputItemId = inputItemId;
+          context.untrustedResponsePending =
+            !inputItemId || !context.emptyFinalInputItemIds.has(inputItemId);
         }
         context.speechInProgress = false;
         context.inputCommitPending = false;
         context.inputAwaitingResponse = false;
         context.responseInFlight = true;
-        context.stopTailObserved = true;
         if (!context.stopping) {
           this.options.host.setCallState(context.epoch, 'thinking');
         }
       },
       onOutputAudioDelta: ({ audio }) => {
         if (!this.isInteractiveSocket(context, generation)) return;
+        if (!this.options.host.sendOutputAudio(context.epoch, audio)) {
+          this.failContext(
+            context,
+            'Live Host could not accept realtime output audio.',
+            undefined,
+          );
+          return;
+        }
         this.options.host.setCallState(context.epoch, 'speaking');
-        this.options.host.sendOutputAudio(context.epoch, audio);
       },
-      onResponseDone: () => {
+      onAudioDropped: () => {
+        if (!this.isInteractiveSocket(context, generation)) return;
+        this.failContext(
+          context,
+          'Realtime input audio was dropped before reaching the provider.',
+          undefined,
+        );
+      },
+      onResponseDone: ({ responseId, inputItemId, status }) => {
         if (!this.isCurrentSocket(context, generation)) return;
+        if (context.activeUntrustedResponseId === responseId) {
+          if (status === 'cancelled' || status === 'failed') {
+            context.untrustedResponsePending = false;
+          }
+          context.activeUntrustedResponseId = undefined;
+          context.activeUntrustedResponseInputItemId = undefined;
+        }
+        if (inputItemId) context.emptyFinalInputItemIds.delete(inputItemId);
         context.responseInFlight = false;
+        context.authorizedResponseInFlight = false;
         context.inputAwaitingResponse = false;
-        context.stopTailObserved = true;
         if (!context.stopping && context.delegatesInFlight === 0) {
           this.options.host.setCallState(context.epoch, 'listening');
         }
         this.maybeRotateAtIdleBoundary(context, generation);
         this.maybeFinishGracefulStop(context);
+        queueMicrotask(() => {
+          if (!this.isCurrentSocket(context, generation) || context.stopping) {
+            return;
+          }
+          this.flushCoordinatorUpdates(context);
+        });
       },
       onBargeIn: () => {
         if (!this.isInteractiveSocket(context, generation)) return;
@@ -534,11 +683,16 @@ export class LiveSessionCoordinator {
       onError: (error) => {
         if (!this.isCurrentSocket(context, generation) || !error.fatal) return;
         if (context.stopping) {
-          this.closeContextNow(context);
+          this.failContext(context, error.message, undefined);
         } else if (reconnectableRealtimeError(error)) {
           this.beginReconnect(context, generation, error);
         } else {
-          this.failContext(context, error.message, false);
+          this.failContext(
+            context,
+            error.message,
+            providerFailureBlocker(error),
+            error,
+          );
         }
       },
       onClose: (info) => {
@@ -560,9 +714,9 @@ export class LiveSessionCoordinator {
 
     let lastError: unknown;
     const probeEpoch = `provider-probe:${randomUUID()}`;
-    for (const delayMs of [0, ...this.reconnectBackoffMs]) {
+    for (const baseDelayMs of [0, ...this.reconnectBackoffMs]) {
       try {
-        await waitForDelay(delayMs, signal);
+        await waitForDelay(retryDelayMs(baseDelayMs, lastError), signal);
         const realtime = await this.openRealtime(
           {
             endpoint: credential.endpoint,
@@ -586,23 +740,34 @@ export class LiveSessionCoordinator {
       }
     }
     if (signal.aborted) return;
+    const blocker = reconnectableRealtimeError(lastError)
+      ? 'provider_unreachable'
+      : 'provider_config';
     this.options.host.setProviderReachability({
       state: 'unavailable',
-      blocker: 'provider_unreachable',
-      message: `The Live provider is unreachable: ${errorMessage(lastError)}`,
+      blocker,
+      message:
+        blocker === 'provider_unreachable'
+          ? `The Live provider is unreachable: ${errorMessage(lastError)}`
+          : `The Live provider configuration was rejected: ${errorMessage(lastError)}`,
     });
-    this.scheduleProviderReprobe();
+    if (blocker === 'provider_unreachable') {
+      this.scheduleProviderReprobe(lastError);
+    }
   }
 
-  private scheduleProviderReprobe(): void {
+  private scheduleProviderReprobe(error?: unknown): void {
     if (this.providerReprobeTimer || !this.canBackgroundReprobeProvider()) {
       return;
     }
-    this.providerReprobeTimer = setTimeout(() => {
-      this.providerReprobeTimer = undefined;
-      if (!this.canBackgroundReprobeProvider()) return;
-      void this.probeProvider();
-    }, this.providerReprobeDelayMs);
+    this.providerReprobeTimer = setTimeout(
+      () => {
+        this.providerReprobeTimer = undefined;
+        if (!this.canBackgroundReprobeProvider()) return;
+        void this.probeProvider();
+      },
+      retryDelayMs(this.providerReprobeDelayMs, error),
+    );
     this.providerReprobeTimer.unref?.();
   }
 
@@ -627,8 +792,11 @@ export class LiveSessionCoordinator {
     const delays = initial
       ? [0, ...this.reconnectBackoffMs]
       : this.reconnectBackoffMs;
-    for (const delayMs of delays) {
-      await waitForDelay(delayMs, context.callAbort.signal);
+    for (const baseDelayMs of delays) {
+      await waitForDelay(
+        retryDelayMs(baseDelayMs, lastError),
+        context.callAbort.signal,
+      );
       if (!this.isActive(context) || context.stopping) {
         throw new DOMException('Live call ended.', 'AbortError');
       }
@@ -660,6 +828,11 @@ export class LiveSessionCoordinator {
         context.inputCommitPending = false;
         context.inputAwaitingResponse = false;
         context.authorizedResponsesPending = 0;
+        context.authorizedResponseInFlight = false;
+        context.activeUntrustedResponseId = undefined;
+        context.activeUntrustedResponseInputItemId = undefined;
+        context.untrustedResponsePending = false;
+        context.emptyFinalInputItemIds.clear();
         context.rotationDue = false;
         this.options.host.setProviderReachability(undefined);
         this.options.host.setCallState(context.epoch, 'listening');
@@ -703,7 +876,7 @@ export class LiveSessionCoordinator {
         this.failContext(
           context,
           'Realtime connection could not reach a safe rotation boundary before the rotation deadline.',
-          false,
+          undefined,
         );
       }, this.rotationDrainTimeoutMs);
       context.rotationDeadlineTimer.unref?.();
@@ -723,9 +896,11 @@ export class LiveSessionCoordinator {
       context.speechInProgress ||
       context.inputCommitPending ||
       context.inputAwaitingResponse ||
+      this.hasPendingInputTail(context) ||
       context.responseInFlight ||
       context.delegatesInFlight > 0 ||
-      context.authorizedResponsesPending > 0
+      context.authorizedResponsesPending > 0 ||
+      context.authorizedResponseInFlight
     ) {
       return;
     }
@@ -751,7 +926,27 @@ export class LiveSessionCoordinator {
     ) {
       return;
     }
+    if (this.hasUnrecoverableInput(context)) {
+      this.failContext(
+        context,
+        'Realtime disconnected before the current spoken input was delegated.',
+        undefined,
+      );
+      return;
+    }
+    if (
+      context.authorizedResponsesPending > 0 ||
+      context.authorizedResponseInFlight
+    ) {
+      this.failContext(
+        context,
+        'Realtime disconnected before the authorized response was fully delivered.',
+        undefined,
+      );
+      return;
+    }
     const previous = context.realtime;
+    this.options.host.clearOutput(context.epoch);
     this.invalidateRealtime(context);
     previous?.close();
     this.options.host.setProviderReachability({ state: 'checking' });
@@ -762,7 +957,8 @@ export class LiveSessionCoordinator {
         this.failContext(
           context,
           `Realtime provider disconnected: ${errorMessage(error)}`,
-          reconnectableRealtimeError(error),
+          providerFailureBlocker(error),
+          error,
         );
       })
       .finally(() => {
@@ -785,10 +981,15 @@ export class LiveSessionCoordinator {
       return;
     }
     if (context.stopping) {
-      this.closeContextNow(context);
+      this.failContext(
+        context,
+        info.error?.message ??
+          'Realtime disconnected before the final spoken input was persisted.',
+        undefined,
+      );
       return;
     }
-    if (info.reason === 'remote' || reconnectableRealtimeError(info.error)) {
+    if (reconnectableRealtimeError(info.error)) {
       this.beginReconnect(
         context,
         generation,
@@ -803,15 +1004,23 @@ export class LiveSessionCoordinator {
     this.failContext(
       context,
       info.error?.message ?? 'Realtime provider disconnected.',
-      false,
+      providerFailureBlocker(info.error),
+      info.error,
     );
   }
 
-  private beginGracefulStop(context: LiveCallContext): void {
-    if (!this.isActive(context) || context.stopping) return;
+  private beginGracefulStop(
+    context: LiveCallContext,
+  ): Promise<void | { error: string }> {
+    if (context.stopCompletion) return context.stopCompletion;
+    context.stopCompletion = new Promise((resolve) => {
+      context.finishStop = resolve;
+    });
+    if (!this.isActive(context)) {
+      context.finishStop?.();
+      return context.stopCompletion;
+    }
     context.stopping = true;
-    context.stopTailObserved =
-      context.responseInFlight || context.delegatesInFlight > 0;
     if (context.rotationTimer) {
       clearTimeout(context.rotationTimer);
       context.rotationTimer = undefined;
@@ -822,30 +1031,164 @@ export class LiveSessionCoordinator {
     }
     context.rotationDue = false;
     this.options.host.clearOutput(context.epoch);
+    if (!this.hasPendingStopTail(context)) {
+      this.finishGracefulStop(context);
+      return context.stopCompletion;
+    }
     context.stopDrainTimer = setTimeout(() => {
-      this.closeContextNow(context);
+      this.failGracefulStop(
+        context,
+        'Live Voice could not confirm that the final spoken input was persisted before the stop deadline.',
+      );
     }, this.gracefulStopDrainMs);
     context.stopDrainTimer.unref?.();
-    let committed = false;
-    try {
-      committed = context.realtime?.commitInputAudio() ?? false;
-    } catch {
-      committed = false;
+    if (context.speechInProgress || context.inputCommitPending) {
+      let committed = false;
+      try {
+        committed = context.realtime?.commitInputAudio() ?? false;
+      } catch {
+        committed = false;
+      }
+      if (!committed) {
+        this.failGracefulStop(
+          context,
+          'Live Voice could not commit the final spoken input during stop.',
+        );
+      }
     }
-    if (!committed) this.closeContextNow(context);
+    return context.stopCompletion;
   }
 
   private maybeFinishGracefulStop(context: LiveCallContext): void {
     if (
       !this.isActive(context) ||
       !context.stopping ||
-      !context.stopTailObserved ||
-      context.responseInFlight ||
-      context.delegatesInFlight > 0
+      context.stopFailureStarted ||
+      this.hasPendingStopTail(context)
     ) {
       return;
     }
+    this.finishGracefulStop(context);
+  }
+
+  private resolveCommittedInput(
+    context: LiveCallContext,
+    itemId: string | undefined,
+  ): void {
+    if (itemId) {
+      context.pendingCommittedInputItemIds.delete(itemId);
+    } else if (context.unattributedCommittedInputCount > 0) {
+      context.unattributedCommittedInputCount -= 1;
+    }
+  }
+
+  private hasPendingCommittedInput(context: LiveCallContext): boolean {
+    return (
+      context.pendingCommittedInputItemIds.size > 0 ||
+      context.unattributedCommittedInputCount > 0
+    );
+  }
+
+  private hasPendingInputTail(context: LiveCallContext): boolean {
+    return (
+      context.speechInProgress ||
+      context.inputCommitPending ||
+      this.hasPendingCommittedInput(context) ||
+      context.completedInputTranscripts.size > 0 ||
+      context.delegatesInFlight > 0
+    );
+  }
+
+  private hasPendingStopTail(context: LiveCallContext): boolean {
+    return (
+      this.hasPendingInputTail(context) || context.untrustedResponsePending
+    );
+  }
+
+  private hasUnrecoverableInput(context: LiveCallContext): boolean {
+    return (
+      context.speechInProgress ||
+      context.inputCommitPending ||
+      this.hasPendingCommittedInput(context) ||
+      context.untrustedResponsePending ||
+      [...context.completedInputTranscripts.keys()].some(
+        (itemId) => !context.admittedInputItemIds.has(itemId),
+      )
+    );
+  }
+
+  private finishGracefulStop(context: LiveCallContext): void {
+    if (!this.isActive(context) || context.stopFailureStarted) return;
+    const finish = context.finishStop;
+    context.finishStop = undefined;
     this.closeContextNow(context);
+    finish?.();
+  }
+
+  private failGracefulStop(context: LiveCallContext, message: string): void {
+    if (!this.isActive(context) || context.stopFailureStarted) return;
+    context.stopFailureStarted = true;
+    const finish = context.finishStop;
+    context.finishStop = undefined;
+    finish?.({ error: message });
+    const realtime = context.realtime;
+    this.invalidateRealtime(context);
+    realtime?.close();
+    void this.persistStopFailureEvidence(context, message).finally(() => {
+      this.closeContextNow(context);
+    });
+  }
+
+  private async persistStopFailureEvidence(
+    context: LiveCallContext,
+    message: string,
+  ): Promise<void> {
+    await context.delegateTail.catch(() => undefined);
+    if (!this.isActive(context)) return;
+    const pendingTranscripts = [...context.completedInputTranscripts.entries()];
+    if (pendingTranscripts.length > 0) {
+      for (const [itemId, transcript] of pendingTranscripts) {
+        if (context.admittedInputItemIds.has(itemId)) continue;
+        try {
+          const locator = await this.ensureCoordinator(context, transcript);
+          await this.runCoordinatorTurn(
+            context,
+            locator,
+            transcript,
+            buildDelegationPrompt(
+              transcript,
+              buildNewConversationControl(randomUUID()),
+            ),
+            () => context.admittedInputItemIds.add(itemId),
+          );
+          context.completedInputTranscripts.delete(itemId);
+          context.admittedInputItemIds.delete(itemId);
+        } catch {
+          /* the visible stop error remains authoritative */
+        }
+      }
+    }
+    if (
+      !this.hasPendingCommittedInput(context) ||
+      context.stopFailureEvidenceAdmitted
+    ) {
+      return;
+    }
+    const evidence = `[Live Voice stop failure] ${message}`;
+    try {
+      const locator = await this.ensureCoordinator(context, evidence);
+      await this.runCoordinatorTurn(
+        context,
+        locator,
+        evidence,
+        evidence,
+        () => {
+          context.stopFailureEvidenceAdmitted = true;
+        },
+      );
+    } catch {
+      /* the visible stop error remains authoritative */
+    }
   }
 
   private sendOrQueueCoordinatorUpdate(
@@ -880,21 +1223,28 @@ export class LiveSessionCoordinator {
   private failContext(
     context: LiveCallContext,
     message: string,
-    providerUnreachable: boolean,
+    providerBlocker: ProviderFailureBlocker,
+    error?: unknown,
   ): void {
     if (!this.isActive(context)) return;
-    this.closeContextNow(context);
-    this.options.host.failCall(context.epoch, message);
+    if (context.stopping) {
+      this.failGracefulStop(context, message);
+    } else {
+      this.closeContextNow(context);
+      this.options.host.failCall(context.epoch, message);
+    }
     this.options.host.setProviderReachability(
-      providerUnreachable
+      providerBlocker
         ? {
             state: 'unavailable',
-            blocker: 'provider_unreachable',
+            blocker: providerBlocker,
             message,
           }
         : undefined,
     );
-    if (providerUnreachable) this.scheduleProviderReprobe();
+    if (providerBlocker === 'provider_unreachable') {
+      this.scheduleProviderReprobe(error);
+    }
   }
 
   private async handleDelegate(
@@ -902,29 +1252,29 @@ export class LiveSessionCoordinator {
     event: RealtimeDelegateCall,
     generation: number,
     source: QwenRealtimeSession,
-  ): Promise<void> {
-    if (!this.isActive(context)) return;
+    onPromptAdmitted: () => void,
+  ): Promise<boolean> {
+    if (!this.isActive(context)) return false;
     if (!context.stopping) {
       this.options.host.setCallState(context.epoch, 'thinking');
     }
     let output: string;
+    let persisted = false;
     try {
       const newConversationControl = buildNewConversationControl(randomUUID());
       const locator = await this.ensureCoordinator(context, event.request);
-      if (!this.isActive(context)) return;
+      if (!this.isActive(context)) return false;
       const result = await this.runCoordinatorTurn(
         context,
         locator,
         event.request,
-        buildDelegationPrompt(
-          event.request,
-          event.recentTranscript,
-          newConversationControl,
-        ),
+        buildDelegationPrompt(event.request, newConversationControl),
+        onPromptAdmitted,
       );
+      persisted = true;
       if (
         result.stopReason === 'end_turn' &&
-        result.text.trim() === newConversationControl &&
+        result.text === newConversationControl &&
         !context.stopping &&
         this.isCurrentSocket(context, generation) &&
         context.realtime === source
@@ -936,11 +1286,11 @@ export class LiveSessionCoordinator {
             this.failContext(
               context,
               `Starting a new Live conversation failed: ${errorMessage(error)}`,
-              false,
+              undefined,
             );
           }
         }
-        return;
+        return true;
       }
       output =
         result.text.trim() ||
@@ -948,7 +1298,7 @@ export class LiveSessionCoordinator {
     } catch (error) {
       output = `The Qwen Code coordinator could not complete the request: ${errorMessage(error)}`;
     }
-    if (!this.isActive(context)) return;
+    if (!this.isActive(context)) return persisted;
     const boundedOutput = output.slice(0, MAX_COORDINATOR_RESULT_CHARS);
     if (
       this.isCurrentSocket(context, generation) &&
@@ -960,9 +1310,10 @@ export class LiveSessionCoordinator {
       })
     ) {
       context.authorizedResponsesPending += 1;
-      return;
+      return persisted;
     }
     this.sendOrQueueCoordinatorUpdate(context, boundedOutput);
+    return persisted;
   }
 
   private async ensureCoordinator(
@@ -988,6 +1339,7 @@ export class LiveSessionCoordinator {
     if (!runtime) throw new Error('Conversation workspace is unavailable.');
     let sessionId: string | undefined;
     let sessionLease: BridgeSession | undefined;
+    let sessionLeaseIsFresh = false;
     const candidate = context.resumeCandidate;
     if (candidate) {
       try {
@@ -1006,6 +1358,17 @@ export class LiveSessionCoordinator {
       } catch (error) {
         context.resumeCandidate = undefined;
         if (!this.isActive(context)) throw error;
+        if (
+          !(error instanceof SessionNotFoundError) &&
+          !(error instanceof SessionArchivedError)
+        ) {
+          this.failContext(
+            context,
+            `Resuming the Live conversation failed: ${errorMessage(error)}`,
+            undefined,
+          );
+          throw error;
+        }
       }
     }
     if (!sessionId) {
@@ -1018,6 +1381,7 @@ export class LiveSessionCoordinator {
       await this.prepareCoordinatorSession(context, runtime, created, true);
       sessionId = created.sessionId;
       sessionLease = created;
+      sessionLeaseIsFresh = true;
       try {
         runtime.bridge.updateSessionMetadata(sessionId, {
           displayName: titleFromRequest(firstRequest),
@@ -1029,7 +1393,11 @@ export class LiveSessionCoordinator {
     const locator = { workspaceCwd: runtime.workspaceCwd, sessionId };
     if (!this.isActive(context)) {
       if (sessionLease) {
-        await this.rollbackPreparedCoordinator(runtime.bridge, sessionLease);
+        await this.rollbackPreparedCoordinator(
+          runtime,
+          sessionLease,
+          sessionLeaseIsFresh,
+        );
       }
       throw new DOMException('Live call ended.', 'AbortError');
     }
@@ -1038,7 +1406,11 @@ export class LiveSessionCoordinator {
       !this.options.host.setCoordinator(context.epoch, locator)
     ) {
       if (sessionLease) {
-        await this.rollbackPreparedCoordinator(runtime.bridge, sessionLease);
+        await this.rollbackPreparedCoordinator(
+          runtime,
+          sessionLease,
+          sessionLeaseIsFresh,
+        );
       }
       throw new DOMException('Live call ended.', 'AbortError');
     }
@@ -1066,6 +1438,14 @@ export class LiveSessionCoordinator {
       if (!this.isActive(context)) {
         throw new DOMException('Live call ended.', 'AbortError');
       }
+      if (!requirePersistedSource && session.hasActivePrompt === true) {
+        if (session.currentCwd !== conversationCwd) {
+          throw new Error(
+            'Active Live coordinator is outside its isolated conversation directory.',
+          );
+        }
+        return;
+      }
       const changed = await runtime.bridge.changeSessionCwd(session.sessionId, {
         path: conversationCwd,
         allowedRoots: [runtime.workspaceCwd],
@@ -1074,22 +1454,33 @@ export class LiveSessionCoordinator {
       if (changed.newCwd !== conversationCwd) {
         throw new Error('Live coordinator directory relocation was rejected.');
       }
+      session.currentCwd = changed.newCwd;
       if (!this.isActive(context)) {
         throw new DOMException('Live call ended.', 'AbortError');
       }
     } catch (error) {
-      await this.rollbackPreparedCoordinator(runtime.bridge, session);
+      await this.rollbackPreparedCoordinator(
+        runtime,
+        session,
+        requirePersistedSource,
+      );
       throw error;
     }
   }
 
   private async rollbackPreparedCoordinator(
-    bridge: AcpSessionBridge,
+    runtime: WorkspaceRuntime,
     session: BridgeSession,
+    removeFreshTranscript: boolean,
   ): Promise<void> {
+    const bridge = runtime.bridge;
     let sessionClosed = false;
     try {
-      if (session.attached) {
+      if (session.hasActivePrompt === true) {
+        if (session.clientId) {
+          await bridge.detachClient(session.sessionId, session.clientId);
+        }
+      } else if (session.attached) {
         if (session.clientId) {
           await bridge.detachClient(session.sessionId, session.clientId);
         }
@@ -1102,6 +1493,15 @@ export class LiveSessionCoordinator {
       /* preserve the original setup failure */
     }
     if (!sessionClosed) return;
+    if (removeFreshTranscript) {
+      try {
+        await new SessionService(runtime.workspaceCwd).removeSession(
+          session.sessionId,
+        );
+      } catch {
+        /* preserve the original setup failure */
+      }
+    }
     try {
       await this.options.discardEmptyConversationDirectory(session.sessionId);
     } catch {
@@ -1114,6 +1514,7 @@ export class LiveSessionCoordinator {
     locator: LiveSessionLocator,
     prompt: string,
     modelPrompt: string,
+    onPromptAdmitted?: () => void,
   ): Promise<CollectedTurn> {
     const runtime = context.runtime;
     if (!runtime) throw new Error('Conversation workspace is unavailable.');
@@ -1136,7 +1537,7 @@ export class LiveSessionCoordinator {
         lastEventId,
         signal,
       })) {
-        this.captureWorkers(context, event);
+        await this.captureWorker(context, event);
         if (event.promptId !== promptId) continue;
         const update = sessionUpdate(event);
         if (update?.['sessionUpdate'] === 'agent_message_chunk') {
@@ -1158,15 +1559,21 @@ export class LiveSessionCoordinator {
     })();
     try {
       try {
-        await bridge.sendPrompt(
+        const turn = bridge.sendPrompt(
           locator.sessionId,
           {
             sessionId: locator.sessionId,
             prompt: [{ type: 'text', text: prompt }],
           },
           signal,
-          { promptId, modelPrompt, deadlineMs: this.turnTimeoutMs },
+          {
+            promptId,
+            modelPrompt,
+            deadlineMs: this.turnTimeoutMs,
+            ...(onPromptAdmitted ? { onPromptAdmitted } : {}),
+          },
         );
+        await turn;
         await collect;
       } catch (error) {
         if (timedOut) throw new Error('Coordinator turn timed out.');
@@ -1204,18 +1611,20 @@ export class LiveSessionCoordinator {
     void (async () => {
       let announcement = '';
       let response = '';
+      let backgroundTaskId: string | undefined;
       try {
         for await (const event of bridge.subscribeEvents(sessionId, {
           lastEventId,
           signal,
         })) {
-          this.captureWorkers(context, event);
+          await this.captureWorker(context, event);
           const update = sessionUpdate(event);
           if (update?.['sessionUpdate'] === 'agent_message_chunk') {
             const source = updateSource(update);
             if (source === 'background_notification') {
               announcement = updateText(update);
               response = '';
+              backgroundTaskId = updateBackgroundTaskId(update);
             } else if (source === 'background_notification_response') {
               response = appendBounded(response, updateText(update));
             }
@@ -1224,6 +1633,8 @@ export class LiveSessionCoordinator {
             const spoken = response.trim() || announcement.trim();
             if (
               spoken &&
+              backgroundTaskId !== undefined &&
+              context.workerIds.has(backgroundTaskId) &&
               this.isActive(context) &&
               !context.stopping &&
               this.sendOrQueueCoordinatorUpdate(context, spoken)
@@ -1232,6 +1643,7 @@ export class LiveSessionCoordinator {
             }
             announcement = '';
             response = '';
+            backgroundTaskId = undefined;
           }
         }
       } catch {
@@ -1240,20 +1652,40 @@ export class LiveSessionCoordinator {
     })();
   }
 
-  private captureWorkers(context: LiveCallContext, event: BridgeEvent): void {
+  private async captureWorker(
+    context: LiveCallContext,
+    event: BridgeEvent,
+  ): Promise<void> {
     if (!this.isActive(context)) return;
     const runtime = context.runtime;
-    if (!runtime) return;
-    let changed = false;
-    for (const sessionId of workerIdsFromEvent(event)) {
-      if (sessionId === context.coordinator?.sessionId) continue;
-      if (context.workerIds.has(sessionId)) continue;
+    const coordinatorId = context.coordinator?.sessionId;
+    const sessionId = workerIdFromEvent(event);
+    if (!runtime || !coordinatorId || !sessionId) return;
+    if (
+      sessionId === coordinatorId ||
+      context.workerIds.has(sessionId) ||
+      context.pendingWorkerIds.has(sessionId)
+    ) {
+      return;
+    }
+    context.pendingWorkerIds.add(sessionId);
+    try {
+      const parentSessionId = await new SessionService(
+        runtime.workspaceCwd,
+      ).readParentSessionId(sessionId);
+      if (
+        !this.isActive(context) ||
+        context.coordinator?.sessionId !== coordinatorId ||
+        parentSessionId !== coordinatorId ||
+        context.workerIds.has(sessionId)
+      ) {
+        return;
+      }
       context.workerIds.add(sessionId);
       context.workers.push({ workspaceCwd: runtime.workspaceCwd, sessionId });
-      changed = true;
-    }
-    if (changed) {
       this.options.host.setWorkers(context.epoch, context.workers);
+    } finally {
+      context.pendingWorkerIds.delete(sessionId);
     }
   }
 
@@ -1296,6 +1728,7 @@ export class LiveSessionCoordinator {
     context.inputCommitPending = false;
     context.inputAwaitingResponse = false;
     context.authorizedResponsesPending = 0;
+    context.authorizedResponseInFlight = false;
     context.rotationDue = false;
     context.realtimeGeneration += 1;
   }

@@ -16,6 +16,7 @@ export const DEFAULT_LIVE_PROVIDER_MODEL = 'openai:qwen3.8-max-preview';
 export const DEFAULT_LIVE_ENDPOINT =
   'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
 export const DEFAULT_LIVE_VOICE = 'Tina';
+export const DEFAULT_LIVE_SHORTCUT = 'Command+Q';
 
 export interface LiveVoiceConfiguration {
   enabled: boolean;
@@ -23,6 +24,7 @@ export interface LiveVoiceConfiguration {
   providerModel: string;
   endpoint: string;
   voice: string;
+  shortcut: string;
 }
 
 export interface LiveProviderCredential {
@@ -55,6 +57,15 @@ function readNonEmpty(value: unknown, fallback: string): string {
     : fallback;
 }
 
+function readBoundedNonEmpty(
+  value: unknown,
+  fallback: string,
+  maximumLength: number,
+): string {
+  const resolved = readNonEmpty(value, fallback);
+  return resolved.length <= maximumLength ? resolved : fallback;
+}
+
 export function readLiveVoiceConfiguration(
   settings: Settings,
 ): LiveVoiceConfiguration {
@@ -68,6 +79,7 @@ export function readLiveVoiceConfiguration(
     ),
     endpoint: readNonEmpty(raw?.endpoint, DEFAULT_LIVE_ENDPOINT),
     voice: readNonEmpty(raw?.voice, DEFAULT_LIVE_VOICE),
+    shortcut: readBoundedNonEmpty(raw?.shortcut, DEFAULT_LIVE_SHORTCUT, 128),
   };
 }
 

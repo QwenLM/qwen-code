@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { PINNED_CUA_DRIVER_VERSION } from '../../shared/cua-driver-version.ts';
 import {
+  CuaReadinessMonitor,
   findInstalledCuaDriver,
   hasExpectedCuaDriverIdentity,
   isCuaDriverBundleExecutablePath,
@@ -93,7 +94,7 @@ describe('CuaDriver readiness', () => {
           accessibility: true,
           screen_recording: true,
           screen_recording_capturable: true,
-          source: 'daemon',
+          source: { attribution: 'driver-daemon' },
         }),
       ),
       {
@@ -109,13 +110,46 @@ describe('CuaDriver readiness', () => {
           accessibility: true,
           screen_recording: true,
           screen_recording_capturable: false,
+          source: { attribution: 'driver-daemon' },
         }),
       ).appshot,
       false,
     );
   });
 
-  it('does not attribute an unknown standalone result to CuaDriver', () => {
+  it('fails closed for standalone, terminal, IDE, and missing provenance', () => {
+    const untrustedSources: unknown[] = [
+      { attribution: 'caller' },
+      {
+        attribution: 'caller',
+        executable: '/Applications/Terminal.app/Contents/MacOS/Terminal',
+      },
+      {
+        attribution: 'caller',
+        executable:
+          '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+      },
+      undefined,
+    ];
+    for (const source of untrustedSources) {
+      assert.deepEqual(
+        parseCuaPermissionStatus(
+          JSON.stringify({
+            accessibility: true,
+            screen_recording: true,
+            screen_recording_capturable: true,
+            source,
+          }),
+        ),
+        {
+          installed: true,
+          accessibility: 'not_determined',
+          screenRecording: 'not_determined',
+          appshot: false,
+        },
+      );
+    }
+
     assert.deepEqual(
       parseCuaPermissionStatus('{"status":"unknown","daemon_running":false}'),
       {
@@ -151,10 +185,14 @@ describe('CuaDriver readiness', () => {
     );
   });
 
-  it('rejects an executable when bounded codesign identity validation fails', async () => {
+  it('rejects the wrong bundle version or signing identity at the pinned path', async () => {
     const root = await mkdtemp(join(tmpdir(), 'qwen-live-cua-'));
     const executable = join(
       root,
+      '.qwen',
+      'computer-use',
+      `cua-driver-rs-${PINNED_CUA_DRIVER_VERSION}`,
+      `cua-driver-rs-${PINNED_CUA_DRIVER_VERSION}-darwin-arm64`,
       'CuaDriver.app',
       'Contents',
       'MacOS',
@@ -172,6 +210,12 @@ describe('CuaDriver readiness', () => {
           if (args.includes('Print :CFBundleIdentifier')) {
             return { stdout: 'com.trycua.driver\n', stderr: '' };
           }
+          if (args.includes('Print :CFBundleShortVersionString')) {
+            return {
+              stdout: `${PINNED_CUA_DRIVER_VERSION}\n`,
+              stderr: '',
+            };
+          }
           return args.includes('-dv')
             ? {
                 stdout: '',
@@ -182,13 +226,39 @@ describe('CuaDriver readiness', () => {
         },
       );
       assert.equal(valid, true);
-      assert.equal(commands, 3);
+      assert.equal(commands, 4);
+
+      const wrongVersion = await validateCuaDriverBundle(
+        executable,
+        async (_file, args) => {
+          if (args.includes('Print :CFBundleIdentifier')) {
+            return { stdout: 'com.trycua.driver\n', stderr: '' };
+          }
+          if (args.includes('Print :CFBundleShortVersionString')) {
+            return { stdout: '9.9.9\n', stderr: '' };
+          }
+          return args.includes('-dv')
+            ? {
+                stdout: '',
+                stderr:
+                  'Identifier=com.trycua.driver\nTeamIdentifier=YCK386LBJ7\n',
+              }
+            : { stdout: '', stderr: '' };
+        },
+      );
+      assert.equal(wrongVersion, false);
 
       const invalid = await validateCuaDriverBundle(
         executable,
         async (_file, args) => {
           if (args.includes('Print :CFBundleIdentifier')) {
             return { stdout: 'com.trycua.driver\n', stderr: '' };
+          }
+          if (args.includes('Print :CFBundleShortVersionString')) {
+            return {
+              stdout: `${PINNED_CUA_DRIVER_VERSION}\n`,
+              stderr: '',
+            };
           }
           return {
             stdout: '',
@@ -200,5 +270,65 @@ describe('CuaDriver readiness', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('revalidates the installed bundle identity on every poll', async () => {
+    const states: Array<{ installed: boolean; appshot: boolean }> = [];
+    let validations = 0;
+    const monitor = new CuaReadinessMonitor(
+      (state) => states.push(state),
+      60_000,
+      async () => {
+        validations += 1;
+        return validations === 1 ? '/validated/cua-driver' : undefined;
+      },
+      async () => ({
+        stdout: JSON.stringify({
+          accessibility: true,
+          screen_recording: true,
+          screen_recording_capturable: true,
+          source: { attribution: 'driver-daemon' },
+        }),
+        stderr: '',
+      }),
+    );
+
+    await monitor.poll();
+    await monitor.poll();
+
+    assert.equal(validations, 2);
+    assert.deepEqual(
+      states.map(({ installed, appshot }) => ({ installed, appshot })),
+      [
+        { installed: true, appshot: true },
+        { installed: false, appshot: false },
+      ],
+    );
+  });
+
+  it('does not run a validated driver after the monitor stops', async () => {
+    const findResolvers: Array<(path: string) => void> = [];
+    let commands = 0;
+    const monitor = new CuaReadinessMonitor(
+      () => undefined,
+      60_000,
+      () =>
+        new Promise<string>((resolve) => {
+          findResolvers.push(resolve);
+        }),
+      async () => {
+        commands += 1;
+        return { stdout: '{}', stderr: '' };
+      },
+    );
+
+    monitor.start();
+    monitor.requestPermission('accessibility');
+    monitor.stop();
+    for (const resolve of findResolvers) resolve('/validated/cua-driver');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(commands, 0);
   });
 });

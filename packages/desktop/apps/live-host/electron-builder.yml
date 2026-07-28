@@ -2,7 +2,6 @@ appId: 'com.alibaba.qwen-code.live-host'
 productName: 'Qwen Live Host'
 copyright: 'Copyright © 2026 Alibaba Group.'
 electronVersion: '39.2.7'
-afterSign: 'scripts/after-sign.cjs'
 npmRebuild: false
 
 directories:
@@ -32,8 +31,6 @@ mac:
   entitlements: 'build/entitlements.mac.plist'
   entitlementsInherit: 'build/entitlements.mac.plist'
   extraResources:
-    - from: 'dist/native/qwen-live-command-monitor'
-      to: 'native/qwen-live-command-monitor'
     - from: 'dist/icon.png'
       to: 'live-host-icon.png'
   target:

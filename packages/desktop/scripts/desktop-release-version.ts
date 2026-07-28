@@ -19,6 +19,7 @@ const repoRoot = join(import.meta.dir, '..');
 export const desktopReleasePackageSources: PackageVersionSource[] = [
   { label: 'root package', path: 'package.json' },
   { label: 'Electron app package', path: 'apps/electron/package.json' },
+  { label: 'Live Host package', path: 'apps/live-host/package.json' },
   { label: 'shared package', path: 'packages/shared/package.json' },
 ];
 

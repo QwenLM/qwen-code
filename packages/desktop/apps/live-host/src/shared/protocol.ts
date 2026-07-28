@@ -1,4 +1,4 @@
-export const LIVE_PROTOCOL_VERSION = 2;
+export const LIVE_PROTOCOL_VERSION = 3;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host';
 export const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
 export const MAX_INPUT_AUDIO_FRAME_BYTES = 64 * 1024;
@@ -12,7 +12,6 @@ export type PermissionState = 'granted' | 'denied' | 'not_determined';
 
 export type HostPermissions = {
   microphone: PermissionState;
-  inputMonitoring: PermissionState;
   accessibility: PermissionState;
   screenRecording: PermissionState;
 };
@@ -22,15 +21,6 @@ export type HostSelfChecks = {
   audioOutput: boolean;
   globalShortcut: boolean;
   appshot: boolean;
-};
-
-export type SessionLocator = {
-  workspaceCwd: string;
-  sessionId: string;
-};
-
-export type OpenSessionTarget = SessionLocator & {
-  workspaceId: string;
 };
 
 export type LiveCallState =
@@ -47,19 +37,17 @@ export type LiveStatus = {
   v: 1;
   available: boolean;
   state: LiveCallState;
+  shortcut: string;
   blocker?: string;
   message?: string;
   callId?: string;
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
-  coordinator?: SessionLocator;
-  workers?: SessionLocator[];
   requirements?: Partial<
     Record<
       | 'host'
       | 'microphone'
-      | 'inputMonitoring'
       | 'accessibility'
       | 'screenRecording'
       | 'audioInput'
@@ -71,7 +59,6 @@ export type LiveStatus = {
     >
   >;
   host?: { version?: string; protocolVersion?: number };
-  installUrl?: string;
 };
 
 export type HostHello = {
@@ -92,18 +79,6 @@ export type HostAction =
       inputMuted: boolean;
       outputMuted: boolean;
       epoch?: number;
-    }
-  | {
-      type: 'host.action';
-      action: 'open_session';
-      locator: SessionLocator;
-      epoch?: number;
-    }
-  | {
-      type: 'host.action';
-      action: 'request_permission';
-      permission: keyof HostPermissions;
-      epoch?: number;
     };
 
 export type HostControlMessage =
@@ -123,7 +98,6 @@ export type DaemonControlMessage =
   | { type: 'host.state'; epoch: number; status: LiveStatus }
   | { type: 'host.ping'; pingId: string }
   | { type: 'host.clear_output'; epoch: number }
-  | { type: 'host.open_session'; target: OpenSessionTarget }
   | { type: 'host.error'; code: string; message?: string };
 
 const LIVE_STATES = new Set<LiveCallState>([
@@ -150,20 +124,6 @@ function boundedString(
     : undefined;
 }
 
-function parseLocator(value: unknown): SessionLocator | undefined {
-  if (!isRecord(value)) return undefined;
-  const workspaceCwd = boundedString(value.workspaceCwd, 4096);
-  const sessionId = boundedString(value.sessionId, 256);
-  return workspaceCwd && sessionId ? { workspaceCwd, sessionId } : undefined;
-}
-
-function parseOpenSessionTarget(value: unknown): OpenSessionTarget | undefined {
-  const locator = parseLocator(value);
-  if (!locator || !isRecord(value)) return undefined;
-  const workspaceId = boundedString(value.workspaceId, 256);
-  return workspaceId ? { ...locator, workspaceId } : undefined;
-}
-
 const REQUIREMENT_STATES = new Set([
   'ready',
   'missing',
@@ -175,7 +135,6 @@ const REQUIREMENT_STATES = new Set([
 const REQUIREMENT_KEYS = [
   'host',
   'microphone',
-  'inputMonitoring',
   'accessibility',
   'screenRecording',
   'audioInput',
@@ -189,7 +148,8 @@ export function parseLiveStatus(value: unknown): LiveStatus | undefined {
   if (
     !isRecord(value) ||
     value.v !== 1 ||
-    typeof value.available !== 'boolean'
+    typeof value.available !== 'boolean' ||
+    !boundedString(value.shortcut, 128)
   ) {
     return undefined;
   }
@@ -204,27 +164,20 @@ export function parseLiveStatus(value: unknown): LiveStatus | undefined {
     v: 1,
     available: value.available,
     state: value.state as LiveCallState,
+    shortcut: value.shortcut as string,
   };
   const blocker = boundedString(value.blocker, 128);
   const message = boundedString(value.message, 1_024);
   const callId = boundedString(value.callId, 256);
   const transcript = boundedString(value.transcript, 8_192);
-  const coordinator = parseLocator(value.coordinator);
   if (blocker) status.blocker = blocker;
   if (message) status.message = message;
   if (callId) status.callId = callId;
   if (transcript) status.transcript = transcript;
-  if (coordinator) status.coordinator = coordinator;
   if (typeof value.inputMuted === 'boolean')
     status.inputMuted = value.inputMuted;
   if (typeof value.outputMuted === 'boolean')
     status.outputMuted = value.outputMuted;
-  if (Array.isArray(value.workers)) {
-    status.workers = value.workers.slice(0, 20).flatMap((worker) => {
-      const locator = parseLocator(worker);
-      return locator ? [locator] : [];
-    });
-  }
   if (isRecord(value.requirements)) {
     const requirements: NonNullable<LiveStatus['requirements']> = {};
     for (const key of REQUIREMENT_KEYS) {
@@ -250,8 +203,6 @@ export function parseLiveStatus(value: unknown): LiveStatus | undefined {
       ...(protocolVersion !== undefined ? { protocolVersion } : {}),
     };
   }
-  const installUrl = boundedString(value.installUrl, 2_048);
-  if (installUrl) status.installUrl = installUrl;
   return status;
 }
 
@@ -313,11 +264,6 @@ export function parseDaemonControlMessage(
     return Number.isSafeInteger(value.epoch) && Number(value.epoch) >= 0
       ? { type: 'host.clear_output', epoch: Number(value.epoch) }
       : undefined;
-  }
-
-  if (value.type === 'host.open_session') {
-    const target = parseOpenSessionTarget(value.target);
-    return target ? { type: 'host.open_session', target } : undefined;
   }
 
   if (value.type === 'host.error') {

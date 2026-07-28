@@ -27,7 +27,6 @@ import styles from './LiveVoiceButton.module.css';
 const REQUIREMENTS = [
   ['host', 'live.requirement.host'],
   ['microphone', 'live.requirement.microphone'],
-  ['inputMonitoring', 'live.requirement.inputMonitoring'],
   ['accessibility', 'live.requirement.accessibility'],
   ['screenRecording', 'live.requirement.screenRecording'],
   ['audioInput', 'live.requirement.audioInput'],
@@ -149,6 +148,11 @@ export function LiveVoiceButton(): React.JSX.Element | null {
         {status?.transcript ? (
           <p className={styles.transcript}>{status.transcript}</p>
         ) : null}
+        {status?.shortcut ? (
+          <p className={styles.hint}>
+            {t('live.shortcutHint', { shortcut: status.shortcut })}
+          </p>
+        ) : null}
         {status?.coordinator || status?.workers?.length ? (
           <div className={styles.sessions}>
             {status.coordinator ? (
@@ -176,16 +180,6 @@ export function LiveVoiceButton(): React.JSX.Element | null {
           <Button variant="outline" disabled={busy} onClick={() => refresh()}>
             {t('live.refresh')}
           </Button>
-          {status?.installUrl ? (
-            <Button
-              variant="outline"
-              onClick={() =>
-                window.open(status.installUrl, '_blank', 'noopener,noreferrer')
-              }
-            >
-              {t('live.installHost')}
-            </Button>
-          ) : null}
           {active ? (
             <>
               <Button

@@ -526,6 +526,16 @@ const SETTINGS_SCHEMA = {
             description: 'Voice used for Realtime model audio output.',
             showInDialog: false,
           },
+          shortcut: {
+            type: 'string',
+            label: 'Live Voice Global Shortcut',
+            category: 'General',
+            requiresRestart: true,
+            default: 'Command+Q' as string,
+            description:
+              'Electron accelerator registered globally by Qwen Live Host.',
+            showInDialog: false,
+          },
         },
       },
       enableAutoUpdate: {

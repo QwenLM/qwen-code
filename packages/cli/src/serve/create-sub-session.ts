@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto';
 import {
   createDebugLogger,
   escapeXml,
+  SessionService,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -408,15 +409,26 @@ async function deliverSentCompletion(
       workspaceCwd: boundWorkspace,
     });
     if (isolatedCwd !== undefined) {
-      const changed = await bridge.changeSessionCwd(parentSessionId, {
-        path: isolatedCwd,
-        allowedRoots: [boundWorkspace],
-        managedRelocation: 'live-conversation',
-      });
-      if (changed.newCwd !== isolatedCwd) {
+      if (
+        restoredParent.hasActivePrompt === true &&
+        restoredParent.currentCwd !== isolatedCwd
+      ) {
         throw new Error(
-          'Restored parent workspace directory relocation was rejected.',
+          'Active restored parent is outside its isolated conversation directory.',
         );
+      }
+      if (restoredParent.hasActivePrompt !== true) {
+        const changed = await bridge.changeSessionCwd(parentSessionId, {
+          path: isolatedCwd,
+          allowedRoots: [boundWorkspace],
+          managedRelocation: 'live-conversation',
+        });
+        if (changed.newCwd !== isolatedCwd) {
+          throw new Error(
+            'Restored parent workspace directory relocation was rejected.',
+          );
+        }
+        restoredParent.currentCwd = changed.newCwd;
       }
     }
     const lastEventId = bridge.getSessionLastEventId(parentSessionId);
@@ -470,7 +482,14 @@ async function deliverSentCompletion(
     let recoveredParentClosed = false;
     if (restoredParent !== undefined) {
       try {
-        if (restoredParent.attached) {
+        if (restoredParent.hasActivePrompt === true) {
+          if (restoredParent.clientId) {
+            await bridge.detachClient(
+              restoredParent.sessionId,
+              restoredParent.clientId,
+            );
+          }
+        } else if (restoredParent.attached) {
           if (restoredParent.clientId) {
             await bridge.detachClient(
               restoredParent.sessionId,
@@ -673,7 +692,15 @@ export function createSubSessionLauncher(
     // from one prompt. `callerSessionId` is required and authenticated at the
     // bridge (`ownsSession`), so it can neither be forged nor omitted to
     // sidestep this gate or the per-caller cap below.
-    if (spawnedSessionIds.has(info.callerSessionId)) {
+    // The in-memory set catches children created by this launcher. The
+    // persisted parent lineage catches the same child after a daemon restart,
+    // when the launcher set is empty but the restored bridge entry has been
+    // re-seeded from its transcript metadata.
+    const caller = bridge.getSessionSummary(info.callerSessionId);
+    if (
+      spawnedSessionIds.has(info.callerSessionId) ||
+      caller.parentSessionId !== undefined
+    ) {
       throw new Error(
         'A sub-session cannot create further sub-sessions (nesting is capped ' +
           'at one level).',
@@ -716,6 +743,7 @@ export function createSubSessionLauncher(
     // we roll this session back so it isn't orphaned (the slot was consumed and
     // the prompt may have been dispatched, but launch() reports failure).
     let spawnedSession: BridgeSession | undefined;
+    let promptDispatched = false;
 
     try {
       const sub = await bridge.spawnOrAttach({
@@ -769,6 +797,7 @@ export function createSubSessionLauncher(
         undefined,
         { promptId },
       );
+      promptDispatched = true;
       // The result comes from the event stream (turn_error surfaces failures);
       // swallow the promise so it can't raise an unhandled rejection, but log
       // the error so dispatch failures are not invisible.
@@ -935,6 +964,19 @@ export function createSubSessionLauncher(
           );
         }
         if (sessionClosed) {
+          if (!promptDispatched) {
+            try {
+              await new SessionService(boundWorkspace).removeSession(
+                spawnedSession.sessionId,
+              );
+            } catch (cleanupError) {
+              log.debug(
+                'sub-session: isolated transcript cleanup failed',
+                spawnedSession.sessionId,
+                cleanupError,
+              );
+            }
+          }
           try {
             await isolatedWorkspace.discardEmptyDirectory(
               spawnedSession.sessionId,

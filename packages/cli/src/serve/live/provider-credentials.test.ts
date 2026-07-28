@@ -9,6 +9,7 @@ import type { Settings } from '../../config/settings.js';
 import {
   DEFAULT_LIVE_ENDPOINT,
   DEFAULT_LIVE_PROVIDER_MODEL,
+  DEFAULT_LIVE_SHORTCUT,
   DEFAULT_LIVE_VOICE,
   DEFAULT_LIVE_VOICE_MODEL,
   LiveProviderConfigError,
@@ -49,6 +50,7 @@ describe('Live provider credentials', () => {
       providerModel: DEFAULT_LIVE_PROVIDER_MODEL,
       endpoint: DEFAULT_LIVE_ENDPOINT,
       voice: DEFAULT_LIVE_VOICE,
+      shortcut: DEFAULT_LIVE_SHORTCUT,
     });
   });
 

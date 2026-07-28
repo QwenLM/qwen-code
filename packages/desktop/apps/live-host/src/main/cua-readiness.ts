@@ -43,7 +43,12 @@ export function parseCuaPermissionStatus(value: string): CuaReadiness {
     return { ...EMPTY_READINESS, installed: true };
   }
   const record = parsed as Record<string, unknown>;
+  const source = record.source;
   if (
+    typeof source !== 'object' ||
+    source === null ||
+    Array.isArray(source) ||
+    (source as Record<string, unknown>).attribution !== 'driver-daemon' ||
     typeof record.accessibility !== 'boolean' ||
     typeof record.screen_recording !== 'boolean'
   ) {
@@ -88,7 +93,7 @@ export function isCuaDriverBundleExecutablePath(path: string): boolean {
 }
 
 type ExecFileResult = { stdout: string; stderr: string };
-type BoundedExec = (
+export type BoundedExec = (
   file: string,
   args: readonly string[],
   options: { timeout: number; maxBuffer: number },
@@ -128,6 +133,16 @@ export async function validateCuaDriverBundle(
       { timeout: 5_000, maxBuffer: MAX_STATUS_BYTES },
     );
     if (metadata.stdout.trim() !== CUA_BUNDLE_ID) return false;
+    const version = await run(
+      '/usr/libexec/PlistBuddy',
+      [
+        '-c',
+        'Print :CFBundleShortVersionString',
+        join(appPath, 'Contents', 'Info.plist'),
+      ],
+      { timeout: 5_000, maxBuffer: MAX_STATUS_BYTES },
+    );
+    if (version.stdout.trim() !== PINNED_CUA_DRIVER_VERSION) return false;
     await run(
       '/usr/bin/codesign',
       ['--verify', '--deep', '--strict', appPath],
@@ -177,14 +192,19 @@ export class CuaReadinessMonitor {
   private lastStatusDaemonLaunch = 0;
   private statusDaemonLaunchAttempts = 0;
   private polling = false;
+  private lifecycleGeneration = 0;
 
   constructor(
     private readonly onState: (state: CuaReadiness) => void,
     private readonly intervalMs = 3_000,
+    private readonly findDriver: () => Promise<string | undefined> = () =>
+      findInstalledCuaDriver(),
+    private readonly run: BoundedExec = boundedExec,
   ) {}
 
   start(): void {
     if (this.timer) return;
+    this.lifecycleGeneration += 1;
     void this.poll();
     this.timer = setInterval(() => void this.poll(), this.intervalMs);
     this.timer.unref();
@@ -193,34 +213,42 @@ export class CuaReadinessMonitor {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.lifecycleGeneration += 1;
+    this.driverPath = undefined;
+    this.lastState = '';
+    this.lastStatusDaemonLaunch = 0;
+    this.statusDaemonLaunchAttempts = 0;
   }
 
   requestPermission(_kind: 'accessibility' | 'screenRecording'): void {
     this.statusDaemonLaunchAttempts = 0;
-    void this.grantPermissions();
+    void this.grantPermissions(this.lifecycleGeneration);
   }
 
   async poll(): Promise<void> {
     if (this.polling) return;
+    const generation = this.lifecycleGeneration;
     this.polling = true;
     try {
-      await this.pollOnce();
+      await this.pollOnce(generation);
     } finally {
       this.polling = false;
     }
   }
 
-  private async pollOnce(): Promise<void> {
-    this.driverPath = this.driverPath ?? (await findInstalledCuaDriver());
-    if (!this.driverPath) {
-      this.publish(EMPTY_READINESS);
+  private async pollOnce(generation: number): Promise<void> {
+    const driverPath = await this.findDriver();
+    if (generation !== this.lifecycleGeneration) return;
+    this.driverPath = driverPath;
+    if (!driverPath) {
+      this.publish(EMPTY_READINESS, generation);
       return;
     }
 
     let state: CuaReadiness;
     try {
-      const { stdout } = await execFileAsync(
-        this.driverPath,
+      const { stdout } = await this.run(
+        driverPath,
         ['permissions', 'status', '--json'],
         { timeout: 5_000, maxBuffer: MAX_STATUS_BYTES },
       );
@@ -228,7 +256,8 @@ export class CuaReadinessMonitor {
     } catch {
       state = { ...EMPTY_READINESS, installed: true };
     }
-    this.publish(state);
+    this.publish(state, generation);
+    if (generation !== this.lifecycleGeneration) return;
     if (
       state.accessibility === 'not_determined' ||
       state.screenRecording === 'not_determined'
@@ -238,7 +267,6 @@ export class CuaReadinessMonitor {
   }
 
   private async ensureStatusDaemon(): Promise<void> {
-    this.driverPath = this.driverPath ?? (await findInstalledCuaDriver());
     if (
       !this.driverPath ||
       this.statusDaemonLaunchAttempts >= 3 ||
@@ -249,23 +277,25 @@ export class CuaReadinessMonitor {
     this.lastStatusDaemonLaunch = Date.now();
     this.statusDaemonLaunchAttempts += 1;
     const appPath = join(this.driverPath, '..', '..', '..');
-    await boundedExec(
+    await this.run(
       '/usr/bin/open',
       ['-n', '-g', '-a', appPath, '--args', 'serve', '--no-permissions-gate'],
       { timeout: 5_000, maxBuffer: MAX_STATUS_BYTES },
     ).catch(() => undefined);
   }
 
-  private async grantPermissions(): Promise<void> {
-    this.driverPath = this.driverPath ?? (await findInstalledCuaDriver());
-    if (!this.driverPath) return;
-    await boundedExec(this.driverPath, ['permissions', 'grant'], {
+  private async grantPermissions(generation: number): Promise<void> {
+    const driverPath = await this.findDriver();
+    if (generation !== this.lifecycleGeneration || !driverPath) return;
+    this.driverPath = driverPath;
+    await this.run(driverPath, ['permissions', 'grant'], {
       timeout: 30_000,
       maxBuffer: MAX_STATUS_BYTES,
     }).catch(() => undefined);
   }
 
-  private publish(state: CuaReadiness): void {
+  private publish(state: CuaReadiness, generation: number): void {
+    if (generation !== this.lifecycleGeneration) return;
     const serialized = JSON.stringify(state);
     if (serialized === this.lastState) return;
     this.lastState = serialized;

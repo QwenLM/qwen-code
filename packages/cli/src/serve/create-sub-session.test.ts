@@ -49,6 +49,8 @@ function makeFakeBridge(opts?: {
    * sent-mode worker completes. `resumeSession` makes it live again. */
   reapedParentSessionId?: string;
   reapedParentAttached?: boolean;
+  reapedParentHasActivePrompt?: boolean;
+  reapedParentCurrentCwd?: string;
   /** Make `resumeSession` throw for the reaped parent even though it exists,
    * exercising recovery failure after the directory was materialized. */
   resumeSessionRejects?: string;
@@ -62,6 +64,8 @@ function makeFakeBridge(opts?: {
   closeSessionFails?: 'sync' | 'async';
   /** Accepted acknowledgements returned by successive completion deliveries. */
   notificationAcks?: boolean[];
+  /** Persisted parent lineage for callers restored after a daemon restart. */
+  restoredCallerParents?: Readonly<Record<string, string>>;
 }) {
   const spawns: Array<{
     workspaceCwd: string;
@@ -101,6 +105,10 @@ function makeFakeBridge(opts?: {
   let notificationAttempt = 0;
 
   const bridge = {
+    getSessionSummary: (sessionId: string) => ({
+      sessionId,
+      parentSessionId: opts?.restoredCallerParents?.[sessionId],
+    }),
     spawnOrAttach: async (req: {
       workspaceCwd: string;
       sessionScope?: 'single' | 'thread';
@@ -134,6 +142,14 @@ function makeFakeBridge(opts?: {
         workspaceCwd: req.workspaceCwd,
         attached: opts?.reapedParentAttached ?? false,
         clientId: 'recovery-client',
+        ...(opts?.reapedParentHasActivePrompt
+          ? {
+              hasActivePrompt: true,
+              ...(opts.reapedParentCurrentCwd
+                ? { currentCwd: opts.reapedParentCurrentCwd }
+                : {}),
+            }
+          : {}),
         state: {},
       };
     },
@@ -813,6 +829,73 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
+  it('sent mode: rejects an active restored parent at the Conversations root without killing it', async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('durable result'), turnComplete(pid)],
+      reapedParentSessionId: 'parent-reaped',
+      reapedParentAttached: true,
+      reapedParentHasActivePrompt: true,
+      reapedParentCurrentCwd: WS,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      isolatedWorkspace: {
+        materializeDirectory: async (sessionId) =>
+          `${WS}/conversation-${sessionId}`,
+        discardEmptyDirectory: async () => undefined,
+      },
+    });
+
+    await launcher.launch({
+      prompt: 'finish after the active parent goes idle',
+      completion: 'sent',
+      callerSessionId: 'parent-reaped',
+    });
+
+    await vi.waitFor(() =>
+      expect(fake.detaches).toEqual([
+        { sessionId: 'parent-reaped', clientId: 'recovery-client' },
+      ]),
+    );
+    expect(fake.relocations).toHaveLength(1);
+    expect(fake.kills).toEqual([]);
+    expect(fake.notifications).toEqual([]);
+    launcher.stop();
+  });
+
+  it('sent mode: reuses an active restored parent only with matching cwd proof', async () => {
+    const parentCwd = `${WS}/conversation-parent-reaped`;
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('durable result'), turnComplete(pid)],
+      reapedParentSessionId: 'parent-reaped',
+      reapedParentAttached: true,
+      reapedParentHasActivePrompt: true,
+      reapedParentCurrentCwd: parentCwd,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      isolatedWorkspace: {
+        materializeDirectory: async (sessionId) =>
+          `${WS}/conversation-${sessionId}`,
+        discardEmptyDirectory: async () => undefined,
+      },
+    });
+
+    await launcher.launch({
+      prompt: 'finish after the active parent goes idle',
+      completion: 'sent',
+      callerSessionId: 'parent-reaped',
+    });
+
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect(fake.relocations).toHaveLength(1);
+    expect(fake.kills).toEqual([]);
+    expect(fake.detaches).toEqual([]);
+    launcher.stop();
+  });
+
   it('sent mode: discards the materialized directory when restoring a reaped isolated parent fails', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],
@@ -1064,6 +1147,34 @@ describe('sub-session launcher', () => {
       callerSessionId: 'anchor-2',
     });
     expect(sibling.sessionId).toBe('sub-2');
+    launcher.stop();
+  });
+
+  it('refuses to spawn from a restored sub-session (durable depth-1 gate)', async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [turnComplete(pid)],
+      restoredCallerParents: { 'restored-child': 'coordinator-1' },
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'nested after daemon restart',
+        completion: 'sent',
+        callerSessionId: 'restored-child',
+      }),
+    ).rejects.toThrow(/nesting/i);
+    expect(fake.spawns).toHaveLength(0);
+
+    const topLevel = await launcher.launch({
+      prompt: 'top-level after daemon restart',
+      completion: 'sent',
+      callerSessionId: 'restored-coordinator',
+    });
+    expect(topLevel.sessionId).toBe('sub-1');
     launcher.stop();
   });
 

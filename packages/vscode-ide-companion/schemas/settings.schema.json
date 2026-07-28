@@ -116,6 +116,11 @@
               "description": "Voice used for Realtime model audio output.",
               "type": "string",
               "default": "Tina"
+            },
+            "shortcut": {
+              "description": "Electron accelerator registered globally by Qwen Live Host.",
+              "type": "string",
+              "default": "Command+Q"
             }
           }
         },

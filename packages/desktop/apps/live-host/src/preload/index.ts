@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { HostPublicState, LiveHostApi } from '../shared/host-api.ts';
-import type { HostPermissions, SessionLocator } from '../shared/protocol.ts';
+import type { HostPermissions } from '../shared/protocol.ts';
 import { HostAudioEngine } from './audio-engine.ts';
+import { AUDIO_OUTPUT_BACKPRESSURE } from './audio-output-queue.ts';
 
 const audio = new HostAudioEngine();
 
@@ -14,8 +15,6 @@ const api: LiveHostApi = {
   stop: () => invoke('live:stop'),
   setInputMuted: (muted) => invoke('live:set-input-muted', muted),
   setOutputMuted: (muted) => invoke('live:set-output-muted', muted),
-  openSession: (locator: SessionLocator) =>
-    invoke('live:open-session', locator),
   requestPermission: (permission: keyof HostPermissions) =>
     invoke('live:request-permission', permission),
   getState: () =>
@@ -40,6 +39,12 @@ ipcRenderer.on(
     void audio.initialize(microphoneAllowed);
   },
 );
+ipcRenderer.on('live:audio:deactivate', () => {
+  void audio.dispose();
+});
+ipcRenderer.on('live:audio:recheck', (_event, reason: string) => {
+  void audio.recheck(reason);
+});
 ipcRenderer.on(
   'live:audio:set-capture',
   (_event, value: { enabled: boolean; muted: boolean; epoch?: number }) => {
@@ -59,8 +64,14 @@ ipcRenderer.on('live:audio:set-output-muted', (_event, muted: boolean) => {
   audio.setOutputMuted(muted);
 });
 ipcRenderer.on('live:audio:play', (_event, frame: Uint8Array) => {
-  void audio.play(frame).catch(() => {
-    ipcRenderer.send('live:audio:output-error');
+  void audio.play(frame).catch((error: unknown) => {
+    audio.clearOutput();
+    ipcRenderer.send('live:audio:output-error', {
+      code:
+        error instanceof Error && error.message === AUDIO_OUTPUT_BACKPRESSURE
+          ? AUDIO_OUTPUT_BACKPRESSURE
+          : 'audio_output_unavailable',
+    });
   });
 });
 ipcRenderer.on('live:audio:clear', () => audio.clearOutput());
@@ -77,9 +88,7 @@ window.addEventListener('mousemove', (event) => {
   requestAnimationFrame(() => {
     pointerRafPending = false;
     const element = document.elementFromPoint(pointerX, pointerY);
-    const interactive = Boolean(
-      element?.closest('[data-live-interactive]'),
-    );
+    const interactive = Boolean(element?.closest('[data-live-interactive]'));
     if (interactive === lastPointerInteractive) return;
     lastPointerInteractive = interactive;
     ipcRenderer.send('live:pointer-interactivity', interactive);

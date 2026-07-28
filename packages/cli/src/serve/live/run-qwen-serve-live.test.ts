@@ -7,15 +7,29 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetHomeEnvBootstrapForTesting } from '../../config/settings.js';
 import { runQwenServe } from '../run-qwen-serve.js';
 import { getLiveDiscoveryPath } from './discovery.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 
+const trackedWriteLiveDiscoveryFile = vi.hoisted(() => vi.fn());
+
+vi.mock('./discovery.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./discovery.js')>();
+  trackedWriteLiveDiscoveryFile.mockImplementation(
+    actual.writeLiveDiscoveryFile,
+  );
+  return {
+    ...actual,
+    writeLiveDiscoveryFile: trackedWriteLiveDiscoveryFile,
+  };
+});
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  trackedWriteLiveDiscoveryFile.mockClear();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -58,6 +72,7 @@ describe('qwen serve Live Host discovery', () => {
         {
           preheatBridge: false,
           daemonLogBaseDir: path.join(runtime, 'debug'),
+          liveDiscoveryStableBaseDir: runtime,
         },
       );
 
@@ -82,6 +97,11 @@ describe('qwen serve Live Host discovery', () => {
         available: false,
         state: 'unavailable',
       });
+      expect(
+        trackedWriteLiveDiscoveryFile.mock.calls.map(([baseDir]) =>
+          path.resolve(String(baseDir)),
+        ),
+      ).toEqual([path.resolve(runtime)]);
     } finally {
       await handle?.close();
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -142,6 +162,20 @@ describe('qwen serve Live Host discovery', () => {
         pid: process.pid,
       });
       expect(stableRecord).toEqual(runtimeRecord);
+      const writtenBaseDirs = trackedWriteLiveDiscoveryFile.mock.calls.map(
+        ([baseDir]) => path.resolve(String(baseDir)),
+      );
+      expect(writtenBaseDirs).toEqual([
+        path.resolve(runtime),
+        path.resolve(stable),
+      ]);
+      expect(
+        writtenBaseDirs.every(
+          (baseDir) =>
+            baseDir === path.resolve(root) ||
+            baseDir.startsWith(`${path.resolve(root)}${path.sep}`),
+        ),
+      ).toBe(true);
     } finally {
       await handle?.close();
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -155,6 +189,100 @@ describe('qwen serve Live Host discovery', () => {
     await expect(fs.stat(getLiveDiscoveryPath(runtime))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+    await expect(fs.stat(getLiveDiscoveryPath(stable))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  }, 30_000);
+
+  it('hands stable discovery ownership to a waiting enabled daemon', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-live-handoff-'),
+    );
+    temporaryDirectories.push(root);
+    const stable = path.join(root, 'stable-qwen-home');
+    const qwenHome = path.join(root, 'settings-home');
+    const workspaceOne = path.join(root, 'workspace-one');
+    const workspaceTwo = path.join(root, 'workspace-two');
+    const runtimeOne = path.join(root, 'runtime-one');
+    const runtimeTwo = path.join(root, 'runtime-two');
+    await fs.mkdir(qwenHome, { recursive: true });
+    await fs.mkdir(workspaceOne, { recursive: true });
+    await fs.mkdir(workspaceTwo, { recursive: true });
+    await fs.writeFile(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { liveVoice: { enabled: true } } }),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    resetHomeEnvBootstrapForTesting();
+    let first: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    let second: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      first = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceOne,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        {
+          preheatBridge: false,
+          daemonLogBaseDir: path.join(runtimeOne, 'debug'),
+          liveDiscoveryStableBaseDir: stable,
+          liveDiscoveryRetryDelayMs: 20,
+        },
+      );
+      second = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceTwo,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        {
+          preheatBridge: false,
+          daemonLogBaseDir: path.join(runtimeTwo, 'debug'),
+          liveDiscoveryStableBaseDir: stable,
+          liveDiscoveryRetryDelayMs: 20,
+        },
+      );
+      const stablePath = getLiveDiscoveryPath(stable);
+      expect(JSON.parse(await fs.readFile(stablePath, 'utf8'))).toMatchObject({
+        url: first.url,
+      });
+
+      await first.close();
+      first = undefined;
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            JSON.parse(await fs.readFile(stablePath, 'utf8')),
+          ).toMatchObject({ url: second!.url });
+        },
+        { timeout: 5_000, interval: 20 },
+      );
+      expect(
+        trackedWriteLiveDiscoveryFile.mock.calls.every(([baseDir]) => {
+          const resolved = path.resolve(String(baseDir));
+          return (
+            resolved === path.resolve(root) ||
+            resolved.startsWith(`${path.resolve(root)}${path.sep}`)
+          );
+        }),
+      ).toBe(true);
+    } finally {
+      await second?.close();
+      await first?.close();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      resetHomeEnvBootstrapForTesting();
+    }
+
     await expect(fs.stat(getLiveDiscoveryPath(stable))).rejects.toMatchObject({
       code: 'ENOENT',
     });

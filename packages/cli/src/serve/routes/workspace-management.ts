@@ -202,7 +202,10 @@ export function registerWorkspaceManagementRoutes(
     return cwdSet.size + pendingScratchCreations;
   };
 
-  const assertOwnedRuntimeAdmission = (canonical: string): void => {
+  const assertOwnedRuntimeAdmission = (
+    canonical: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+  ): void => {
     if (sealed) throw new Error('Daemon is shutting down');
     if (inFlight.has(canonical)) {
       throw new Error('Workspace registration is already in progress');
@@ -210,17 +213,20 @@ export function registerWorkspaceManagementRoutes(
     if (workspaceRegistry.getManagedByWorkspaceCwd(canonical)) {
       throw new Error('Workspace is already registered');
     }
-    const nested = [
+    const nestingConflict = [
       ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
       ...[...inFlight].flatMap(([cwd, operation]) =>
         operation === 'addition' ? [cwd] : [],
       ),
-    ].some(
-      (cwd) =>
-        cwd !== canonical &&
-        (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
-    );
-    if (nested) {
+    ].some((cwd) => {
+      if (cwd === canonical) return false;
+      if (isWithinRoot(cwd, canonical)) return true;
+      return provenance !== 'live-conversation' && isWithinRoot(canonical, cwd);
+    });
+    // Live uses one fixed, daemon-owned root and every request resolves its
+    // runtime exactly; user-selected and scratch runtimes keep the strict
+    // no-nesting boundary.
+    if (nestingConflict) {
       throw new Error('Workspace path nests with an existing workspace');
     }
     if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
@@ -236,7 +242,7 @@ export function registerWorkspaceManagementRoutes(
     if (!createWorkspaceRuntime || !runtimeRemoval) {
       throw new Error('Managed workspace runtime publication is unavailable');
     }
-    assertOwnedRuntimeAdmission(canonicalCwd);
+    assertOwnedRuntimeAdmission(canonicalCwd, provenance);
     inFlight.set(canonicalCwd, 'addition');
     operationStarted();
     let runtime: WorkspaceRuntime | undefined;
@@ -249,15 +255,17 @@ export function registerWorkspaceManagementRoutes(
         if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
           throw new Error('Workspace is already registered');
         }
-        const nested = workspaceRegistry
+        const nestingConflict = workspaceRegistry
           .listManaged()
-          .some(
-            (entry) =>
-              entry.workspaceCwd !== canonicalCwd &&
-              (isWithinRoot(canonicalCwd, entry.workspaceCwd) ||
-                isWithinRoot(entry.workspaceCwd, canonicalCwd)),
-          );
-        if (nested) {
+          .some((entry) => {
+            if (entry.workspaceCwd === canonicalCwd) return false;
+            if (isWithinRoot(entry.workspaceCwd, canonicalCwd)) return true;
+            return (
+              provenance !== 'live-conversation' &&
+              isWithinRoot(canonicalCwd, entry.workspaceCwd)
+            );
+          });
+        if (nestingConflict) {
           throw new Error('Workspace path nests with an existing workspace');
         }
         if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {

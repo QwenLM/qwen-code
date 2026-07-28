@@ -32,6 +32,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  isReservedLiveSessionSource,
+  readCompatibleLiveSessionMetadata,
+} from '../live/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
@@ -149,6 +153,7 @@ interface RegisterSessionRoutesDeps {
     sessionId: string,
   ) => Promise<string | undefined>;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
+  isLiveSessionActive?: (sessionId: string) => boolean;
 }
 
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
@@ -439,6 +444,23 @@ export function registerSessionRoutes(
         activeBranchSessions.delete(cwd);
       }
     }
+  };
+
+  const rejectActiveLiveSessionMutation = (
+    res: Response,
+    sessionIds: readonly string[],
+  ): boolean => {
+    const activeSessionId = sessionIds.find((sessionId) =>
+      deps.isLiveSessionActive?.(sessionId),
+    );
+    if (!activeSessionId) return false;
+    res.status(409).json({
+      error:
+        'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+      code: 'live_session_active',
+      sessionId: activeSessionId,
+    });
+    return true;
   };
 
   /** Roll back a branch creation: restore the base ref and delete the branch. */
@@ -1267,6 +1289,14 @@ export function registerSessionRoutes(
     const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
     if (resolvedRuntime === undefined) return;
     const { runtime, workspaceCwd } = resolvedRuntime;
+    if (runtime.provenance === 'live-conversation') {
+      res.status(400).json({
+        error:
+          'Sessions in the Conversations workspace can only be created by Live Voice.',
+        code: 'live_session_creation_reserved',
+      });
+      return;
+    }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -1292,6 +1322,14 @@ export function registerSessionRoutes(
       res.status(400).json({
         error: source.error,
         code: 'invalid_session_source',
+      });
+      return;
+    }
+    if (isReservedLiveSessionSource(source)) {
+      res.status(400).json({
+        error:
+          'The requested session source is reserved for daemon-owned Live Voice sessions.',
+        code: 'reserved_session_source',
       });
       return;
     }
@@ -1941,9 +1979,18 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const metadata = await new SessionService(
-              workspaceCwd,
-            ).readCreationMetadata(sessionId);
+            const sessionService = new SessionService(workspaceCwd);
+            const metadata =
+              runtime.provenance === 'live-conversation'
+                ? await readCompatibleLiveSessionMetadata(
+                    sessionId,
+                    (candidateId) =>
+                      sessionService.readCreationMetadata(candidateId),
+                  )
+                : await sessionService.readCreationMetadata(sessionId);
+            if (metadata === undefined) {
+              throw new SessionNotFoundError(sessionId);
+            }
             let liveConversationCwd: string | undefined;
             if (runtime.provenance === 'live-conversation') {
               const materialize = deps.materializeLiveConversationDirectory;
@@ -1973,13 +2020,28 @@ export function registerSessionRoutes(
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
                   });
-            // A live entry with an active prompt was relocated before that
-            // prompt started. Re-queuing cd here would block load/resume behind
-            // a worker that may itself be waiting for Web Shell approval.
-            if (
-              liveConversationCwd !== undefined &&
-              !restored.hasActivePrompt
-            ) {
+            // Every path that can register a Live entry relocates it before a
+            // prompt can start. Re-queuing cd for an active entry would block
+            // this load behind the prompt it is meant to observe.
+            if (liveConversationCwd !== undefined) {
+              if (restored.hasActivePrompt) {
+                if (restored.currentCwd === liveConversationCwd) {
+                  return restored;
+                }
+                try {
+                  if (restored.clientId) {
+                    await runtime.bridge.detachClient(
+                      restored.sessionId,
+                      restored.clientId,
+                    );
+                  }
+                } catch {
+                  // Preserve the isolation error. Never kill an active owner.
+                }
+                throw new Error(
+                  'Active Live session is outside its isolated conversation directory.',
+                );
+              }
               try {
                 const changed = await runtime.bridge.changeSessionCwd(
                   sessionId,
@@ -1994,6 +2056,7 @@ export function registerSessionRoutes(
                     'Live conversation directory relocation was rejected.',
                   );
                 }
+                restored.currentCwd = changed.newCwd;
               } catch (error) {
                 try {
                   if (restored.attached) {
@@ -2069,7 +2132,7 @@ export function registerSessionRoutes(
         // Note: the !res.writable early-return above skips this restore;
         // a client that disconnects mid-load leaves the session parked in
         // the main workspace (pre-existing shape, low frequency).
-        if (!session.worktree) {
+        if (runtime.provenance !== 'live-conversation' && !session.worktree) {
           const sidecar = await readWorktreeSession(
             new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
           ).catch(() => null);
@@ -3367,6 +3430,7 @@ export function registerSessionRoutes(
 
   app.delete('/session/:id', async (req, res) => {
     const sessionId = req.params['id'];
+    if (rejectActiveLiveSessionMutation(res, [sessionId])) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     const runtime = resolveLiveSessionRuntime(
@@ -3399,6 +3463,7 @@ export function registerSessionRoutes(
     if (clientId === null) return;
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
     try {
       const service = new SessionService(boundWorkspace);
       const result = await deleteDaemonSessions({
@@ -3437,6 +3502,7 @@ export function registerSessionRoutes(
   app.post('/sessions/archive', mutate(), async (req, res) => {
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     const service = new SessionService(boundWorkspace, {
       onWarning: logSessionArchiveWarning,
@@ -3496,6 +3562,7 @@ export function registerSessionRoutes(
       if (clientId === null) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const service = new SessionService(runtime.workspaceCwd);
         const result = await deleteDaemonSessions({
@@ -3541,6 +3608,7 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       const service = new SessionService(runtime.workspaceCwd, {
         onWarning: logSessionArchiveWarning,
       });

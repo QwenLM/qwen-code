@@ -11,11 +11,11 @@ function status(
   state: LiveStatus['state'],
   available: boolean,
 ): LiveStatus {
-  return { v: 1, state, available };
+  return { v: 1, state, available, shortcut: 'Command+Q' };
 }
 
 describe('Live Host state policy', () => {
-  it('lets DoubleCommand stop an active call while provider readiness checks', () => {
+  it('lets the registered shortcut stop an active call while readiness checks', () => {
     const reconnecting = status('starting', false);
     assert.equal(isActiveLiveCall(reconnecting), true);
     assert.equal(canToggleLive(reconnecting, true, true), true);

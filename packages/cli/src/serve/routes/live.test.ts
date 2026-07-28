@@ -39,7 +39,6 @@ class FakeSocket extends EventEmitter {
           instanceNonce: 'host_instance_nonce_0001',
           permissions: {
             microphone: 'granted',
-            inputMonitoring: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -66,6 +65,7 @@ function harness(providerReady = true) {
         ? { state: 'ready' }
         : { state: 'unavailable', blocker: 'provider_config' },
   });
+  coordinator.setAppshotReadiness({ state: 'ready' });
   coordinators.push(coordinator);
   const app = express();
   app.use(express.json());

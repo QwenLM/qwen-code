@@ -10,12 +10,11 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:native": "node scripts/build-native-helper.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src/main/__tests__/*.test.ts && node scripts/test-native-helper.mjs",
-    "test:native": "node scripts/test-native-helper.mjs",
-    "dist:mac": "npm run build && electron-builder --config electron-builder.yml --mac"
+    "test": "bun test src/main/__tests__/*.test.ts",
+    "dist:mac": "npm run build && electron-builder --config electron-builder.yml --mac",
+    "dist:mac:no-publish": "npm run build && electron-builder --config electron-builder.yml --mac --publish never"
   },
   "dependencies": {
     "ws": "^8.19.0"

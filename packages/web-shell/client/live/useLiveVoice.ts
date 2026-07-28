@@ -27,6 +27,7 @@ function unavailableStatus(message: string): DaemonLiveStatus {
     v: 1,
     available: false,
     state: 'error',
+    shortcut: '',
     message,
   };
 }
@@ -40,8 +41,12 @@ export function useLiveVoice(): UseLiveVoiceResult {
   const [loading, setLoading] = useState(false);
   const [mutating, setMutating] = useState(false);
   const mountedRef = useRef(true);
-  const requestRef = useRef<Promise<void> | undefined>(undefined);
-  const mutationRef = useRef(false);
+  const generationRef = useRef(0);
+  const contextRef = useRef({ client: workspace.client, supported });
+  const requestRef = useRef<
+    { generation: number; promise: Promise<void> } | undefined
+  >(undefined);
+  const mutationRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -52,14 +57,20 @@ export function useLiveVoice(): UseLiveVoiceResult {
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!supported) return;
-    if (requestRef.current) return await requestRef.current;
+    const generation = generationRef.current;
+    if (mutationRef.current === generation) return;
+    if (requestRef.current?.generation === generation) {
+      return await requestRef.current.promise;
+    }
     const request = (async () => {
       setLoading(true);
       try {
         const next = await workspace.client.liveStatus();
-        if (mountedRef.current) setStatus(next);
+        if (mountedRef.current && generationRef.current === generation) {
+          setStatus(next);
+        }
       } catch (error) {
-        if (mountedRef.current) {
+        if (mountedRef.current && generationRef.current === generation) {
           setStatus(
             unavailableStatus(
               error instanceof Error ? error.message : String(error),
@@ -67,16 +78,30 @@ export function useLiveVoice(): UseLiveVoiceResult {
           );
         }
       } finally {
-        if (mountedRef.current) setLoading(false);
-        requestRef.current = undefined;
+        if (mountedRef.current && generationRef.current === generation) {
+          setLoading(false);
+        }
+        if (requestRef.current?.generation === generation) {
+          requestRef.current = undefined;
+        }
       }
     })();
-    requestRef.current = request;
+    requestRef.current = { generation, promise: request };
     return await request;
   }, [supported, workspace.client]);
 
   useEffect(() => {
+    if (
+      contextRef.current.client !== workspace.client ||
+      contextRef.current.supported !== supported
+    ) {
+      contextRef.current = { client: workspace.client, supported };
+      generationRef.current += 1;
+      mutationRef.current = undefined;
+    }
     setStatus(undefined);
+    setLoading(false);
+    setMutating(false);
     if (!supported) return undefined;
     void refresh();
     const timer = window.setInterval(() => {
@@ -92,18 +117,30 @@ export function useLiveVoice(): UseLiveVoiceResult {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [refresh, supported]);
+  }, [refresh, supported, workspace.client]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveStatus>): Promise<void> => {
-      if (mutationRef.current) return;
-      mutationRef.current = true;
+      const generation = generationRef.current;
+      if (mutationRef.current === generation) return;
+      generationRef.current += 1;
+      const mutationGeneration = generationRef.current;
+      mutationRef.current = mutationGeneration;
+      setLoading(false);
       setMutating(true);
       try {
         const next = await operation();
-        if (mountedRef.current) setStatus(next);
+        if (
+          mountedRef.current &&
+          generationRef.current === mutationGeneration
+        ) {
+          setStatus(next);
+        }
       } catch (error) {
-        if (mountedRef.current) {
+        if (
+          mountedRef.current &&
+          generationRef.current === mutationGeneration
+        ) {
           setStatus(
             unavailableStatus(
               error instanceof Error ? error.message : String(error),
@@ -111,8 +148,10 @@ export function useLiveVoice(): UseLiveVoiceResult {
           );
         }
       } finally {
-        mutationRef.current = false;
-        if (mountedRef.current) setMutating(false);
+        if (mutationRef.current === mutationGeneration) {
+          mutationRef.current = undefined;
+          if (mountedRef.current) setMutating(false);
+        }
       }
     },
     [],

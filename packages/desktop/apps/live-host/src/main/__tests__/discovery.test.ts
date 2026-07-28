@@ -3,7 +3,12 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
-import { buildHostWebSocketUrl, readDiscoveryFile } from '../discovery.ts';
+import {
+  buildHostWebSocketUrl,
+  DiscoveryMonitor,
+  readDiscoveryFile,
+  type DiscoveryResult,
+} from '../discovery.ts';
 import { LIVE_PROTOCOL_VERSION } from '../../shared/protocol.ts';
 
 const temporaryDirectories: string[] = [];
@@ -62,5 +67,53 @@ describe('Live daemon discovery', () => {
       'ws://127.23.45.67:9527/live/host',
     );
     assert.throws(() => buildHostWebSocketUrl('https://localhost.example.com'));
+  });
+
+  it('coalesces overlapping polls so an older read cannot win', async () => {
+    let resolveRead: ((result: DiscoveryResult) => void) | undefined;
+    let reads = 0;
+    const observed: DiscoveryResult[] = [];
+    const monitor = new DiscoveryMonitor(
+      '/unused',
+      (result) => observed.push(result),
+      1_000,
+      async () => {
+        reads += 1;
+        return await new Promise<DiscoveryResult>((resolve) => {
+          resolveRead = resolve;
+        });
+      },
+    );
+
+    const first = monitor.poll();
+    const overlapping = monitor.poll();
+    assert.equal(reads, 1);
+    resolveRead?.({ kind: 'missing' });
+    await Promise.all([first, overlapping]);
+
+    assert.deepEqual(observed, [{ kind: 'missing' }]);
+    assert.equal(reads, 1);
+  });
+
+  it('suppresses an in-flight result after the monitor stops', async () => {
+    let resolveRead: ((result: DiscoveryResult) => void) | undefined;
+    const observed: DiscoveryResult[] = [];
+    const monitor = new DiscoveryMonitor(
+      '/unused',
+      (result) => observed.push(result),
+      60_000,
+      async () =>
+        await new Promise<DiscoveryResult>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+
+    monitor.start();
+    monitor.stop();
+    resolveRead?.({ kind: 'missing' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.deepEqual(observed, []);
   });
 });

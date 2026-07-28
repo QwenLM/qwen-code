@@ -40,6 +40,7 @@ import {
 } from './workspace-registry.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from './live/session-source.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   serializeWorkspaceTranscriptResponseForTesting,
@@ -190,6 +191,8 @@ async function writeStoredSession(input: {
   prompt: string;
   mtime: Date;
   parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
 }): Promise<void> {
   const chatsDir = path.join(new Storage(input.cwd).getProjectDir(), 'chats');
   await fsp.mkdir(chatsDir, { recursive: true });
@@ -214,6 +217,24 @@ async function writeStoredSession(input: {
       type: 'system',
       subtype: 'parent_session',
       systemPayload: { parentSessionId: input.parentSessionId },
+      cwd: input.cwd,
+    });
+  }
+  if (input.sourceType !== undefined) {
+    records.push({
+      uuid: `${input.sessionId}-source-1`,
+      parentUuid:
+        input.parentSessionId === undefined
+          ? `${input.sessionId}-user-1`
+          : `${input.sessionId}-parent-1`,
+      sessionId: input.sessionId,
+      timestamp: input.timestamp,
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType: input.sourceType,
+        ...(input.sourceId !== undefined ? { sourceId: input.sourceId } : {}),
+      },
       cwd: input.cwd,
     });
   }
@@ -256,6 +277,55 @@ async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+async function withStoredLiveCoordinators<T>(
+  sessionIds: readonly string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withRuntimeDir(async () => {
+    for (const sessionId of sessionIds) {
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'live coordinator',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
+      });
+    }
+    return fn();
+  });
+}
+
+async function withStoredLiveWorkers<T>(
+  sessionIds: readonly string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withRuntimeDir(async () => {
+    for (const sessionId of sessionIds) {
+      const parentSessionId = `${sessionId}-coordinator`;
+      await writeStoredSession({
+        sessionId: parentSessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'live coordinator',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${parentSessionId}`,
+      });
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:01.000Z',
+        prompt: 'live worker',
+        mtime: new Date('2026-07-08T00:00:01.000Z'),
+        parentSessionId,
+      });
+    }
+    return fn();
+  });
+}
+
 function makeBridge(
   workspaceCwd: string,
   summaries: BridgeSessionSummary[] = [],
@@ -267,6 +337,7 @@ function makeBridge(
     operationLog?: string[];
     restoreAttached?: boolean;
     restoreHasActivePrompt?: boolean;
+    restoreCurrentCwd?: string;
     killSessionResult?: boolean;
   } = {},
 ): FakeBridge {
@@ -403,6 +474,9 @@ function makeBridge(
         attached: options.restoreAttached ?? false,
         clientId: 'restore-client',
         hasActivePrompt: options.restoreHasActivePrompt ?? false,
+        ...(options.restoreCurrentCwd !== undefined
+          ? { currentCwd: options.restoreCurrentCwd }
+          : {}),
       };
     },
     async resumeSession(req: BridgeRestoreSessionRequest) {
@@ -414,6 +488,9 @@ function makeBridge(
         attached: options.restoreAttached ?? false,
         clientId: 'restore-client',
         hasActivePrompt: options.restoreHasActivePrompt ?? false,
+        ...(options.restoreCurrentCwd !== undefined
+          ? { currentCwd: options.restoreCurrentCwd }
+          : {}),
       };
     },
     listWorkspaceSessions(cwd: string) {
@@ -786,6 +863,7 @@ function makeHarness(opts?: {
   secondaryOperationLog?: string[];
   secondaryRestoreAttached?: boolean;
   secondaryRestoreHasActivePrompt?: boolean;
+  secondaryRestoreCurrentCwd?: string;
   secondaryKillSessionResult?: boolean;
   secondaryProvenance?: WorkspaceRuntimeProvenance;
   liveConversationWorkspace?: LiveConversationWorkspace;
@@ -820,6 +898,9 @@ function makeHarness(opts?: {
         : {}),
       ...(opts?.secondaryRestoreHasActivePrompt !== undefined
         ? { restoreHasActivePrompt: opts.secondaryRestoreHasActivePrompt }
+        : {}),
+      ...(opts?.secondaryRestoreCurrentCwd !== undefined
+        ? { restoreCurrentCwd: opts.secondaryRestoreCurrentCwd }
         : {}),
       ...(opts?.secondaryKillSessionResult !== undefined
         ? { killSessionResult: opts.secondaryKillSessionResult }
@@ -1639,210 +1720,234 @@ describe('multi-workspace session dispatch', () => {
   });
 
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
-    const operationLog: string[] = [];
-    const materializeConversationDirectory = vi.fn(
-      async (sessionId: string) => {
-        operationLog.push(`materialize:${sessionId}`);
-        return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
+    await withStoredLiveCoordinators(
+      ['live-cold-load', 'live-cold-resume'],
+      async () => {
+        const operationLog: string[] = [];
+        const materializeConversationDirectory = vi.fn(
+          async (sessionId: string) => {
+            operationLog.push(`materialize:${sessionId}`);
+            return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
+          },
+        );
+        const { app, secondaryBridge } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryOperationLog: operationLog,
+          secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          }),
+          liveConversationWorkspace: {
+            materializeConversationDirectory,
+          } as unknown as LiveConversationWorkspace,
+        });
+
+        for (const action of ['load', 'resume'] as const) {
+          const response = await request(app)
+            .post(`/session/live-cold-${action}/${action}`)
+            .set('Host', host())
+            .send({ cwd: SECONDARY_CWD });
+
+          expect(response.status).toBe(200);
+          expect(response.body.workspaceCwd).toBe(SECONDARY_CWD);
+        }
+
+        expect(operationLog).toEqual([
+          'materialize:live-cold-load',
+          'load:live-cold-load',
+          'change:live-cold-load',
+          'materialize:live-cold-resume',
+          'resume:live-cold-resume',
+          'change:live-cold-resume',
+        ]);
+        expect(secondaryBridge.cwdChangeCalls).toEqual([
+          {
+            sessionId: 'live-cold-load',
+            request: {
+              path: path.join(SECONDARY_CWD, 'conversation-live-cold-load'),
+              allowedRoots: [SECONDARY_CWD],
+              managedRelocation: 'live-conversation',
+            },
+          },
+          {
+            sessionId: 'live-cold-resume',
+            request: {
+              path: path.join(SECONDARY_CWD, 'conversation-live-cold-resume'),
+              allowedRoots: [SECONDARY_CWD],
+              managedRelocation: 'live-conversation',
+            },
+          },
+        ]);
+        expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
       },
     );
-    const { app, secondaryBridge } = makeHarness({
-      secondaryProvenance: 'live-conversation',
-      secondaryOperationLog: operationLog,
-      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-        sessionId,
-        previousCwd: SECONDARY_CWD,
-        newCwd: req.path,
-        warnings: [],
-      }),
-      liveConversationWorkspace: {
-        materializeConversationDirectory,
-      } as unknown as LiveConversationWorkspace,
-    });
-
-    for (const action of ['load', 'resume'] as const) {
-      const response = await request(app)
-        .post(`/session/live-cold-${action}/${action}`)
-        .set('Host', host())
-        .send({ cwd: SECONDARY_CWD });
-
-      expect(response.status).toBe(200);
-      expect(response.body.workspaceCwd).toBe(SECONDARY_CWD);
-    }
-
-    expect(operationLog).toEqual([
-      'materialize:live-cold-load',
-      'load:live-cold-load',
-      'change:live-cold-load',
-      'materialize:live-cold-resume',
-      'resume:live-cold-resume',
-      'change:live-cold-resume',
-    ]);
-    expect(secondaryBridge.cwdChangeCalls).toEqual([
-      {
-        sessionId: 'live-cold-load',
-        request: {
-          path: path.join(SECONDARY_CWD, 'conversation-live-cold-load'),
-          allowedRoots: [SECONDARY_CWD],
-          managedRelocation: 'live-conversation',
-        },
-      },
-      {
-        sessionId: 'live-cold-resume',
-        request: {
-          path: path.join(SECONDARY_CWD, 'conversation-live-cold-resume'),
-          allowedRoots: [SECONDARY_CWD],
-          managedRelocation: 'live-conversation',
-        },
-      },
-    ]);
-    expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
   });
 
   it('opens attached active Live workers without waiting for cwd relocation', async () => {
-    const materializeConversationDirectory = vi.fn(async (sessionId: string) =>
-      path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+    await withStoredLiveWorkers(
+      ['live-active-load', 'live-active-resume'],
+      async () => {
+        const materializeConversationDirectory = vi.fn(
+          async (sessionId: string) =>
+            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+        );
+        for (const action of ['load', 'resume'] as const) {
+          const sessionId = `live-active-${action}`;
+          const { app, secondaryBridge } = makeHarness({
+            secondaryProvenance: 'live-conversation',
+            secondaryRestoreAttached: true,
+            secondaryRestoreHasActivePrompt: true,
+            secondaryRestoreCurrentCwd: path.join(
+              SECONDARY_CWD,
+              `conversation-${sessionId}`,
+            ),
+            liveConversationWorkspace: {
+              materializeConversationDirectory,
+            } as unknown as LiveConversationWorkspace,
+          });
+
+          const response = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', host())
+            .send({ cwd: SECONDARY_CWD });
+          expect(response.status).toBe(200);
+          expect(response.body).toMatchObject({
+            attached: true,
+            hasActivePrompt: true,
+          });
+          expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+        }
+        expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
+      },
     );
-    const { app, secondaryBridge } = makeHarness({
-      secondaryProvenance: 'live-conversation',
-      secondaryRestoreAttached: true,
-      secondaryRestoreHasActivePrompt: true,
-      liveConversationWorkspace: {
-        materializeConversationDirectory,
-      } as unknown as LiveConversationWorkspace,
-    });
-
-    for (const action of ['load', 'resume'] as const) {
-      const response = await request(app)
-        .post(`/session/live-active-${action}/${action}`)
-        .set('Host', host())
-        .send({ cwd: SECONDARY_CWD });
-
-      expect(response.status).toBe(200);
-      expect(response.body).toMatchObject({
-        attached: true,
-        hasActivePrompt: true,
-      });
-    }
-
-    expect(secondaryBridge.cwdChangeCalls).toEqual([]);
-    expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed and rolls back a cold Live restore when conversation relocation is rejected', async () => {
-    const operationLog: string[] = [];
-    const { app, secondaryBridge } = makeHarness({
-      secondaryProvenance: 'live-conversation',
-      secondaryOperationLog: operationLog,
-      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-        sessionId,
-        previousCwd: SECONDARY_CWD,
-        newCwd: `${req.path}-rejected`,
-        warnings: [],
-      }),
-      liveConversationWorkspace: {
-        materializeConversationDirectory: async (sessionId: string) => {
-          operationLog.push(`materialize:${sessionId}`);
-          return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
-        },
-      } as unknown as LiveConversationWorkspace,
+    await withStoredLiveCoordinators(['live-cold-rejected'], async () => {
+      const operationLog: string[] = [];
+      const { app, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryOperationLog: operationLog,
+        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+          sessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: `${req.path}-rejected`,
+          warnings: [],
+        }),
+        liveConversationWorkspace: {
+          materializeConversationDirectory: async (sessionId: string) => {
+            operationLog.push(`materialize:${sessionId}`);
+            return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
+          },
+        } as unknown as LiveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/session/live-cold-rejected/resume')
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+
+      expect(response.status).toBe(500);
+      expect(secondaryBridge.killCalls).toEqual(['live-cold-rejected']);
+      expect(operationLog).toEqual([
+        'materialize:live-cold-rejected',
+        'resume:live-cold-rejected',
+        'change:live-cold-rejected',
+        'kill:live-cold-rejected',
+      ]);
+      expect(secondaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.detachCalls).toEqual([]);
     });
-
-    const response = await request(app)
-      .post('/session/live-cold-rejected/resume')
-      .set('Host', host())
-      .send({ cwd: SECONDARY_CWD });
-
-    expect(response.status).toBe(500);
-    expect(secondaryBridge.killCalls).toEqual(['live-cold-rejected']);
-    expect(operationLog).toEqual([
-      'materialize:live-cold-rejected',
-      'resume:live-cold-rejected',
-      'change:live-cold-rejected',
-      'kill:live-cold-rejected',
-    ]);
-    expect(secondaryBridge.closeCalls).toEqual([]);
-    expect(secondaryBridge.detachCalls).toEqual([]);
   });
 
   it('only detaches its lease when an attached cold Live restore relocation is rejected', async () => {
-    const { app, secondaryBridge } = makeHarness({
-      secondaryProvenance: 'live-conversation',
-      secondaryRestoreAttached: true,
-      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-        sessionId,
-        previousCwd: SECONDARY_CWD,
-        newCwd: `${req.path}-rejected`,
-        warnings: [],
-      }),
-      liveConversationWorkspace: {
-        materializeConversationDirectory: async (sessionId: string) =>
-          path.join(SECONDARY_CWD, `conversation-${sessionId}`),
-      } as unknown as LiveConversationWorkspace,
+    await withStoredLiveCoordinators(['live-cold-attached'], async () => {
+      const { app, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryRestoreAttached: true,
+        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+          sessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: `${req.path}-rejected`,
+          warnings: [],
+        }),
+        liveConversationWorkspace: {
+          materializeConversationDirectory: async (sessionId: string) =>
+            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+        } as unknown as LiveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/session/live-cold-attached/resume')
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+
+      expect(response.status).toBe(500);
+      expect(secondaryBridge.detachCalls).toEqual(['live-cold-attached']);
+      expect(secondaryBridge.killCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([]);
     });
-
-    const response = await request(app)
-      .post('/session/live-cold-attached/resume')
-      .set('Host', host())
-      .send({ cwd: SECONDARY_CWD });
-
-    expect(response.status).toBe(500);
-    expect(secondaryBridge.detachCalls).toEqual(['live-cold-attached']);
-    expect(secondaryBridge.killCalls).toEqual([]);
-    expect(secondaryBridge.closeCalls).toEqual([]);
   });
 
   it('does not force-close a cold Live restore when zero-attach reap is rejected', async () => {
-    const { app, secondaryBridge } = makeHarness({
-      secondaryProvenance: 'live-conversation',
-      secondaryKillSessionResult: false,
-      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-        sessionId,
-        previousCwd: SECONDARY_CWD,
-        newCwd: `${req.path}-rejected`,
-        warnings: [],
-      }),
-      liveConversationWorkspace: {
-        materializeConversationDirectory: async (sessionId: string) =>
-          path.join(SECONDARY_CWD, `conversation-${sessionId}`),
-      } as unknown as LiveConversationWorkspace,
+    await withStoredLiveCoordinators(['live-cold-reap-rejected'], async () => {
+      const { app, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryKillSessionResult: false,
+        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+          sessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: `${req.path}-rejected`,
+          warnings: [],
+        }),
+        liveConversationWorkspace: {
+          materializeConversationDirectory: async (sessionId: string) =>
+            path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+        } as unknown as LiveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/session/live-cold-reap-rejected/resume')
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+
+      expect(response.status).toBe(500);
+      expect(secondaryBridge.killCalls).toEqual(['live-cold-reap-rejected']);
+      expect(secondaryBridge.closeCalls).toEqual([]);
     });
-
-    const response = await request(app)
-      .post('/session/live-cold-reap-rejected/resume')
-      .set('Host', host())
-      .send({ cwd: SECONDARY_CWD });
-
-    expect(response.status).toBe(500);
-    expect(secondaryBridge.killCalls).toEqual(['live-cold-reap-rejected']);
-    expect(secondaryBridge.closeCalls).toEqual([]);
   });
 
   it('does not restore a cold Live session when conversation workspace validation fails', async () => {
-    const { app, secondaryBridge } = makeHarness({
-      secondaryProvenance: 'live-conversation',
-      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
-        sessionId,
-        previousCwd: SECONDARY_CWD,
-        newCwd: req.path,
-        warnings: [],
-      }),
-      liveConversationWorkspace: {
-        materializeConversationDirectory: async () => {
-          throw new Error('Live conversation child was replaced by a symlink.');
-        },
-      } as unknown as LiveConversationWorkspace,
+    await withStoredLiveCoordinators(['live-invalid-child'], async () => {
+      const { app, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+          sessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: req.path,
+          warnings: [],
+        }),
+        liveConversationWorkspace: {
+          materializeConversationDirectory: async () => {
+            throw new Error(
+              'Live conversation child was replaced by a symlink.',
+            );
+          },
+        } as unknown as LiveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/session/live-invalid-child/load')
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+
+      expect(response.status).toBe(500);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+      expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+      expect(secondaryBridge.killCalls).toEqual([]);
     });
-
-    const response = await request(app)
-      .post('/session/live-invalid-child/load')
-      .set('Host', host())
-      .send({ cwd: SECONDARY_CWD });
-
-    expect(response.status).toBe(500);
-    expect(secondaryBridge.restoreCalls).toEqual([]);
-    expect(secondaryBridge.cwdChangeCalls).toEqual([]);
-    expect(secondaryBridge.killCalls).toEqual([]);
   });
 
   it('rejects unknown and untrusted restore cwd before touching a bridge', async () => {

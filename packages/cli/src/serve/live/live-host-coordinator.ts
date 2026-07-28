@@ -14,9 +14,9 @@ import {
   type LiveDaemonMessage,
   type LiveHostAction,
   type LiveHostHello,
+  type LiveHostStatus,
   type LiveHostMessage,
   type LiveMuteUpdate,
-  type LiveOpenSessionTarget,
   type LivePermissionState,
   type LiveProviderReadiness,
   type LiveSessionLocator,
@@ -36,6 +36,8 @@ const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
 const MAX_ID_LENGTH = 128;
 const MAX_VERSION_LENGTH = 128;
 const MAX_TRANSCRIPT_LENGTH = 8_192;
+const DEFAULT_SHORTCUT = 'Command+Q';
+const MAX_SHORTCUT_LENGTH = 128;
 
 interface LiveCall {
   epoch: number;
@@ -63,25 +65,21 @@ export interface LiveCallHandlers {
     callId: string;
     mode: 'resume' | 'new';
   }) => void | Promise<void>;
-  onStop?: (call: { epoch: number; callId: string }) => void | Promise<void>;
+  onStop?: (call: {
+    epoch: number;
+    callId: string;
+  }) => void | { error: string } | Promise<void | { error: string }>;
   onInputAudio?: (call: {
     epoch: number;
     callId: string;
     pcm16: Buffer;
-  }) => void;
-  onOpenSession?: (locator: LiveSessionLocator) => void | Promise<void>;
-  onPermissionRequest?: (
-    permission:
-      | 'microphone'
-      | 'inputMonitoring'
-      | 'accessibility'
-      | 'screenRecording',
-  ) => void;
+  }) => boolean;
 }
 
 export interface LiveHostCoordinatorOptions {
   daemonInstanceNonce?: string;
   getProviderReadiness: () => LiveProviderReadiness;
+  shortcut?: string;
   handlers?: LiveCallHandlers;
   helloTimeoutMs?: number;
   heartbeatIntervalMs?: number;
@@ -126,7 +124,6 @@ function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
     !isBoundedString(value['instanceNonce']) ||
     !isObject(permissions) ||
     !isPermissionState(permissions['microphone']) ||
-    !isPermissionState(permissions['inputMonitoring']) ||
     !isPermissionState(permissions['accessibility']) ||
     !isPermissionState(permissions['screenRecording']) ||
     !isObject(selfChecks) ||
@@ -138,20 +135,6 @@ function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
     return undefined;
   }
   return value as unknown as LiveHostHello;
-}
-
-function parseLocator(value: unknown): LiveSessionLocator | undefined {
-  if (
-    !isObject(value) ||
-    !isBoundedString(value['workspaceCwd'], 4096) ||
-    !isBoundedString(value['sessionId'])
-  ) {
-    return undefined;
-  }
-  return {
-    workspaceCwd: value['workspaceCwd'] as string,
-    sessionId: value['sessionId'] as string,
-  };
 }
 
 function parseAction(
@@ -191,33 +174,6 @@ function parseAction(
       ...(epoch !== undefined ? { epoch } : {}),
     };
   }
-  if (action === 'open_session') {
-    const locator = parseLocator(value['locator']);
-    if (!locator) return undefined;
-    return {
-      type: 'host.action',
-      action,
-      locator,
-      ...(epoch !== undefined ? { epoch } : {}),
-    };
-  }
-  if (action === 'request_permission') {
-    const permission = value['permission'];
-    if (
-      permission !== 'microphone' &&
-      permission !== 'inputMonitoring' &&
-      permission !== 'accessibility' &&
-      permission !== 'screenRecording'
-    ) {
-      return undefined;
-    }
-    return {
-      type: 'host.action',
-      action,
-      permission,
-      ...(epoch !== undefined ? { epoch } : {}),
-    };
-  }
   return undefined;
 }
 
@@ -245,19 +201,47 @@ function permissionRequirement(
   return 'missing';
 }
 
+function projectStatusForHost(status: LiveStatus): LiveHostStatus {
+  return {
+    v: status.v,
+    available: status.available,
+    state: status.state,
+    shortcut: status.shortcut,
+    ...(status.blocker ? { blocker: status.blocker } : {}),
+    ...(status.message ? { message: status.message } : {}),
+    ...(status.callId ? { callId: status.callId } : {}),
+    ...(status.inputMuted !== undefined
+      ? { inputMuted: status.inputMuted }
+      : {}),
+    ...(status.outputMuted !== undefined
+      ? { outputMuted: status.outputMuted }
+      : {}),
+    ...(status.transcript ? { transcript: status.transcript } : {}),
+    ...(status.requirements
+      ? { requirements: { ...status.requirements } }
+      : {}),
+    ...(status.host ? { host: { ...status.host } } : {}),
+  };
+}
+
 export class LiveHostCoordinator {
   readonly daemonInstanceNonce: string;
   private readonly now: () => number;
   private readonly helloTimeoutMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
+  private readonly shortcut: string;
   private handlers: LiveCallHandlers;
   private host?: HostLease;
   private hadConnectedHost = false;
   private lastHostFailure?: 'host_disconnected' | 'host_version';
   private providerOverride?: LiveProviderReadiness;
-  private appshotReadiness: LiveAppshotReadiness = { state: 'ready' };
+  private appshotReadiness: LiveAppshotReadiness = {
+    state: 'unavailable',
+    message: 'Appshot readiness has not been verified.',
+  };
   private call?: LiveCall;
+  private pendingStartMode?: 'new';
   private nextEpoch = 0;
   private inputMuted = false;
   private outputMuted = false;
@@ -272,6 +256,11 @@ export class LiveHostCoordinator {
       options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    const shortcut = options.shortcut?.trim();
+    this.shortcut =
+      shortcut && shortcut.length <= MAX_SHORTCUT_LENGTH
+        ? shortcut
+        : DEFAULT_SHORTCUT;
   }
 
   setHandlers(handlers: LiveCallHandlers): void {
@@ -347,9 +336,6 @@ export class LiveHostCoordinator {
       requirements.microphone = permissionRequirement(
         hello.permissions.microphone,
       );
-      requirements.inputMonitoring = permissionRequirement(
-        hello.permissions.inputMonitoring,
-      );
       requirements.accessibility = permissionRequirement(
         hello.permissions.accessibility,
       );
@@ -375,7 +361,8 @@ export class LiveHostCoordinator {
     const blocker = this.resolveBlocker(provider, appshot, hello);
     const providerChecking = provider.state === 'checking';
     const available = !providerChecking && blocker === undefined;
-    const preserveCheckingCall = providerChecking && this.call !== undefined;
+    const preserveCheckingCall =
+      providerChecking && blocker === undefined && this.call !== undefined;
     if (
       !available &&
       this.call &&
@@ -388,6 +375,7 @@ export class LiveHostCoordinator {
     return {
       v: 1,
       available,
+      shortcut: this.shortcut,
       state: preserveCheckingCall
         ? (active?.state ?? 'starting')
         : available
@@ -433,7 +421,25 @@ export class LiveHostCoordinator {
         status,
       };
     }
-    if (this.call) this.finishCall(this.call);
+    if (this.call) {
+      const replacedCall = this.call;
+      this.pendingStartMode = 'new';
+      this.beginCallStop(replacedCall);
+      const reportedCall = this.call ?? replacedCall;
+      return {
+        epoch: reportedCall.epoch,
+        callId: reportedCall.callId,
+        status: this.getStatus(),
+      };
+    }
+    return this.startCall(mode);
+  }
+
+  private startCall(mode: 'resume' | 'new'): {
+    epoch: number;
+    callId: string;
+    status: LiveStatus;
+  } {
     const call: LiveCall = {
       epoch: ++this.nextEpoch,
       callId: randomUUID(),
@@ -461,7 +467,8 @@ export class LiveHostCoordinator {
   }
 
   stop(): LiveStatus {
-    if (this.call) this.finishCall(this.call);
+    this.pendingStartMode = undefined;
+    if (this.call) this.beginCallStop(this.call);
     return this.getStatus();
   }
 
@@ -508,6 +515,15 @@ export class LiveHostCoordinator {
     return true;
   }
 
+  isActiveSession(sessionId: string): boolean {
+    const call = this.call;
+    return (
+      call !== undefined &&
+      (call.coordinator?.sessionId === sessionId ||
+        call.workers.some((worker) => worker.sessionId === sessionId))
+    );
+  }
+
   setProviderReachability(readiness?: LiveProviderReadiness): void {
     this.providerOverride = readiness;
     const status = this.getStatus();
@@ -523,18 +539,9 @@ export class LiveHostCoordinator {
   failCall(epoch: number, message = 'Live Voice failed.'): boolean {
     if (!this.call || this.call.epoch !== epoch) return false;
     const call = this.call;
-    this.call = undefined;
+    this.pendingStartMode = undefined;
     this.lastCallError = message;
-    this.clearOutput(call.epoch);
-    ++this.nextEpoch;
-    try {
-      void Promise.resolve(
-        this.handlers.onStop?.({ epoch: call.epoch, callId: call.callId }),
-      ).catch(() => {});
-    } catch {
-      // The call is already stopped. Handler failures cannot restore it.
-    }
-    this.broadcastState();
+    this.beginCallStop(call);
     return true;
   }
 
@@ -542,13 +549,13 @@ export class LiveHostCoordinator {
     if (
       !this.call ||
       this.call.epoch !== epoch ||
-      this.outputMuted ||
       pcm16.byteLength === 0 ||
       pcm16.byteLength > MAX_DAEMON_AUDIO_BYTES ||
       pcm16.byteLength % 2 !== 0
     ) {
       return false;
     }
+    if (this.outputMuted) return true;
     const socket = this.host?.socket;
     if (
       !socket ||
@@ -566,12 +573,8 @@ export class LiveHostCoordinator {
     this.sendHost({ type: 'host.clear_output', epoch });
   }
 
-  sendOpenSession(target: LiveOpenSessionTarget): boolean {
-    if (!this.host?.hello) return false;
-    return this.sendHost({ type: 'host.open_session', target });
-  }
-
   dispose(): void {
+    this.pendingStartMode = undefined;
     if (this.call) this.finishCall(this.call);
     if (this.host) {
       const lease = this.host;
@@ -601,7 +604,6 @@ export class LiveHostCoordinator {
     appshot: LiveAppshotReadiness,
     hello: LiveHostHello | undefined,
   ): LiveStatus['blocker'] {
-    if (provider.state === 'checking') return undefined;
     if (provider.state === 'unavailable') {
       return provider.blocker ?? 'provider_config';
     }
@@ -611,9 +613,6 @@ export class LiveHostCoordinator {
     }
     if (hello.permissions.microphone !== 'granted') {
       return 'microphone_permission';
-    }
-    if (hello.permissions.inputMonitoring !== 'granted') {
-      return 'input_monitoring_permission';
     }
     if (hello.permissions.accessibility !== 'granted') {
       return 'accessibility_permission';
@@ -649,7 +648,6 @@ export class LiveHostCoordinator {
       host_disconnected: 'Qwen Live Host disconnected.',
       host_version: 'Qwen Live Host is not protocol-compatible.',
       microphone_permission: 'Microphone permission is required.',
-      input_monitoring_permission: 'Input Monitoring permission is required.',
       accessibility_permission: 'Accessibility permission is required.',
       screen_recording_permission: 'Screen Recording permission is required.',
       audio_input: 'Live Host audio input self-check failed.',
@@ -740,7 +738,7 @@ export class LiveHostCoordinator {
       daemonInstanceNonce: this.daemonInstanceNonce,
       heartbeatIntervalMs: this.heartbeatIntervalMs,
       epoch: this.nextEpoch,
-      status,
+      status: projectStatusForHost(status),
     });
     this.sendState(status);
   }
@@ -766,47 +764,6 @@ export class LiveHostCoordinator {
         return;
       case 'mute':
         this.setMute(action);
-        return;
-      case 'open_session':
-        if (this.handlers.onOpenSession) {
-          try {
-            void Promise.resolve(
-              this.handlers.onOpenSession(action.locator),
-            ).catch(() => {
-              this.sendHostError(
-                'unsupported_action',
-                'Opening the session failed.',
-              );
-            });
-          } catch {
-            this.sendHostError(
-              'unsupported_action',
-              'Opening the session failed.',
-            );
-          }
-        } else {
-          this.sendHostError(
-            'unsupported_action',
-            'Opening sessions is not available.',
-          );
-        }
-        return;
-      case 'request_permission':
-        if (this.handlers.onPermissionRequest) {
-          try {
-            this.handlers.onPermissionRequest(action.permission);
-          } catch {
-            this.sendHostError(
-              'unsupported_action',
-              'Requesting the permission failed.',
-            );
-          }
-        } else {
-          this.sendHostError(
-            'unsupported_action',
-            'Permission requests are not available.',
-          );
-        }
         return;
       default:
         return;
@@ -857,11 +814,14 @@ export class LiveHostCoordinator {
     if (!call || epoch !== call.epoch || this.inputMuted) return;
     const pcm16 = audio.subarray(LIVE_INPUT_AUDIO_EPOCH_BYTES);
     try {
-      this.handlers.onInputAudio?.({
+      const accepted = this.handlers.onInputAudio?.({
         epoch,
         callId: call.callId,
         pcm16: Buffer.from(pcm16),
       });
+      if (accepted === false) {
+        this.failCall(call.epoch, 'Live Voice audio transport dropped input.');
+      }
     } catch {
       this.failCall(call.epoch, 'Live Voice audio input failed.');
     }
@@ -880,6 +840,7 @@ export class LiveHostCoordinator {
 
   private finishCall(call: LiveCall): void {
     if (this.call !== call) return;
+    this.pendingStartMode = undefined;
     call.state = 'stopping';
     this.sendState(this.buildStatus(false));
     this.clearOutput(call.epoch);
@@ -895,19 +856,68 @@ export class LiveHostCoordinator {
     this.broadcastState();
   }
 
+  private beginCallStop(call: LiveCall): void {
+    if (this.call !== call || call.state === 'stopping') return;
+    call.state = 'stopping';
+    this.sendState(this.buildStatus(false));
+    this.clearOutput(call.epoch);
+    let result: void | { error: string } | Promise<void | { error: string }>;
+    try {
+      result = this.handlers.onStop?.({
+        epoch: call.epoch,
+        callId: call.callId,
+      });
+    } catch {
+      this.failStoppingCall(call, 'Live Voice failed to stop safely.');
+      return;
+    }
+    if (!result || !('then' in result)) {
+      this.finishStoppingCall(call, result);
+      return;
+    }
+    void Promise.resolve(result).then(
+      (outcome) => this.finishStoppingCall(call, outcome),
+      () => this.failStoppingCall(call, 'Live Voice failed to stop safely.'),
+    );
+  }
+
+  private finishStoppingCall(
+    call: LiveCall,
+    outcome: void | { error: string },
+  ): void {
+    if (this.call !== call || call.state !== 'stopping') return;
+    if (outcome?.error) {
+      this.failStoppingCall(call, outcome.error);
+      return;
+    }
+    this.call = undefined;
+    ++this.nextEpoch;
+    const pendingStartMode = this.pendingStartMode;
+    this.pendingStartMode = undefined;
+    if (pendingStartMode) {
+      const status = this.getStatus();
+      if (status.available) {
+        this.startCall(pendingStartMode);
+        return;
+      }
+    }
+    this.broadcastState();
+  }
+
+  private failStoppingCall(call: LiveCall, message: string): void {
+    if (this.call !== call || call.state !== 'stopping') return;
+    this.pendingStartMode = undefined;
+    this.call = undefined;
+    this.lastCallError = message;
+    ++this.nextEpoch;
+    this.broadcastState();
+  }
+
   private stopForReadinessLoss(): void {
     const call = this.call;
     if (!call) return;
-    this.clearOutput(call.epoch);
-    this.call = undefined;
-    ++this.nextEpoch;
-    try {
-      void Promise.resolve(
-        this.handlers.onStop?.({ epoch: call.epoch, callId: call.callId }),
-      ).catch(() => {});
-    } catch {
-      // The call is already stopped. Handler failures cannot restore it.
-    }
+    this.pendingStartMode = undefined;
+    this.beginCallStop(call);
   }
 
   private disconnectHost(lease: HostLease, code: number, reason: string): void {
@@ -938,7 +948,11 @@ export class LiveHostCoordinator {
   }
 
   private sendState(status: LiveStatus): void {
-    this.sendHost({ type: 'host.state', epoch: this.nextEpoch, status });
+    this.sendHost({
+      type: 'host.state',
+      epoch: this.nextEpoch,
+      status: projectStatusForHost(status),
+    });
   }
 
   private sendHostError(
