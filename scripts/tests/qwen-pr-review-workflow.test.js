@@ -319,6 +319,14 @@ describe('qwen pr review transient retry', () => {
     expect(fallback).toContain('model quota exhausted');
   });
 
+  it('checks out without workspace clean on reused runners', () => {
+    const doc = parse(workflow);
+    const checkout = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Checkout base branch',
+    );
+    expect(checkout.with.clean).toBe(false);
+  });
+
   it('keeps the workflow rate-limit suffix list in sync with errorParsing.ts', () => {
     const src = readFileSync('packages/core/src/utils/errorParsing.ts', 'utf8');
     const blk = src.slice(
