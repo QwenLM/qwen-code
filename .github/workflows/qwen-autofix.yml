@@ -2366,7 +2366,7 @@ jobs:
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       contents: 'read'
     strategy:
@@ -2970,11 +2970,12 @@ jobs:
         # revalidation in prepare) — no agent run, no marker, no comment.
         if: |-
           ${{ steps.prepare.outputs.stale != 'true' }}
-        # Bound the agent well below the 120-minute job timeout so a runaway agent
+        # Bound the agent well below the 150-minute job timeout so a runaway agent
         # fails THIS step (not the whole job), leaving the always() verify and
         # report steps time to run and post a handoff. A job-level timeout would
-        # cancel those steps too and leave the loop silent. 80 leaves ~40 minutes
-        # of headroom for setup (install/build) plus verify + report.
+        # cancel those steps too and leave the loop silent. The 80-minute primary
+        # attempt plus one 20-minute repair leaves ~50 minutes for setup, two
+        # verification passes, and reporting.
         timeout-minutes: 80
         env:
           PR: '${{ env.PR }}'
@@ -3050,8 +3051,136 @@ jobs:
         id: 'verify'
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
+        continue-on-error: true
         run: |-
           bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+
+      - name: 'Repair deterministic rejection'
+        id: 'repair'
+        if: |-
+          ${{ always() && steps.verify.outputs.retryable == 'true' }}
+        timeout-minutes: 20
+        env:
+          PR: '${{ env.PR }}'
+          ISSUE: '${{ env.ISSUE }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
+          QWEN_TIMEOUT_MS: '1080000'
+          CONFLICT: '${{ steps.prepare.outputs.conflict }}'
+          BASE: 'main'
+          SETTINGS_JSON: |-
+            {
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "read_many_files",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(git add)",
+                "run_shell_command(git checkout)",
+                "run_shell_command(git commit)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git merge)",
+                "run_shell_command(git status)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(npm run build)",
+                "run_shell_command(npm run typecheck)",
+                "run_shell_command(npm run lint)",
+                "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
+                "run_shell_command(pwd)"
+              ],
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          echo "attempted=true" >> "${GITHUB_OUTPUT}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
+          if [[ ! -s "${WORKDIR}/gate-rejection.md" ]]; then
+            echo '::error::Retryable verification rejection has no gate-rejection.md.'
+            exit 1
+          fi
+          {
+            cat "${WORKDIR}/feedback.md"
+            if [[ -s "${WORKDIR}/address-summary.md" ]]; then
+              echo
+              echo '## Previous attempt summary'
+              cat "${WORKDIR}/address-summary.md"
+            fi
+            echo
+            echo '## Same-run verification repair'
+            echo
+            echo 'The previous commit was rejected by deterministic verification.'
+            echo 'Keep that commit and add one follow-up commit that fixes this rejection:'
+            echo
+            cat "${WORKDIR}/gate-rejection.md"
+          } > "${WORKDIR}/feedback.retry.md"
+          mv "${WORKDIR}/feedback.retry.md" "${WORKDIR}/feedback.md"
+          rm -f \
+            "${WORKDIR}/address-summary.md" \
+            "${WORKDIR}/no-action.md" \
+            "${WORKDIR}/failure.md" \
+            "${WORKDIR}/handoff.md" \
+            "${WORKDIR}/gate-output.log" \
+            "${WORKDIR}/agent-api-error" \
+            "${WORKDIR}/agent-api-error-kind" \
+            "${WORKDIR}/agent-timeout"
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          git config core.hooksPath .husky
+          node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
+            --mode address-review \
+            --pr "${PR}" \
+            --issue "${ISSUE}" \
+            --workdir "${WORKDIR}" \
+            --conflict "${CONFLICT}" \
+            --base "${BASE}"
+
+      - name: 'Repair verification gate'
+        id: 'verify_repair'
+        if: |-
+          ${{ always() && steps.repair.outputs.attempted == 'true' }}
+        continue-on-error: true
+        run: |-
+          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+
+      - name: 'Finalize verification'
+        id: 'final_verify'
+        if: |-
+          ${{ always() && steps.prepare.outputs.stale != 'true' }}
+        env:
+          FIRST_OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          FIRST_COMMITTED: '${{ steps.verify.outputs.committed }}'
+          REPAIR_ATTEMPTED: '${{ steps.repair.outputs.attempted }}'
+          REPAIR_OUTCOME: '${{ steps.verify_repair.outputs.outcome }}'
+          REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
+        run: |-
+          OUTCOME="${FIRST_OUTCOME}"
+          COMMITTED="${FIRST_COMMITTED}"
+          if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
+            OUTCOME="${REPAIR_OUTCOME}"
+            COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
+          fi
+          echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${COMMITTED}" ]]; then
+            echo "committed=${COMMITTED}" >> "${GITHUB_OUTPUT}"
+          fi
+          case "${OUTCOME}" in
+            fixed|noop) ;;
+            *) exit 1 ;;
+          esac
 
       - name: 'Show run artifacts'
         if: |-
@@ -3079,14 +3208,14 @@ jobs:
 
       - name: 'Push and report'
         if: |-
-          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
+          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.final_verify.outputs.outcome == 'fixed' || steps.final_verify.outputs.outcome == 'noop') }}
         env:
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) pushes the branch and
           # posts the report as qwen-code-dev-bot, the same identity that opened
           # the PR. The default GITHUB_TOKEN cannot do either on a bot-owned PR
           # in a way that re-triggers CI.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
@@ -3299,8 +3428,8 @@ jobs:
         if: |-
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
-          COMMITTED: '${{ steps.verify.outputs.committed }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.final_verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -3740,7 +3869,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # The id the announcement wrote. Empty means this round never
           # announced (its step was skipped, or the post itself failed) — then

@@ -32,11 +32,10 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpaths } from '../utils/paths.js';
-import { Storage } from '../config/storage.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getFileReadDefaultPermission } from './file-read-permission.js';
 import {
   formatVisionBridgeNotice,
   runVisionBridge,
@@ -120,41 +119,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
    * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
    * so that external file reads require user confirmation.
    */
-  override async getDefaultPermission(): Promise<PermissionDecision> {
-    const filePath = path.resolve(this.params.file_path);
-    const workspaceContext = this.config.getWorkspaceContext();
-
-    // SYNC: Keep these base roots and the auto-memory check below aligned with
-    // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
-    // append fallback-only roots after that group.
-    const allowedRoots = [
-      this.config.storage.getProjectTempDir(),
-      // Background subagent transcripts live under <projectDir>/subagents/ and
-      // are advertised to the model as polling targets via read_file.
-      path.join(this.config.storage.getProjectDir(), 'subagents'),
-      Storage.getGlobalTempDir(),
-      ...this.config.storage.getUserSkillsDirs(),
-      Storage.getUserExtensionsDir(),
-      // Approved plans are persisted here (default ~/.qwen/plans, outside
-      // the workspace) and after approval nothing re-injects the plan text,
-      // so the saved file is the model's only recovery route — reading it
-      // back must not stall on a confirmation prompt. The dir holds only
-      // session plan files, never credentials or settings.
-      this.config.getPlansDir(),
-    ];
-
-    if (
-      workspaceContext.isPathWithinWorkspace(filePath) ||
-      isSubpaths(allowedRoots, filePath) ||
-      // isAnyAutoMemPath narrows to the managed auto-memory roots
-      // (per-project + user-level under ~/.qwen/memories/) — never the
-      // broad getMemoryBaseDir() — to avoid exposing sensitive ~/.qwen
-      // files such as settings.json or OAuth credentials.
-      isAnyAutoMemPath(filePath, this.config.getTargetDir())
-    ) {
-      return 'allow';
-    }
-    return 'ask';
+  override getDefaultPermission(): Promise<PermissionDecision> {
+    return Promise.resolve(
+      getFileReadDefaultPermission(this.config, this.params.file_path),
+    );
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -224,7 +192,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       debugLogger.debug('miss', { path: absPath, state: status.state });
     }
 
-    const preparePdfForVisionBridge = shouldRunVisionBridge(this.config);
+    const prepareForVisionBridge = shouldRunVisionBridge(this.config);
     let result = await processSingleFileContent(
       this.params.file_path,
       this.config,
@@ -232,7 +200,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         offset: this.params.offset,
         limit: this.params.limit,
         pages: this.params.pages,
-        preparePdfForVisionBridge,
+        preserveUnsupportedImage: prepareForVisionBridge,
+        preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
       },
     );

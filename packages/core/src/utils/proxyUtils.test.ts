@@ -102,4 +102,50 @@ describe('normalizeProxyUrl', () => {
       'SOCKS proxy is not supported',
     );
   });
+
+  // socks5h and socks4a ask the proxy to resolve hostnames and are the forms
+  // curl, proxychains and most tunnels emit. They used to fall through to the
+  // http:// prefix and yield `http://socks5h://...`, which parses as the host
+  // `socks5h` on port 80.
+  it('should throw error for socks5h:// proxy URL', () => {
+    expect(() => normalizeProxyUrl('socks5h://127.0.0.1:1080')).toThrow(
+      'SOCKS proxy is not supported',
+    );
+  });
+
+  it('should throw error for socks4a:// proxy URL', () => {
+    expect(() => normalizeProxyUrl('socks4a://127.0.0.1:1080')).toThrow(
+      'SOCKS proxy is not supported',
+    );
+  });
+
+  it('should throw error for SOCKS5H:// proxy URL (case insensitive)', () => {
+    expect(() => normalizeProxyUrl('SOCKS5H://proxy.example.com:1080')).toThrow(
+      'SOCKS proxy is not supported',
+    );
+  });
+
+  it('should never prefix http:// onto a socks scheme', () => {
+    for (const url of [
+      'socks://h:1080',
+      'socks4://h:1080',
+      'socks4a://h:1080',
+      'socks5://h:1080',
+      'socks5h://h:1080',
+    ]) {
+      expect(() => normalizeProxyUrl(url)).toThrow('SOCKS proxy');
+    }
+  });
+
+  // Guards against over-correcting: a host that merely starts with "socks" is
+  // not a socks scheme, since there is no `://` after it. Passes before and
+  // after the fix.
+  it('should still accept a hostname that begins with socks', () => {
+    expect(normalizeProxyUrl('socks.example.com:1080')).toBe(
+      'http://socks.example.com:1080',
+    );
+    expect(normalizeProxyUrl('http://socks5h.example.com:1080')).toBe(
+      'http://socks5h.example.com:1080',
+    );
+  });
 });

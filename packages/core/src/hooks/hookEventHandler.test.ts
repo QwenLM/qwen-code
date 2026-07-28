@@ -165,7 +165,70 @@ describe('HookEventHandler', () => {
         .calls;
       const input = mockCalls[0][2] as { prompt: string };
       expect(input.prompt).toBe('my test prompt');
+      expect(input).not.toHaveProperty('submitted_prompt');
     });
+
+    it('should include submitted prompt when provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent(
+        'model prompt',
+        undefined,
+        'submitted prompt',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        prompt: string;
+        submitted_prompt?: string;
+      };
+      expect(input).toMatchObject({
+        prompt: 'model prompt',
+        submitted_prompt: 'submitted prompt',
+      });
+    });
+
+    it.each(['', ' \t\n '])(
+      'should omit an empty submitted prompt',
+      async (submittedPrompt) => {
+        const mockPlan = createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]);
+        vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+          mockPlan,
+        );
+        vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+        vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+          createMockAggregatedResult(true),
+        );
+
+        await hookEventHandler.fireUserPromptSubmitEvent(
+          'model prompt',
+          undefined,
+          submittedPrompt,
+        );
+
+        const input = (mockHookRunner.executeHooksParallel as Mock).mock
+          .calls[0][2] as { submitted_prompt?: string };
+        expect(input).not.toHaveProperty('submitted_prompt');
+      },
+    );
   });
 
   describe('fireInstructionsLoadedEvent', () => {

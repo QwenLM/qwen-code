@@ -30,6 +30,7 @@ import {
   AUTONOMOUS_SENTINEL_DYNAMIC,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
+  MessageSenderType,
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
@@ -348,6 +349,8 @@ describe('useGeminiStream', () => {
     initialToolCalls: TrackedToolCall[] = [],
     geminiClient?: any,
     availableTerminalHeightRef?: { current: number },
+    onCancelSubmit: Parameters<typeof useGeminiStream>[15] = () => {},
+    logger?: Parameters<typeof useGeminiStream>[20],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -397,12 +400,12 @@ describe('useGeminiStream', () => {
           false,
           () => {},
           () => {},
-          () => {},
+          onCancelSubmit,
           () => {},
           80,
           24,
           undefined, // midTurnDrainRef
-          undefined, // logger
+          logger,
           availableTerminalHeightRef,
         );
       },
@@ -469,6 +472,54 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('forwards submitted prompt provenance only for UserQuery', async () => {
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        '<system-reminder>managed</system-reminder>\n\nreview this',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'review this' },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).toEqual(
+      expect.objectContaining({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'review this',
+      }),
+    );
+
+    mockSendMessageStream.mockClear();
+    await act(async () => {
+      await result.current.submitQuery(
+        'retry payload',
+        SendMessageType.Retry,
+        undefined,
+        { submittedPrompt: 'must not escape' },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'submittedPrompt',
+    );
+
+    mockSendMessageStream.mockClear();
+    await act(async () => {
+      await result.current.submitQuery(
+        'tool result payload',
+        SendMessageType.ToolResult,
+        undefined,
+        { submittedPrompt: 'must not escape' },
+      );
+    });
+
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
+      'submittedPrompt',
+    );
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
@@ -499,13 +550,23 @@ describe('useGeminiStream', () => {
       });
       const { result, mockSendMessageStream } = renderTestHook();
       await act(async () => {
-        await result.current.submitQuery('@img.png describe');
+        await result.current.submitQuery(
+          '@img.png describe',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '@img.png describe' },
+        );
       });
       await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
       const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
       expect(sent).toContain('[transcribed image]');
       expect(sent).not.toContain('inlineData');
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toEqual(
+        expect.objectContaining({
+          submittedPrompt: '@img.png describe',
+        }),
+      );
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.VISION_NOTICE,
@@ -719,6 +780,37 @@ describe('useGeminiStream', () => {
         type: SendMessageType.ToolResult,
         modelOverride: selector,
       });
+    });
+
+    it('pins the tool-result full-turn selector handed to the interactive scheduler', async () => {
+      enableBridge();
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+
+      const canUseToolResultFullTurnModel =
+        mockUseReactToolScheduler.mock.calls.at(-1)?.[4] as
+          | ((model: string) => boolean)
+          | undefined;
+      expect(typeof canUseToolResultFullTurnModel).toBe('function');
+      // The turn is already routed to the vision agent, so the same selector
+      // must stay accepted (sticky) while a different selector is rejected.
+      expect(canUseToolResultFullTurnModel!(selector)).toBe(true);
+      expect(canUseToolResultFullTurnModel!('other-agent\0https://x\0')).toBe(
+        false,
+      );
     });
 
     it('does not query bridge config for text-only messages', async () => {
@@ -6010,11 +6102,18 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          undefined,
+          { logMessage: vi.fn() } as any,
         ),
       );
 
       await act(async () => {
-        result.current.submitQuery('what time is it?');
+        result.current.submitQuery(
+          '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: 'what time is it?' },
+        );
       });
 
       act(() => {
@@ -6030,8 +6129,10 @@ describe('useGeminiStream', () => {
       // content before cancel; that's covered by a separate test below.)
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
-        text: 'what time is it?',
+        text: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+        submittedPrompt: 'what time is it?',
       });
+      expect(info?.canUndoLastLoggedUserMessage).toBe(true);
     });
 
     it('emits lastTurnUserItem: null for paths that do NOT add a user history item (Notification)', async () => {
@@ -6702,7 +6803,12 @@ describe('useGeminiStream', () => {
         renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('/my-custom-command');
+        await result.current.submitQuery(
+          '/my-custom-command',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '/my-custom-command' },
+        );
       });
 
       await waitFor(() => {
@@ -6720,7 +6826,10 @@ describe('useGeminiStream', () => {
           'This is the actual prompt from the command file.',
           expect.any(AbortSignal),
           expect.any(String),
-          { type: SendMessageType.UserQuery },
+          expect.objectContaining({
+            type: SendMessageType.UserQuery,
+            submittedPrompt: '/my-custom-command',
+          }),
         );
 
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
@@ -8238,7 +8347,12 @@ describe('useGeminiStream', () => {
     );
 
     await act(async () => {
-      await result.current.submitQuery(rawQuery);
+      await result.current.submitQuery(
+        rawQuery,
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: rawQuery },
+      );
     });
 
     expect(handleAtCommandSpy).toHaveBeenCalledWith(
@@ -8261,7 +8375,10 @@ describe('useGeminiStream', () => {
       processedQueryParts, // Argument 1: The parts array directly
       expect.any(AbortSignal), // Argument 2: An AbortSignal
       expect.any(String), // Argument 3: The prompt_id string
-      { type: SendMessageType.UserQuery }, // Argument 4: The options
+      expect.objectContaining({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: rawQuery,
+      }), // Argument 4: The options
     );
   });
 
@@ -9600,7 +9717,8 @@ describe('useGeminiStream', () => {
   });
 
   describe('Concurrent Execution Prevention', () => {
-    it('should allow /btw slash commands while a main response is in progress', async () => {
+    it('should handle /btw as a UI-only command while a main response is in progress', async () => {
+      const btwQuery = '/btw quick side question';
       let resolveFirstCall!: () => void;
 
       const firstCallPromise = new Promise<void>((resolve) => {
@@ -9617,7 +9735,7 @@ describe('useGeminiStream', () => {
 
       mockSendMessageStream.mockImplementation(() => firstStream);
       mockHandleSlashCommand.mockImplementation(async (command) => {
-        if (command === '/btw quick side question') {
+        if (command === btwQuery) {
           return { type: 'handled' };
         }
         return false;
@@ -9637,12 +9755,10 @@ describe('useGeminiStream', () => {
         });
 
         await act(async () => {
-          await result.current.submitQuery('/btw quick side question');
+          await result.current.submitQuery(btwQuery);
         });
 
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
-          '/btw quick side question',
-        );
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
         resolveFirstCall();
@@ -9651,6 +9767,7 @@ describe('useGeminiStream', () => {
     });
 
     it('should keep the main request cancellable after submitting /btw in parallel', async () => {
+      const btwQuery = '/btw quick side question';
       let resolveFirstCall!: () => void;
       let mainAbortSignal: AbortSignal | undefined;
 
@@ -9669,17 +9786,30 @@ describe('useGeminiStream', () => {
         })();
       });
       mockHandleSlashCommand.mockImplementation(async (command) => {
-        if (command === '/btw quick side question') {
+        if (command === btwQuery) {
           return { type: 'handled' };
         }
         return false;
       });
 
-      const { result } = renderTestHook();
+      const cancelSubmitSpy = vi.fn();
+      const mockLogMessage = vi.fn();
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        cancelSubmitSpy,
+        { logMessage: mockLogMessage } as any,
+      );
 
       let mainRequest!: Promise<void>;
       await act(async () => {
-        mainRequest = result.current.submitQuery('First query');
+        mainRequest = result.current.submitQuery(
+          '<system-reminder>managed</system-reminder>\n\nFirst query',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: 'First query' },
+        );
       });
 
       try {
@@ -9689,7 +9819,12 @@ describe('useGeminiStream', () => {
         });
 
         await act(async () => {
-          await result.current.submitQuery('/btw quick side question');
+          await result.current.submitQuery(
+            btwQuery,
+            SendMessageType.UserQuery,
+            undefined,
+            { submittedPrompt: btwQuery },
+          );
         });
 
         act(() => {
@@ -9704,6 +9839,107 @@ describe('useGeminiStream', () => {
           expect.any(Number),
         );
         expect(mainAbortSignal?.aborted).toBe(true);
+        expect(
+          cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
+        ).toEqual({
+          id: expect.any(Number),
+          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          submittedPrompt: 'First query',
+        });
+        expect(
+          cancelSubmitSpy.mock.calls.at(-1)?.[0]?.canUndoLastLoggedUserMessage,
+        ).toBe(false);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockLogMessage).toHaveBeenNthCalledWith(
+          2,
+          MessageSenderType.USER,
+          btwQuery,
+        );
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
+    it('should preserve the legacy model path for ?btw during a main response', async () => {
+      const btwQuery = '?btw quick side question';
+      let resolveFirstCall!: () => void;
+      let mainAbortSignal: AbortSignal | undefined;
+      let callCount = 0;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      mockSendMessageStream.mockImplementation((_query, signal) => {
+        callCount += 1;
+        if (callCount === 1) {
+          mainAbortSignal = signal;
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'First call content',
+            };
+            await firstCallPromise;
+          })();
+        }
+        return (async function* () {})();
+      });
+
+      const cancelSubmitSpy = vi.fn();
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        cancelSubmitSpy,
+      );
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery(
+          '<system-reminder>managed</system-reminder>\n\nFirst query',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: 'First query' },
+        );
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mainAbortSignal).toBeDefined();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery(
+            btwQuery,
+            SendMessageType.UserQuery,
+            undefined,
+            { submittedPrompt: btwQuery },
+          );
+        });
+
+        expect(mockHandleSlashCommand).not.toHaveBeenCalledWith(btwQuery);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream.mock.calls[1]?.[3]).toEqual(
+          expect.objectContaining({
+            type: SendMessageType.UserQuery,
+            submittedPrompt: btwQuery,
+          }),
+        );
+
+        act(() => {
+          result.current.cancelOngoingRequest();
+        });
+
+        expect(mainAbortSignal?.aborted).toBe(true);
+        expect(
+          cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
+        ).toEqual({
+          id: expect.any(Number),
+          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          submittedPrompt: 'First query',
+        });
       } finally {
         resolveFirstCall();
         await mainRequest;
