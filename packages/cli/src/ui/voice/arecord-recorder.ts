@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { decodeProcessOutput } from '../../utils/decode-process-output.js';
 import type {
   RecordedVoiceAudio,
   VoiceRecorder,
@@ -73,7 +74,7 @@ class ArecordRecorder implements VoiceRecorder {
 
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
+      stderr += decodeProcessOutput(chunk);
     });
 
     this.closePromise = new Promise((resolve) => {

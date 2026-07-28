@@ -7,6 +7,7 @@
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { decodeProcessOutput } from '../../utils/decode-process-output.js';
 import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
@@ -107,7 +108,10 @@ export const copyToClipboard = async (text: string): Promise<void> => {
       const child = options ? spawn(cmd, args, options) : spawn(cmd, args);
       let stderr = '';
       if (child.stderr) {
-        child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
+        child.stderr.on(
+          'data',
+          (chunk) => (stderr += decodeProcessOutput(chunk)),
+        );
       }
       child.on('error', reject);
       child.on('close', (code) => {

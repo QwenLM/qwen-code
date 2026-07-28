@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { decodeProcessOutput } from '../../utils/decode-process-output.js';
 
 export type TerminalImageProtocol = 'kitty' | 'iterm2';
 
@@ -1267,13 +1268,11 @@ function runCommand(
     }, options.timeout);
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
-    child.stdout?.setEncoding('utf8');
-    child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      stdout = appendBoundedRendererOutput(stdout, chunk);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout = appendBoundedRendererOutput(stdout, decodeProcessOutput(chunk));
     });
-    child.stderr?.on('data', (chunk: string) => {
-      stderr = appendBoundedRendererOutput(stderr, chunk);
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = appendBoundedRendererOutput(stderr, decodeProcessOutput(chunk));
     });
     child.on('error', (error) => {
       finish({

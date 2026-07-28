@@ -12,7 +12,10 @@ import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import type { Terminal } from '@xterm/headless';
-import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
+import {
+  getCachedEncodingForBuffer,
+  decodeProcessOutput,
+} from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import {
@@ -114,8 +117,17 @@ export function getShellAbortReasonKind(
  */
 const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
 
-function applyUtf8Prefix(command: string, shell: ShellType): string {
+function applyUtf8Prefix(
+  command: string,
+  shell: ShellType,
+  isPipeMode = false,
+): string {
   if (os.platform() !== 'win32') return command;
+  // In pipe mode, chcp/Console.OutputEncoding have no effect on native
+  // Windows tools — they write OEM bytes directly to the pipe handle,
+  // bypassing the console subsystem. Skip the prefix to avoid ~50ms
+  // overhead per command. Encoding detection is handled at decode time.
+  if (isPipeMode && shell === 'cmd') return command;
   switch (shell) {
     case 'powershell':
       return (
@@ -243,11 +255,6 @@ function getMaxBufferedOutputBytes(config: ShellExecutionConfig): number {
   return floored > 0
     ? Math.min(floored, MAX_BUFFERED_OUTPUT_BYTES_CEILING)
     : DEFAULT_MAX_BUFFERED_OUTPUT_BYTES;
-}
-
-function decodeBufferedOutput(finalBuffer: Buffer): string {
-  const fallbackEncoding = getCachedEncodingForBuffer(finalBuffer);
-  return new TextDecoder(fallbackEncoding).decode(finalBuffer);
 }
 
 function appendOutputCaptureLimitNotice(
@@ -759,7 +766,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell, true);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -794,6 +801,8 @@ export class ShellExecutionService {
         let stdout = '';
         let stderr = '';
         const outputChunks: Buffer[] = [];
+        const stdoutChunks: Buffer[] = [];
+        const stderrChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
         let exited = false;
@@ -844,17 +853,6 @@ export class ShellExecutionService {
         };
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
-          if (!stdoutDecoder || !stderrDecoder) {
-            const encoding = getCachedEncodingForBuffer(data);
-            try {
-              stdoutDecoder = new TextDecoder(encoding);
-              stderrDecoder = new TextDecoder(encoding);
-            } catch {
-              stdoutDecoder = new TextDecoder('utf-8');
-              stderrDecoder = new TextDecoder('utf-8');
-            }
-          }
-
           // Binary sniff applies in both modes — even streaming consumers
           // (e.g. background shell output file) shouldn't pile up text-decoded
           // garbage when the command actually emits binary (`cat /bin/ls`,
@@ -899,27 +897,38 @@ export class ShellExecutionService {
             return;
           }
 
-          const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
           if (streamStdout) {
-            // Streaming text mode: push through immediately, no string
-            // accumulation. (Up to ~4KB may already have been emitted
-            // before binary detection trips — bounded, acceptable.)
+            // Streaming text mode: per-chunk decode for real-time display.
+            // Decoder is created lazily on first chunk — acceptable here
+            // because streaming output is for display only, not for the
+            // final `output` string.
+            if (!stdoutDecoder || !stderrDecoder) {
+              const encoding = getCachedEncodingForBuffer(data);
+              try {
+                stdoutDecoder = new TextDecoder(encoding);
+                stderrDecoder = new TextDecoder(encoding);
+              } catch {
+                stdoutDecoder = new TextDecoder('utf-8');
+                stderrDecoder = new TextDecoder('utf-8');
+              }
+            }
+            const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
             const decodedChunk = decoder.decode(data, { stream: true });
             onOutputEvent({ type: 'data', chunk: decodedChunk });
             return;
           }
 
-          if (!capturedData) {
-            return;
-          }
-
-          const decodedChunk = decoder.decode(capturedData, { stream: true });
-
-          // Buffered text mode: accumulate for the final cleaned-blob emit.
-          if (stream === 'stdout') {
-            stdout += decodedChunk;
-          } else {
-            stderr += decodedChunk;
+          // Buffered text mode: accumulate raw buffers per-stream, decode
+          // the complete buffer in cleanup() via decodeProcessOutput().
+          // This avoids the per-chunk encoding detection bug where an
+          // ASCII-only first chunk locks the decoder to UTF-8, garbling
+          // all subsequent non-ASCII bytes in the system OEM code page.
+          if (capturedData) {
+            if (stream === 'stdout') {
+              stdoutChunks.push(capturedData);
+            } else {
+              stderrChunks.push(capturedData);
+            }
           }
         };
 
@@ -1401,17 +1410,26 @@ export class ShellExecutionService {
         function cleanup() {
           exited = true;
           abortSignal.removeEventListener('abort', abortHandler);
+
+          // Flush streaming decoders (only used in streaming mode for
+          // real-time display — their output is not used for the final
+          // `output` string).
           if (stdoutDecoder) {
-            const remaining = stdoutDecoder.decode();
-            if (remaining) {
-              stdout += remaining;
-            }
+            stdoutDecoder.decode();
           }
           if (stderrDecoder) {
-            const remaining = stderrDecoder.decode();
-            if (remaining) {
-              stderr += remaining;
-            }
+            stderrDecoder.decode();
+          }
+
+          // Decode complete per-stream buffers with proper encoding
+          // detection on the full output. This fixes the mojibake bug
+          // where per-chunk detection on an ASCII-only first chunk
+          // locked the decoder to UTF-8, garbling subsequent OEM bytes.
+          if (stdoutChunks.length > 0) {
+            stdout = decodeProcessOutput(Buffer.concat(stdoutChunks));
+          }
+          if (stderrChunks.length > 0) {
+            stderr = decodeProcessOutput(Buffer.concat(stderrChunks));
           }
 
           const finalBuffer = Buffer.concat(outputChunks);
@@ -1872,7 +1890,7 @@ export class ShellExecutionService {
                   }
                 } catch {
                   try {
-                    fullOutput = decodeBufferedOutput(finalBuffer);
+                    fullOutput = decodeProcessOutput(finalBuffer);
                   } catch {
                     // Ignore fallback rendering errors and resolve with empty text.
                   }
@@ -2238,7 +2256,7 @@ export class ShellExecutionService {
                 `Falling back to bounded raw buffer decode; if that also fails, output stays empty.`,
             );
             try {
-              snapshot = decodeBufferedOutput(finalBuffer);
+              snapshot = decodeProcessOutput(finalBuffer);
             } catch {
               // Both paths failed — leave snapshot empty.
             }

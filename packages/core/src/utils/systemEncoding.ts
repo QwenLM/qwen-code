@@ -7,6 +7,7 @@
 import { isUtf8 } from 'node:buffer';
 import { execSync } from 'node:child_process';
 import os from 'node:os';
+import { TextDecoder } from 'node:util';
 import { detect as chardetDetect } from 'chardet';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -57,6 +58,11 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
 
   // Last resort
   return 'utf-8';
+}
+
+export function decodeProcessOutput(buffer: Buffer): string {
+  if (buffer.length === 0) return '';
+  return new TextDecoder(getCachedEncodingForBuffer(buffer)).decode(buffer);
 }
 
 /**
