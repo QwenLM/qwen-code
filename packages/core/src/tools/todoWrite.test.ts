@@ -202,6 +202,24 @@ describe('TodoWriteTool', () => {
       expect(reminder?.length).toBeLessThan(4300);
     });
 
+    it('skips active Todo reminder when no prompt id is active', async () => {
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+      };
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool.build(params).execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(mockConfig.setActiveTodoReminder).not.toHaveBeenCalled();
+    });
+
     it('should replace todos with new ones', async () => {
       const existingTodos = [
         { id: '1', content: 'Existing Task', status: 'completed' },

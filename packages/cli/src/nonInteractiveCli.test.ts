@@ -3512,6 +3512,111 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('keeps notifications from different Todo work chains in separate batches', async () => {
+    setupMetricsMock();
+
+    const firstNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    const secondNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_2</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #2.</summary>\n' +
+      '<result>also ready</result>\n' +
+      '</task-notification>';
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+        todoWorkChainId: 'chain-1',
+      });
+      cb('Monitor "build" event #1: ready', secondNotificationXml, {
+        monitorId: 'mon_2',
+        toolUseId: 'tool_mon_2',
+        status: 'running',
+        eventCount: 1,
+        todoWorkChainId: 'chain-2',
+      });
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Started.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'First notification.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Second notification.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor-work-chains',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: firstNotificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor-work-chains/automatic/2',
+      expect.objectContaining({
+        todoWorkChainId: 'chain-1',
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: secondNotificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor-work-chains/automatic/3',
+      expect.objectContaining({
+        todoWorkChainId: 'chain-2',
+      }),
+    );
+  });
+
   it.skip('should emit a single user envelope when userEnvelope is provided', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
