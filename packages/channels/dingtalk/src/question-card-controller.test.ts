@@ -8,7 +8,11 @@ import { QuestionCardController } from './question-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
-  | { kind: 'forbidden'; actorId: string }
+  | {
+      kind: 'forbidden';
+      actorId: string;
+      target: { chatId: string; isGroup: boolean };
+    }
   | { kind: 'ignored'; actorId?: string };
 
 function callbackResult(value: unknown): ExpectedCallbackResult {
@@ -223,7 +227,21 @@ describe('QuestionCardController', () => {
           formData: { '0': 'Beijing', '1': ['Logs'] },
         }),
       ),
-    ).toEqual({ kind: 'forbidden', actorId: 'other' });
+    ).toEqual({
+      kind: 'forbidden',
+      actorId: 'other',
+      target: { chatId: 'cid-1', isGroup: true },
+    });
+    expect(
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'submit',
+          actorId: 'other',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored' });
     const execute = acceptedExecution(
       controller.claim({
         outTrackId,

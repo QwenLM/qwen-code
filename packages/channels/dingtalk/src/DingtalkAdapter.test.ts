@@ -416,8 +416,12 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
   });
 });
 
-it('ACKs before sending forbidden feedback directly to the clicker', async () => {
-  createCallbackResultChannel({ kind: 'forbidden', actorId: 'other-user' });
+it('ACKs before sending forbidden feedback to the original group', async () => {
+  createCallbackResultChannel({
+    kind: 'forbidden',
+    actorId: 'other-user',
+    target: { chatId: 'group-1', isGroup: true },
+  });
   const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
   const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch();
 
@@ -434,14 +438,15 @@ it('ACKs before sending forbidden feedback directly to the clicker', async () =>
       status: 'success',
       message: 'ok',
     });
-    await vi.waitFor(() => expect(directSendCalls()).toHaveLength(1));
-    expect(groupSendCalls()).toHaveLength(0);
+    await vi.waitFor(() => expect(groupSendCalls()).toHaveLength(1));
+    expect(directSendCalls()).toHaveLength(0);
     const requestBody = JSON.parse(
-      String((directSendCalls()[0]![1] as RequestInit).body),
+      String((groupSendCalls()[0]![1] as RequestInit).body),
     );
-    expect(requestBody.userIds).toEqual(['other-user']);
-    expect(requestBody.openConversationId).toBeUndefined();
-    expect(JSON.parse(requestBody.msgParam).text).toContain('无权操作');
+    expect(requestBody.openConversationId).toBe('group-1');
+    expect(requestBody.userIds).toBeUndefined();
+    expect(JSON.parse(requestBody.msgParam).text).toContain('任务发起人');
+    expect(JSON.parse(requestBody.msgParam).text).toContain('未生效');
   } finally {
     spy.mockRestore();
   }
@@ -518,7 +523,11 @@ it('does not send feedback for a malformed callback without an actor', async () 
 });
 
 it('logs failed direct feedback without falling back to the group', async () => {
-  createCallbackResultChannel({ kind: 'forbidden', actorId: 'other-user' });
+  createCallbackResultChannel({
+    kind: 'forbidden',
+    actorId: 'other-user',
+    target: { chatId: 'other-user', isGroup: false },
+  });
   const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
   const { spy, directSendCalls, groupSendCalls } = stubCardFeedbackFetch({
     rejectDirect: true,

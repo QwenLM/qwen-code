@@ -5,7 +5,11 @@ import { StatusCardController } from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
-  | { kind: 'forbidden'; actorId: string }
+  | {
+      kind: 'forbidden';
+      actorId: string;
+      target: { chatId: string; isGroup: boolean };
+    }
   | { kind: 'ignored'; actorId?: string };
 
 function callbackResult(value: unknown): ExpectedCallbackResult {
@@ -390,6 +394,10 @@ describe('StatusCardController', () => {
     expect(callbackResult(controller.claimStop(outTrackId, 'other'))).toEqual({
       kind: 'forbidden',
       actorId: 'other',
+      target,
+    });
+    expect(callbackResult(controller.claimStop(outTrackId, 'other'))).toEqual({
+      kind: 'ignored',
     });
     const execute = acceptedExecution(
       controller.claimStop(outTrackId, 'owner-1'),

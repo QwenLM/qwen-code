@@ -10,12 +10,12 @@ describe('interactive card config', () => {
     expect(parseDingtalkInteractiveCardConfig(undefined)).toEqual({
       enabled: false,
       statusCard: { enabled: true },
-      questionCard: { enabled: true, timeoutMs: 300_000 },
+      questionCard: { enabled: true, timeoutMs: 270_000 },
     });
     expect(parseDingtalkInteractiveCardConfig({})).toEqual({
       enabled: true,
       statusCard: { enabled: true },
-      questionCard: { enabled: true, timeoutMs: 300_000 },
+      questionCard: { enabled: true, timeoutMs: 270_000 },
     });
   });
 

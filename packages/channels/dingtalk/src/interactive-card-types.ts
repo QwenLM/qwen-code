@@ -15,10 +15,14 @@ export interface DingtalkCardCallback {
 
 export type DingtalkCardCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
-  | { kind: 'forbidden'; actorId: string }
+  | {
+      kind: 'forbidden';
+      actorId: string;
+      target: { chatId: string; isGroup: boolean };
+    }
   | { kind: 'ignored'; actorId?: string };
 
-const DEFAULT_QUESTION_TIMEOUT_MS = 300_000;
+const DEFAULT_QUESTION_TIMEOUT_MS = 270_000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)

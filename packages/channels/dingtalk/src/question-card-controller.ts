@@ -23,11 +23,13 @@ const OTHER_OPTION_VALUE = '__qwen_other__';
 
 interface QuestionRecord {
   context: ChannelUserInputRequestContext;
+  target: { chatId: string; isGroup: boolean };
   outTrackId: string;
   scopeKey: string;
   sequence: number;
   state: QuestionState;
   delivered: boolean;
+  forbiddenActors: Set<string>;
   terminalState?: QuestionTerminalState;
   terminalDescription?: string;
   finishTerminalProjection?: (operation: () => Promise<void>) => Promise<void>;
@@ -60,11 +62,13 @@ export class QuestionCardController {
   ): Promise<UserInputPresentationResult> {
     const record: QuestionRecord = {
       context,
+      target,
       outTrackId: `qwen-question-${randomUUID()}`,
       scopeKey: this.scopeKey(context),
       sequence: this.nextSequence++,
       state: 'reserved',
       delivered: false,
+      forbiddenActors: new Set(),
     };
     this.byRequest.set(context.requestId, record);
     this.byOutTrack.set(record.outTrackId, record);
@@ -146,7 +150,15 @@ export class QuestionCardController {
       return { kind: 'ignored', actorId: callback.actorId };
     }
     if (record.context.owner.id !== callback.actorId) {
-      return { kind: 'forbidden', actorId: callback.actorId };
+      if (record.forbiddenActors.has(callback.actorId)) {
+        return { kind: 'ignored' };
+      }
+      record.forbiddenActors.add(callback.actorId);
+      return {
+        kind: 'forbidden',
+        actorId: callback.actorId,
+        target: record.target,
+      };
     }
     if (callback.hasBusinessPayload === false) {
       return { kind: 'ignored', actorId: callback.actorId };

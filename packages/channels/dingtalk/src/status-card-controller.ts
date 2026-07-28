@@ -21,6 +21,7 @@ interface StatusRecord {
   runId: string;
   sessionId: string;
   ownerId: string;
+  target: { chatId: string; isGroup: boolean };
   outTrackId: string;
   content: string;
   startedAt: number;
@@ -29,6 +30,7 @@ interface StatusRecord {
   terminal: boolean;
   streamFailed: boolean;
   stopClaimed: boolean;
+  forbiddenActors: Set<string>;
   lastWriteAt: number;
   pendingSnapshot?: string;
   flushTimer?: ReturnType<typeof setTimeout>;
@@ -85,6 +87,7 @@ export class StatusCardController {
       runId: segment.runId,
       sessionId: segment.sessionId,
       ownerId: segment.owner.id,
+      target,
       outTrackId,
       content: '',
       startedAt: Date.now(),
@@ -93,6 +96,7 @@ export class StatusCardController {
       terminal: false,
       streamFailed: false,
       stopClaimed: false,
+      forbiddenActors: new Set(),
       lastWriteAt: Date.now(),
       writeChain: Promise.resolve(),
     };
@@ -133,7 +137,11 @@ export class StatusCardController {
       return { kind: 'ignored', actorId };
     }
     if (record.ownerId !== actorId) {
-      return { kind: 'forbidden', actorId };
+      if (record.forbiddenActors.has(actorId)) {
+        return { kind: 'ignored' };
+      }
+      record.forbiddenActors.add(actorId);
+      return { kind: 'forbidden', actorId, target: record.target };
     }
     record.stopClaimed = true;
     return {
