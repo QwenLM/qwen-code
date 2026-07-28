@@ -2621,12 +2621,56 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      [
+        'an ACP session without an opt-in',
+        { experimentalZedIntegration: true },
+      ],
+      [
+        'a non-ACP session with the setting enabled',
+        { sessionWriterLeaseEnabled: true },
+      ],
+      [
+        'an ACP session with an invalid truthy opt-in',
+        {
+          experimentalZedIntegration: true,
+          sessionWriterLeaseEnabled: 'true' as unknown as boolean,
+        },
+      ],
+    ])(
+      'uses the legacy recorder without acquiring a writer lease for %s',
+      async (_name, params) => {
+        const acquire = vi.spyOn(SessionWriterLease, 'acquire');
+        const config = new Config({
+          ...baseParams,
+          ...params,
+          chatRecording: true,
+        });
+
+        await (
+          config as unknown as { activateChatRecording(): Promise<void> }
+        ).activateChatRecording();
+
+        expect(acquire).not.toHaveBeenCalled();
+        expect(config.isSessionWriterLeaseEnabled()).toBe(false);
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        await expect(
+          config
+            .getChatRecordingService()
+            ?.runWithWriteBarrier(async () => 'legacy'),
+        ).resolves.toBe('legacy');
+        acquire.mockRestore();
+      },
+    );
+
     it('preserves activation and lease release failures', async () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
         experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
       });
+      expect(config.isSessionWriterLeaseEnabled()).toBe(true);
       const activationError = new SessionTranscriptChangedError();
       const releaseError = new Error('lease release failed');
       const release = vi.fn().mockRejectedValue(releaseError);

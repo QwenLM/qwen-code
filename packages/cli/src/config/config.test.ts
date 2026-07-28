@@ -1347,6 +1347,52 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('should keep the session writer lease disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWriterLeaseEnabled: false,
+      }),
+    );
+  });
+
+  it('should propagate the session writer lease opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { sessionWriterLease: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWriterLeaseEnabled: true,
+      }),
+    );
+  });
+
+  it('should not enable the session writer lease for invalid truthy values', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      {
+        experimental: {
+          sessionWriterLease: 'true',
+        },
+      } as unknown as Settings,
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWriterLeaseEnabled: false,
+      }),
+    );
+  });
+
   it('should propagate the image model selection', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
