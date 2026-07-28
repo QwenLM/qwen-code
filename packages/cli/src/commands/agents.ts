@@ -6,79 +6,20 @@
 
 import * as path from 'node:path';
 import type { Argv, CommandModule } from 'yargs';
-import {
-  readLastJsonStringFieldSync,
-  Storage,
-} from '@qwen-code/qwen-code-core';
-import { loadSettings, type Settings } from '../config/settings.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
-  AgentViewRosterEntry,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
   AgentViewWorkerFile,
 } from '../agent-view/protocol.js';
-import type { AgentViewSupervisorClientHandle } from '../agent-view/supervisor-runner.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
-import { runAgentViewRosterApp } from '../ui/agent-view/AgentViewApp.js';
-import type { AgentViewRosterResult } from '../ui/agent-view/AgentViewApp.js';
-import type {
-  AgentViewHeaderInfo,
-  AgentViewPeekPanel,
-} from '../ui/agent-view/AgentViewRoster.js';
-import { showResumeSessionPickerItem } from '../ui/components/StandaloneSessionPicker.js';
-import type { AgentRosterRow } from '../ui/agent-view/roster-model.js';
-import { buildAgentRosterRows } from '../ui/agent-view/roster-model.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
-import { getCliVersion } from '../utils/version.js';
 
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
   all?: boolean;
-}
-
-type AgentsInteractiveSupervisor = Pick<
-  AgentViewSupervisorClientHandle,
-  | 'list'
-  | 'subscribe'
-  | 'dispatch'
-  | 'adopt'
-  | 'attach'
-  | 'peek'
-  | 'send'
-  | 'answer'
-  | 'pin'
-  | 'rename'
-  | 'stop'
-  | 'remove'
->;
-
-export interface AgentsInteractiveActions {
-  dispatchPrompt(prompt: string, attach: boolean): Promise<unknown>;
-  peekSelected(sessionId: string): Promise<AgentViewPeekPanel>;
-  sendToSession(sessionId: string, text: string): Promise<unknown>;
-  answerSession(sessionId: string, text: string): Promise<unknown>;
-  pinSession(sessionId: string): Promise<unknown>;
-  renameSession(sessionId: string, displayName: string): Promise<unknown>;
-  stopSession(sessionId: string): Promise<unknown>;
-  removeSession(sessionId: string): Promise<unknown>;
-  loadRows(): Promise<AgentRosterRow[]>;
-  subscribeToChanges?(onChange: () => void): { dispose(): void };
-}
-
-export interface RunAgentsInteractiveSessionOptions {
-  cwd: string;
-  listCwd?: string;
-  supervisor: AgentsInteractiveSupervisor;
-  renderRoster(
-    rows: AgentRosterRow[],
-    actions: AgentsInteractiveActions,
-    initialPeekPanel?: AgentViewPeekPanel,
-    header?: AgentViewHeaderInfo,
-  ): Promise<AgentViewRosterResult | void> | AgentViewRosterResult | void;
-  header?: AgentViewHeaderInfo;
 }
 
 export async function handleAgentViewBackgroundPrompt(
@@ -94,228 +35,20 @@ export async function handleAgentViewBackgroundPrompt(
   writeStdoutLine(`View logs with qwen logs ${shortId}.`);
 }
 
-export async function runAgentsInteractiveSession({
-  cwd,
-  listCwd,
-  supervisor,
-  renderRoster,
-  header,
-}: RunAgentsInteractiveSessionOptions): Promise<void> {
-  const loadRows = async () =>
-    toRosterRows(toSnapshots(await supervisor.list(listCwd)));
-  const actions: AgentsInteractiveActions = {
-    dispatchPrompt: async (prompt, _attach) => {
-      const trimmedPrompt = prompt.trim();
-      if (!trimmedPrompt) {
-        throw new Error('Prompt cannot be empty.');
-      }
-
-      return supervisor.dispatch(trimmedPrompt, cwd);
-    },
-    peekSelected: async (sessionId) =>
-      formatPeekPanel(await supervisor.peek(sessionId)),
-    sendToSession: (sessionId, text) => supervisor.send(sessionId, text),
-    answerSession: (sessionId, text) => supervisor.answer(sessionId, text),
-    pinSession: (sessionId) => supervisor.pin(sessionId),
-    renameSession: (sessionId, displayName) =>
-      supervisor.rename(sessionId, displayName),
-    stopSession: (sessionId) => supervisor.stop(sessionId),
-    removeSession: (sessionId) => supervisor.remove(sessionId),
-    loadRows,
-    subscribeToChanges: (onChange) =>
-      supervisor.subscribe(() => {
-        onChange();
-      }),
-  };
-
-  let initialPeekPanel: AgentViewPeekPanel | undefined;
-  const foregroundSubscription = supervisor.subscribe(() => {});
-  try {
-    while (true) {
-      const rows = await loadRows();
-      const result = await renderRoster(
-        rows,
-        actions,
-        initialPeekPanel,
-        header,
-      );
-      initialPeekPanel = undefined;
-      if (!result || result.type === 'exit') {
-        return;
-      }
-      if (result.type === 'resume') {
-        resetTerminalForRoster();
-        await waitForTerminalHandoff();
-        initialPeekPanel = await adoptResumeSessionFromPicker(cwd, supervisor);
-        resetTerminalForRoster();
-        await waitForTerminalHandoff();
-        continue;
-      }
-      if (result.type === 'attach') {
-        try {
-          await supervisor.attach(result.sessionId);
-        } catch (error) {
-          initialPeekPanel = {
-            title: result.sessionId,
-            lines: [error instanceof Error ? error.message : String(error)],
-          };
-        } finally {
-          resetTerminalForRoster();
-        }
-      }
-    }
-  } finally {
-    foregroundSubscription.dispose();
-  }
-}
-
-async function adoptResumeSessionFromPicker(
-  cwd: string,
-  supervisor: Pick<AgentViewSupervisorClientHandle, 'adopt' | 'peek'>,
-): Promise<AgentViewPeekPanel | undefined> {
-  const session = await showResumeSessionPickerItem(cwd, undefined, {
-    includeAgentViewSessions: false,
-    allowManagedAgentViewSelection: true,
-  });
-  if (!session) {
-    return undefined;
-  }
-  const { sessionId } = session;
-  const sessionCwd = path.resolve(session.cwd || cwd);
-
-  try {
-    await supervisor.peek(sessionId);
-    return {
-      title: sessionId,
-      lines: ['Session is already managed by Agent View.'],
-    };
-  } catch {
-    // Not currently managed; adopt it below.
-  }
-
-  try {
-    await supervisor.adopt({
-      sessionId,
-      projectCwd: sessionCwd,
-      activeCwd: sessionCwd,
-      terminal: {
-        columns: process.stdout.columns ?? 80,
-        rows: process.stdout.rows ?? 24,
-      },
-    });
-    return {
-      title: sessionId,
-      lines: ['Session added to Agent View.'],
-    };
-  } catch (error) {
-    return {
-      title: sessionId,
-      lines: [error instanceof Error ? error.message : String(error)],
-    };
-  }
-}
-
-function resetTerminalForRoster(): void {
-  if (!process.stdout.isTTY) return;
-  process.stdout.write('\x1b[0m\x1b[?25h\x1b[?1049l\x1b[2J\x1b[H');
-}
-
-async function waitForTerminalHandoff(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
-}
-
-export const agentsInteractiveSession = {
-  run: runAgentsInteractiveSession,
-};
-
-async function defaultRenderAgentsRoster(
-  rows: AgentRosterRow[],
-  actions: AgentsInteractiveActions,
-  initialPeekPanel?: AgentViewPeekPanel,
-  header?: AgentViewHeaderInfo,
-): Promise<AgentViewRosterResult | void> {
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    return runAgentViewRosterApp(rows, actions, header, initialPeekPanel);
-  }
-  writeStdoutLine(formatRosterRowsText(rows));
-}
-
-function toRosterRows(snapshots: AgentViewSessionSnapshot[]): AgentRosterRow[] {
-  if (snapshots.length === 0) {
-    return [];
-  }
-  return buildAgentRosterRows({
-    sessions: snapshots.map((snapshot) => snapshot.state),
-    launches: Object.fromEntries(
-      snapshots.map((snapshot) => [snapshot.sessionId, snapshot.launch]),
-    ),
-    activities: Object.fromEntries(
-      snapshots.map((snapshot) => [snapshot.sessionId, snapshot.activity]),
-    ),
-    workers: Object.fromEntries(
-      snapshots.map((snapshot) => [snapshot.sessionId, snapshot.worker]),
-    ),
-    rosterEntries: snapshots
-      .map(getRosterEntryWithTitle)
-      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
-  });
-}
-
-function getRosterEntryWithTitle(
-  snapshot: AgentViewSessionSnapshot,
-): AgentViewRosterEntry | undefined {
-  if (snapshot.rosterEntry?.displayName) {
-    return snapshot.rosterEntry;
-  }
-  const title = readTranscriptTitle(snapshot);
-  if (!title) {
-    return snapshot.rosterEntry;
-  }
-  return {
-    sessionId: snapshot.sessionId,
-    projectCwd: snapshot.rosterEntry?.projectCwd ?? snapshot.state.projectCwd,
-    activeCwd: snapshot.rosterEntry?.activeCwd ?? snapshot.state.activeCwd,
-    ...(snapshot.rosterEntry?.pinned ? { pinned: true } : {}),
-    displayName: title,
-    createdAt: snapshot.rosterEntry?.createdAt ?? snapshot.state.createdAt,
-    updatedAt: snapshot.rosterEntry?.updatedAt ?? snapshot.state.updatedAt,
-  };
-}
-
-function readTranscriptTitle(
-  snapshot: AgentViewSessionSnapshot,
-): string | undefined {
-  const cwdCandidates = Array.from(
-    new Set([snapshot.state.activeCwd, snapshot.state.projectCwd]),
-  );
-  for (const cwd of cwdCandidates) {
-    try {
-      const filePath = path.join(
-        new Storage(cwd).getProjectDir(),
-        'chats',
-        `${snapshot.sessionId}.jsonl`,
-      );
-      const title = readLastJsonStringFieldSync(
-        filePath,
-        'customTitle',
-        'custom_title',
-      )?.trim();
-      if (title) return title;
-    } catch {
-      // Missing transcripts are fine; new sessions may not have a title yet.
-    }
-  }
-  return undefined;
-}
-
-function formatRosterRowsText(rows: AgentRosterRow[]): string {
-  if (rows.length === 0) {
+function formatAgentsText(snapshots: AgentViewSessionSnapshot[]): string {
+  const active = snapshots.filter(isActiveAgentSnapshot);
+  if (active.length === 0) {
     return 'No background agents.';
   }
-  return rows
-    .map((row) => {
-      const summary = row.summary ? ` ${row.summary}` : '';
-      return `${row.sessionId} ${row.stateLabel} ${row.aliveIndicator} ${row.cwd} ${row.ageLabel}${summary}`;
+  return active
+    .map((snapshot) => {
+      const name = snapshot.rosterEntry?.displayName
+        ? ` ${snapshot.rosterEntry.displayName}`
+        : '';
+      const summary = snapshot.activity?.summary
+        ? ` ${snapshot.activity.summary}`
+        : '';
+      return `${snapshot.sessionId} ${snapshot.state.sessionState} ${snapshot.state.processState} ${snapshot.state.activeCwd}${name}${summary}`;
     })
     .join('\n');
 }
@@ -347,7 +80,6 @@ export const agentsCommand: CommandModule<unknown, AgentsArgs> = {
       })
       .version(false),
   handler: async (argv) => {
-    const cwd = path.resolve(argv.cwd ?? process.cwd());
     const listCwd = argv.cwd ? path.resolve(argv.cwd) : undefined;
     const supervisor = await ensureAgentViewSupervisor();
     if (argv.json) {
@@ -356,82 +88,10 @@ export const agentsCommand: CommandModule<unknown, AgentsArgs> = {
       return;
     }
 
-    await agentsInteractiveSession.run({
-      cwd,
-      ...(listCwd ? { listCwd } : {}),
-      supervisor,
-      renderRoster: defaultRenderAgentsRoster,
-      header: await buildAgentViewHeader(cwd),
-    });
+    const snapshots = toSnapshots(await supervisor.list(listCwd));
+    writeStdoutLine(formatAgentsText(snapshots));
   },
 };
-
-async function buildAgentViewHeader(cwd: string): Promise<AgentViewHeaderInfo> {
-  return {
-    version: await getCliVersion(),
-    cwd,
-    ...readConfiguredModelHeader(cwd),
-  };
-}
-
-function readConfiguredModelHeader(
-  cwd: string,
-): Pick<AgentViewHeaderInfo, 'authLabel' | 'model' | 'providerLabel'> {
-  try {
-    const settings = loadSettings(cwd, {
-      skipLoadEnvironment: true,
-    }).merged;
-    const model = readConfiguredModelFromSettings(settings);
-    return {
-      authLabel: formatAuthLabel(settings.security?.auth?.selectedType),
-      ...(model ? { model } : {}),
-      ...readProviderLabel(settings.modelProviders, model),
-    };
-  } catch {
-    const model = process.env['OPENAI_MODEL']?.trim();
-    return {
-      authLabel: process.env['OPENAI_API_KEY'] ? 'API Key' : 'Auth',
-      ...(model ? { model } : {}),
-    };
-  }
-}
-
-function readProviderLabel(
-  modelProviders: Settings['modelProviders'],
-  model: string | undefined,
-): Pick<AgentViewHeaderInfo, 'providerLabel'> {
-  if (!model || !modelProviders) {
-    return {};
-  }
-  for (const [providerId, models] of Object.entries(modelProviders)) {
-    if (!Array.isArray(models)) continue;
-    if (models.some((modelConfig) => modelConfig.id === model)) {
-      return { providerLabel: formatProviderLabel(providerId) };
-    }
-  }
-  return {};
-}
-
-function readConfiguredModelFromSettings(
-  settings: Settings,
-): string | undefined {
-  return settings.model?.name?.trim() || undefined;
-}
-
-function formatAuthLabel(authType: string | undefined): string {
-  if (process.env['OPENAI_API_KEY']) return 'API Key';
-  if (!authType) return 'Auth';
-  if (authType === 'qwen-oauth') return 'Qwen OAuth';
-  return formatProviderLabel(authType);
-}
-
-function formatProviderLabel(providerId: string): string {
-  return providerId
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-    .join('');
-}
 
 function formatAgentsJson(
   snapshots: AgentViewSessionSnapshot[],
@@ -563,35 +223,6 @@ function getSessionId(value: unknown): string {
 function formatSessionShortId(sessionId: string): string {
   if (sessionId.length <= 12) return sessionId;
   return sessionId.slice(0, 8);
-}
-
-function formatPeekPanel(value: unknown): AgentViewPeekPanel {
-  if (!isRecord(value)) {
-    return { title: 'Agent', lines: ['No details available.'] };
-  }
-
-  const sessionId =
-    typeof value['sessionId'] === 'string' ? value['sessionId'] : 'Agent';
-  const activity = isActivity(value['activity'])
-    ? value['activity']
-    : undefined;
-  const lines = [
-    activity?.waitingFor ? `Waiting: ${activity.waitingFor}` : undefined,
-    activity?.queuedPromptCount ? formatQueuedPromptLine(activity) : undefined,
-    activity?.lastResult ? `Result: ${activity.lastResult}` : undefined,
-    activity?.summary ? `Summary: ${activity.summary}` : undefined,
-  ].filter((line): line is string => Boolean(line));
-
-  return {
-    title: sessionId,
-    lines: lines.length > 0 ? lines : ['No details available.'],
-  };
-}
-
-function formatQueuedPromptLine(activity: AgentViewActivityFile): string {
-  const preview = activity.queuedPromptPreview?.trim();
-  const suffix = preview ? `: ${preview}` : '';
-  return `Waiting for response${suffix}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

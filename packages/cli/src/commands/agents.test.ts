@@ -6,42 +6,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import {
-  agentsCommand,
-  agentsInteractiveSession,
-  handleAgentViewBackgroundPrompt,
-  runAgentsInteractiveSession,
-} from './agents.js';
+import { agentsCommand, handleAgentViewBackgroundPrompt } from './agents.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
-const mockLoadSettings = vi.hoisted(() =>
-  vi.fn(() => ({
-    merged: {
-      security: { auth: { selectedType: 'openai' } },
-      model: { name: 'settings-model' },
-      modelProviders: {
-        idealab: [{ id: 'settings-model' }],
-      },
-      env: {},
-    },
-  })),
-);
-const mockGetCliVersion = vi.hoisted(() => vi.fn(async () => 'test-version'));
-const mockShowResumeSessionPickerItem = vi.hoisted(() =>
-  vi.fn(
-    async () =>
-      undefined as
-        | {
-            sessionId: string;
-            cwd: string;
-            startTime: string;
-            mtime: number;
-            prompt: string;
-            filePath: string;
-          }
-        | undefined,
-  ),
-);
 const mockSupervisor = vi.hoisted(() => ({
   list: vi.fn(async () => [
     {
@@ -68,13 +35,6 @@ const mockSupervisor = vi.hoisted(() => ({
         summary: 'write tests',
         lastActivityAt: '2026-07-17T09:00:00.000Z',
         capabilities: [],
-      },
-      worker: {
-        schemaVersion: 1,
-        protocolVersion: 1,
-        platform: 'darwin',
-        recentOutputBytes: 0,
-        lastHeartbeatAt: '2026-07-17T09:00:00.000Z',
       },
       rosterEntry: {
         sessionId: 'session-1',
@@ -104,48 +64,7 @@ const mockSupervisor = vi.hoisted(() => ({
       },
     },
   ]),
-  subscribe: vi.fn(() => ({ dispose: vi.fn() })),
   dispatch: vi.fn(async () => ({ sessionId: 'session-2', state: 'created' })),
-  adopt: vi.fn(async () => ({ sessionId: 'session-resume', adopted: true })),
-  attach: vi.fn(async () => ({ attached: true })),
-  peek: vi.fn(async () => ({
-    sessionId: 'session-1',
-    state: {
-      schemaVersion: 1,
-      sessionId: 'session-1',
-      ownership: 'managed',
-      sessionState: 'needs_input',
-      processState: 'alive',
-      attachState: 'detached',
-      projectCwd: '/tmp/workspace',
-      originalCwd: '/tmp/workspace',
-      activeCwd: '/tmp/workspace',
-      createdAt: '2026-07-17T09:00:00.000Z',
-      updatedAt: '2026-07-17T09:00:00.000Z',
-      worktree: { mode: 'none' },
-    },
-    activity: {
-      schemaVersion: 1,
-      waitingFor: 'permission',
-      summary: 'write tests',
-      lastActivityAt: '2026-07-17T09:00:00.000Z',
-      capabilities: [],
-    },
-    worker: {
-      schemaVersion: 1,
-      protocolVersion: 1,
-      platform: 'darwin',
-      recentOutputBytes: 0,
-      workerPid: 123,
-    },
-    live: true,
-  })),
-  send: vi.fn(async () => ({ sent: true })),
-  answer: vi.fn(async () => ({ answered: true })),
-  pin: vi.fn(async () => ({ pinned: true })),
-  rename: vi.fn(async () => ({ displayName: 'Build Fix' })),
-  stop: vi.fn(async () => ({ stopped: true })),
-  remove: vi.fn(async () => ({ removed: true })),
 }));
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async () => mockSupervisor),
@@ -157,23 +76,6 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 
 vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
-}));
-
-vi.mock('../config/settings.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../config/settings.js')>();
-  return {
-    ...actual,
-    loadSettings: mockLoadSettings,
-  };
-});
-
-vi.mock('../utils/version.js', () => ({
-  getCliVersion: mockGetCliVersion,
-}));
-
-vi.mock('../ui/components/StandaloneSessionPicker.js', () => ({
-  showResumeSessionPickerItem: mockShowResumeSessionPickerItem,
 }));
 
 interface AgentsArgs {
@@ -201,14 +103,14 @@ describe('agents command', () => {
     vi.restoreAllMocks();
   });
 
-  it('has the Phase 1 command definition', () => {
+  it('has the command definition', () => {
     expect(agentsCommand.command).toBe('agents');
     expect(agentsCommand.describe).toBe('List background agents');
     expect(typeof agentsCommand.builder).toBe('function');
     expect(typeof agentsCommand.handler).toBe('function');
   });
 
-  it('registers --cwd and --json options', () => {
+  it('registers --cwd, --json, and --all options', () => {
     const options = (
       buildParser() as Argv & {
         getOptions(): { key: Record<string, boolean> };
@@ -220,8 +122,7 @@ describe('agents command', () => {
     expect(options.key['all']).toBe(true);
   });
 
-  it('prints active agents as a JSON array without entering interactive helper', async () => {
-    const runSpy = vi.spyOn(agentsInteractiveSession, 'run');
+  it('prints active agents as a JSON array', async () => {
     const handler = agentsCommand.handler;
     if (!handler) throw new Error('agents command handler missing');
 
@@ -250,7 +151,6 @@ describe('agents command', () => {
       }),
     ]);
     expect(mockSupervisor.list).toHaveBeenCalledWith('/tmp/workspace');
-    expect(runSpy).not.toHaveBeenCalled();
   });
 
   it('lists all projects by default for JSON output', async () => {
@@ -296,10 +196,7 @@ describe('agents command', () => {
     );
   });
 
-  it('runs the interactive helper when --json is not set', async () => {
-    const runSpy = vi
-      .spyOn(agentsInteractiveSession, 'run')
-      .mockResolvedValue(undefined);
+  it('prints a text list when --json is not set', async () => {
     const handler = agentsCommand.handler;
     if (!handler) throw new Error('agents command handler missing');
 
@@ -309,376 +206,10 @@ describe('agents command', () => {
       >[0],
     );
 
-    expect(runSpy).toHaveBeenCalledOnce();
-    expect(runSpy.mock.calls[0]?.[0]).toEqual({
-      cwd: '/tmp/workspace',
-      listCwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster: expect.any(Function),
-      header: expect.objectContaining({
-        version: 'test-version',
-        cwd: '/tmp/workspace',
-        model: 'settings-model',
-        providerLabel: 'Idealab',
-      }),
-    });
-    expect(mockSupervisor.list).not.toHaveBeenCalled();
-  });
-
-  it('builds rows for the roster renderer', async () => {
-    const renderRoster = vi.fn();
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster,
-    });
-
-    expect(mockSupervisor.list).toHaveBeenCalledWith(undefined);
-    expect(renderRoster).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({
-          sessionId: 'session-1',
-          displayName: 'Write Tests',
-          pinned: true,
-          stateLabel: 'Working',
-          cwd: '/tmp/workspace',
-          summary: 'write tests',
-        }),
-      ]),
-      expect.objectContaining({
-        dispatchPrompt: expect.any(Function),
-        peekSelected: expect.any(Function),
-        sendToSession: expect.any(Function),
-        answerSession: expect.any(Function),
-        pinSession: expect.any(Function),
-        renameSession: expect.any(Function),
-        stopSession: expect.any(Function),
-        removeSession: expect.any(Function),
-        loadRows: expect.any(Function),
-        subscribeToChanges: expect.any(Function),
-      }),
-      undefined,
-      undefined,
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'session-1 working alive /tmp/workspace Write Tests write tests',
     );
-  });
-
-  it('filters roster rows when listCwd is provided', async () => {
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      listCwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster: vi.fn(),
-    });
-
     expect(mockSupervisor.list).toHaveBeenCalledWith('/tmp/workspace');
-  });
-
-  it('dispatches without attaching inside roster actions', async () => {
-    const calls: string[] = [];
-    const supervisor = {
-      list: vi.fn(async () => []),
-      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
-      dispatch: vi.fn(async () => {
-        calls.push('dispatch');
-        return { sessionId: 'new-session' };
-      }),
-      adopt: vi.fn(),
-      attach: vi.fn(async () => {
-        calls.push('attach');
-      }),
-      peek: vi.fn(),
-      send: vi.fn(),
-      answer: vi.fn(),
-      pin: vi.fn(),
-      rename: vi.fn(),
-      stop: vi.fn(),
-      remove: vi.fn(),
-    };
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor,
-      renderRoster: async (_rows, actions) => {
-        await actions.dispatchPrompt('  write tests  ', true);
-      },
-    });
-
-    expect(supervisor.dispatch).toHaveBeenCalledWith(
-      'write tests',
-      '/tmp/workspace',
-    );
-    expect(supervisor.attach).not.toHaveBeenCalled();
-    expect(calls).toEqual(['dispatch']);
-  });
-
-  it('attaches after the roster returns an attach intent', async () => {
-    const calls: string[] = [];
-    let renderCount = 0;
-    const supervisor = {
-      list: vi.fn(async () => []),
-      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
-      dispatch: vi.fn(async () => {
-        calls.push('dispatch');
-        return { sessionId: 'new-session' };
-      }),
-      adopt: vi.fn(),
-      attach: vi.fn(async () => {
-        calls.push('attach');
-      }),
-      peek: vi.fn(),
-      send: vi.fn(),
-      answer: vi.fn(),
-      pin: vi.fn(),
-      rename: vi.fn(),
-      stop: vi.fn(),
-      remove: vi.fn(),
-    };
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor,
-      renderRoster: async (_rows, actions) => {
-        renderCount += 1;
-        if (renderCount > 1) {
-          return { type: 'exit' };
-        }
-        const result = await actions.dispatchPrompt('write tests', true);
-        expect(result).toEqual({ sessionId: 'new-session' });
-        return { type: 'attach', sessionId: 'new-session' };
-      },
-    });
-
-    expect(supervisor.attach).toHaveBeenCalledWith('new-session');
-    expect(calls).toEqual(['dispatch', 'attach']);
-  });
-
-  it('keeps a foreground subscription alive while attaching', async () => {
-    const calls: string[] = [];
-    let renderCount = 0;
-    const dispose = vi.fn(() => {
-      calls.push('dispose');
-    });
-    const supervisor = {
-      list: vi.fn(async () => []),
-      subscribe: vi.fn(() => {
-        calls.push('subscribe');
-        return { dispose };
-      }),
-      dispatch: vi.fn(),
-      adopt: vi.fn(),
-      attach: vi.fn(async () => {
-        calls.push('attach');
-        expect(dispose).not.toHaveBeenCalled();
-      }),
-      peek: vi.fn(),
-      send: vi.fn(),
-      answer: vi.fn(),
-      pin: vi.fn(),
-      rename: vi.fn(),
-      stop: vi.fn(),
-      remove: vi.fn(),
-    };
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor,
-      renderRoster: async () => {
-        renderCount += 1;
-        return renderCount === 1
-          ? { type: 'attach', sessionId: 'session-1' }
-          : { type: 'exit' };
-      },
-    });
-
-    expect(calls).toEqual(['subscribe', 'attach', 'dispose']);
-  });
-
-  it('reopens the roster with an error panel when attach fails', async () => {
-    let renderCount = 0;
-    const supervisor = {
-      list: vi.fn(async () => []),
-      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
-      dispatch: vi.fn(),
-      adopt: vi.fn(),
-      attach: vi.fn(async () => {
-        throw new Error('stale PTY host');
-      }),
-      peek: vi.fn(),
-      send: vi.fn(),
-      answer: vi.fn(),
-      pin: vi.fn(),
-      rename: vi.fn(),
-      stop: vi.fn(),
-      remove: vi.fn(),
-    };
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor,
-      renderRoster: async (_rows, _actions, initialPeekPanel) => {
-        renderCount += 1;
-        if (renderCount === 1) {
-          expect(initialPeekPanel).toBeUndefined();
-          return { type: 'attach', sessionId: 'session-1' };
-        }
-        expect(initialPeekPanel).toEqual({
-          title: 'session-1',
-          lines: ['stale PTY host'],
-        });
-        return { type: 'exit' };
-      },
-    });
-
-    expect(supervisor.attach).toHaveBeenCalledWith('session-1');
-    expect(renderCount).toBe(2);
-  });
-
-  it('adopts a picked history session when the roster requests resume', async () => {
-    let renderCount = 0;
-    const supervisor = {
-      list: vi.fn(async () => []),
-      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
-      dispatch: vi.fn(),
-      adopt: vi.fn(async () => ({
-        sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        adopted: true,
-      })),
-      attach: vi.fn(),
-      peek: vi.fn(async () => {
-        throw new Error('not managed');
-      }),
-      send: vi.fn(),
-      answer: vi.fn(),
-      pin: vi.fn(),
-      rename: vi.fn(),
-      stop: vi.fn(),
-      remove: vi.fn(),
-    };
-    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
-      sessionId: '123e4567-e89b-12d3-a456-426614174000',
-      cwd: '/tmp/history-workspace',
-      startTime: '2026-07-17T08:00:00.000Z',
-      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
-      prompt: 'historical prompt',
-      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
-    });
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor,
-      renderRoster: async (_rows, _actions, initialPeekPanel) => {
-        renderCount += 1;
-        if (renderCount === 1) {
-          return { type: 'resume' };
-        }
-        expect(initialPeekPanel).toEqual({
-          title: '123e4567-e89b-12d3-a456-426614174000',
-          lines: ['Session added to Agent View.'],
-        });
-        return { type: 'exit' };
-      },
-    });
-
-    expect(mockShowResumeSessionPickerItem).toHaveBeenCalledWith(
-      '/tmp/workspace',
-      undefined,
-      {
-        includeAgentViewSessions: false,
-        allowManagedAgentViewSelection: true,
-      },
-    );
-    expect(supervisor.dispatch).not.toHaveBeenCalled();
-    expect(supervisor.adopt).toHaveBeenCalledWith({
-      sessionId: '123e4567-e89b-12d3-a456-426614174000',
-      projectCwd: '/tmp/history-workspace',
-      activeCwd: '/tmp/history-workspace',
-      terminal: {
-        columns: expect.any(Number),
-        rows: expect.any(Number),
-      },
-    });
-  });
-
-  it('sends and answers selected sessions through the supervisor', async () => {
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster: async (_rows, actions) => {
-        await actions.sendToSession('idle-session', 'next');
-        await actions.answerSession('needs-input-session', 'yes');
-      },
-    });
-
-    expect(mockSupervisor.send).toHaveBeenCalledWith('idle-session', 'next');
-    expect(mockSupervisor.answer).toHaveBeenCalledWith(
-      'needs-input-session',
-      'yes',
-    );
-  });
-
-  it('pins and renames selected sessions through the supervisor', async () => {
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster: async (_rows, actions) => {
-        await actions.pinSession('session-1');
-        await actions.renameSession('session-1', 'Build Fix');
-      },
-    });
-
-    expect(mockSupervisor.pin).toHaveBeenCalledWith('session-1');
-    expect(mockSupervisor.rename).toHaveBeenCalledWith(
-      'session-1',
-      'Build Fix',
-    );
-  });
-
-  it('stops and removes selected sessions through the supervisor', async () => {
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster: async (_rows, actions) => {
-        await actions.stopSession('session-1');
-        await actions.removeSession('session-1');
-      },
-    });
-
-    expect(mockSupervisor.stop).toHaveBeenCalledWith('session-1');
-    expect(mockSupervisor.remove).toHaveBeenCalledWith('session-1');
-  });
-
-  it('peeks selected session details through the supervisor', async () => {
-    let panel;
-
-    await runAgentsInteractiveSession({
-      cwd: '/tmp/workspace',
-      supervisor: mockSupervisor,
-      renderRoster: async (_rows, actions) => {
-        panel = await actions.peekSelected('session-1');
-      },
-    });
-
-    expect(mockSupervisor.peek).toHaveBeenCalledWith('session-1');
-    expect(panel).toEqual({
-      title: 'session-1',
-      lines: ['Waiting: permission', 'Summary: write tests'],
-    });
-  });
-
-  it('rejects blank prompts', async () => {
-    await expect(
-      runAgentsInteractiveSession({
-        cwd: '/tmp/workspace',
-        supervisor: mockSupervisor,
-        renderRoster: async (_rows, actions) => {
-          await actions.dispatchPrompt('   ', false);
-        },
-      }),
-    ).rejects.toThrow('Prompt cannot be empty.');
-
-    expect(mockSupervisor.dispatch).not.toHaveBeenCalled();
-    expect(mockSupervisor.attach).not.toHaveBeenCalled();
   });
 
   it('dispatches a background prompt through the supervisor', async () => {
