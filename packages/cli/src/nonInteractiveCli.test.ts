@@ -1547,7 +1547,7 @@ describe('runNonInteractive', () => {
       4,
       [{ text: 'drain image a' }, { text: 'drain image b' }],
       expect.any(AbortSignal),
-      'prompt-drain',
+      'prompt-drain/automatic/3',
       { type: SendMessageType.ToolResult, modelOverride: first },
     );
   });
