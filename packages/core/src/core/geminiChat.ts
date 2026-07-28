@@ -484,6 +484,17 @@ const INVALID_STREAM_RETRY_CONFIG = {
 const TRANSPORT_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
+  /**
+   * Budget for *continuation* recovery after a socket-level cut that already
+   * delivered output (issue #7832). This is a different mechanism from the
+   * `maxRetries` replay above and therefore has its own budget: a replay
+   * re-sends the request from scratch and is only legal before any chunk
+   * reached callers, while a continuation keeps the delivered output and asks
+   * the model to resume from it. A single long generation can be cut more than
+   * once by the same gateway idle timeout, so this is sized like
+   * {@link MAX_OUTPUT_RECOVERY_ATTEMPTS} rather than like the replay budget.
+   */
+  maxContinuationRetries: 3,
 };
 
 /**
@@ -514,6 +525,20 @@ const OUTPUT_RECOVERY_MESSAGE =
   'Output token limit hit. Resume directly — no apology, no recap of what ' +
   'you were doing. Pick up mid-thought if that is where the cut happened. ' +
   'Break remaining work into smaller pieces.';
+
+/**
+ * Lead-in for the same recovery user-turn when the cause was a socket-level
+ * cut mid-stream rather than the output token limit (issue #7832). Gateways
+ * that cap SSE connection lifetime close long generations after a few
+ * minutes; the response so far is already on the caller's screen, so the only
+ * safe recovery is to resume from it. Worded like
+ * {@link OUTPUT_RECOVERY_MESSAGE} — the model does not need to know which
+ * limit it hit, only that it was cut off and must not restart.
+ */
+const TRANSPORT_CONTINUATION_MESSAGE =
+  'The connection dropped mid-response. Resume directly — no apology, no ' +
+  'recap of what you were doing. Pick up mid-thought if that is where the ' +
+  'cut happened. Break remaining work into smaller pieces.';
 
 /**
  * Maximum length of the previous-response tail embedded inside the
@@ -839,13 +864,18 @@ function sanitizeRecoverySuffixTail(tail: string): string {
     .replace(/<previous_response_suffix>/g, '<​previous_response_suffix>');
 }
 
-function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
-  const previousText =
-    previousModelTurn?.role === 'model'
-      ? getPlainTextFromParts(previousModelTurn.parts)
-      : '';
+/**
+ * Build a recovery user-turn from the text the model already produced.
+ *
+ * Shared by both continuation paths: output-token truncation (which reads the
+ * partial turn back out of history) and mid-stream transport cuts (which
+ * cannot, because a text-only partial is deliberately never persisted — see
+ * `processStreamResponse`). `lead` states the cause; everything after it is
+ * identical so the two paths cannot drift in how they fence the suffix.
+ */
+function buildRecoveryMessageFromText(lead: string, previousText: string) {
   if (previousText.trim().length === 0) {
-    return OUTPUT_RECOVERY_MESSAGE;
+    return lead;
   }
 
   const rawTail =
@@ -855,13 +885,22 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
   const tail = sanitizeRecoverySuffixTail(rawTail);
 
   return (
-    `${OUTPUT_RECOVERY_MESSAGE}\n\n` +
+    `${lead}\n\n` +
     'The previous assistant response ended with this exact suffix. ' +
     'Do not repeat any line, table row, code line, or prose that already ' +
     'appears in it; output only text that comes after this suffix:\n\n' +
     '<previous_response_suffix>\n' +
     tail +
     '\n</previous_response_suffix>'
+  );
+}
+
+function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
+  return buildRecoveryMessageFromText(
+    OUTPUT_RECOVERY_MESSAGE,
+    previousModelTurn?.role === 'model'
+      ? getPlainTextFromParts(previousModelTurn.parts)
+      : '',
   );
 }
 
@@ -2435,6 +2474,19 @@ export class GeminiChat {
         const totalInvalidStreamRetryCount = () =>
           transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
         let transportStreamRetryCount = 0;
+        // Continuation recovery for mid-stream socket closes (issue #7832).
+        // `transportContinuationText` accumulates every plain-text chunk this
+        // send has already handed to callers across all continuation attempts,
+        // so each attempt can show the model its own visible output and ask it
+        // to resume instead of replaying (which would duplicate that output).
+        let transportContinuationCount = 0;
+        let transportContinuationText = '';
+        // Text delivered *before* the attempt currently running. Empty unless
+        // a continuation is in flight. `processStreamResponse` only pushes the
+        // final attempt's own output to history, so this is what has to be
+        // prepended once the send succeeds, or the next turn would see the
+        // model's answer starting mid-sentence.
+        let transportContinuationPrefix = '';
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
@@ -2483,23 +2535,65 @@ export class GeminiChat {
 
         let lastFinishReason: string | undefined;
 
+        /**
+         * Contents for the next attempt. Identical to `requestContents` on
+         * every normal send; while a transport continuation is pending it
+         * appends the two synthetic turns that carry the delivered output and
+         * the instruction to resume from it. Built per attempt and never
+         * written to `self.history`, so the synthetic turns cannot leak into
+         * durable history, the JSONL transcript, or a later compression —
+         * unlike the MAX_TOKENS recovery loop, which has to route through
+         * history and clean up afterwards with `coalesceRecoveryPairs`.
+         */
+        const buildAttemptContents = (): Content[] =>
+          transportContinuationPrefix.length > 0
+            ? [
+                ...requestContents,
+                {
+                  role: 'model',
+                  parts: [{ text: transportContinuationPrefix }],
+                },
+                createUserContent([
+                  {
+                    text: buildRecoveryMessageFromText(
+                      TRANSPORT_CONTINUATION_MESSAGE,
+                      transportContinuationPrefix,
+                    ),
+                  },
+                ]),
+              ]
+            : requestContents;
+
         for (;;) {
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
+          // A cut that already delivered a `functionCall` cannot be continued
+          // from — see the continuation gate below.
+          let streamYieldedFunctionCall = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
             } else if (
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
-              transportStreamRetryCount > 0
+              transportStreamRetryCount > 0 ||
+              transportContinuationCount > 0
             ) {
+              // A fresh-restart retry reaching this point means some other
+              // branch (rate limit, invalid stream, reactive compression)
+              // chose to re-send the original request. That RETRY event has no
+              // `isContinuation`, so the UI discards the delivered text — the
+              // request must discard it too, or the resend would keep asking
+              // the model to continue output the caller no longer has.
+              transportContinuationCount = 0;
+              transportContinuationText = '';
+              transportContinuationPrefix = '';
               yield { type: StreamEventType.RETRY };
             }
 
             const stream = await self.makeApiCallAndProcessStream(
               model,
-              requestContents,
+              buildAttemptContents(),
               params,
               prompt_id,
               requestOverrides,
@@ -2515,12 +2609,27 @@ export class GeminiChat {
               if (hasNonThoughtCandidateParts(chunk)) {
                 streamYieldedContentChunk = true;
               }
+              // Mirror the visible text into the continuation buffer as it is
+              // yielded. Reading it back off history is not an option on the
+              // transport path: processStreamResponse deliberately does NOT
+              // persist a text-only partial turn when the stream throws, so at
+              // the catch below history holds nothing about what the user
+              // already saw.
+              const chunkParts = chunk.candidates?.[0]?.content?.parts;
+              transportContinuationText += getPlainTextFromParts(chunkParts);
+              if (chunkParts?.some((part) => part.functionCall)) {
+                streamYieldedFunctionCall = true;
+              }
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
             }
 
             lastError = null;
+            if (transportContinuationPrefix.length > 0) {
+              self.prependTextToLastModelTurn(transportContinuationPrefix);
+              transportContinuationPrefix = '';
+            }
             break;
           } catch (error) {
             lastError = error;
@@ -2658,11 +2767,67 @@ export class GeminiChat {
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
+            // Continuation recovery (issue #7832). Once answer text has been
+            // delivered, replaying is off the table — it would duplicate what
+            // the caller already has — but propagating is not the only
+            // alternative left. Gateways that cap SSE connection lifetime
+            // (DashScope closes at ~3-5 min) cut long generations partway
+            // through the answer, which is precisely when the replay gate is
+            // shut, so large outputs failed outright however many retries were
+            // configured. Instead of replaying, keep the delivered text and
+            // ask the model to continue from it — the same shape the MAX_TOKENS
+            // truncation path already uses: show the model its own partial
+            // output, inject a resume instruction, and signal the UI with
+            // `isContinuation` so it keeps its text buffer rather than
+            // discarding it.
+            //
+            // A cut that delivered a `functionCall` is excluded: injecting a
+            // user turn between a `functionCall` and its `functionResponse`
+            // produces a sequence providers reject (the same constraint the
+            // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
+            // check), and the scheduler's repair path already covers it.
+            const canContinueAfterTransportCut =
+              isRetryableStreamTransportError &&
+              !streamYieldedFunctionCall &&
+              transportContinuationText.trim().length > 0 &&
+              transportContinuationCount <
+                TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries;
+            if (canContinueAfterTransportCut) {
+              self.popPendingPartialAssistantTurn();
+              transportContinuationCount++;
+              // Everything delivered so far — across earlier continuation
+              // attempts too, since `transportContinuationText` accumulates
+              // and is never reset while continuing.
+              transportContinuationPrefix = transportContinuationText;
+              const delayMs =
+                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
+                transportContinuationCount;
+              debugLogger.warn('Transport stream continuation scheduled', {
+                retryPath: 'stream',
+                retryDecision: 'continue',
+                attempt: transportContinuationCount,
+                maxRetries:
+                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
+                retryDelayMs: delayMs,
+                errorKind: classification.kind,
+                transportCode: classification.transportCode,
+                deliveredChars: transportContinuationText.length,
+              });
+              // `isContinuation` keeps the UI's text buffer, so the next
+              // attempt's chunks append to what is already on screen instead
+              // of replacing it. The delivered text and the resume
+              // instruction ride along in `buildAttemptContents()`.
+              yield { type: StreamEventType.RETRY, isContinuation: true };
+              suppressNextRetryEvent = true;
+              await delay(delayMs, params.config?.abortSignal).promise;
+              continue;
+            }
             if (isRetryableStreamTransportError) {
-              // Reached only when the retry above did not fire: either
-              // user-visible content was already yielded (replaying would
-              // duplicate it) or the retry budget is exhausted. Either way
-              // the error propagates.
+              // Reached only when neither branch above fired: content was
+              // already delivered so replaying would duplicate it, or the
+              // replay budget is exhausted, or continuation is unavailable
+              // (function-call cut, no text to anchor on, or its own budget
+              // exhausted).
               debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
                 retryDecision: streamYieldedContentChunk
@@ -2670,6 +2835,9 @@ export class GeminiChat {
                   : 'exhausted',
                 attempts: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
+                continuationAttempts: transportContinuationCount,
+                maxContinuationRetries:
+                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
               });
@@ -4446,6 +4614,53 @@ export class GeminiChat {
         usageMetadata,
       } as GenerateContentResponse;
     }
+  }
+
+  /**
+   * Prepend already-delivered text to the trailing model turn.
+   *
+   * Used by the transport-continuation path (issue #7832): after a socket cut
+   * mid-response, the caller has seen text that `processStreamResponse`
+   * deliberately did not persist, and the continuation attempt's own turn
+   * carries only the resumed remainder. Without this, durable history would
+   * hold an answer that starts mid-sentence — visibly wrong on `/compress`,
+   * `--resume`, and every later turn's context.
+   *
+   * The delivered text is merged into the turn's first plain-text part (kept
+   * after any leading thought part, matching the
+   * `[thoughtPart?, ...text]` shape `processStreamResponse` produces), or
+   * inserted as a new part when the continuation returned no text of its own.
+   * Overlap is deduped by the same helper the output-recovery merge uses, so a
+   * model that replays part of its previous tail does not double it.
+   */
+  private prependTextToLastModelTurn(deliveredText: string): void {
+    if (deliveredText.length === 0) return;
+    const lastEntry = this.history.at(-1);
+    if (lastEntry?.role !== 'model') {
+      debugLogger.warn(
+        '[TRANSPORT_CONTINUATION] Trailing entry is not a model turn; ' +
+          'dropping the delivered-text merge.',
+        { role: lastEntry?.role ?? 'undefined' },
+      );
+      return;
+    }
+    const parts = [...(lastEntry.parts ?? [])];
+    const textIndex = parts.findIndex(isPlainTextPart);
+    if (textIndex < 0) {
+      const insertAt = parts.findIndex((part) => !part.thought);
+      parts.splice(insertAt < 0 ? parts.length : insertAt, 0, {
+        text: deliveredText,
+      });
+    } else {
+      const continuationPart = parts[textIndex] as Part & { text: string };
+      parts[textIndex] = {
+        ...continuationPart,
+        text:
+          deliveredText +
+          getRecoveryContinuationSuffix(deliveredText, continuationPart.text),
+      };
+    }
+    lastEntry.parts = parts;
   }
 
   /**
