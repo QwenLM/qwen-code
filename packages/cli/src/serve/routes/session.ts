@@ -2574,6 +2574,16 @@ export function registerSessionRoutes(
             runtime.workspaceCwd,
             codec,
           );
+          const hasActivePrompt = (): boolean => {
+            try {
+              return runtime.bridge.getSessionSummary(sessionId)
+                .hasActivePrompt;
+            } catch (error) {
+              if (error instanceof SessionNotFoundError) return false;
+              throw error;
+            }
+          };
+          const activePromptBeforeRead = hasActivePrompt();
           let page;
           try {
             page = await reader.readPage(sessionId, {
@@ -2601,9 +2611,11 @@ export function registerSessionRoutes(
           if (page.records.some((record) => record.sessionId !== sessionId)) {
             throw new SessionTranscriptSnapshotUnavailableError(sessionId);
           }
+          const activePromptAfterRead = hasActivePrompt();
           const replay = await replayTranscriptRecordPage({
             sessionId,
             page,
+            finalizeDangling: !activePromptBeforeRead && !activePromptAfterRead,
             encodeCursor: (state) => codec.encode(state),
           });
           const cursorTooLarge =

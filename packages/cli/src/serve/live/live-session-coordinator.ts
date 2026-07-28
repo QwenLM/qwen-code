@@ -1165,7 +1165,7 @@ export class LiveSessionCoordinator {
             prompt: [{ type: 'text', text: prompt }],
           },
           signal,
-          { promptId, modelPrompt },
+          { promptId, modelPrompt, deadlineMs: this.turnTimeoutMs },
         );
         await collect;
       } catch (error) {

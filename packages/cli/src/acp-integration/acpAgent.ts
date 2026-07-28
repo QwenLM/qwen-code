@@ -7355,6 +7355,8 @@ class QwenAgent implements Agent {
                 ?.flush();
             }
             const reader = new SessionTranscriptReader(cwd);
+            const activePromptBeforeRead =
+              this.activePromptCalls.has(sessionId);
             const page = await reader.readPage(sessionId, {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawBeforeRecordId === 'string'
@@ -7371,6 +7373,9 @@ class QwenAgent implements Agent {
               sessionId,
               page,
               config,
+              finalizeDangling:
+                !activePromptBeforeRead &&
+                !this.activePromptCalls.has(sessionId),
               encodeCursor: (state) =>
                 encodeSessionTranscriptCursor(state, cwd),
               logger: debugLogger,

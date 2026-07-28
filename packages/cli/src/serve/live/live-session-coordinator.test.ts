@@ -1724,6 +1724,9 @@ describe('LiveSessionCoordinator', () => {
     });
     const call = { epoch: 1, callId: 'call-timeout' };
     await startDeferredTurn(harness, call);
+    expect(
+      vi.mocked(harness.runtime.bridge.sendPrompt).mock.calls[0]?.[3],
+    ).toEqual(expect.objectContaining({ deadlineMs: 250 }));
 
     await vi.waitFor(
       () => {

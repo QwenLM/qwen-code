@@ -3262,6 +3262,102 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('does not finalize a dangling tool call while its workspace session prompt is active', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440280';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'read while active',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      await fsp.appendFile(
+        transcriptPath,
+        `${JSON.stringify({
+          uuid: `${sessionId}-assistant-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-07-08T00:01:00.000Z',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'active-tool-call',
+                  name: 'read_file',
+                  args: { path: '/workspace/file.txt' },
+                },
+              },
+            ],
+          },
+          cwd: SECONDARY_CWD,
+        })}\n`,
+        'utf8',
+      );
+      const summary = makeSummary(sessionId, SECONDARY_CWD, {
+        hasActivePrompt: true,
+      });
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [summary],
+      });
+
+      const active = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host())
+        .expect(200);
+      expect(
+        active.body.events
+          .map((event: { data: Record<string, unknown> }) => event.data)
+          .filter(
+            (event: Record<string, unknown>) =>
+              event['toolCallId'] === 'active-tool-call',
+          ),
+      ).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          status: 'in_progress',
+        }),
+      ]);
+
+      summary.hasActivePrompt = false;
+      const idle = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host())
+        .expect(200);
+      expect(
+        idle.body.events
+          .map((event: { data: Record<string, unknown> }) => event.data)
+          .filter(
+            (event: Record<string, unknown>) =>
+              event['toolCallId'] === 'active-tool-call',
+          ),
+      ).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          status: 'in_progress',
+        }),
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          status: 'failed',
+        }),
+      ]);
+      expect(primaryBridge.summaryCalls).toEqual([]);
+      expect(secondaryBridge.summaryCalls).toEqual([
+        sessionId,
+        sessionId,
+        sessionId,
+        sessionId,
+      ]);
+    });
+  });
+
   it('enforces the workspace transcript cursor byte boundary', () => {
     expect(
       workspaceTranscriptCursorExceedsLimitForTesting(
