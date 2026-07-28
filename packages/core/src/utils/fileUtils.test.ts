@@ -1266,21 +1266,26 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('100 MB source limit');
     });
 
-    it('returns READ_CONTENT_FAILURE for a corrupt canonical image', async () => {
+    it('forwards a corrupt canonical image verbatim instead of failing the read', async () => {
       const corruptPath = path.join(tempRootDir, 'corrupt.png');
-      await fsPromises.writeFile(corruptPath, 'not a real png');
+      const bytes = Buffer.from('not a real png');
+      await fsPromises.writeFile(corruptPath, bytes);
       mockMimeGetType.mockReturnValue('image/png');
 
       const result = await processSingleFileContent(corruptPath, mockConfig);
 
-      expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
-      expect(result.error).toContain(corruptPath);
-      expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).not.toContain(corruptPath);
-      expect(result.returnDisplay).not.toContain(corruptPath);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: bytes.toString('base64'),
+          mimeType: 'image/png',
+          displayName: 'corrupt.png',
+        },
+      });
+      expect(result.returnDisplay).toContain('Read image file: corrupt.png');
     });
 
-    it('returns READ_CONTENT_FAILURE for an animated canonical image', async () => {
+    it('forwards an animated canonical image verbatim instead of failing the read', async () => {
       const twoFrameGif = Buffer.from(
         '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
         'hex',
@@ -1291,9 +1296,37 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(animatedPath, mockConfig);
 
-      expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
-      expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toMatch(/static/i);
+      const onDisk = await fsPromises.readFile(animatedPath);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: onDisk.toString('base64'),
+          mimeType: 'image/webp',
+          displayName: 'animated.webp',
+        },
+      });
+      expect(result.returnDisplay).toContain('Read image file: animated.webp');
+    });
+
+    it('forwards non-canonical content behind a canonical extension verbatim', async () => {
+      const gifBytes = Buffer.from(
+        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
+        'hex',
+      );
+      const mismatchPath = path.join(tempRootDir, 'mismatch.png');
+      await fsPromises.writeFile(mismatchPath, gifBytes);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(mismatchPath, mockConfig);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: gifBytes.toString('base64'),
+          mimeType: 'image/png',
+          displayName: 'mismatch.png',
+        },
+      });
     });
 
     it('applies EXIF orientation before describing and rendering an overview', async () => {

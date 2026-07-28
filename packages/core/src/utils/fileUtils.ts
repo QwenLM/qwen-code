@@ -1474,21 +1474,26 @@ export async function processSingleFileContent(
           } catch (error) {
             signal?.throwIfAborted();
             if (error instanceof ImageViewError) {
-              const message = error.message;
-              const errorType =
+              // Non-size render failures (sharp missing, animated,
+              // unsupported, or corrupt input) fall through to the legacy
+              // inline-bytes branch below rather than hard-failing the read,
+              // matching main's forward-verbatim behaviour. The size codes
+              // stay a hard error because that branch cannot shrink them.
+              if (
                 error.code === 'source_too_large' ||
                 error.code === 'output_too_large'
-                  ? ToolErrorType.FILE_TOO_LARGE
-                  : ToolErrorType.READ_CONTENT_FAILURE;
-              const userMessage = message.replace(`: ${filePath}`, '');
-              return {
-                llmContent: userMessage,
-                returnDisplay: userMessage,
-                error: message,
-                errorType,
-              };
+              ) {
+                const userMessage = error.message.replace(`: ${filePath}`, '');
+                return {
+                  llmContent: userMessage,
+                  returnDisplay: userMessage,
+                  error: error.message,
+                  errorType: ToolErrorType.FILE_TOO_LARGE,
+                };
+              }
+            } else {
+              throw error;
             }
-            throw error;
           }
         }
         const contentBuffer = await fs.promises.readFile(filePath);
