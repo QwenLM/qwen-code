@@ -1335,6 +1335,8 @@ describe('Markdown code highlighting while streaming', () => {
           isStreaming: true,
         }),
       );
+      // Wait for the 80ms streaming throttle to flush the new content
+      await new Promise((resolve) => setTimeout(resolve, 100));
     });
     expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const b = 2;');

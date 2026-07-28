@@ -12,7 +12,7 @@ import {
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components } from 'react-markdown';
+import type { Components, Options } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -708,6 +708,72 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
 }
 
+/**
+ * Throttles a rapidly changing value (like a streaming string) to prevent
+ * O(n²) re-parsing of the entire Markdown AST on every token.
+ */
+function useThrottledValue<T>(
+  value: T,
+  isStreaming: boolean | undefined,
+  intervalMs: number = 80,
+): T {
+  const [throttled, setThrottled] = useState(value);
+  const lastRunRef = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      // Flush immediately when streaming stops
+      if (throttled !== value) {
+        setThrottled(value);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastRunRef.current;
+
+    if (elapsed >= intervalMs) {
+      lastRunRef.current = now;
+      setThrottled(valueRef.current);
+    } else if (!timeoutRef.current) {
+      timeoutRef.current = setTimeout(() => {
+        lastRunRef.current = Date.now();
+        timeoutRef.current = null;
+        setThrottled(valueRef.current);
+      }, intervalMs - elapsed);
+    }
+  }, [value, isStreaming, intervalMs, throttled]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!isStreaming) return value;
+
+  // Bypass throttle for non-monotonic changes
+  if (
+    typeof value === 'string' &&
+    typeof throttled === 'string' &&
+    !value.startsWith(throttled)
+  ) {
+    return value;
+  }
+
+  return throttled;
+}
+
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
 // call (it closes over tableMode/tableResetKey). Recreating the components
 // object for a table reset therefore never changes the `code` element type, so
@@ -743,6 +809,35 @@ function createComponents(
 
 const COMPONENTS_DEFAULT = createComponents();
 
+/**
+ * Isolated memoized renderer. This ensures react-markdown ONLY re-parses
+ * when the throttled content or plugin references actually change.
+ */
+const MemoizedMarkdownRenderer = memo(function MemoizedMarkdownRenderer({
+  content,
+  components,
+  remarkPlugins,
+  rehypePlugins,
+  urlTransform,
+}: {
+  content: string;
+  components: Options['components'];
+  remarkPlugins: Options['remarkPlugins'];
+  rehypePlugins: Options['rehypePlugins'];
+  urlTransform: Options['urlTransform'];
+}) {
+  return (
+    <ReactMarkdown
+      components={components}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={urlTransform}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 export const Markdown = memo(function Markdown({
   content,
   source,
@@ -751,19 +846,27 @@ export const Markdown = memo(function Markdown({
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const sourceMarkdown = source ? markdown : undefined;
-  const renderedContent =
+
+  const rawRenderedContent =
     content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+
+  // Throttle the content that actually reaches the parser
+  const renderedContent = useThrottledValue(rawRenderedContent, isStreaming);
+
   const effectiveTableMode = isStreaming
     ? 'basic'
     : (tableMode ?? markdownTableMode ?? 'basic');
+
+  // Memoize components so references stay stable during throttle window
   const components = useMemo(() => {
     if (effectiveTableMode === 'advanced') {
       return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
   }, [effectiveTableMode, renderedContent]);
+
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
@@ -774,14 +877,20 @@ export const Markdown = memo(function Markdown({
     };
   }, [components, effectiveTableMode, sourceComponents]);
 
-  if (!content) return null;
-  const remarkPlugins = sourceMarkdown?.remarkPlugins
-    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-    : [remarkGfm, remarkMath];
-  const rehypePlugins = sourceMarkdown?.rehypePlugins
-    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-    : [rehypeKatex];
+  // Memoize plugins so their array references remain stable.
+  const remarkPlugins = useMemo(() => {
+    return sourceMarkdown?.remarkPlugins
+      ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
+      : [remarkGfm, remarkMath];
+  }, [sourceMarkdown?.remarkPlugins]);
 
+  const rehypePlugins = useMemo(() => {
+    return sourceMarkdown?.rehypePlugins
+      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
+      : [rehypeKatex];
+  }, [sourceMarkdown?.rehypePlugins]);
+
+  if (!content) return null;
   return (
     <div
       className={source !== 'thinking' ? styles.content : undefined}
@@ -789,14 +898,13 @@ export const Markdown = memo(function Markdown({
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
         <MarkdownSourceContext.Provider value={source}>
-          <ReactMarkdown
+          <MemoizedMarkdownRenderer
+            content={renderedContent}
+            components={renderedComponents}
             remarkPlugins={remarkPlugins}
             rehypePlugins={rehypePlugins}
-            components={renderedComponents}
             urlTransform={markdownUrlTransform}
-          >
-            {renderedContent}
-          </ReactMarkdown>
+          />
         </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>
