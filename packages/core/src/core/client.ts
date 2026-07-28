@@ -961,10 +961,22 @@ export class GeminiClient {
           undefined,
           resolveInteractionMode(this.config),
         );
-    return assembleSystemPrompt({
+    const stableLayers = {
       base,
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
+    };
+    // Record the stable → context layers (everything before the volatile
+    // gitStatus/autoMemory tail) as the cross-session-stable system prefix.
+    // The Anthropic converter splits the outgoing system prompt at this
+    // boundary and puts an early cache breakpoint on the stable part, so
+    // new sessions (different git status) and in-session memory saves
+    // don't re-bill it. Recorded on every rebuild so it tracks
+    // memory/model/mode changes; consumers match via `startsWith` and fail
+    // open when it goes stale.
+    this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
+    return assembleSystemPrompt({
+      ...stableLayers,
       gitStatus: this.getCachedGitStatus(),
       autoMemory: this.config.getAutoMemoryPrompt(),
     });

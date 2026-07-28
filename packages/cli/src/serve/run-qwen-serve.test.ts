@@ -464,6 +464,9 @@ function makeRuntimeBridge(): HttpAcpBridge {
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
+const mockChannelWorkerEnabledState = vi.hoisted(() => ({
+  value: undefined as boolean | undefined,
+}));
 
 async function getFreeLoopbackPort(): Promise<number> {
   const server = createServer();
@@ -489,6 +492,28 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
         return actual.createSpawnChannelFactory(options);
       },
     ),
+  };
+});
+
+vi.mock('./channel-worker-manager.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./channel-worker-manager.js')>();
+  return {
+    ...actual,
+    createChannelWorkerManager: (
+      ...args: Parameters<typeof actual.createChannelWorkerManager>
+    ) => {
+      const manager = actual.createChannelWorkerManager(...args);
+      return {
+        ...manager,
+        state: () => {
+          const state = manager.state();
+          return mockChannelWorkerEnabledState.value === undefined
+            ? state
+            : { ...state, enabled: mockChannelWorkerEnabledState.value };
+        },
+      };
+    },
   };
 });
 
@@ -6298,6 +6323,7 @@ describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
 
   afterEach(() => {
+    mockChannelWorkerEnabledState.value = undefined;
     vi.restoreAllMocks();
     if (tmpDir) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -7722,10 +7748,19 @@ describe('runQwenServe channel worker supervisor', () => {
       servePid: process.pid,
       workerPid: 1234,
     });
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const shutdownProcessRegistry =
+      processRegistry.shutdown.bind(processRegistry);
+    vi.spyOn(processRegistry, 'shutdown').mockImplementation(() => {
+      order.push('registry');
+      return shutdownProcessRegistry();
+    });
 
     await handle.close();
 
-    expect(order).toEqual(['worker', 'bridge']);
+    expect(order).toEqual(['registry', 'worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
@@ -7863,6 +7898,150 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
       expect(exitSpy).toHaveBeenCalledWith(0);
       expect(fs.readFileSync(logPath, 'utf8')).toContain('daemon stopped');
+    } finally {
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('exits on the first signal when only ACP process shutdown fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-acp-error-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    vi.spyOn(processRegistry, 'shutdown').mockRejectedValue(
+      new Error('ACP process shutdown failed'),
+    );
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+
+      expect(worker.stop).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('retries only the channel worker error when ACP process shutdown also fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-combined-error-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      pid: 1234,
+      channels: ['telegram'],
+      error: 'Channel worker did not exit after SIGKILL.',
+    });
+    worker.stop
+      .mockRejectedValueOnce(
+        new Error('Channel worker did not exit after SIGKILL.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    vi.spyOn(processRegistry, 'shutdown').mockRejectedValue(
+      new Error('ACP process shutdown failed'),
+    );
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+      expect(exitSpy).not.toHaveBeenCalled();
+
+      await signalListener!('SIGTERM');
+      expect(worker.stop).toHaveBeenCalledTimes(2);
+      expect(exitSpy).toHaveBeenCalledWith(1);
     } finally {
       for (const listener of process.rawListeners('SIGINT')) {
         if (!existingSigintListeners.has(listener)) {
@@ -8539,7 +8718,9 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     try {
-      await vi.waitFor(() => expect(worker.stop).toHaveBeenCalledTimes(4));
+      await vi.waitFor(() => expect(worker.stop).toHaveBeenCalledTimes(4), {
+        timeout: 5_000,
+      });
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       expect(settled).toBe(false);
       expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();

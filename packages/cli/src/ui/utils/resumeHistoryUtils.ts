@@ -187,6 +187,7 @@ function convertToHistoryItems(
     name: string;
     description: string;
     resultDisplay: ToolResultDisplay | undefined;
+    visionBridgeNotice?: string;
     detailedDisplay?: string;
     status: ToolCallStatus;
     confirmationDetails: undefined;
@@ -460,6 +461,10 @@ function convertToHistoryItems(
             // Preserve the resultDisplay as-is - it can be a string or structured object
             const rawDisplay = record.toolCallResult.resultDisplay;
             toolCall.resultDisplay = rawDisplay;
+            if (record.toolCallResult.visionBridgeNotice !== undefined) {
+              toolCall.visionBridgeNotice =
+                record.toolCallResult.visionBridgeNotice;
+            }
             // Check if status exists and use it
             const rawStatus = (
               record.toolCallResult as Record<string, unknown>

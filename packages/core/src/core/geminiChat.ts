@@ -3499,6 +3499,15 @@ export class GeminiChat {
         // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
         if (isRateLimitError(error, extraRetryErrorCodes)) return true;
 
+        // Transient network errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP
+        // status and would otherwise fall through every predicate above.
+        if (
+          classifyRetryError(error, { extraRetryErrorCodes }).kind ===
+          'transport'
+        ) {
+          return true;
+        }
+
         return false;
       },
       authType,
