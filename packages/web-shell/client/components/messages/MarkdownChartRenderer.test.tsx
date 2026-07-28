@@ -692,6 +692,55 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
     );
   });
 
+  it('does not resolve the same legacy ref again when response streaming ends', async () => {
+    const { runtime } = createFakeRuntime();
+    const resolveDataRef = vi.fn<EchartsFullDataRefResolver>(async () => ({
+      dimensions: ['day', 'orders'],
+      source: [['Mon', 120]],
+    }));
+    const renderer = createEchartsFullDataRenderer({
+      loadEcharts: async () => runtime as EchartsRuntime,
+      resolveDataRef,
+    });
+    const compact = JSON.stringify({
+      version: 1,
+      data: {
+        kind: 'ref',
+        ref: 'artifact://charts/orders.csv',
+        format: 'csv',
+        dimensions: ['day', 'orders'],
+      },
+      option: { series: [{ type: 'bar' }] },
+    });
+    const customization = { markdown: { renderCodeBlock: renderer } };
+    const tree = (isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider value={customization}>
+          <Markdown
+            content={`\`\`\`echarts-fulldata\n${compact}\n\`\`\``}
+            source="assistant"
+            isStreaming={isStreaming}
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>
+    );
+    const chart = await mount(tree(false));
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+    expect(runtime.init).toHaveBeenCalledOnce();
+
+    await chart.rerender(tree(true));
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+
+    await chart.rerender(tree(false));
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+  });
+
   it('keeps the direct component export as a thin shared-renderer wrapper', async () => {
     const { runtime } = createFakeRuntime();
     const { container } = await mount(
@@ -726,6 +775,34 @@ describe('deprecated echarts-fulldata compatibility adapter', () => {
     );
 
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Invalid legacy chart',
+    );
+  });
+
+  it('keeps a direct parse error loading while streaming and reveals it when settled', async () => {
+    const tree = (isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <EchartsFullDataBlock
+          parseError="Invalid legacy chart"
+          isStreaming={isStreaming}
+          theme="dark"
+        />
+      </I18nProvider>
+    );
+    const chart = await mount(tree(true));
+
+    expect(
+      chart.container.querySelector('[data-markdown-chart-loading="true"]'),
+    ).not.toBeNull();
+    expect(chart.container.textContent).toContain('Rendering chart');
+    expect(chart.container.querySelector('[role="alert"]')).toBeNull();
+
+    await chart.rerender(tree(false));
+
+    expect(
+      chart.container.querySelector('[data-markdown-chart-loading="true"]'),
+    ).toBeNull();
+    expect(chart.container.querySelector('[role="alert"]')?.textContent).toBe(
       'Invalid legacy chart',
     );
   });

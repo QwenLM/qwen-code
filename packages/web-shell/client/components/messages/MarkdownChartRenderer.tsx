@@ -314,6 +314,12 @@ function adaptLegacyDataResolver(
   if (!resolveDataRef) {
     return undefined;
   }
+  let cached:
+    | {
+        readonly key: string;
+        readonly dataset: EchartsFullDataResolvedDataset;
+      }
+    | undefined;
   return async (ref, context) => {
     if (!context.dimensions || !context.format) {
       throw new Error('Chart data reference metadata is incomplete.');
@@ -322,14 +328,24 @@ function adaptLegacyDataResolver(
     if (!normalizedRef) {
       throw new Error('Chart data reference is not supported.');
     }
+    const key = JSON.stringify([
+      normalizedRef,
+      context.format,
+      context.dimensions,
+    ]);
+    if (cached?.key === key) {
+      return cached.dataset;
+    }
     const resolved = await resolveDataRef(normalizedRef, {
       dimensions: [...context.dimensions],
       format: context.format,
     });
-    return {
+    const dataset = {
       dimensions: resolved.dimensions,
       source: resolved.source,
     };
+    cached = { key, dataset };
+    return dataset;
   };
 }
 
@@ -406,6 +422,31 @@ function MarkdownChartCodeBlock({
   );
 }
 
+function LegacyMarkdownChartCodeBlock({
+  options,
+  language,
+  source,
+  streaming,
+  theme,
+}: {
+  readonly options: EchartsFullDataRendererOptions;
+  readonly language: string;
+  readonly source: string;
+  readonly streaming: boolean;
+  readonly theme: WebShellTheme;
+}): ReactElement {
+  const registry = useMemo(() => createLegacyRegistry(options), [options]);
+  return (
+    <MarkdownChartCodeBlock
+      registry={registry}
+      language={language}
+      source={source}
+      streaming={streaming}
+      theme={theme}
+    />
+  );
+}
+
 /**
  * @deprecated Configure `markdown.chart.registry` with
  * `createMarkdownChartRegistry` instead.
@@ -413,7 +454,6 @@ function MarkdownChartCodeBlock({
 export function createEchartsFullDataRenderer(
   options: EchartsFullDataRendererOptions = {},
 ): CodeBlockRenderer {
-  const registry = createLegacyRegistry(options);
   return function renderEchartsFullDataBlock(
     info: WebShellCodeBlockRenderInfo,
   ) {
@@ -427,8 +467,8 @@ export function createEchartsFullDataRenderer(
       ? { language: ECHARTS_FULLDATA_LANGUAGE, source: info.code }
       : normalizeLegacyEchartsSource(info.code);
     return (
-      <MarkdownChartCodeBlock
-        registry={registry}
+      <LegacyMarkdownChartCodeBlock
+        options={options}
         language={normalized.language}
         source={normalized.source}
         streaming={info.isIncomplete}
