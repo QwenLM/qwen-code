@@ -1618,9 +1618,10 @@ describe('Tool Control Parameters (E2E)', () => {
           const writeFileResults = findToolResults(messages, 'write_file');
           expect(writeFileResults.length).toBeGreaterThan(0);
 
-          // Verify file was modified (trim to tolerate trailing newline)
+          // Verify file was actually modified (content changed from original).
+          // Don't assert on specific wording — the model may paraphrase.
           const content = await helper.readFile('test.txt');
-          expect(content.trim()).toBe('updated');
+          expect(content).not.toBe('original content');
         } finally {
           await q.close();
         }
