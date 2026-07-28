@@ -132,8 +132,10 @@ function makeComment(overrides: Record<string, unknown> = {}) {
 }
 
 function makeIssueEvent(overrides: Record<string, unknown> = {}) {
+  const id = (overrides.id as number | undefined) ?? 2001;
   return {
-    id: 2001,
+    id,
+    node_id: `E_${id}`,
     event: 'review_requested',
     created_at: '2026-07-02T09:00:00.000Z',
     actor: { login: 'maintainer' },
@@ -586,7 +588,9 @@ describe('GithubChannel', () => {
             },
           }),
         ])
-        .mockResolvedValueOnce([makeIssueEvent()]);
+        .mockResolvedValueOnce([
+          makeIssueEvent({ created_at: '2026-07-04T09:00:00.000Z' }),
+        ]);
       mockOctokit.rest.pulls.get.mockResolvedValue({
         data: {
           title: 'feat: divide',
@@ -616,6 +620,57 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'Author: alice | State: open | Draft: false',
       );
+    });
+
+    it('dispatches late direct events once without muting newer events', async () => {
+      await initWithoutLoop();
+      channel.cursor = {
+        lastProcessedAt: '2026-07-03T00:00:00.000Z',
+        metaFloor: '2026-07-01T00:00:00.000Z',
+      };
+      const first = makeIssueEvent({
+        created_at: '2026-07-02T09:00:00.000Z',
+      });
+      const second = makeIssueEvent({
+        id: 2002,
+        created_at: '2026-07-05T09:00:00.000Z',
+      });
+      const reviewNotification = (updated_at: string) =>
+        makeNotification({
+          reason: 'review_requested',
+          updated_at,
+          subject: {
+            title: 'Review me',
+            url: 'https://api.github.com/repos/owner/repo/pulls/99',
+            type: 'PullRequest',
+          },
+        });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([reviewNotification('2026-07-04T10:00:00.000Z')])
+        .mockResolvedValueOnce([first])
+        .mockResolvedValueOnce([reviewNotification('2026-07-05T10:00:00.000Z')])
+        .mockResolvedValueOnce([first])
+        .mockResolvedValueOnce([reviewNotification('2026-07-06T10:00:00.000Z')])
+        .mockResolvedValueOnce([first, second]);
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: {
+          title: 'Review me',
+          state: 'open',
+          draft: false,
+          user: { login: 'alice' },
+          head: { ref: 'feature' },
+          base: { ref: 'main' },
+        },
+      });
+
+      await pollOnce();
+      await pollOnce();
+      await pollOnce();
+
+      expect(
+        channel.inboundEnvelopes.map((envelope) => envelope.messageId),
+      ).toEqual(['2001', '2002']);
+      expect(channel.cursor.dispatchedEvents).toEqual(['E_2001', 'E_2002']);
     });
 
     it('dispatches assign from issue metadata', async () => {
@@ -714,8 +769,11 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('not allowed');
     });
 
-    it('preserves pairing for mentioned follow-up comments', async () => {
-      await initWithoutLoop({ senderPolicy: 'pairing' });
+    it('dispatches directed follow-ups from approved pairing users without a mention', async () => {
+      await initWithoutLoop({
+        senderPolicy: 'pairing',
+        allowedUsers: ['alice'],
+      });
       channel.usePreflight = true;
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -724,15 +782,20 @@ describe('GithubChannel', () => {
             last_read_at: '2026-07-01T12:00:00.000Z',
           }),
         ])
-        .mockResolvedValueOnce([makeComment()]);
+        .mockResolvedValueOnce([
+          makeComment({ body: 'please take a look' }),
+          makeComment({
+            id: 1002,
+            body: 'unapproved follow-up',
+            user: { login: 'bob' },
+          }),
+        ]);
 
       await pollOnce();
 
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
-        expect.objectContaining({
-          body: expect.stringContaining('pairing code'),
-        }),
-      );
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toBe('please take a look');
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
     it('bounds each aggregated comment without hiding later comments', async () => {

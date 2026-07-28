@@ -96,7 +96,7 @@ Non-comment activity (push, label changes) bumps the notification's `updated_at`
 
 - **First start skips existing unread notifications.** The cursor initializes to "now" on first launch. Notifications created before the bot starts are not processed unless the thread receives new activity afterwards.
 - If a user marks a notification as read on github.com before the bot's poll cycle, the bot will not process it.
-- The bot does not read prior conversation history — only the triggering comment is processed.
+- The bot does not read comments before the current polling window; `author` and `comment` notifications may aggregate up to 20 comments from that window.
 - Inline PR review comments and review summary bodies are not enumerated; only issue/PR comments are processed.
 - Requires a classic PAT with `notifications` scope. Fine-grained PATs do not support the notifications API.
 

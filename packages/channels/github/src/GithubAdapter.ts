@@ -16,6 +16,7 @@ interface GithubConfig extends ChannelConfig {
 
 interface GithubCursor {
   lastProcessedAt: string;
+  metaFloor?: string;
   /**
    * Thread keys (`chatId|threadId`) whose issue/PR body has already been fed as
    * a first-contact trigger. Dedupes body dispatch when a thread is re-fetched
@@ -26,6 +27,8 @@ interface GithubCursor {
   dispatchedBodies?: string[];
   /** Comment node IDs already accepted by the channel. */
   dispatchedComments?: string[];
+  /** Direct-action event node IDs already accepted by the channel. */
+  dispatchedEvents?: string[];
 }
 
 const MAX_DISPATCHED = 500;
@@ -42,6 +45,7 @@ interface GithubComment {
 
 interface GithubIssueEvent {
   id: number;
+  node_id?: string;
   event?: string;
   created_at?: string | null;
   actor?: { login?: string } | null;
@@ -67,6 +71,7 @@ interface NotificationContext {
   issueNumber: number;
   lastReadAt: string | null;
   windowSince: string;
+  metaFloor: string;
   maxUpdatedAt: string;
   subjectTitle: string;
   reason: string;
@@ -94,7 +99,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;
     if (Number.isNaN(new Date(base.lastProcessedAt).getTime())) return null;
-    for (const field of ['dispatchedBodies', 'dispatchedComments'] as const) {
+    if (
+      base.metaFloor !== undefined &&
+      (typeof base.metaFloor !== 'string' ||
+        Number.isNaN(new Date(base.metaFloor).getTime()))
+    ) {
+      delete base.metaFloor;
+    }
+    for (const field of [
+      'dispatchedBodies',
+      'dispatchedComments',
+      'dispatchedEvents',
+    ] as const) {
       if (base[field] !== undefined && !Array.isArray(base[field])) {
         base[field] = [];
       }
@@ -172,6 +188,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   protected async pollOnce(): Promise<void> {
+    this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
     const since = new Date(
       new Date(this.cursor.lastProcessedAt).getTime() - 1000,
     ).toISOString();
@@ -219,6 +236,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         issueNumber,
         lastReadAt,
         windowSince,
+        metaFloor: this.cursor.metaFloor,
         maxUpdatedAt,
         subjectTitle: notification.subject.title || '',
         reason: notification.reason,
@@ -258,6 +276,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async processCommentLane(
     ctx: NotificationContext,
     onlyMentioned: boolean,
+    directed = false,
   ): Promise<void> {
     const comments = await this.fetchNewComments(ctx);
     let dispatched = false;
@@ -282,7 +301,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         messageId: String(comment.id),
         text: this.botUsername ? stripBotMention(body, this.botUsername) : body,
         isGroup: true,
-        isMentioned: hasMention,
+        isMentioned: hasMention || (directed && this.gate.isAllowed(senderId)),
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(ctx),
       };
@@ -335,11 +354,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\nTrigger: ${reason}.\n${details}`,
     };
     await this.dispatchEnvelope(envelope, ctx.issueNumber);
+    this.recordDispatched('dispatchedEvents', trigger.key);
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
     if (this.config.senderPolicy === 'pairing') {
-      await this.processCommentLane(ctx, false);
+      await this.processCommentLane(ctx, false, true);
       return;
     }
     const comments = (await this.fetchNewComments(ctx))
@@ -385,7 +405,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async findDirectTrigger(
     ctx: NotificationContext,
     reason: 'review_requested' | 'assign',
-  ): Promise<{ actor: string; id: number } | null> {
+  ): Promise<{ actor: string; id: number; key: string } | null> {
     const [owner, repo] = ctx.chatId.split('/');
     const events = (await this.githubApi(
       () =>
@@ -398,7 +418,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       `listEvents(${ctx.threadId})`,
     )) as GithubIssueEvent[];
     const bot = this.botUsername?.toLowerCase();
-    const lowerBound = ctx.lastReadAt || ctx.windowSince;
+    const lowerBound =
+      ctx.lastReadAt && ctx.lastReadAt > ctx.metaFloor
+        ? ctx.lastReadAt
+        : ctx.metaFloor;
     const event = events.findLast((candidate) => {
       if (
         !candidate.created_at ||
@@ -423,11 +446,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       return null;
     }
+    const key = event.node_id || String(event.id);
+    if (this.cursor.dispatchedEvents?.includes(key)) return null;
     const actor =
       reason === 'assign'
         ? event.assigner?.login || event.actor?.login
         : event.review_requester?.login || event.actor?.login;
-    return actor ? { actor: actor.toLowerCase(), id: event.id } : null;
+    return actor ? { actor: actor.toLowerCase(), id: event.id, key } : null;
   }
 
   private async fetchNewComments(
@@ -531,15 +556,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private recordDispatchedBody(key: string): void {
-    const list = this.cursor.dispatchedBodies ?? [];
-    list.push(key);
-    this.cursor.dispatchedBodies = list.slice(-MAX_DISPATCHED);
+    this.recordDispatched('dispatchedBodies', key);
   }
 
   private recordDispatchedComment(key: string): void {
-    const list = this.cursor.dispatchedComments ?? [];
+    this.recordDispatched('dispatchedComments', key);
+  }
+
+  private recordDispatched(
+    field: 'dispatchedBodies' | 'dispatchedComments' | 'dispatchedEvents',
+    key: string,
+  ): void {
+    const list = this.cursor[field] ?? [];
     if (!list.includes(key)) list.push(key);
-    this.cursor.dispatchedComments = list.slice(-MAX_DISPATCHED);
+    this.cursor[field] = list.slice(-MAX_DISPATCHED);
   }
 
   private async dispatchEnvelope(
