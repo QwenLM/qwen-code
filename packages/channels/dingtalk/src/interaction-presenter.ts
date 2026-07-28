@@ -9,7 +9,6 @@ import type { QuestionCardController } from './question-card-controller.js';
 import type { StatusCardController } from './status-card-controller.js';
 
 interface RunPresentation {
-  runId: string;
   ownerId: string;
   target: { chatId: string; isGroup: boolean };
   projectionChain: Promise<void>;
@@ -42,7 +41,6 @@ export class DingtalkInteractionPresenter {
     target: { chatId: string; isGroup: boolean },
   ): void {
     this.runs.set(runId, {
-      runId,
       ownerId,
       target,
       projectionChain: Promise.resolve(),

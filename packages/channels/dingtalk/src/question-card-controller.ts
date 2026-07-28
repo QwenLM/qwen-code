@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type {
   ChannelUserInputRequestContext,
   UserInputPresentationResult,
-  UserInputSettlementReason,
 } from '@qwen-code/channel-base';
 import {
   QUESTION_CARD_TEMPLATE_ID,
@@ -31,7 +30,6 @@ interface QuestionRecord {
   delivered: boolean;
   terminalState?: QuestionTerminalState;
   terminalDescription?: string;
-  deferredSettlement?: UserInputSettlementReason;
   finishTerminalProjection?: (operation: () => Promise<void>) => Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
   unsubscribe?: () => void;
@@ -52,10 +50,6 @@ export class QuestionCardController {
   private readonly byOutTrack = new Map<string, QuestionRecord>();
   private readonly activeByScope = new Map<string, QuestionRecord>();
   private readonly pendingByRun = new Map<string, Set<string>>();
-  private readonly tombstones = new Map<
-    string,
-    { reason: QuestionTerminalState; expiresAt: number }
-  >();
   private nextSequence = 0;
 
   constructor(private readonly options: QuestionCardControllerOptions) {}
@@ -75,10 +69,7 @@ export class QuestionCardController {
     this.byRequest.set(context.requestId, record);
     this.byOutTrack.set(record.outTrackId, record);
     const unsubscribe = context.onSettled((reason) => {
-      if (record.state === 'claimed') {
-        record.deferredSettlement = reason;
-        return;
-      }
+      if (record.state === 'claimed') return;
       if (record.state === 'pending') this.reserveTerminalProjection(record);
       void this.finalize(
         record,
@@ -268,7 +259,6 @@ export class QuestionCardController {
     const pending = this.pendingByRun.get(record.context.runId);
     pending?.delete(record.context.requestId);
     if (pending?.size === 0) this.pendingByRun.delete(record.context.runId);
-    this.addTombstone(record.outTrackId, state);
     if (record.delivered) {
       const finishTerminalProjection = record.finishTerminalProjection;
       record.finishTerminalProjection = undefined;
@@ -441,24 +431,5 @@ export class QuestionCardController {
       )
       .join('\n');
     return `The interactive question could not be delivered, so this request was cancelled. Please retry.\n${questions}`;
-  }
-
-  private addTombstone(
-    outTrackId: string,
-    reason: QuestionTerminalState,
-  ): void {
-    const now = Date.now();
-    for (const [id, tombstone] of this.tombstones) {
-      if (tombstone.expiresAt <= now) this.tombstones.delete(id);
-    }
-    this.tombstones.set(outTrackId, {
-      reason,
-      expiresAt: now + 10 * 60 * 1000,
-    });
-    while (this.tombstones.size > 1000) {
-      const oldest = this.tombstones.keys().next().value;
-      if (oldest === undefined) break;
-      this.tombstones.delete(oldest);
-    }
   }
 }
