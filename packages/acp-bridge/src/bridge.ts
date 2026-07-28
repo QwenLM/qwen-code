@@ -498,8 +498,8 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
-  /** Set only when the child Guard explicitly yielded to this FIFO. */
-  todoStopGuardAwaitingQueuedPrompt?: boolean;
+  /** Bridge prompt that owns the child Guard wait for this FIFO. */
+  todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
    * Mid-turn user messages pushed by the browser (`POST
    * /session/:id/mid-turn-message`) while a turn is running. The ACP child
@@ -5460,7 +5460,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'abort',
           () => {
             if (pendingEntry.state !== 'queued') return;
-            if (!entry.todoStopGuardAwaitingQueuedPrompt) return;
+            const waitingOwnerPromptId =
+              entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+            if (!waitingOwnerPromptId) return;
             const hasAnotherQueuedPrompt = entry.pendingPromptList.some(
               (candidate) =>
                 candidate !== pendingEntry &&
@@ -5468,9 +5470,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 !candidate.abortController.signal.aborted,
             );
             if (hasAnotherQueuedPrompt) return;
-            entry.todoStopGuardAwaitingQueuedPrompt = false;
+            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
             void entry.connection
-              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, { sessionId })
+              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
+                sessionId,
+                promptId: waitingOwnerPromptId,
+              })
               .catch((error) => {
                 writeStderrLine(
                   `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
@@ -5517,7 +5522,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // 'running' and publish a started event now that it has
           // reached the head of the FIFO.
           if (pendingEntry.state === 'queued') {
-            entry.todoStopGuardAwaitingQueuedPrompt = false;
+            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
             pendingEntry.state = 'running';
             entry.events.publish({
               type: 'pending_prompt_started',

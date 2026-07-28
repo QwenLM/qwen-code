@@ -6,7 +6,7 @@ This document defines the implementation contract for Codex-style live voice
 in Qwen Code WebShell.
 
 - Implementation base: `origin/main` at
-  `2db663bec82ac90d4284ba0b013f570e170da23a`.
+  `9461aa860df6d8d1f68d0c58275d115659843d6b`.
 - Reference behavior: Codex Desktop `26.721.41059`, build `5848`.
 - Realtime model: `qwen3.5-omni-plus-realtime`.
 - Initial native platform: macOS.

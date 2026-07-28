@@ -24,7 +24,10 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // SSE event type, the SDK validator + browser consumer — single sources of truth
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
-import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
+import {
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+} from './bridgeTypes.js';
 import type {
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
@@ -513,8 +516,8 @@ export interface BridgeClientSessionEntry {
   midTurnMessageQueue: MidTurnQueueEntry[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
-  /** The child reported that its Todo Stop Guard yielded to the FIFO. */
-  todoStopGuardAwaitingQueuedPrompt?: boolean;
+  /** Bridge prompt that owns the child Guard wait for this FIFO. */
+  todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /** True while a prompt is executing for this session. */
   promptActive?: boolean;
   /** Admitted id for the prompt currently executing on this session. */
@@ -1073,6 +1076,9 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
       return this.handleChannelDelivery(params);
     }
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      return this.handleTodoStopGuardContinuationClaim(params);
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -1092,9 +1098,6 @@ export class BridgeClient implements Client {
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
     );
-    if (params['todoStopGuardWatchQueuedPrompt'] === true) {
-      entry.todoStopGuardAwaitingQueuedPrompt = hasQueuedPrompt;
-    }
     if (drained.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
@@ -1129,6 +1132,61 @@ export class BridgeClient implements Client {
       }
     }
     return { messages, hasQueuedPrompt };
+  }
+
+  private handleTodoStopGuardContinuationClaim(
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const sessionId =
+      typeof params['sessionId'] === 'string' && params['sessionId'].length > 0
+        ? params['sessionId']
+        : undefined;
+    if (!sessionId) return { claimed: false, hasQueuedPrompt: false };
+    if (!this.ownsSession(sessionId)) {
+      return { claimed: false, hasQueuedPrompt: false };
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return { claimed: false, hasQueuedPrompt: false };
+
+    const livePrompts = entry.pendingPromptList.filter(
+      (prompt) => !prompt.abortController.signal.aborted,
+    );
+    const promptId =
+      typeof params['promptId'] === 'string' && params['promptId'].length > 0
+        ? params['promptId']
+        : undefined;
+
+    if (promptId) {
+      const ownsRunningPrompt =
+        entry.activePromptId === promptId &&
+        livePrompts.some(
+          (prompt) =>
+            prompt.promptId === promptId && prompt.state === 'running',
+        );
+      const hasCompetingRunningPrompt = livePrompts.some(
+        (prompt) => prompt.promptId !== promptId && prompt.state === 'running',
+      );
+      if (!ownsRunningPrompt || hasCompetingRunningPrompt) {
+        return { claimed: false, hasQueuedPrompt: false };
+      }
+
+      const hasQueuedPrompt = livePrompts.some(
+        (prompt) => prompt.state === 'queued',
+      );
+      if (hasQueuedPrompt) {
+        entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId = promptId;
+        return { claimed: false, hasQueuedPrompt: true };
+      }
+      if (entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId === promptId) {
+        delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+      }
+      return { claimed: true, hasQueuedPrompt: false };
+    }
+
+    if (entry.promptActive || livePrompts.length > 0) {
+      return { claimed: false, hasQueuedPrompt: false };
+    }
+    return { claimed: true, hasQueuedPrompt: false };
   }
 
   private async handleChannelDelivery(

@@ -613,6 +613,24 @@ export interface BridgeHeartbeatState {
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
 /**
+ * Child-to-parent request that atomically assigns the next Todo Stop Guard
+ * model send to the current daemon FIFO owner. `promptId`, when present, is
+ * the trusted bridge invocation id rather than the provider-facing prompt id.
+ */
+export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
+
+export interface TodoStopGuardContinuationClaimRequest {
+  sessionId: string;
+  promptId?: string;
+}
+
+export interface TodoStopGuardContinuationClaimResponse {
+  claimed: boolean;
+  hasQueuedPrompt: boolean;
+}
+
+/**
  * Parent-to-agent request reporting that the daemon FIFO no longer contains the
  * complete prompt an active Todo Stop Guard yielded to. The child clears the
  * old guard instead of letting background work revive it or leaving unrelated
@@ -620,6 +638,11 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  */
 export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
   'craft/todoStopGuardQueueReleased';
+
+export interface TodoStopGuardQueueReleasedRequest {
+  sessionId: string;
+  promptId: string;
+}
 
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
