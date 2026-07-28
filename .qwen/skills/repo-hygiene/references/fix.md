@@ -8,8 +8,9 @@ against this checkout before touching code.
 
 ## Steps
 
-1. Read `<workdir>/findings.json`. If it is missing or its `fixes` array is
-   empty, write `<workdir>/failure.md` explaining that and stop.
+1. Read `<workdir>/findings.json`. If its `fixes` array is empty, stop —
+   that is a valid, silent outcome (step 8 applies): do not create a branch
+   and do not write failure.md.
 2. Select `fixes` entries — the most certain, lowest-risk, easiest to
    explain. Selecting none is valid. No cap on count.
 3. If you selected at least one fix, create the branch from current HEAD:

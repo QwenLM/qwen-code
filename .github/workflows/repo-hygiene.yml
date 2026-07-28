@@ -37,7 +37,7 @@ jobs:
   scan:
     name: 'Scan'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 60
+    timeout-minutes: 75
     permissions:
       contents: 'read'
     env:
@@ -220,7 +220,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
-          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --search 'repo-hygiene in:title' --json number --jq 'map(.number) | join(", ")')"
+          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --json number,headRefName --jq '[.[] | select(.headRefName | startswith("hygiene/")) | .number | tostring] | join(", ")')"
           if [[ -n "${OPEN_PRS}" ]]; then
             echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping."
             echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
@@ -391,13 +391,15 @@ jobs:
             # Capture commit messages before rebase removes them
             DROPPED_MSGS="$(for sha in "${DROPPED_COMMITS[@]}"; do git log -1 --format='%s' "${sha}"; done)"
 
-            # Build rebase todo: drop bad commits
-            GIT_SEQUENCE_EDITOR="sed -i 's/^pick \(${DROPPED_COMMITS[0]:0:7}\)/drop \1/'" \
-              git rebase -i "origin/main"
-            for sha in "${DROPPED_COMMITS[@]:1}"; do
-              GIT_SEQUENCE_EDITOR="sed -i 's/^pick \(${sha:0:7}\)/drop \1/'" \
-                git rebase -i "origin/main"
+            # Drop every bad commit in ONE rebase. Sequential rebases only
+            # work while drops stay newest-first (later rebases would chase
+            # SHAs rewritten by earlier ones); a single todo edit has no
+            # ordering assumption.
+            SED_EXPRS=''
+            for sha in "${DROPPED_COMMITS[@]}"; do
+              SED_EXPRS="${SED_EXPRS} -e 's/^pick \(${sha:0:7}\)/drop \1/'"
             done
+            GIT_SEQUENCE_EDITOR="sed -i${SED_EXPRS}" git rebase -i "origin/main"
 
             # Update findings.json: move dropped fixes to reportOnly
             export DROPPED_MSGS
@@ -422,6 +424,15 @@ jobs:
               console.log(`Moved ${moved.length} finding(s) to reportOnly.`);
             '
 
+            # Keep the PR body honest about what was dropped
+            {
+              echo
+              echo '> **Note**: CI dropped the following commit(s) for exceeding the per-commit size cap; they are filed as report-only findings instead:'
+              while IFS= read -r msg; do
+                if [[ -n "${msg}" ]]; then echo "> - ${msg}"; fi
+              done <<< "${DROPPED_MSGS}"
+            } >> "${WORKDIR}/pr-body.md"
+
             # If no commits left, bail
             COMMITS="$(git rev-list --count origin/main..HEAD)"
             if [[ "${COMMITS}" -eq 0 ]]; then
@@ -441,8 +452,9 @@ jobs:
         id: 'verify'
         run: |-
           REVERTED=0
+          REVERTED_MSGS=''
           while true; do
-            if npm run typecheck 2>/dev/null; then break; fi
+            if npm run typecheck; then break; fi
             COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
             if [[ "${COMMITS_LEFT}" -le 0 ]]; then
               echo '❌ All commits reverted.'
@@ -451,11 +463,19 @@ jobs:
             fi
             BAD="$(git rev-parse --short HEAD)"
             echo "⏪ Reverting ${BAD} (typecheck failed)"
+            REVERTED_MSGS="${REVERTED_MSGS}$(git log -1 --format='%s' HEAD)"$'\n'
             git reset --hard HEAD~1
             REVERTED=$((REVERTED + 1))
           done
           if [[ "${REVERTED}" -gt 0 ]]; then
             echo "⚠️  Reverted ${REVERTED} commit(s)."
+            {
+              echo
+              echo '> **Note**: CI reverted the following commit(s) after typecheck failed; they are not included in this PR:'
+              while IFS= read -r msg; do
+                if [[ -n "${msg}" ]]; then echo "> - ${msg}"; fi
+              done <<< "${REVERTED_MSGS}"
+            } >> "${WORKDIR}/pr-body.md"
             COMMITS="$(git rev-list --count origin/main..HEAD)"
             echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
             if [[ "${COMMITS}" -eq 0 ]]; then
