@@ -1266,6 +1266,18 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('100 MB source limit');
     });
 
+    it('returns READ_CONTENT_FAILURE for a corrupt canonical image', async () => {
+      const corruptPath = path.join(tempRootDir, 'corrupt.png');
+      await fsPromises.writeFile(corruptPath, 'not a real png');
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(corruptPath, mockConfig);
+
+      expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+      expect(result.error).toBeDefined();
+      expect(typeof result.llmContent).toBe('string');
+    });
+
     it('applies EXIF orientation before describing and rendering an overview', async () => {
       const orientedPath = path.join(tempRootDir, 'oriented.jpg');
       await sharp({

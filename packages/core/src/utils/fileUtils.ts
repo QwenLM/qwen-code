@@ -1473,16 +1473,18 @@ export async function processSingleFileContent(
             };
           } catch (error) {
             signal?.throwIfAborted();
-            if (
-              error instanceof ImageViewError &&
-              (error.code === 'source_too_large' ||
-                error.code === 'output_too_large')
-            ) {
+            if (error instanceof ImageViewError) {
+              const message = error.message;
+              const errorType =
+                error.code === 'source_too_large' ||
+                error.code === 'output_too_large'
+                  ? ToolErrorType.FILE_TOO_LARGE
+                  : ToolErrorType.READ_CONTENT_FAILURE;
               return {
-                llmContent: error.message,
-                returnDisplay: error.message,
-                error: error.message,
-                errorType: ToolErrorType.FILE_TOO_LARGE,
+                llmContent: message,
+                returnDisplay: message,
+                error: message,
+                errorType,
               };
             }
             throw error;
