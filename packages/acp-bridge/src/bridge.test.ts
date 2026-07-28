@@ -83,6 +83,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   PROMPT_CANCEL_METHOD,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 
@@ -3539,6 +3540,169 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {
+    // Live-session regression: recordId is only stamped during replay of
+    // the persisted transcript, never on the live stream. A seeded replay
+    // whose events carry no recordId produces a truncation marker with no
+    // anchor; an attach that falls back to the in-memory snapshot (no
+    // historyPageSize) must then backfill `historyAnchorRecordId` from
+    // the persisted transcript so the client can still page backward.
+    let transcriptCalls = 0;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+                },
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          transcriptCalls += 1;
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            // Two-record page (chronological ascending): the backfill
+            // must return the OLDEST recordId (first hit), not the
+            // newest — a conservative anchor that cannot re-fetch
+            // records the client already displays.
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'persisted oldest' },
+                  _meta: { 'qwen.session.recordId': 'record-oldest' },
+                },
+              },
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'persisted newest' },
+                  _meta: { 'qwen.session.recordId': 'record-newest' },
+                },
+              },
+            ],
+            hasMore: true,
+          };
+        },
+      }).channel;
+    const bridge = makeBridge({
+      channelFactory: factory,
+      compactedReplayMaxBytes: 512,
+    });
+
+    // First load seeds the in-memory snapshot. The seeded updates carry
+    // no recordId, so the truncation marker has none either.
+    const loaded = await bridge.loadSession({
+      sessionId: 'anchor-backfill',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    expect(loaded.compactedReplay?.[0]?.type).toBe('history_truncated');
+    expect(loaded.compactedReplay?.[0]?.data).not.toHaveProperty('recordId');
+
+    // Attach WITHOUT historyPageSize → in-memory snapshot path → marker
+    // still has no recordId → daemon backfills from the transcript.
+    const attached = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+    });
+    expect(attached.historyAnchorRecordId).toBe('record-oldest');
+    expect(transcriptCalls).toBeGreaterThan(0);
+
+    await bridge.shutdown();
+  });
+
+  it('skips transcript backfill when the truncation marker already carries a recordId', async () => {
+    // When the compaction engine stamps a recordId on the marker (e.g.
+    // a prior turn boundary was ingested then evicted), the backfill
+    // must not fire — the client can anchor on the marker directly.
+    let transcriptCalls = 0;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+                  _meta: { 'qwen.session.recordId': 'record-seeded' },
+                },
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            throw new Error(`unexpected extMethod ${method}`);
+          }
+          transcriptCalls += 1;
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            hasMore: false,
+          };
+        },
+      }).channel;
+    const bridge = makeBridge({
+      channelFactory: factory,
+      compactedReplayMaxBytes: 512,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'marker-has-anchor',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    // The seeded recordId survives on the marker via the pre-scan.
+    expect(loaded.compactedReplay?.[0]?.type).toBe('history_truncated');
+    expect(loaded.compactedReplay?.[0]?.data).toMatchObject({
+      recordId: 'record-seeded',
+    });
+
+    // Attach WITHOUT historyPageSize → in-memory snapshot path → marker
+    // already carries a recordId → no backfill RPC.
+    transcriptCalls = 0;
+    const attached = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+    });
+    expect(attached.historyAnchorRecordId).toBeUndefined();
+    expect(transcriptCalls).toBe(0);
+
+    await bridge.shutdown();
+  });
+
   it('rejects oversized response-mode load replay payloads', async () => {
     const factory: ChannelFactory = async () =>
       makeChannel({
@@ -6925,6 +7089,103 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('clears the Guard wait owner when a queued prompt is promoted', async () => {
+      let resolveFirst!: () => void;
+      const firstDone = new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let resolveSecond!: () => void;
+      const secondDone = new Promise<void>((resolve) => {
+        resolveSecond = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          const text = (req.prompt[0] as { text?: string }).text;
+          if (text === 'first') await firstDone;
+          if (text === 'second') await secondDone;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { promptId: 'promotion-owner' },
+      );
+      const second = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { promptId: 'promoted-prompt' },
+      );
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+          { promptId: 'promotion-owner', state: 'running' },
+          { promptId: 'promoted-prompt', state: 'queued' },
+        ]);
+      });
+      await expect(
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          {
+            sessionId: session.sessionId,
+            promptId: 'promotion-owner',
+          },
+        ),
+      ).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+
+      resolveFirst();
+      await first;
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+          { promptId: 'promoted-prompt', state: 'running' },
+        ]);
+      });
+
+      const third = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'third' }],
+        },
+        undefined,
+        { promptId: 'removed-after-promotion' },
+      );
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      expect(
+        bridge.removePendingPrompt(
+          session.sessionId,
+          'removed-after-promotion',
+        ),
+      ).toEqual({ removed: true });
+      expect(
+        handle.agent.extMethodCalls.some(
+          (call) => call.method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+        ),
+      ).toBe(false);
+
+      resolveSecond();
+      await second;
+      await expect(third).rejects.toBeDefined();
+      await bridge.shutdown();
+    });
+
     it('removePendingPrompt aborts a queued prompt and removes it from the list', async () => {
       let resolveFirst: (() => void) | undefined;
       const firstDone = new Promise<void>((r) => {
@@ -6981,6 +7242,18 @@ describe('createAcpSessionBridge', () => {
       expect(queuedId).toBe('prompt-removed');
 
       await expect(
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          {
+            sessionId: session.sessionId,
+            promptId: 'prompt-running',
+          },
+        ),
+      ).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+      await expect(
         handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
           sessionId: session.sessionId,
           todoStopGuardWatchQueuedPrompt: true,
@@ -6997,7 +7270,10 @@ describe('createAcpSessionBridge', () => {
         await vi.waitFor(() => {
           expect(handle.agent.extMethodCalls).toContainEqual({
             method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
-            params: { sessionId: session.sessionId },
+            params: {
+              sessionId: session.sessionId,
+              promptId: 'prompt-running',
+            },
           });
         });
         await vi.waitFor(() => {
@@ -7343,12 +7619,22 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('publishes a deadline turn_error, unlocks the FIFO, and clears active state when the agent wedges (DAEMON-003)', async () => {
+      let markFollowupStarted!: () => void;
+      const followupStarted = new Promise<void>((resolve) => {
+        markFollowupStarted = resolve;
+      });
+      let releaseFollowup!: () => void;
+      const followupGate = new Promise<void>((resolve) => {
+        releaseFollowup = resolve;
+      });
       const handle = makeChannel({
         promptImpl: async (request) => {
           const text = (request.prompt[0] as { text?: string }).text;
           if (text === 'wedge') {
             return new Promise<PromptResponse>(() => {});
           }
+          markFollowupStarted();
+          await followupGate;
           return { stopReason: 'end_turn' };
         },
         cancelImpl: () => new Promise<void>(() => {}),
@@ -7387,17 +7673,27 @@ describe('createAcpSessionBridge', () => {
         expect(handle.agent.cancelCalls.length).toBeGreaterThan(0);
       });
       // FIFO released: a follow-up prompt dispatches and completes.
+      const followup = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'after the wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-after' },
+      );
+      await followupStarted;
       await expect(
-        bridge.sendPrompt(
-          session.sessionId,
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
           {
             sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'after the wedge' }],
+            promptId: 'prompt-wedged',
           },
-          undefined,
-          { promptId: 'prompt-after' },
         ),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+      releaseFollowup();
+      await expect(followup).resolves.toEqual({ stopReason: 'end_turn' });
       expect(terminalsFor(events, 'prompt-wedged')).toHaveLength(1);
       await vi.waitFor(() => {
         expect(terminalsFor(events, 'prompt-after')).toHaveLength(1);

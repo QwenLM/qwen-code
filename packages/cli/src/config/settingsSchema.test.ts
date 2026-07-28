@@ -122,6 +122,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties

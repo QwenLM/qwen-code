@@ -686,7 +686,9 @@ export class ChatRecordingService {
   constructor(
     config: Config,
     private readonly onWriteFailure?: ChatRecordingFailureListener,
-    writerLeaseRequired = config.getExperimentalZedIntegration?.() ?? true,
+    writerLeaseRequired = config.isSessionWriterLeaseEnabled?.() ??
+      config.getExperimentalZedIntegration?.() ??
+      true,
   ) {
     this.config = config;
     this.writerLeaseRequired = writerLeaseRequired;
