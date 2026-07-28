@@ -1700,7 +1700,7 @@ describe('GithubChannel', () => {
       expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:999');
     });
 
-    it('trims all three dedup lists after a successful poll', async () => {
+    it('trims dedup lists and failed attempts after a successful poll', async () => {
       await initWithoutLoop();
       // Drain the poll loop's pending pollOnce() so it cannot race with
       // the cursor setup below.
@@ -1717,6 +1717,9 @@ describe('GithubChannel', () => {
         { length: 501 },
         (_, i) => `e${i}`,
       );
+      channel.cursor.failedAttempts = Object.fromEntries(
+        Array.from({ length: 501 }, (_, i) => [`${i}`, 1]),
+      );
       mockOctokit.paginate.mockResolvedValueOnce([]);
       await pollOnce();
       expect(channel.cursor.dispatchedBodies).toHaveLength(500);
@@ -1725,6 +1728,8 @@ describe('GithubChannel', () => {
       expect(channel.cursor.dispatchedComments).not.toContain('c0');
       expect(channel.cursor.dispatchedEvents).toHaveLength(500);
       expect(channel.cursor.dispatchedEvents).not.toContain('e0');
+      expect(Object.keys(channel.cursor.failedAttempts ?? {})).toHaveLength(500);
+      expect(channel.cursor.failedAttempts?.['0']).toBeUndefined();
     });
 
     it('skips bot-authored issue body', async () => {
@@ -2036,6 +2041,8 @@ describe('GithubChannel', () => {
             dispatchedBodies?: string[];
             dispatchedComments?: string[];
             dispatchedEvents?: string[];
+            failedAttempts?: Record<string, number>;
+            metaFloor?: string;
           } | null;
         }
       ).validateCursor(parsed);
@@ -2072,6 +2079,18 @@ describe('GithubChannel', () => {
       expect(result).not.toBeNull();
       expect(result!.dispatchedBodies).toBeUndefined();
     });
+
+    it.each([false, 0, '', null, 'invalid'])(
+      'removes invalid metaFloor value %s',
+      (bad) => {
+        const result = validate({
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          metaFloor: bad,
+        });
+        expect(result).not.toBeNull();
+        expect(result!.metaFloor).toBeUndefined();
+      },
+    );
 
     it.each([false, 0, '', null, []])(
       'normalizes invalid failedAttempts values %s',
