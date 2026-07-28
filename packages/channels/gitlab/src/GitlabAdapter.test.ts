@@ -31,7 +31,7 @@ function makeConfig(
     groups: { '*': {} },
     action_prompt_template: {
       mentioned:
-        'REPO: %repo% | URL: %repo_url% | Author: %author% | Type: %thread_type% | ID: %thread_id% | Title: %thread_title% | CommentId: %comment_id%',
+        'Project: %project% | URL: %project_url% | Author: %author% | Type: %target_type% | IID: %iid% | Title: %title% | TodoID: %todo_id%',
     },
     ...overrides,
   };
@@ -54,7 +54,7 @@ function makeTodo(overrides: Record<string, unknown> = {}) {
     id: 100,
     action_name: 'mentioned',
     target_type: 'Issue',
-    target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+    target_url: 'https://gitlab.com/owner/repo/-/issues/42#note_1001',
     body: '@test-bot please fix this',
     state: 'pending',
     created_at: '2026-07-02T09:00:00.000Z',
@@ -218,7 +218,7 @@ describe('GitlabChannel', () => {
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
       await ch.connect();
       ch.disconnect();
-      ch.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z', repo: {} };
+      ch.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
 
       mockApi.TodoLists.all.mockClear();
       await (ch as unknown as { pollOnce: () => Promise<void> }).pollOnce();
@@ -231,21 +231,18 @@ describe('GitlabChannel', () => {
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
       await ch.connect();
       ch.disconnect();
-      ch.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z', repo: {} };
+      ch.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
 
       mockApi.TodoLists.all.mockClear();
       await (ch as unknown as { pollOnce: () => Promise<void> }).pollOnce();
       expect(mockApi.TodoLists.all).not.toHaveBeenCalled();
     });
 
-    it('dispatches notes within the comment window', async () => {
+    it('dispatches todo body as envelope', async () => {
       await initWithoutLoop();
 
       const todo = makeTodo();
-      const note = makeNote();
-
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([note]);
 
       await pollOnce();
 
@@ -256,8 +253,28 @@ describe('GitlabChannel', () => {
       expect(env.senderId).toBe('alice');
       expect(env.isMentioned).toBe(true);
       expect(env.text).toContain('please fix this');
-      expect(env.metadata).toContain('REPO: owner/repo');
-      expect(env.metadata).toContain('CommentId: 1001');
+      expect(env.metadata).toContain('Project: owner/repo');
+    });
+
+    it('fetches description for non-note mention (no #note_ anchor)', async () => {
+      await initWithoutLoop();
+
+      const todo = makeTodo({
+        target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+        body: 'Test Issue',
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+      mockApi.Issues.show.mockResolvedValueOnce({
+        description: 'Full issue description with @test-bot',
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        'Full issue description',
+      );
+      expect(mockApi.Issues.show).toHaveBeenCalled();
     });
 
     it('filters system notes', async () => {
@@ -284,24 +301,6 @@ describe('GitlabChannel', () => {
 
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
       mockApi.IssueNotes.all.mockResolvedValueOnce([botNote]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(0);
-    });
-
-    it('excludes notes outside the comment window', async () => {
-      await initWithoutLoop();
-
-      const todo = makeTodo({ author: { id: 99999, username: 'test-bot' } });
-      const oldNote = makeNote({ created_at: '2026-06-30T00:00:00.000Z' });
-      const futureNote = makeNote({
-        id: 1002,
-        created_at: '2026-07-03T00:00:00.000Z',
-      });
-
-      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([oldNote, futureNote]);
 
       await pollOnce();
 
@@ -346,19 +345,17 @@ describe('GitlabChannel', () => {
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
     });
 
-    it('does not mark todo done when handleInbound fails', async () => {
+    it('marks todo done and advances cursor even when handleInbound fails', async () => {
       await initWithoutLoop();
       channel.handleInboundError = new Error('agent failed');
 
       const todo = makeTodo();
-      const note = makeNote();
-
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([note]);
 
       await pollOnce();
 
-      expect(mockApi.TodoLists.done).not.toHaveBeenCalled();
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
     });
 
     it('advances cursor to maxUpdatedAt', async () => {
@@ -375,31 +372,20 @@ describe('GitlabChannel', () => {
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T12:00:00.000Z');
     });
 
-    it('handles MR todos with correct threadId and resource', async () => {
+    it('handles MR todos with correct threadId', async () => {
       await initWithoutLoop();
 
       const todo = makeTodo({
         target_type: 'MergeRequest',
         target: { id: 300, iid: 99, title: 'Test MR' },
       });
-      const note = makeNote();
 
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.MergeRequestNotes.all.mockResolvedValueOnce([note]);
 
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.threadId).toBe('mr:99');
-      expect(mockApi.MergeRequestNotes.all).toHaveBeenCalledWith(
-        'owner/repo',
-        99,
-        expect.objectContaining({
-          sort: 'desc',
-          orderBy: 'created_at',
-          maxPages: 1,
-        }),
-      );
     });
 
     it('fetches pending todos', async () => {
@@ -412,75 +398,17 @@ describe('GitlabChannel', () => {
         expect.objectContaining({ state: 'pending' }),
       );
     });
-  });
 
-  describe('first-contact body', () => {
-    it('dispatches target description when no notes found', async () => {
+    it('skips todo with empty body', async () => {
       await initWithoutLoop();
-
-      const todo = makeTodo();
-      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      const env = channel.inboundEnvelopes[0]!;
-      expect(env.messageId).toBe('todo-body-100');
-      expect(env.text).toContain('Issue description');
-      expect(mockApi.Issues.show).toHaveBeenCalledWith('owner/repo', {
-        issueIId: 42,
-      });
-    });
-
-    it('advances per-repo cursor after successful processing', async () => {
-      await initWithoutLoop();
-
-      const todo = makeTodo({ body: '@test-bot look at this issue' });
-      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([]);
-
-      await pollOnce();
-
-      expect(channel.cursor.repo['owner/repo']).toEqual({
-        last_read: '2026-07-02T10:00:00.000Z',
-      });
-    });
-
-    it('uses per-repo cursor as notes window lower bound', async () => {
-      await initWithoutLoop();
-      channel.cursor.repo['owner/repo'] = {
-        last_read: '2026-07-02T09:45:00.000Z',
-      };
 
       const todo = makeTodo({ body: '' });
-      const oldNote = makeNote({ created_at: '2026-07-02T09:30:00.000Z' });
-      const newNote = makeNote({
-        id: 1002,
-        created_at: '2026-07-02T09:50:00.000Z',
-        body: '@test-bot new comment',
-      });
-
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([oldNote, newNote]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]!.messageId).toBe('1002');
-    });
-
-    it('skips first-contact when description and title are empty', async () => {
-      await initWithoutLoop();
-
-      const todo = makeTodo({ target: { id: 200, iid: 42, title: '' } });
-      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([]);
-      mockApi.Issues.show.mockResolvedValueOnce({ description: '' });
 
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
     });
   });
 
@@ -535,34 +463,6 @@ describe('GitlabChannel', () => {
       ).validateCursor({});
       expect(result).toBeNull();
     });
-
-    it('normalizes invalid repo to empty object', () => {
-      const result = (
-        channel as unknown as {
-          validateCursor: (p: unknown) => { repo: Record<string, unknown> };
-        }
-      ).validateCursor({
-        lastProcessedAt: '2026-07-01T00:00:00.000Z',
-        repo: 'invalid',
-      });
-      expect(result).not.toBeNull();
-      expect(result!.repo).toEqual({});
-    });
-
-    it('preserves valid repo map', () => {
-      const result = (
-        channel as unknown as {
-          validateCursor: (p: unknown) => { repo: Record<string, unknown> };
-        }
-      ).validateCursor({
-        lastProcessedAt: '2026-07-01T00:00:00.000Z',
-        repo: { 'owner/repo': { last_read: '2026-07-01T12:00:00.000Z' } },
-      });
-      expect(result).not.toBeNull();
-      expect(result!.repo).toEqual({
-        'owner/repo': { last_read: '2026-07-01T12:00:00.000Z' },
-      });
-    });
   });
 
   describe('template rendering', () => {
@@ -570,30 +470,24 @@ describe('GitlabChannel', () => {
       await initWithoutLoop();
 
       const todo = makeTodo();
-      const note = makeNote();
-
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([note]);
 
       await pollOnce();
 
       const env = channel.inboundEnvelopes[0]!;
       expect(env.metadata).toBe(
-        'REPO: owner/repo | URL: https://gitlab.com/owner/repo | Author: alice | Type: Issue | ID: 42 | Title: Test Issue | CommentId: 1001',
+        'Project: owner/repo | URL: https://gitlab.com/owner/repo | Author: alice | Type: Issue | IID: 42 | Title: Test Issue | TodoID: 100',
       );
     });
 
     it('preserves unknown variables as-is', async () => {
       await initWithoutLoop();
       (channel.config as Record<string, unknown>).action_prompt_template = {
-        mentioned: 'Known: %repo% Unknown: %nonexistent%',
+        mentioned: 'Known: %project% Unknown: %nonexistent%',
       };
 
       const todo = makeTodo();
-      const note = makeNote();
-
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([note]);
 
       await pollOnce();
 
@@ -604,8 +498,9 @@ describe('GitlabChannel', () => {
   });
 
   describe('error handling', () => {
-    it('stops processing on failure, does not advance cursor past failed todo', async () => {
+    it('continues processing after failure, advances cursor for all todos', async () => {
       await initWithoutLoop();
+      channel.handleInboundError = new Error('agent failed');
 
       const todo1 = makeTodo({
         id: 1,
@@ -619,13 +514,13 @@ describe('GitlabChannel', () => {
       });
 
       mockApi.TodoLists.all.mockResolvedValueOnce([todo1, todo2]);
-      mockApi.IssueNotes.all.mockRejectedValueOnce(new Error('API error'));
 
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
-      expect(mockApi.TodoLists.done).not.toHaveBeenCalled();
-      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 1 });
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 2 });
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T12:00:00.000Z');
     });
   });
 });
