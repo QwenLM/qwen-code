@@ -387,26 +387,51 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const testFilePath = await helper.getPath('test.txt');
       await helper.createFile('test.txt', 'original content');
 
-      const fakeServer = await startFakeOpenAIServer(
-        ({ body, requestIndex }) => {
-          const transcript = JSON.stringify(body['messages'] ?? []);
-          if (transcript.includes(`Write "updated" to ${testFilePath}`)) {
-            return {
-              toolCalls: [
-                fakeToolCall('write_file', {
-                  file_path: testFilePath,
-                  content: 'updated',
-                }),
-              ],
-            };
-          }
-          if (requestIndex === 0) {
-            return { content: 'OK' };
-          }
-          return { content: 'Done.' };
-        },
-        FAKE_SERVER_OPTIONS,
-      );
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        const messages = (body['messages'] ?? []) as Array<
+          Record<string, unknown>
+        >;
+        const transcript = JSON.stringify(messages);
+        // The second user turn is identified by a quote-free marker: the
+        // prompt contains `"updated"`, and JSON.stringify escapes those
+        // quotes, so a needle containing a raw `"` can never match.
+        if (!transcript.includes('Stop if any exception occurs')) {
+          return { content: 'OK' };
+        }
+        const alreadyCalled = (name: string) =>
+          messages.some(
+            (m) =>
+              Array.isArray(m['tool_calls']) &&
+              (m['tool_calls'] as Array<{ function?: { name?: string } }>).some(
+                (t) => t.function?.name === name,
+              ),
+          );
+        // write_file refuses to overwrite a file that has not been read in
+        // this session, so the script has to read before it writes.
+        if (!alreadyCalled('read_file')) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'read_file',
+                { file_path: testFilePath },
+                'read-target',
+              ),
+            ],
+          };
+        }
+        if (!alreadyCalled('write_file')) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'write_file',
+                { file_path: testFilePath, content: 'updated' },
+                'write-target',
+              ),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      }, FAKE_SERVER_OPTIONS);
 
       // Bounded promise with explicit timer arming and clearing on settle.
       // `startTimer()` lets each phase begin counting only when its phase

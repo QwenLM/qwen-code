@@ -85,12 +85,29 @@ describe('list_directory', () => {
 
     try {
       const prompt = `Call the list_directory tool on the current directory.`;
-      await rig.run(prompt);
+      // Explicit CLI flags outrank a developer's ~/.qwen/settings.json
+      // (settings.model.name beats the OPENAI_MODEL env var and can silently
+      // route the run to a real model endpoint instead of the fake server).
+      await rig.run(
+        prompt,
+        '--auth-type',
+        'openai',
+        '--model',
+        'fake-model',
+        '--openai-base-url',
+        fakeServer.baseUrl,
+        '--openai-api-key',
+        'fake-key',
+      );
 
       const foundToolCall = await rig.waitForToolCall('list_directory');
 
       expect(foundToolCall, 'Expected a list_directory tool call').toBe(true);
 
+      expect(
+        fakeServer.requests.length,
+        'Fake server saw fewer than 2 requests — the CLI likely resolved a real model endpoint from user-level settings instead of the fake server',
+      ).toBeGreaterThanOrEqual(2);
       const toolResultRequest = JSON.stringify(fakeServer.requests[1]?.body);
       expect(toolResultRequest).toContain('file1.txt');
       expect(toolResultRequest).toContain('subdir');
