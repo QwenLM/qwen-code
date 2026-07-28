@@ -33,6 +33,10 @@ import {
 } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
 import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
@@ -146,6 +150,12 @@ export async function startInteractiveUI(
   // always reads from the same stable prop rather than the (now empty) module buffer.
   const initialCapturedInput = stopAndGetCapturedInput();
 
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  );
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -175,6 +185,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
@@ -188,7 +199,6 @@ export async function startInteractiveUI(
     );
   };
 
-  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
   const stdoutMaxListeners = process.stdout.getMaxListeners();
   if (useVP) {
     // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.

@@ -15,6 +15,7 @@ import {
 } from './workspace-registry.js';
 import {
   resolveContainedCwd,
+  resolveContainedCwdOrFail,
   resolveWorkspaceRuntimeFromParam,
 } from './workspace-route-runtime.js';
 
@@ -75,6 +76,62 @@ describe('resolveContainedCwd', () => {
   it('returns workspaceCwd when the path does not exist', () => {
     const missing = path.join(workspace, 'missing');
     expect(resolveContainedCwd(fakeReq(missing), workspace)).toBe(workspace);
+  });
+});
+
+describe('resolveContainedCwdOrFail', () => {
+  let workspace: string;
+  let outside: string;
+
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-'));
+    outside = fs.mkdtempSync(path.join(os.tmpdir(), 'outside-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('returns workspaceCwd when cwd is genuinely absent', () => {
+    expect(resolveContainedCwdOrFail(fakeReq(), workspace)).toBe(workspace);
+  });
+
+  it('fails closed when cwd is an array (a duplicated ?cwd= param)', () => {
+    expect(
+      resolveContainedCwdOrFail(fakeReq(['/a', '/b']), workspace),
+    ).toBeNull();
+  });
+
+  it('fails closed when cwd is an empty string', () => {
+    expect(resolveContainedCwdOrFail(fakeReq(''), workspace)).toBeNull();
+  });
+
+  it('fails closed when cwd is an object', () => {
+    expect(resolveContainedCwdOrFail(fakeReq({}), workspace)).toBeNull();
+  });
+
+  it('returns the resolved path for a valid contained cwd', () => {
+    const sub = path.join(workspace, 'sub');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwdOrFail(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
+  it('fails closed for a cwd that escapes the workspace', () => {
+    expect(resolveContainedCwdOrFail(fakeReq(outside), workspace)).toBeNull();
+  });
+
+  it('fails closed for a symlink escaping the workspace', () => {
+    const link = path.join(workspace, 'link');
+    fs.symlinkSync(outside, link);
+    expect(resolveContainedCwdOrFail(fakeReq(link), workspace)).toBeNull();
+  });
+
+  it('fails closed when the path does not exist', () => {
+    const missing = path.join(workspace, 'missing');
+    expect(resolveContainedCwdOrFail(fakeReq(missing), workspace)).toBeNull();
   });
 });
 

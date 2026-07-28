@@ -128,6 +128,7 @@ describe('AnthropicContentGenerator', () => {
       getProxy: vi.fn().mockReturnValue(undefined),
       getTelemetryEnabled: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session'),
+      getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -974,6 +975,58 @@ describe('AnthropicContentGenerator', () => {
         type: 'ephemeral',
         scope: 'global',
       });
+    });
+
+    it('splits the system prompt at the Config-recorded static prefix (4-breakpoint layout)', async () => {
+      // End-to-end through the generator: `GeminiClient` records the
+      // gitStatus-free base on Config, the generator reads it per request,
+      // and the converter splits the system prompt there — static prefix
+      // carries scope:'global' (cross-session reuse), volatile suffix stays
+      // per-session. Together with the last-tool and last-user-message
+      // markers this fills all 4 Anthropic breakpoints.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      (
+        mockConfig.getStaticSystemPrefix as ReturnType<typeof vi.fn>
+      ).mockReturnValue('sys-base');
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: false },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys-base\n\n# Git Status\nbranch: main',
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys-base',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+        {
+          type: 'text',
+          text: '\n\n# Git Status\nbranch: main',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+      // The scope entry on the split prefix block is enough for the
+      // body-scan beta gate to fire.
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
     });
 
     it('suppresses scope:"global" when enableCacheControl is false even with forceGlobalCacheScope', async () => {

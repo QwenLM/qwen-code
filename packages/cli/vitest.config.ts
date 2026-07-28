@@ -49,6 +49,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/spawnChannel.ts',
       ),
+      '@qwen-code/acp-bridge/processRegistry': path.resolve(
+        __dirname,
+        '../acp-bridge/src/process-registry.ts',
+      ),
       '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
         __dirname,
         '../acp-bridge/src/ndJsonStream.ts',
