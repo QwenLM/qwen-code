@@ -247,6 +247,8 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
+import type { AgentViewIdleGateState } from './commands/types.js';
 import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
@@ -1164,6 +1166,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -1651,6 +1654,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [config, skillReviewPending],
   );
 
+  const detachAgentViewSession = useCallback(async () => {
+    await detachCurrentSessionToAgentView(config);
+  }, [config]);
+
   // Subscribe to skill-review task changes and keep skillReviewPending in sync.
   useEffect(() => {
     const mgr = config.getMemoryManager();
@@ -1744,6 +1751,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       clearPendingState: () => clearPendingStateRef.current(),
+      detachAgentViewSession,
     }),
     [
       openAuthDialog,
@@ -1774,6 +1782,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       openDiffDialog,
+      detachAgentViewSession,
       config,
     ],
   );
@@ -1810,6 +1819,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
+    agentViewIdleGateStateRef,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -2164,6 +2174,18 @@ export const AppContainer = (props: AppContainerProps) => {
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
+  agentViewIdleGateStateRef.current = {
+    hasPendingToolConfirmation: pendingToolCalls.some(
+      (call) => call.status === 'awaiting_approval',
+    ),
+    hasPendingCommandConfirmation: Boolean(
+      shellConfirmationRequest ||
+        confirmationRequest ||
+        loopDetectionConfirmationRequest,
+    ),
+    hasForegroundShell: Boolean(activePtyId || embeddedShellFocused),
+    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
+  };
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
