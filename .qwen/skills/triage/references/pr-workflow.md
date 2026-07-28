@@ -260,9 +260,9 @@ If the review array has a `CHANGES_REQUESTED` entry after position 0 from a revi
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
 - Do not auto-approve even if Stage 2 and Stage 3 are clean (this feeds the Stage 3 approval guardrail — see below).
 
-**Re-triage clearing:** the review history is immutable — a `CHANGES_REQUESTED` entry from an earlier round remains even after the disagreement is resolved. On a re-triage (`@qwen-code /triage`), if the `need-discussion` label is absent, treat the contested-merge signal as resolved and do not re-apply it. The label is the clearing mechanism: a maintainer removes it once the discussion resolves, and its absence on re-run means the signal no longer fires.
+**Re-triage clearing:** the review history and touched paths are immutable — a `CHANGES_REQUESTED` entry from an earlier round remains even after the disagreement is resolved, and high-risk paths remain in the diff. On a re-triage (`@qwen-code /triage`), if the `need-discussion` label is absent, treat contested-merge and non-maintainer + high-risk signals as resolved and do not re-apply the label. The label is the clearing mechanism: a maintainer removes it once the discussion resolves, and its absence on re-run means those signals no longer fire.
 
-**Non-maintainer + high-risk**: a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: do not skip any Stage 2 enrichment, require Stage 2b CI evidence, flag the high-risk paths in the Stage 1 comment, recommend E2E verification (scoped to write-access authors per Stage 2c), apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
+**Non-maintainer + high-risk**: a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions unless the re-triage clearing rule above applies: do not skip any Stage 2 enrichment, require Stage 2b CI evidence, flag the high-risk paths in the Stage 1 comment, recommend E2E verification (scoped to write-access authors per Stage 2c), apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
 
 These signals are NOT terminal gates — they do not stop the review or close the PR. They escalate review depth and flag risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 
@@ -636,7 +636,7 @@ GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
   --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
 ```
 
-Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, Stage 0 raised no maintainer escalation, and Stage 1e raised no do-not-auto-approve signal. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail before approving, but that is a backstop, not the mechanism.)
+Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, Stage 0 raised no maintainer escalation, and Stage 1e raised no do-not-auto-approve signal. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail and an active `need-discussion` label before approving, but that is a backstop, not the mechanism.)
 
 When the marker is warranted, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include it on its own line (full OID, the same one the footer attests):
 
@@ -654,7 +654,7 @@ If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how cle
 
 If Stage 0 escalated the PR for maintainer awareness, do **not** approve automatically; use the "Genuinely unsure" path below.
 
-If Stage 1e flagged a contested-merge or non-maintainer + high-risk signal, do **not** approve automatically; use the "Genuinely unsure" path below. A Stage 1e flag is a data-backed risk signal, not a hygiene concern — the re-run rule below does not override it.
+If Stage 1e flagged a contested-merge or non-maintainer + high-risk signal and `need-discussion` is still present, do **not** approve automatically; use the "Genuinely unsure" path below. A Stage 1e flag is a data-backed risk signal, not a hygiene concern. If a maintainer removed `need-discussion` and this is a re-triage, follow the clearing rule above.
 
 **Re-runs (manually triggered via `@qwen-code /triage`):** hygiene concerns (scope mismatch, undocumented changes, naming) that don't block the PR are not a valid reason to defer. Note them in the comment and approve. Only defer if you have genuine blocking uncertainty — something you cannot resolve from the diff, tests, and PR description.
 

@@ -684,7 +684,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('qwen-code-ci-bot');
     expect(prSkill).toContain('packages/core/src/**');
     expect(prSkill).toContain(
-      'A maintainer removes it once the discussion resolves',
+      'contested-merge and non-maintainer + high-risk signals as resolved',
     );
     expect(prSkill).toContain('does not appear in any earlier entry');
   });
@@ -695,6 +695,9 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('do not auto-approve');
     expect(prSkill).toContain('Stage 3 approval guardrail');
     expect(prSkill).toContain('no Stage 1e do-not-auto-approve signal');
+    expect(prSkill).toContain(
+      'unless the re-triage clearing rule above applies',
+    );
   });
 
   it('includes Risk field in the Stage 1 comment template', () => {

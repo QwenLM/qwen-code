@@ -131,6 +131,10 @@ describe('qwen-triage-finalize workflow', () => {
       `(.head.repo.full_name // "") != .base.repo.full_name`,
     );
     expect(script).toContain("grep -qiE '^[[:space:]]*refactor'");
+    expect(script).toContain('any(.labels[]?; .name == "need-discussion")');
+    expect(script).toContain(
+      'need-discussion label — approval guardrail blocks the deferred approval',
+    );
     expect(script.indexOf('update_status "$PR" guarded')).toBeLessThan(
       script.indexOf('update_status "$PR" deferred'),
     );

@@ -54,7 +54,10 @@ describe('qwen-triage: agent tool/permission settings', () => {
   it('settings is valid JSON that restricts the toolset', () => {
     const settings = JSON.parse(triageStep.with.settings);
     const core = settings.tools?.core;
-    assert.ok(Array.isArray(core), 'tools.core must be an array (registration allowlist)');
+    assert.ok(
+      Array.isArray(core),
+      'tools.core must be an array (registration allowlist)',
+    );
     for (const t of [
       'run_shell_command',
       'read_file',
@@ -233,9 +236,13 @@ describe('qwen-triage: git exec-vector cleanup', () => {
     after(() => dir && rmSync(dir, { recursive: true, force: true }));
 
     const remaining = () =>
-      spawnSync('git', ['-C', dir, 'config', '--local', '--name-only', '--list'], {
-        encoding: 'utf8',
-      }).stdout.toLowerCase();
+      spawnSync(
+        'git',
+        ['-C', dir, 'config', '--local', '--name-only', '--list'],
+        {
+          encoding: 'utf8',
+        },
+      ).stdout.toLowerCase();
 
     for (const vec of [
       'hookspath',
@@ -303,7 +310,11 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('maintainer sign-off'));
     assert.ok(prSkill.includes('qwen-code-ci-bot'));
     assert.ok(prSkill.includes('packages/core/src/**'));
-    assert.ok(prSkill.includes('A maintainer removes it once the discussion resolves'));
+    assert.ok(
+      prSkill.includes(
+        'contested-merge and non-maintainer + high-risk signals as resolved',
+      ),
+    );
     assert.ok(prSkill.includes('does not appear in any earlier entry'));
   });
 
@@ -313,6 +324,9 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('do not auto-approve'));
     assert.ok(prSkill.includes('Stage 3 approval guardrail'));
     assert.ok(prSkill.includes('no Stage 1e do-not-auto-approve signal'));
+    assert.ok(
+      prSkill.includes('unless the re-triage clearing rule above applies'),
+    );
   });
 
   it('includes Risk field in the Stage 1 comment template', () => {
