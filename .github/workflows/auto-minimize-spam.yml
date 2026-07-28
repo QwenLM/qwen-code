@@ -13,6 +13,11 @@ name: 'Auto-minimize spam comments'
 # Note: the lookback window (LOOKBACK_HOURS) only filters issues —
 # the GraphQL pullRequests connection has no `since` filter, so PRs
 # are always scoped to the 100 most recently updated.
+#
+# Coverage limits: only issue-style comments are scanned — PR review
+# (inline) comments, review bodies, and Discussions are not.
+# comments(last: 30) means a >30-comment flood on a single thread is
+# only partially cleaned per run.
 
 on:
   schedule:
@@ -22,8 +27,8 @@ on:
       hours:
         description: 'Look back this many hours (default 2)'
         required: false
-        default: '2'
-        type: 'string'
+        default: 2
+        type: 'number'
 
 permissions:
   contents: 'read'
@@ -56,6 +61,15 @@ jobs:
           REPO="$GITHUB_REPOSITORY"
           SINCE="$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           BLOCKLIST=".github/spam-blocklist.txt"
+
+          write_summary() {
+            {
+              echo "## Summary"
+              echo "- Scanned comments since: ${SINCE}"
+              echo "- Blocklisted users: ${BLOCKED_COUNT}"
+              echo "- Comments minimized: $1"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
 
           echo "Scanning comments since $SINCE in $REPO"
 
@@ -130,10 +144,7 @@ jobs:
           echo "Unminimized comments from blocklisted users: ${MATCHED_COUNT}"
           if [ "$MATCHED_COUNT" -eq 0 ]; then
             echo "Nothing to minimize."
-            echo "## Summary" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Scanned comments since: ${SINCE}" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Blocklisted users: ${BLOCKED_COUNT}" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Comments minimized: 0" >> "$GITHUB_STEP_SUMMARY"
+            write_summary 0
             exit 0
           fi
 
@@ -149,21 +160,18 @@ jobs:
                     minimizedComment { isMinimized }
                   }
                 }
-              " --jq '.data.minimizeComment.minimizedComment.isMinimized' 2>/dev/null
+              " --jq '.data.minimizeComment.minimizedComment.isMinimized' 2>&1
             )" || true
             if [ "$result" = "true" ]; then
               SUCCESS=$((SUCCESS + 1))
             else
               FAIL=$((FAIL + 1))
-              echo "::warning::Failed to minimize ${node_id}"
+              echo "::warning::Failed to minimize ${node_id}: ${result}"
             fi
           done <<< "$MATCHED_IDS"
 
           echo "Minimized ${SUCCESS} comments, ${FAIL} failed."
-          echo "## Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Scanned comments since: ${SINCE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Blocklisted users: ${BLOCKED_COUNT}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Comments minimized: ${SUCCESS}" >> "$GITHUB_STEP_SUMMARY"
+          write_summary "$SUCCESS"
           if [ "$FAIL" -gt 0 ]; then
             echo "- Failures: ${FAIL}" >> "$GITHUB_STEP_SUMMARY"
             exit 1
