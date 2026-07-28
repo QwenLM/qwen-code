@@ -7396,6 +7396,93 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('fires at most one continuation: a second mid-stream failure propagates with only the first partial kept', async () => {
+      vi.useFakeTimers();
+      try {
+        // The review scenario: attempt 1 yields A then dies, continuation 1
+        // yields B then dies the same way, and a third stream would succeed.
+        // A second continuation must NOT fire, so history must not end up
+        // with adjacent model turns model(A) + model(B+C).
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('socket failure'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: 'text A ' }] } }],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: 'text B ' }] } }],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'text C' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-no-second-continuation',
+        );
+        const events: StreamEvent[] = [];
+        let caught: unknown;
+        const collecting = (async () => {
+          try {
+            for await (const event of stream) {
+              events.push(event);
+            }
+          } catch (error) {
+            caught = error;
+          }
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await collecting;
+
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).toContain('terminated');
+        // The third stream is never consumed: one continuation per send.
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retryEvents = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retryEvents).toHaveLength(1);
+        expect(retryEvents[0]).toMatchObject({ isContinuation: true });
+
+        // History alternates roles: user prompt, then only model(A). No
+        // model(B), no adjacent model turns, no recovery user turn.
+        const history = chat.getHistory();
+        expect(history.map((c) => c.role)).toEqual(['user', 'model']);
+        expect(history[1]!.parts?.map((p) => p.text ?? '').join('')).toBe(
+          'text A ',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {
       // A definitive 4xx is a permanent client error; the socket-level cause
       // must not relabel it as retryable (classifier keeps 4xx authoritative).
