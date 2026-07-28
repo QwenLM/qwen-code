@@ -2608,6 +2608,45 @@ describe('useSlashCommandProcessor', () => {
       expect(recordedNames).toContain('bugfix');
     });
 
+    it('records successful stacked project auto-skills as used', async () => {
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      recordAutoSkillUsageMock.mockClear();
+      await act(async () => {
+        await result.current.handleSlashCommand('/feat-dev /review do stuff');
+      });
+
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledTimes(2);
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'feat-dev',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+      });
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      });
+    });
+
     it('appends remaining text after all skill bodies', async () => {
       const skillA = createSkillCommand('feat-dev', 'a');
       const skillB = createSkillCommand('review', 'b');

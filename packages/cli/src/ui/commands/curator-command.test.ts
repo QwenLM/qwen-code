@@ -154,6 +154,57 @@ describe('curator command', () => {
     );
   });
 
+  it('reports an error when reading status fails', async () => {
+    mocks.getStatus.mockRejectedValue(new Error('state unreadable'));
+
+    const result = await curatorCommand.action!(context, '');
+
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect((result as { content: string }).content).toContain(
+      'state unreadable',
+    );
+  });
+
+  it('reports an error and skips refresh when a live run fails', async () => {
+    mocks.run.mockRejectedValue(new Error('run exploded'));
+    const runCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'run',
+    )!;
+
+    const result = await runCommand.action!(context, '');
+
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect((result as { content: string }).content).toContain('run exploded');
+    expect(mocks.refreshCache).not.toHaveBeenCalled();
+  });
+
+  it('reports an error and skips refresh when restore fails', async () => {
+    mocks.restore.mockRejectedValue(new Error('restore exploded'));
+    const restoreCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'restore',
+    )!;
+
+    const result = await restoreCommand.action!(context, 'auto-skill-old');
+
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect((result as { content: string }).content).toContain(
+      'restore exploded',
+    );
+    expect(mocks.refreshCache).not.toHaveBeenCalled();
+  });
+
+  it('reports an error when pinning fails', async () => {
+    mocks.setPinned.mockRejectedValue(new Error('pin exploded'));
+    const pinCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'pin',
+    )!;
+
+    const result = await pinCommand.action!(context, 'auto-skill-old');
+
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect((result as { content: string }).content).toContain('pin exploded');
+  });
+
   it('rejects unsupported run arguments', async () => {
     const runCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'run',
