@@ -854,7 +854,7 @@ describe('GeminiClient Goal admission', () => {
     expect(runtime.finishTurn).not.toHaveBeenCalled();
   });
 
-  it('turns a generic Stop-hook cap into a true Stop without clearing Goal state', async () => {
+  it('pauses Goal when a generic Stop-hook cap prevents further progress', async () => {
     const { client, config, runtime, order } = setupGoalClient();
     const messageBus = {
       request: vi.fn(async () => ({
@@ -871,7 +871,7 @@ describe('GeminiClient Goal admission', () => {
     );
     vi.mocked(config.getStopHookBlockingCap).mockReturnValue(1);
 
-    await drain(
+    const events = await collect(
       client.sendMessageStream(
         [{ text: 'continue' }],
         new AbortController().signal,
@@ -884,8 +884,21 @@ describe('GeminiClient Goal admission', () => {
       ),
     );
 
-    expect(runtime.dispatch).not.toHaveBeenCalled();
-    expect(order).toEqual(['flush', 'finish']);
+    expect(runtime.dispatch).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+    });
+    expect(runtime.getSnapshot()).toMatchObject({
+      goal: { status: 'paused' },
+    });
+    expect(turnMocks.run).toHaveBeenCalledOnce();
+    expect(order).toEqual(['pause', 'flush', 'finish']);
+    expect(events).toContainEqual({
+      type: GeminiEventType.HookSystemMessage,
+      value:
+        'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+    });
   });
 
   it('does not treat permit-owned preemption as a caller cancellation', async () => {

@@ -3234,6 +3234,11 @@ export class GeminiClient {
               value: warning,
             };
             debugLogger.warn(warning);
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            if (isTopLevelInteraction) endInteractionSpan('ok');
+            return turn;
           } else {
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
