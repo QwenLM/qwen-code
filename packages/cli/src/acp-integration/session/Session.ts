@@ -7125,6 +7125,7 @@ export class Session implements SessionContext {
         tool_name: policyToolName,
       },
       tool.description,
+      promptId,
     );
     let spanSuccess = false;
 
