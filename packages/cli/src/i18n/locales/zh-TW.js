@@ -2372,4 +2372,8 @@ export default {
   'Unpinned auto-skill: {{name}}': '已取消固定自動技能：{{name}}',
   'Failed to update auto-skill pin: {{message}}':
     '更新自動技能固定狀態失敗：{{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    '安全模式下禁止變更自動技能管理器。',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
 };

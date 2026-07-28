@@ -80,6 +80,8 @@ Qwen Code tracks successful uses of generated project Skills locally, including 
 
 Use `/curator` to see active, stale, archived, and pinned auto-skills. Run `/curator run --dry-run` to preview a maintenance pass, `/curator run` to apply it immediately, `/curator pin <directory>` or `/curator unpin <directory>` to control per-skill maintenance, or `/curator restore <directory>` to move an archived auto-skill back into the active library.
 
+Status and dry-run previews are available in safe mode and untrusted workspaces. Applying maintenance, changing pins, and restoring archived auto-skills require a trusted workspace outside safe mode.
+
 ## Write `SKILL.md`
 
 Create a `SKILL.md` file with YAML frontmatter and Markdown content:

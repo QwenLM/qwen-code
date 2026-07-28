@@ -63,6 +63,10 @@ guard, while confirmation staging still snapshots active skills only.
 If state persistence fails after moves, the pass attempts to move every package
 back before surfacing the error.
 
+Read-only status and dry-run previews remain available in safe mode and
+untrusted workspaces. Applying a maintenance pass, pinning, unpinning, and
+restoring require a trusted workspace outside safe mode.
+
 ## Activity and transitions
 
 A successful Skill tool or direct skill slash-command invocation updates an

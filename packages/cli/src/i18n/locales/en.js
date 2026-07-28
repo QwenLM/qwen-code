@@ -2790,4 +2790,8 @@ export default {
   'Unpinned auto-skill: {{name}}': 'Unpinned auto-skill: {{name}}',
   'Failed to update auto-skill pin: {{message}}':
     'Failed to update auto-skill pin: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Auto-skill curator changes are disabled in safe mode.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
 };

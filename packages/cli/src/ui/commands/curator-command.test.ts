@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   restore: vi.fn(),
   setPinned: vi.fn(),
   refreshCache: vi.fn(),
+  isSafeMode: vi.fn(),
+  isTrustedFolder: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -30,11 +32,15 @@ describe('curator command', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.isSafeMode.mockReturnValue(false);
+    mocks.isTrustedFolder.mockReturnValue(true);
     context = {
       services: {
         config: {
           getProjectRoot: () => '/project',
           getSkillManager: () => ({ refreshCache: mocks.refreshCache }),
+          isSafeMode: mocks.isSafeMode,
+          isTrustedFolder: mocks.isTrustedFolder,
         },
       },
     } as unknown as CommandContext;
@@ -158,4 +164,65 @@ describe('curator command', () => {
     expect(mocks.run).not.toHaveBeenCalled();
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
   });
+
+  it.each([
+    ['safe mode', true, true],
+    ['an untrusted workspace', false, false],
+  ])(
+    'blocks mutations but preserves read-only commands in %s',
+    async (_name, safeMode, trustedFolder) => {
+      mocks.isSafeMode.mockReturnValue(safeMode);
+      mocks.isTrustedFolder.mockReturnValue(trustedFolder);
+      mocks.run.mockResolvedValue({
+        dryRun: true,
+        checked: 0,
+        seeded: [],
+        markedStale: [],
+        reactivated: [],
+        archived: [],
+        skippedCollisions: [],
+      });
+      const runCommand = curatorCommand.subCommands!.find(
+        (command) => command.name === 'run',
+      )!;
+      const pinCommand = curatorCommand.subCommands!.find(
+        (command) => command.name === 'pin',
+      )!;
+      const unpinCommand = curatorCommand.subCommands!.find(
+        (command) => command.name === 'unpin',
+      )!;
+      const restoreCommand = curatorCommand.subCommands!.find(
+        (command) => command.name === 'restore',
+      )!;
+
+      const statusResult = await curatorCommand.action!(context, '');
+      const previewResult = await runCommand.action!(context, '--dry-run');
+      const blockedResults = await Promise.all([
+        runCommand.action!(context, ''),
+        pinCommand.action!(context, 'auto-skill-old'),
+        unpinCommand.action!(context, 'auto-skill-old'),
+        restoreCommand.action!(context, 'auto-skill-old'),
+      ]);
+
+      expect(statusResult).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
+      expect(previewResult).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
+      expect(mocks.run).toHaveBeenCalledTimes(1);
+      expect(mocks.run).toHaveBeenCalledWith('/project', { dryRun: true });
+      expect(mocks.setPinned).not.toHaveBeenCalled();
+      expect(mocks.restore).not.toHaveBeenCalled();
+      expect(mocks.refreshCache).not.toHaveBeenCalled();
+      for (const result of blockedResults) {
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+      }
+    },
+  );
 });

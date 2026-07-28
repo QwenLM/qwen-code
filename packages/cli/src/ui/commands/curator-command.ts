@@ -12,6 +12,7 @@ import {
   type AutoSkillCuratorEntry,
   type AutoSkillCuratorRunResult,
   type AutoSkillCuratorStatus,
+  type Config,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
@@ -26,6 +27,24 @@ function message(
   messageType: MessageActionReturn['messageType'] = 'info',
 ): MessageActionReturn {
   return { type: 'message', messageType, content };
+}
+
+function mutationGuard(config: Config): MessageActionReturn | undefined {
+  if (config.isSafeMode()) {
+    return message(
+      t('Auto-skill curator changes are disabled in safe mode.'),
+      'error',
+    );
+  }
+  if (!config.isTrustedFolder()) {
+    return message(
+      t(
+        'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+      ),
+      'error',
+    );
+  }
+  return undefined;
 }
 
 function displayName(entry: AutoSkillCuratorEntry): string {
@@ -140,6 +159,10 @@ const runCommand: SlashCommand = {
     if (normalized !== '' && normalized !== '--dry-run') {
       return message(t('Usage: /curator run [--dry-run]'), 'error');
     }
+    if (normalized !== '--dry-run') {
+      const blocked = mutationGuard(config);
+      if (blocked) return blocked;
+    }
     try {
       const result = await runAutoSkillCurator(config.getProjectRoot(), {
         dryRun: normalized === '--dry-run',
@@ -174,6 +197,8 @@ const restoreCommand: SlashCommand = {
     if (!directoryName) {
       return message(t('Usage: /curator restore <directory>'), 'error');
     }
+    const blocked = mutationGuard(config);
+    if (blocked) return blocked;
     try {
       await restoreArchivedAutoSkill(config.getProjectRoot(), directoryName);
       await config.getSkillManager()?.refreshCache();
@@ -226,6 +251,8 @@ function pinCommand(name: 'pin' | 'unpin', pinned: boolean): SlashCommand {
           'error',
         );
       }
+      const blocked = mutationGuard(config);
+      if (blocked) return blocked;
       try {
         await setAutoSkillPinned(
           config.getProjectRoot(),
