@@ -166,13 +166,7 @@ export function expandPendingPastePlaceholders(
 
 export interface InputPromptProps {
   buffer: TextBuffer;
-  onSubmit: (
-    value: string,
-    options?: {
-      deferUntilIdle?: boolean;
-      submittedPrompt?: string;
-    },
-  ) => void;
+  onSubmit: (value: string, options?: { deferUntilIdle?: boolean }) => void;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -598,10 +592,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const resetHistoryNavRef = useRef<() => void>(() => {});
 
   const handleSubmitAndClear = useCallback(
-    (submittedValue: string, deferUntilIdle = false) => {
+    (submittedValue: string, options?: { deferUntilIdle?: boolean }) => {
       exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
-      const submittedPrompt = submittedValue;
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
         finalValue = expandPendingPastePlaceholders(finalValue, pendingPastes);
@@ -624,7 +617,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       clearPromptStash(targetDir);
-      onSubmit(finalValue, { deferUntilIdle, submittedPrompt });
+      if (options?.deferUntilIdle) {
+        onSubmit(finalValue, { deferUntilIdle: true });
+      } else {
+        onSubmit(finalValue);
+      }
 
       // Reset history navigation so the next Up-arrow starts from the newest
       // entry rather than advancing from whatever index the user picked.
@@ -668,11 +665,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
-      uiActions.invalidateSubmittedPromptProvenance();
       buffer.setText(newText);
       setHistoryRestoredText(newText);
     },
-    [buffer, uiActions],
+    [buffer],
   );
 
   const inputHistory = useInputHistory({
@@ -1296,7 +1292,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
           }
           if (keyMatchers[Command.ACCEPT_SUGGESTION_REVERSE_SEARCH](key)) {
-            uiActions.invalidateSubmittedPromptProvenance();
             sc.handleAutocomplete(activeSuggestionIndex);
             resetState();
             setActive(false);
@@ -1309,9 +1304,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             showSuggestions && activeSuggestionIndex > -1
               ? suggestions[activeSuggestionIndex].value
               : buffer.text;
-          if (showSuggestions && activeSuggestionIndex > -1) {
-            uiActions.invalidateSubmittedPromptProvenance();
-          }
           handleSubmitAndClear(textToSubmit);
           resetState();
           setActive(false);
@@ -1413,23 +1405,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (showCompletionSuggestions) {
-        // Category tab switching for the tabbed `@` completion UI. Only consume
-        // Ctrl+←/→ (per the COMPLETION_TAB_* bindings) and only when there are
-        // more than two tabs (at least 3 entries including 'all'). Plain ←/→ are
-        // never consumed here, so they always move the caret in the editable buffer.
-        if ((completion.availableCategories?.length ?? 0) > 2) {
-          if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
-            completion.switchCategory(1);
-            setExpandedSuggestionIndex(-1);
-            return true;
-          }
-          if (keyMatchers[Command.COMPLETION_TAB_LEFT](key)) {
-            completion.switchCategory(-1);
-            setExpandedSuggestionIndex(-1);
-            return true;
-          }
-        }
-
         if (completion.suggestions.length > 1) {
           const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
           const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
@@ -1663,7 +1638,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (keyMatchers[Command.NAVIGATION_UP](key)) {
           const prevCommand = shellHistory.getPreviousCommand();
           if (prevCommand !== null) {
-            uiActions.invalidateSubmittedPromptProvenance();
             buffer.setText(prevCommand);
           }
           return true;
@@ -1671,7 +1645,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (keyMatchers[Command.NAVIGATION_DOWN](key)) {
           const nextCommand = shellHistory.getNextCommand();
           if (nextCommand !== null) {
-            uiActions.invalidateSubmittedPromptProvenance();
             buffer.setText(nextCommand);
           }
           return true;
@@ -1680,7 +1653,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (keyMatchers[Command.QUEUE_MESSAGE](key)) {
         if (buffer.text.trim()) {
-          handleSubmitAndClear(buffer.text, true);
+          handleSubmitAndClear(buffer.text, { deferUntilIdle: true });
         }
         return true;
       }
@@ -2051,7 +2024,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         const sc = isCommandSearch
           ? commandSearchCompletion
           : reverseSearchCompletion;
-        uiActions.invalidateSubmittedPromptProvenance();
         sc.handleAutocomplete(index);
         sc.resetCompletionState();
         (isCommandSearch ? setCommandSearchActive : setReverseSearchActive)(
@@ -2099,7 +2071,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setExpandedSuggestionIndex,
       setCommandSearchActive,
       setReverseSearchActive,
-      uiActions,
     ],
   );
 
@@ -2271,20 +2242,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             expandedIndex={expandedSuggestionIndex}
             mouseEnabled={mouseInteractionsEnabled}
-            activeCategory={
-              suggestionsFromExport ||
-              commandSearchActive ||
-              reverseSearchActive
-                ? undefined
-                : completion.activeCategory
-            }
-            availableCategories={
-              suggestionsFromExport ||
-              commandSearchActive ||
-              reverseSearchActive
-                ? undefined
-                : completion.availableCategories
-            }
             onHoverIndex={
               suggestionsFromExport ? undefined : handleSuggestionHover
             }

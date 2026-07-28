@@ -75,7 +75,6 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
-    invalidateSubmittedPromptProvenance: vi.fn(),
     handleToggleKeypress: vi.fn(() => false),
   })),
 }));
@@ -223,7 +222,6 @@ describe('InputPrompt', () => {
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
-      invalidateSubmittedPromptProvenance: vi.fn(),
       handleToggleKeypress: vi.fn(() => false),
     } as unknown as ReturnType<typeof useUIActions>);
     mockedUseAgentViewState.mockReturnValue({
@@ -323,9 +321,6 @@ describe('InputPrompt', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
-      activeCategory: 'all' as const,
-      availableCategories: ['all'] as Array<'all'>,
-      switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
 
@@ -414,64 +409,8 @@ describe('InputPrompt', () => {
       expect(mockedClearPromptStash).toHaveBeenCalledWith(
         path.join('test', 'project', 'src'),
       );
-      expect(props.onSubmit).toHaveBeenCalledWith('send this', {
-        deferUntilIdle: false,
-        submittedPrompt: 'send this',
-      });
+      expect(props.onSubmit).toHaveBeenCalledWith('send this');
     });
-    unmount();
-  });
-
-  it('captures explicit provenance before clearing the input buffer', async () => {
-    props.buffer.setText('restored prompt');
-    vi.mocked(props.buffer.setText).mockClear();
-
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-
-    act(() => {
-      stdin.write('\r');
-    });
-
-    await waitFor(() => {
-      expect(props.buffer.setText).toHaveBeenCalledWith('');
-      expect(props.onSubmit).toHaveBeenCalledWith('restored prompt', {
-        deferUntilIdle: false,
-        submittedPrompt: 'restored prompt',
-      });
-    });
-    expect(
-      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
-    unmount();
-  });
-
-  it('clears restored provenance before applying same-text history', async () => {
-    const invalidateSubmittedPromptProvenance = vi.fn();
-    mockedUseUIActions.mockReturnValue({
-      handleRetryLastPrompt: vi.fn(),
-      temporaryCloseFeedbackDialog: vi.fn(),
-      popAllQueuedMessages: vi.fn(() => null),
-      invalidateSubmittedPromptProvenance,
-      handleToggleKeypress: vi.fn(() => false),
-    } as unknown as ReturnType<typeof useUIActions>);
-    props.buffer.setText('repeat prompt');
-    vi.mocked(props.buffer.setText).mockClear();
-
-    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
-    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
-    if (!historyArgs) {
-      throw new Error('useInputHistory was not called');
-    }
-
-    act(() => {
-      historyArgs.onChange('repeat prompt');
-    });
-
-    expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
-    expect(props.buffer.setText).toHaveBeenCalledWith('repeat prompt');
-    expect(
-      invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
     unmount();
   });
 
@@ -486,7 +425,6 @@ describe('InputPrompt', () => {
     await waitFor(() => {
       expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
         deferUntilIdle: true,
-        submittedPrompt: 'send this later',
       });
     });
     expect(props.buffer.setText).toHaveBeenCalledWith('');
@@ -974,10 +912,7 @@ describe('InputPrompt', () => {
 
           // Submitting a non-empty buffer clears the stale suggestion too, so a
           // synchronous slash command (/clear, /help) can't leave a ghost.
-          expect(props.onSubmit).toHaveBeenCalledWith('ship it', {
-            deferUntilIdle: false,
-            submittedPrompt: 'ship it',
-          });
+          expect(props.onSubmit).toHaveBeenCalledWith('ship it');
           expect(onPromptSuggestionDismiss).toHaveBeenCalled();
         } finally {
           vi.useRealTimers();
@@ -1265,14 +1200,6 @@ describe('InputPrompt', () => {
 
   it('should set the buffer text when a shell history command is retrieved', async () => {
     props.shellModeActive = true;
-    const invalidateSubmittedPromptProvenance = vi.fn();
-    mockedUseUIActions.mockReturnValue({
-      handleRetryLastPrompt: vi.fn(),
-      temporaryCloseFeedbackDialog: vi.fn(),
-      popAllQueuedMessages: vi.fn(() => null),
-      invalidateSubmittedPromptProvenance,
-      handleToggleKeypress: vi.fn(() => false),
-    } as unknown as ReturnType<typeof useUIActions>);
     vi.mocked(mockShellHistory.getPreviousCommand).mockReturnValue(
       'previous command',
     );
@@ -1283,10 +1210,6 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockShellHistory.getPreviousCommand).toHaveBeenCalled();
-    expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
-    expect(
-      invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
     expect(props.buffer.setText).toHaveBeenCalledWith('previous command');
     unmount();
   });
@@ -1301,10 +1224,7 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith('ls -l');
-    expect(props.onSubmit).toHaveBeenCalledWith('ls -l', {
-      deferUntilIdle: false,
-      submittedPrompt: 'ls -l',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('ls -l');
     unmount();
   });
 
@@ -1330,10 +1250,7 @@ describe('InputPrompt', () => {
 
     expect(mockInputHistory.navigateUp).toHaveBeenCalled();
     expect(mockInputHistory.navigateDown).toHaveBeenCalled();
-    expect(props.onSubmit).toHaveBeenCalledWith('some text', {
-      deferUntilIdle: false,
-      submittedPrompt: 'some text',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('some text');
     unmount();
   });
 
@@ -1484,40 +1401,6 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
       // Note: The new implementation adds images as attachments rather than inserting into buffer
-      unmount();
-    });
-
-    it('keeps generated attachment references out of submitted provenance', async () => {
-      const imagePath = path.join(
-        'test',
-        'project',
-        'src',
-        '.qwen',
-        'tmp',
-        'clipboard.png',
-      );
-      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
-      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
-      props.buffer.setText('describe this image');
-
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      stdin.write(isWindows ? '\x1Bv' : '\x16');
-      await wait();
-      stdin.write('\r');
-
-      await waitFor(() => {
-        expect(props.onSubmit).toHaveBeenCalledWith(
-          `@${['.qwen', 'tmp', 'clipboard.png'].join(isWindows ? '\\' : '/')}\n\ndescribe this image`,
-          {
-            deferUntilIdle: false,
-            submittedPrompt: 'describe this image',
-          },
-        );
-      });
       unmount();
     });
 
@@ -1821,10 +1704,7 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
-      deferUntilIdle: false,
-      submittedPrompt: '/clear',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('/clear');
     unmount();
   });
 
@@ -1849,10 +1729,7 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export', {
-      deferUntilIdle: false,
-      submittedPrompt: '/export',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('/export');
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
@@ -1885,10 +1762,7 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export md', {
-      deferUntilIdle: false,
-      submittedPrompt: '/export md',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('/export md');
     unmount();
   });
 
@@ -2583,10 +2457,7 @@ describe('InputPrompt', () => {
     stdinFinal.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
-      deferUntilIdle: false,
-      submittedPrompt: '/memory',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmountFinal();
   });
@@ -2611,10 +2482,7 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
-      deferUntilIdle: false,
-      submittedPrompt: '/memory',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
@@ -2685,94 +2553,6 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('should NOT switch category on left/right when availableCategories <= 2', async () => {
-    const switchCategory = vi.fn();
-    mockedUseCommandCompletion.mockReturnValue({
-      ...mockCommandCompletion,
-      completionMode: CompletionMode.AT,
-      showSuggestions: true,
-      suggestions: [
-        { label: 'file.ts', value: 'file.ts' },
-        { label: 'other.ts', value: 'other.ts' },
-      ],
-      activeSuggestionIndex: 0,
-      isPerfectMatch: false,
-      availableCategories: ['all'],
-      switchCategory,
-    });
-    props.buffer.setText('@file');
-
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-    await wait();
-
-    stdin.write('\x1b[C'); // right arrow
-    await wait();
-    stdin.write('\x1b[D'); // left arrow
-    await wait();
-
-    expect(switchCategory).not.toHaveBeenCalled();
-    unmount();
-  });
-
-  it('should NOT switch category on Ctrl+left/right when availableCategories is exactly 2', async () => {
-    const switchCategory = vi.fn();
-    mockedUseCommandCompletion.mockReturnValue({
-      ...mockCommandCompletion,
-      completionMode: CompletionMode.AT,
-      showSuggestions: true,
-      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
-      activeSuggestionIndex: 0,
-      isPerfectMatch: false,
-      availableCategories: ['all', 'file'],
-      switchCategory,
-    });
-    props.buffer.setText('@file');
-
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-    await wait();
-
-    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
-    await wait();
-    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
-    await wait();
-
-    // With only 2 entries (all + one real category) the tab bar is hidden,
-    // so Ctrl+arrows must not trigger category switching.
-    expect(switchCategory).not.toHaveBeenCalled();
-    unmount();
-  });
-
-  it('should NOT switch category on plain left/right when availableCategories > 2 (caret stays free)', async () => {
-    const switchCategory = vi.fn();
-    mockedUseCommandCompletion.mockReturnValue({
-      ...mockCommandCompletion,
-      completionMode: CompletionMode.AT,
-      showSuggestions: true,
-      suggestions: [
-        { label: 'file.ts', value: 'file.ts', category: 'file' },
-        { label: 'sess', value: 'sess', category: 'session' },
-      ],
-      activeSuggestionIndex: 0,
-      isPerfectMatch: false,
-      availableCategories: ['all', 'file', 'session'],
-      switchCategory,
-    });
-    props.buffer.setText('@');
-
-    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
-    await wait();
-
-    stdin.write('\x1b[C'); // plain right arrow
-    await wait();
-    stdin.write('\x1b[D'); // plain left arrow
-    await wait();
-
-    // Plain arrows must not be hijacked for tab switching, so they remain
-    // available to move the caret in the editable buffer.
-    expect(switchCategory).not.toHaveBeenCalled();
-    unmount();
-  });
-
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -2787,10 +2567,7 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history', {
-      deferUntilIdle: false,
-      submittedPrompt: 'a prompt from history',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history');
     expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
   });
@@ -2809,10 +2586,7 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
-      deferUntilIdle: false,
-      submittedPrompt: '/clear',
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith('/clear');
     unmount();
   });
 
@@ -3374,7 +3148,6 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
-        invalidateSubmittedPromptProvenance: vi.fn(),
         handleToggleKeypress: vi.fn(() => true),
       } as unknown as ReturnType<typeof useUIActions>);
 
@@ -3395,7 +3168,6 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
-        invalidateSubmittedPromptProvenance: vi.fn(),
         handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
@@ -3793,10 +3565,7 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify that onSubmit was called after the timeout
-        expect(props.onSubmit).toHaveBeenCalledWith('test command', {
-          deferUntilIdle: false,
-          submittedPrompt: 'test command',
-        });
+        expect(props.onSubmit).toHaveBeenCalledWith('test command');
       } finally {
         vi.useRealTimers();
         unmount();
@@ -3817,10 +3586,7 @@ describe('InputPrompt', () => {
       await wait();
 
       // Verify that onSubmit was called normally
-      expect(props.onSubmit).toHaveBeenCalledWith('normal command', {
-        deferUntilIdle: false,
-        submittedPrompt: 'normal command',
-      });
+      expect(props.onSubmit).toHaveBeenCalledWith('normal command');
 
       unmount();
     });
@@ -4011,14 +3777,6 @@ describe('InputPrompt', () => {
     });
 
     it('completes the highlighted entry on Tab and exits reverse-search', async () => {
-      const invalidateSubmittedPromptProvenance = vi.fn();
-      mockedUseUIActions.mockReturnValue({
-        handleRetryLastPrompt: vi.fn(),
-        temporaryCloseFeedbackDialog: vi.fn(),
-        popAllQueuedMessages: vi.fn(() => null),
-        invalidateSubmittedPromptProvenance,
-        handleToggleKeypress: vi.fn(() => false),
-      } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion
       const mockHandleAutocomplete = vi.fn(() => {
         props.buffer.setText('echo hello');
@@ -4060,23 +3818,11 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockHandleAutocomplete).toHaveBeenCalledWith(0);
-      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
-      expect(
-        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
-      ).toBeLessThan(mockHandleAutocomplete.mock.invocationCallOrder[0]);
       expect(props.buffer.setText).toHaveBeenCalledWith('echo hello');
       unmount();
     }, 15000);
 
     it('submits the highlighted entry on Enter and exits reverse-search', async () => {
-      const invalidateSubmittedPromptProvenance = vi.fn();
-      mockedUseUIActions.mockReturnValue({
-        handleRetryLastPrompt: vi.fn(),
-        temporaryCloseFeedbackDialog: vi.fn(),
-        popAllQueuedMessages: vi.fn(() => null),
-        invalidateSubmittedPromptProvenance,
-        handleToggleKeypress: vi.fn(() => false),
-      } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion to return suggestions
       mockedUseReverseSearchCompletion.mockReturnValue({
         ...mockReverseSearchCompletion,
@@ -4108,14 +3854,7 @@ describe('InputPrompt', () => {
         expect(stdout.lastFrame()).not.toContain('(r:)');
       });
 
-      expect(props.onSubmit).toHaveBeenCalledWith('echo hello', {
-        deferUntilIdle: false,
-        submittedPrompt: 'echo hello',
-      });
-      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
-      expect(
-        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
-      ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
+      expect(props.onSubmit).toHaveBeenCalledWith('echo hello');
       unmount();
     });
 
@@ -4260,60 +3999,6 @@ describe('InputPrompt', () => {
       expect(frame).toContain('(r:)');
       expect(frame).toContain('git commit');
       expect(frame).toContain('git push');
-      unmount();
-    });
-
-    it('invalidates provenance before submitting a command-history match', async () => {
-      props.shellModeActive = false;
-      const invalidateSubmittedPromptProvenance = vi.fn();
-      mockedUseUIActions.mockReturnValue({
-        handleRetryLastPrompt: vi.fn(),
-        temporaryCloseFeedbackDialog: vi.fn(),
-        popAllQueuedMessages: vi.fn(() => null),
-        invalidateSubmittedPromptProvenance,
-        handleToggleKeypress: vi.fn(() => false),
-      } as unknown as ReturnType<typeof useUIActions>);
-      vi.mocked(useReverseSearchCompletion).mockImplementation(
-        (_buffer, _data, isActive) => ({
-          ...mockReverseSearchCompletion,
-          suggestions: isActive
-            ? [
-                {
-                  label:
-                    '<system-reminder>generated</system-reminder>\nuser text',
-                  value:
-                    '<system-reminder>generated</system-reminder>\nuser text',
-                },
-              ]
-            : [],
-          showSuggestions: !!isActive,
-          activeSuggestionIndex: isActive ? 0 : -1,
-        }),
-      );
-
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      stdin.write('\x12');
-      await wait();
-      stdin.write('\r');
-
-      await waitFor(() => {
-        expect(props.onSubmit).toHaveBeenCalledWith(
-          '<system-reminder>generated</system-reminder>\nuser text',
-          {
-            deferUntilIdle: false,
-            submittedPrompt:
-              '<system-reminder>generated</system-reminder>\nuser text',
-          },
-        );
-      });
-      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
-      expect(
-        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
-      ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
       unmount();
     });
 
@@ -4645,10 +4330,7 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify onSubmit was called with expanded content
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
-          deferUntilIdle: false,
-          submittedPrompt: '[Pasted Content 1001 chars]',
-        });
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
       } finally {
         vi.useRealTimers();
         unmount();
@@ -4690,11 +4372,6 @@ describe('InputPrompt', () => {
 
         expect(props.onSubmit).toHaveBeenCalledWith(
           `${secondPaste}\n${firstPaste}`,
-          {
-            deferUntilIdle: false,
-            submittedPrompt:
-              '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
-          },
         );
       } finally {
         vi.useRealTimers();
@@ -4732,10 +4409,7 @@ describe('InputPrompt', () => {
         expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith(
           largeContent,
         );
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
-          deferUntilIdle: false,
-          submittedPrompt: '[Pasted Content 1001 chars]',
-        });
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
       } finally {
         vi.useRealTimers();
         unmount();
@@ -4993,6 +4667,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
     });
 
@@ -5006,7 +4681,6 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
-        invalidateSubmittedPromptProvenance: vi.fn(),
         handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
@@ -5035,7 +4709,6 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
-        invalidateSubmittedPromptProvenance: vi.fn(),
         handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
@@ -5070,7 +4743,6 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
-        invalidateSubmittedPromptProvenance: vi.fn(),
         handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
@@ -5099,7 +4771,6 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
-        invalidateSubmittedPromptProvenance: vi.fn(),
         handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
@@ -5262,7 +4933,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5324,7 +4994,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5354,7 +5023,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5392,7 +5060,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5428,7 +5095,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5476,7 +5142,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map(),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5514,7 +5179,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5550,7 +5214,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map(),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
@@ -5583,7 +5246,6 @@ describe('InputPrompt', () => {
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
         agentShellFocused: false,
-        agentViewHasActiveShellPty: false,
         agentInputBufferText: '',
         agentTabBarFocused: false,
         agentApprovalModes: new Map(),
