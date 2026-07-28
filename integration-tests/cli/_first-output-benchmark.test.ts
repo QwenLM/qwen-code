@@ -745,7 +745,7 @@ describe('runner decision contracts', () => {
         ...validInput,
         coldWarmPairedDeltasMs: [Number.NaN],
       }),
-    ).toThrow('Percentile inputs must all be finite');
+    ).toThrow('coldWarmPairedDeltasMs must all be finite');
   });
 
   it('maps a mismatched final answer to the stable failure code', () => {

@@ -855,7 +855,9 @@ export function evaluateSingleBundlePrototypeGate(
   if (!Number.isFinite(input.seed)) {
     throw new TypeError('seed must be finite');
   }
-  assertFiniteValues(input.coldWarmPairedDeltasMs);
+  if (input.coldWarmPairedDeltasMs.some((value) => !Number.isFinite(value))) {
+    throw new TypeError('coldWarmPairedDeltasMs must all be finite');
+  }
   const providerDeltaMs =
     input.coldPromptToProviderRequestP50Ms === null ||
     input.warmPromptToProviderRequestP50Ms === null
@@ -979,6 +981,7 @@ export interface FirstOutputVariantDescriptor {
 export type FirstOutputMetricName =
   | 'processToListenMs'
   | 'processToSessionReadyMs'
+  | 'sseReadyToPromptMs'
   | 'promptToProviderRequestArrivalMs'
   | 'promptToFirstModelOutputMs'
   | 'promptToFirstAnswerTextMs'

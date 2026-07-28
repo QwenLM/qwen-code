@@ -1677,6 +1677,7 @@ function logProgress(message: string): void {
 const METRICS: readonly FirstOutputMetricName[] = [
   'processToListenMs',
   'processToSessionReadyMs',
+  'sseReadyToPromptMs',
   'promptToProviderRequestArrivalMs',
   'promptToFirstModelOutputMs',
   'promptToFirstAnswerTextMs',
@@ -1762,6 +1763,8 @@ function sessionMetric(
   switch (metric) {
     case 'processToSessionReadyMs':
       return session.timings.processToSessionReadyMs;
+    case 'sseReadyToPromptMs':
+      return session.timings.sseReadyToPromptMs;
     case 'promptToProviderRequestArrivalMs':
       return session.timings.promptToProviderRequestArrivalMs;
     case 'promptToFirstModelOutputMs':
