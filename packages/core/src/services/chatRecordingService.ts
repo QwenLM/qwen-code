@@ -611,6 +611,7 @@ export class ChatRecordingService {
   private operationTail: Promise<void> = Promise.resolve();
   private acceptingWrites = false;
   private closePromise: Promise<void> | undefined;
+  private handoffRequested = false;
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -1152,15 +1153,21 @@ export class ChatRecordingService {
     }
   }
 
-  close(): Promise<void> {
+  close(options?: { handoff?: boolean }): Promise<void> {
+    if (options?.handoff) {
+      this.handoffRequested = true;
+    }
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
-    this.beginClose();
+    this.beginClose(options);
     this.closePromise = this.closeOnce();
     return this.closePromise;
   }
 
-  beginClose(): void {
+  beginClose(options?: { handoff?: boolean }): void {
+    if (options?.handoff) {
+      this.handoffRequested = true;
+    }
     this.autoTitleController?.abort();
     this.acceptingWrites = false;
     if (this.state === 'active') {
@@ -1175,9 +1182,17 @@ export class ChatRecordingService {
     } catch (error) {
       flushFailure = error;
     }
+    if (this.handoffRequested && flushFailure !== undefined) {
+      this.state = 'integrity_failed';
+      throw flushFailure;
+    }
     const lease = this.binding?.lease;
     try {
-      await lease?.release();
+      if (this.handoffRequested) {
+        await lease?.sealForHandoff();
+      } else {
+        await lease?.release();
+      }
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {

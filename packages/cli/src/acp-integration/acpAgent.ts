@@ -3451,7 +3451,7 @@ class QwenAgent implements Agent {
     const writerTerminals: Array<Promise<void>> = [];
     for (const config of configList) {
       try {
-        writerTerminals.push(config.closeSessionWriter());
+        writerTerminals.push(config.closeSessionWriter({ handoff: true }));
       } catch (error) {
         writerTerminals.push(Promise.reject(error));
       }
@@ -10776,6 +10776,7 @@ class QwenAgent implements Agent {
       this.assertManagedSessionAdmission();
       if (this.isTrustedManagedParent()) {
         config.setSessionWriterReclaimPolicy('never');
+        config.setSessionWriterTakeoverPolicy('certified');
       }
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>

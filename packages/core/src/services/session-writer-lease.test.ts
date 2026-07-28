@@ -5,6 +5,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, unlinkSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -42,6 +43,21 @@ const lstatFault = vi.hoisted(() => ({
   calls: 0,
 }));
 
+const transitionFault = vi.hoisted(() => ({
+  renameFrom: undefined as string | undefined,
+  renameTo: undefined as string | undefined,
+  afterRename: undefined as (() => Promise<void>) | undefined,
+  linkFrom: undefined as string | undefined,
+  linkTo: undefined as string | undefined,
+  throwAfterLink: false,
+}));
+
+const writeFault = vi.hoisted(() => ({
+  contains: undefined as string | undefined,
+  onEntered: undefined as (() => void) | undefined,
+  wait: undefined as Promise<void> | undefined,
+}));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -57,6 +73,50 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         }
       }
       return actual.lstat(filePath);
+    },
+    rename: async (
+      oldPath: Parameters<typeof actual.rename>[0],
+      newPath: Parameters<typeof actual.rename>[1],
+    ) => {
+      await actual.rename(oldPath, newPath);
+      if (
+        oldPath === transitionFault.renameFrom &&
+        (transitionFault.renameTo === undefined ||
+          newPath === transitionFault.renameTo)
+      ) {
+        await transitionFault.afterRename?.();
+      }
+    },
+    link: async (
+      existingPath: Parameters<typeof actual.link>[0],
+      newPath: Parameters<typeof actual.link>[1],
+    ) => {
+      await actual.link(existingPath, newPath);
+      if (
+        transitionFault.throwAfterLink &&
+        existingPath === transitionFault.linkFrom &&
+        newPath === transitionFault.linkTo
+      ) {
+        throw Object.assign(new Error('injected error after link'), {
+          code: 'EIO',
+        });
+      }
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      const writeFile = handle.writeFile.bind(handle);
+      handle.writeFile = async (data, options) => {
+        if (
+          writeFault.contains &&
+          Buffer.isBuffer(data) &&
+          data.toString('utf8').includes(writeFault.contains)
+        ) {
+          writeFault.onEntered?.();
+          await writeFault.wait;
+        }
+        return writeFile(data, options);
+      };
+      return handle;
     },
   };
 });
@@ -162,6 +222,15 @@ afterEach(async () => {
   lstatFault.path = undefined;
   lstatFault.remainingFailures = 0;
   lstatFault.calls = 0;
+  transitionFault.renameFrom = undefined;
+  transitionFault.renameTo = undefined;
+  transitionFault.afterRename = undefined;
+  transitionFault.linkFrom = undefined;
+  transitionFault.linkTo = undefined;
+  transitionFault.throwAfterLink = false;
+  writeFault.contains = undefined;
+  writeFault.onEntered = undefined;
+  writeFault.wait = undefined;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -278,6 +347,71 @@ describe('SessionWriterLease', () => {
         ),
       ),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('hands a real managed ACP Config to a certified replacement', async () => {
+    const fixture = await createFixture('managed-config-handoff-session');
+    const createConfig = () =>
+      Storage.runWithRuntimeBaseDir(
+        fixture.runtimeBaseDir,
+        fixture.projectRoot,
+        () =>
+          new Config({
+            sessionId: fixture.options.sessionId,
+            cwd: fixture.projectRoot,
+            targetDir: fixture.projectRoot,
+            debugMode: false,
+            model: 'test-model',
+            chatRecording: true,
+            experimentalZedIntegration: true,
+            sessionWriterLeaseEnabled: true,
+            bareMode: true,
+            telemetry: { enabled: false },
+            usageStatisticsEnabled: false,
+          }),
+      );
+    const initialize = (config: Config) =>
+      config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+        lenientToolWarmup: true,
+      });
+
+    const first = createConfig();
+    first.setSessionWriterReclaimPolicy('never');
+    first.setSessionWriterTakeoverPolicy('certified');
+    await initialize(first);
+    first.getChatRecordingService()?.recordUserMessage('handoff tail');
+    await first.closeSessionWriter({ handoff: true });
+    expect(
+      JSON.parse(
+        await fs.readFile(
+          getSessionWriterLockPath(
+            fixture.runtimeBaseDir,
+            fixture.options.sessionId,
+          ),
+          'utf8',
+        ),
+      ),
+    ).toMatchObject({ schema_version: 2, state: 'sealed' });
+
+    const replacement = createConfig();
+    replacement.setSessionWriterReclaimPolicy('never');
+    replacement.setSessionWriterTakeoverPolicy('certified');
+    await initialize(replacement);
+    expect(
+      replacement.getResumedSessionData()?.conversation.messages.at(-1)?.message
+        ?.parts,
+    ).toEqual([{ text: 'handoff tail' }]);
+
+    await first.shutdown({
+      shutdownTelemetry: false,
+      skipSessionWriter: true,
+    });
+    await replacement.shutdown({ shutdownTelemetry: false });
   });
 
   it('restores and re-anchors a persisted title outside the active UUID chain', async () => {
@@ -812,6 +946,385 @@ describe('SessionWriterLease', () => {
         reclaimPolicy: 'never',
       }),
     ).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it('never treats a foreign-host active record as a certified handoff', async () => {
+    const fixture = await createFixture('foreign-active-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const active = JSON.parse(await fs.readFile(lockPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    await first.release();
+    await fs.writeFile(
+      lockPath,
+      JSON.stringify({
+        ...active,
+        hostname: 'retired-foreign-host',
+        pid: 2_147_483_647,
+      }),
+    );
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      state: 'active',
+      hostname: 'retired-foreign-host',
+    });
+  });
+
+  it('keeps schema v1 records on the active-owner path', async () => {
+    const fixture = await createFixture('legacy-active-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const active = JSON.parse(await fs.readFile(lockPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    await first.release();
+    delete active['state'];
+    active['schema_version'] = 1;
+    await fs.writeFile(lockPath, JSON.stringify(active));
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+    await fs.writeFile(
+      lockPath,
+      JSON.stringify({
+        ...active,
+        pid: 2_147_483_647,
+      }),
+    );
+    const replacement = await SessionWriterLease.acquire(fixture.options);
+    await replacement.release();
+  });
+
+  it('seals a transcript proof and permits only certified takeover', async () => {
+    const fixture = await createFixture('sealed-session');
+    const initial = `${JSON.stringify({ record: 'initial' })}\n`;
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, initial);
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.appendJsonLine({ record: 'final' });
+    const expectedTranscript = await fs.readFile(fixture.transcriptPath);
+
+    await first.sealForHandoff();
+
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+      schema_version: number;
+      state: string;
+      transcript: {
+        relative_path: string;
+        exists: boolean;
+        byte_length: number;
+        sha256: string;
+      };
+    };
+    expect(sealed).toMatchObject({
+      schema_version: 2,
+      state: 'sealed',
+      transcript: {
+        relative_path: path
+          .relative(fixture.runtimeBaseDir, fixture.transcriptPath)
+          .split(path.sep)
+          .join('/'),
+        exists: true,
+        byte_length: expectedTranscript.byteLength,
+        sha256: createHash('sha256').update(expectedTranscript).digest('hex'),
+      },
+    });
+    await expect(
+      first.appendJsonLine({ record: 'too-late' }),
+    ).rejects.toBeInstanceOf(SessionWriterLostError);
+    await expect(fs.readFile(fixture.transcriptPath)).resolves.toEqual(
+      expectedTranscript,
+    );
+    await expect(
+      SessionWriterLease.acquire(fixture.options),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+    const replacement = await SessionWriterLease.acquire({
+      ...fixture.options,
+      reclaimPolicy: 'never',
+      takeoverPolicy: 'certified',
+    });
+    expect(replacement.ownerId).not.toBe(first.ownerId);
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      schema_version: 2,
+      state: 'active',
+      owner_id: replacement.ownerId,
+    });
+    await replacement.assertOwnedAndUnchanged();
+    await replacement.release();
+  });
+
+  it('waits for an accepted append before sealing the transcript', async () => {
+    const fixture = await createFixture('sealed-append-race-session');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    let resumeWrite: (() => void) | undefined;
+    writeFault.contains = '"late":true';
+    writeFault.wait = new Promise<void>((resolve) => {
+      resumeWrite = resolve;
+    });
+    const writeEntered = new Promise<void>((resolve) => {
+      writeFault.onEntered = resolve;
+    });
+
+    const append = lease.appendJsonLine({ late: true });
+    await writeEntered;
+    const seal = lease.sealForHandoff();
+    await expect(
+      Promise.race([
+        seal.then(
+          () => 'settled',
+          () => 'settled',
+        ),
+        new Promise<'pending'>((resolve) =>
+          setTimeout(() => resolve('pending'), 50),
+        ),
+      ]),
+    ).resolves.toBe('pending');
+
+    resumeWrite?.();
+    await append;
+    await seal;
+    const transcript = await fs.readFile(fixture.transcriptPath);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+      transcript: { byte_length: number; sha256: string };
+    };
+    expect(transcript.toString('utf8')).toBe('{"late":true}\n');
+    expect(sealed.transcript).toMatchObject({
+      byte_length: transcript.byteLength,
+      sha256: createHash('sha256').update(transcript).digest('hex'),
+    });
+  });
+
+  it('reconciles a sealing error reported after the sealed primary is installed', async () => {
+    const fixture = await createFixture('sealed-after-effect-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    transitionFault.linkFrom = `${lockPath}.sealed-candidate.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.throwAfterLink = true;
+
+    await expect(first.sealForHandoff()).resolves.toBeUndefined();
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      schema_version: 2,
+      state: 'sealed',
+    });
+  });
+
+  it('never overwrites a primary installed during the sealing transition', async () => {
+    const fixture = await createFixture('sealed-successor-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const successorRaw = '{"successor":true}';
+    transitionFault.renameFrom = lockPath;
+    transitionFault.renameTo = `${lockPath}.handoff.${encodeURIComponent(
+      first.ownerId,
+    )}`;
+    transitionFault.afterRename = () =>
+      fs.writeFile(lockPath, successorRaw, 'utf8');
+
+    await expect(first.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterLostError,
+    );
+    expect(first.isReleased).toBe(true);
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(successorRaw);
+  });
+
+  it('elects exactly one certified replacement for a sealed session', async () => {
+    const fixture = await createFixture('sealed-race-session');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+
+    const contenders = [startLeaseProcess(), startLeaseProcess()];
+    const options = {
+      ...fixture.options,
+      reclaimPolicy: 'never' as const,
+      takeoverPolicy: 'certified' as const,
+    };
+    const results = await Promise.all(
+      contenders.map((child) =>
+        requestChild(child, { type: 'acquire', options }),
+      ),
+    );
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    const winner = contenders[results.findIndex((result) => result.ok)]!;
+    expect(await requestChild(winner, { type: 'release' })).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it('reconciles a takeover error reported after the active primary is installed', async () => {
+    const fixture = await createFixture('takeover-after-effect-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    transitionFault.linkFrom = `${lockPath}.claim`;
+    transitionFault.linkTo = lockPath;
+    transitionFault.throwAfterLink = true;
+
+    const replacement = await SessionWriterLease.acquire({
+      ...fixture.options,
+      reclaimPolicy: 'never',
+      takeoverPolicy: 'certified',
+    });
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+      schema_version: 2,
+      state: 'active',
+      owner_id: replacement.ownerId,
+    });
+    await replacement.release();
+  });
+
+  it('never overwrites a primary installed during the takeover transition', async () => {
+    const fixture = await createFixture('takeover-successor-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const successorRaw = '{"successor":true}';
+    transitionFault.renameFrom = lockPath;
+    transitionFault.afterRename = () =>
+      fs.writeFile(lockPath, successorRaw, 'utf8');
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterLostError);
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(successorRaw);
+  });
+
+  it.each(['append', 'truncate', 'replace'] as const)(
+    'retains a sealed lock when the transcript proof changes by %s',
+    async (mutation) => {
+      const fixture = await createFixture(`sealed-${mutation}-session`);
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"record":"tail"}\n');
+      const first = await SessionWriterLease.acquire(fixture.options);
+      await first.sealForHandoff();
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const sealedRaw = await fs.readFile(lockPath, 'utf8');
+      if (mutation === 'append') {
+        await fs.appendFile(fixture.transcriptPath, '{"external":true}\n');
+      } else if (mutation === 'truncate') {
+        await fs.truncate(fixture.transcriptPath, 0);
+      } else {
+        const replacementPath = `${fixture.transcriptPath}.replacement`;
+        await fs.writeFile(replacementPath, '{"record":"evil"}\n');
+        await fs.rename(replacementPath, fixture.transcriptPath);
+      }
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          reclaimPolicy: 'never',
+          takeoverPolicy: 'certified',
+        }),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(sealedRaw);
+    },
+  );
+
+  it.each([
+    ['valid but mismatched', '0'.repeat(64), SessionTranscriptChangedError],
+    ['malformed', 'invalid', SessionWriterUnavailableError],
+  ])(
+    'retains a sealed primary with a %s transcript digest',
+    async (_description, sha256, ErrorType) => {
+      const fixture = await createFixture('sealed-proof-session');
+      const first = await SessionWriterLease.acquire(fixture.options);
+      await first.sealForHandoff();
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+        transcript: { sha256: string };
+      };
+      sealed.transcript.sha256 = sha256;
+      const sealedRaw = JSON.stringify(sealed);
+      await fs.writeFile(lockPath, sealedRaw);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          reclaimPolicy: 'never',
+          takeoverPolicy: 'certified',
+        }),
+      ).rejects.toBeInstanceOf(ErrorType);
+      await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(sealedRaw);
+    },
+  );
+
+  it('fails closed without changing a sealed primary when a claim remains', async () => {
+    const fixture = await createFixture('sealed-claim-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const sealedRaw = await fs.readFile(lockPath, 'utf8');
+    await fs.writeFile(`${lockPath}.claim`, '{"residual":true}');
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(sealedRaw);
   });
 
   it('cannot remove a successor lock after release commits', async () => {
