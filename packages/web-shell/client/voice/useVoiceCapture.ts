@@ -61,6 +61,8 @@ const SAMPLE_RATE = 16_000;
 const FRAME_SIZE = 4096;
 const START_TIMEOUT_MS = 60_000;
 const TRANSCRIPTION_TIMEOUT_MS = 60_000;
+const MAX_BUFFERED_PCM_BYTES =
+  SAMPLE_RATE * Int16Array.BYTES_PER_ELEMENT * (START_TIMEOUT_MS / 1000);
 
 export function toVoiceWebSocketUrl(
   baseUrl: string,
@@ -174,6 +176,7 @@ export function useVoiceCapture({
   const resourcesRef = useRef<CaptureResources>({});
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
+  const stopWhenConnectedRef = useRef(false);
   const statusRef = useRef<VoiceCaptureStatus>('idle');
   const snapshotRef = useRef<CaptureSnapshot | undefined>(undefined);
 
@@ -217,11 +220,13 @@ export function useVoiceCapture({
   const cleanup = useCallback(() => {
     generationRef.current++;
     snapshotRef.current = undefined;
+    stopWhenConnectedRef.current = false;
     teardownAudio();
     clearTranscribeTimeout();
     const resources = resourcesRef.current;
     if (resources.ws) {
       try {
+        resources.ws.onopen = null;
         resources.ws.onmessage = null;
         resources.ws.onerror = null;
         resources.ws.onclose = null;
@@ -284,6 +289,35 @@ export function useVoiceCapture({
     setAudioLevel(0);
     setErrorMessage(undefined);
   }, [applyStatus, cleanup]);
+
+  const finalize = useCallback(
+    (ws: WebSocket, snapshot: CaptureSnapshot) => {
+      teardownAudio();
+      setAudioLevel(0);
+      applyStatus('transcribing');
+      try {
+        ws.send(JSON.stringify({ type: 'stop' }));
+        clearTranscribeTimeout();
+        resourcesRef.current.transcribeTimeout = setTimeout(() => {
+          if (
+            snapshotIsCurrent(snapshot) &&
+            statusRef.current === 'transcribing'
+          ) {
+            fail('Transcription timed out.', snapshot);
+          }
+        }, TRANSCRIPTION_TIMEOUT_MS);
+      } catch {
+        fail('Failed to finalize voice transcription.', snapshot);
+      }
+    },
+    [
+      applyStatus,
+      clearTranscribeTimeout,
+      fail,
+      snapshotIsCurrent,
+      teardownAudio,
+    ],
+  );
 
   const targetIdentity = target
     ? JSON.stringify([target.ownerKey, target.streamPath])
@@ -398,6 +432,9 @@ export function useVoiceCapture({
         );
         ws.binaryType = 'arraybuffer';
         resourcesRef.current.ws = ws;
+        const bufferedPcm: ArrayBuffer[] = [];
+        let bufferedPcmBytes = 0;
+        let streamStarted = false;
 
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
           if (!snapshotIsCurrent(snapshot)) return;
@@ -405,8 +442,25 @@ export function useVoiceCapture({
             event.inputBuffer.getChannelData(0),
           );
           setAudioLevel(level);
-          if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+          if (streamStarted) {
+            if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+          } else {
+            if (bufferedPcmBytes + pcm.byteLength > MAX_BUFFERED_PCM_BYTES) {
+              fail(
+                'Voice capture buffer limit reached while starting.',
+                snapshot,
+              );
+              return;
+            }
+            bufferedPcm.push(pcm);
+            bufferedPcmBytes += pcm.byteLength;
+          }
         };
+        if (!stopWhenConnectedRef.current) {
+          source.connect(processor);
+          processor.connect(sink);
+          sink.connect(context.destination);
+        }
 
         ws.onopen = () => {
           if (!snapshotIsCurrent(snapshot)) {
@@ -418,10 +472,16 @@ export function useVoiceCapture({
             return;
           }
           ws.send(JSON.stringify({ type: 'start' }));
-          source.connect(processor);
-          processor.connect(sink);
-          sink.connect(context.destination);
+          streamStarted = true;
+          for (const pcm of bufferedPcm) ws.send(pcm);
+          bufferedPcm.length = 0;
+          bufferedPcmBytes = 0;
           clearTranscribeTimeout();
+          if (stopWhenConnectedRef.current) {
+            stopWhenConnectedRef.current = false;
+            finalize(ws, snapshot);
+            return;
+          }
           resourcesRef.current.transcribeTimeout = setTimeout(() => {
             if (
               snapshotIsCurrent(snapshot) &&
@@ -502,6 +562,7 @@ export function useVoiceCapture({
     baseUrl,
     clearTranscribeTimeout,
     fail,
+    finalize,
     finishWith,
     onError,
     onFinal,
@@ -515,36 +576,18 @@ export function useVoiceCapture({
     const snapshot = snapshotRef.current;
     const ws = resourcesRef.current.ws;
     if (!snapshot || !ws || ws.readyState !== WebSocket.OPEN) {
+      if (snapshot && statusRef.current === 'connecting') {
+        if (resourcesRef.current.processor) teardownAudio();
+        stopWhenConnectedRef.current = true;
+        clearTranscribeTimeout();
+        return;
+      }
       abort();
       return;
     }
     if (statusRef.current === 'transcribing') return;
-    // Release the microphone immediately; the final frame completes teardown.
-    teardownAudio();
-    setAudioLevel(0);
-    applyStatus('transcribing');
-    try {
-      ws.send(JSON.stringify({ type: 'stop' }));
-      clearTranscribeTimeout();
-      resourcesRef.current.transcribeTimeout = setTimeout(() => {
-        if (
-          snapshotIsCurrent(snapshot) &&
-          statusRef.current === 'transcribing'
-        ) {
-          fail('Transcription timed out.', snapshot);
-        }
-      }, TRANSCRIPTION_TIMEOUT_MS);
-    } catch {
-      fail('Failed to finalize voice transcription.', snapshot);
-    }
-  }, [
-    abort,
-    applyStatus,
-    clearTranscribeTimeout,
-    fail,
-    snapshotIsCurrent,
-    teardownAudio,
-  ]);
+    finalize(ws, snapshot);
+  }, [abort, clearTranscribeTimeout, finalize, teardownAudio]);
 
   useEffect(() => {
     mountedRef.current = true;
