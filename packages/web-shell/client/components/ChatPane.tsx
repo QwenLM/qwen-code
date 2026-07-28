@@ -732,6 +732,8 @@ export function ChatPane({
           followupState={followupState}
           onAcceptFollowup={onAcceptFollowup}
           onDismissFollowup={onDismissFollowup}
+          sessionId={connection.sessionId}
+          atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
         />
         {CustomComposerFooter && (
