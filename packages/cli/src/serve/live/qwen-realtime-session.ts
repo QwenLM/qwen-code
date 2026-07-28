@@ -103,6 +103,15 @@ export interface RealtimeResponseEvent extends RealtimeEventContext {
   status?: string;
 }
 
+export type RealtimeResponseAuthority =
+  | 'untrusted_input'
+  | 'delegate_result'
+  | 'coordinator_update';
+
+export interface RealtimeResponseCreatedEvent extends RealtimeResponseEvent {
+  authority: RealtimeResponseAuthority;
+}
+
 export interface RealtimeOutputTextEvent extends RealtimeResponseEvent {
   itemId?: string;
   text: string;
@@ -167,7 +176,7 @@ export interface QwenRealtimeCallbacks {
   ) => void;
   onFunctionArgumentsDelta?: (event: RealtimeFunctionArgumentsEvent) => void;
   onDelegateCall?: (event: RealtimeDelegateCall) => void;
-  onResponseCreated?: (event: RealtimeResponseEvent) => void;
+  onResponseCreated?: (event: RealtimeResponseCreatedEvent) => void;
   onResponseDone?: (event: RealtimeResponseEvent) => void;
   onBargeIn?: (event: RealtimeResponseEvent) => void;
   onRateLimit?: (event: RealtimeRateLimitEvent) => void;
@@ -291,11 +300,6 @@ interface PendingFunctionCall {
   pendingOutput?: string;
   origin: 'provider' | 'transcript_fallback';
 }
-
-type ResponseAuthority =
-  | 'untrusted_input'
-  | 'delegate_result'
-  | 'coordinator_update';
 
 interface ProviderMessage extends Record<string, unknown> {
   type?: unknown;
@@ -534,10 +538,10 @@ export function openQwenRealtimeSession(
     let activeAudioResponseId: string | undefined;
     let responseCreatePending = false;
     let pendingResponseAuthority:
-      | Exclude<ResponseAuthority, 'untrusted_input'>
+      | Exclude<RealtimeResponseAuthority, 'untrusted_input'>
       | undefined;
     let pendingAuthorizedOutput: string | undefined;
-    let activeResponseAuthority: ResponseAuthority | undefined;
+    let activeResponseAuthority: RealtimeResponseAuthority | undefined;
     let activeAuthorizedOutput: string | undefined;
     let authorizedToolReplayCount = 0;
     let routingToolSuppressed = false;
@@ -655,11 +659,29 @@ export function openQwenRealtimeSession(
         : undefined;
     };
 
+    const authorizedDeliveryError = (): QwenRealtimeError =>
+      new QwenRealtimeError(
+        'Realtime failed before the authorized Coordinator response was fully delivered.',
+        'authorized_response_failed',
+        true,
+        { kind: 'protocol' },
+      );
+
+    const hasPendingAuthorizedDelivery = (): boolean =>
+      responseCreatePending ||
+      (activeResponseId !== undefined &&
+        activeResponseAuthority !== undefined &&
+        activeResponseAuthority !== 'untrusted_input');
+
     function fail(error: QwenRealtimeError): void {
       if (terminal) return;
       const inputLossError = pendingInputLossError();
       const reportedError =
-        error.kind !== 'protocol' && inputLossError ? inputLossError : error;
+        error.kind !== 'protocol' && hasPendingAuthorizedDelivery()
+          ? authorizedDeliveryError()
+          : error.kind !== 'protocol' && inputLossError
+            ? inputLossError
+            : error;
       terminal = true;
       clearConnectTimer();
       removeAbortListener();
@@ -729,17 +751,15 @@ export function openQwenRealtimeSession(
     };
 
     const sendResponseCreate = (
-      authority: Exclude<ResponseAuthority, 'untrusted_input'>,
+      authority: Exclude<RealtimeResponseAuthority, 'untrusted_input'>,
       authorizedOutput?: string,
     ): boolean => {
       if (responseCreatePending || activeResponseId) return false;
+      responseCreatePending = true;
+      pendingResponseAuthority = authority;
+      pendingAuthorizedOutput = authorizedOutput;
       if (!setRoutingToolEnabled(false)) return false;
       const sent = sendJson({ type: 'response.create' });
-      if (sent) {
-        responseCreatePending = true;
-        pendingResponseAuthority = authority;
-        pendingAuthorizedOutput = authorizedOutput;
-      }
       return sent;
     };
 
@@ -1551,10 +1571,12 @@ export function openQwenRealtimeSession(
             );
             break;
           }
+          const responseAuthority: RealtimeResponseAuthority =
+            responseCreatePending
+              ? (pendingResponseAuthority ?? 'untrusted_input')
+              : 'untrusted_input';
           activeResponseId = responseId;
-          activeResponseAuthority = responseCreatePending
-            ? (pendingResponseAuthority ?? 'untrusted_input')
-            : 'untrusted_input';
+          activeResponseAuthority = responseAuthority;
           activeAuthorizedOutput = responseCreatePending
             ? pendingAuthorizedOutput
             : undefined;
@@ -1580,6 +1602,7 @@ export function openQwenRealtimeSession(
               ...(responseInputItemId
                 ? { inputItemId: responseInputItemId }
                 : {}),
+              authority: responseAuthority,
               status: optionalString(response?.['status']),
             }),
           );
@@ -2193,6 +2216,10 @@ export function openQwenRealtimeSession(
       clearConnectTimer();
       removeAbortListener();
       if (closedByClient || terminal) return;
+      if (hasPendingAuthorizedDelivery()) {
+        fail(authorizedDeliveryError());
+        return;
+      }
       const inputLossError = pendingInputLossError();
       if (inputLossError) {
         fail(inputLossError);

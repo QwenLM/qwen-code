@@ -2031,6 +2031,57 @@ describe('LiveSessionCoordinator', () => {
     expect(realtime.close).toHaveBeenCalledOnce();
   });
 
+  it('stops after an adapter-authorized replay without inventing an input tail', async () => {
+    const harness = makeHarness();
+    const call = { epoch: 1, callId: 'call-authorized-replay' };
+    await harness.coordinator.start({ ...call, mode: 'new' });
+    const callbacks = harness.callbacks!;
+
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'input-response',
+      authority: 'untrusted_input',
+    });
+    callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'input-response',
+      callId: 'input-call',
+      request: '完成任务',
+    });
+    await vi.waitFor(() =>
+      expect(harness.realtime.submitFunctionCallOutput).toHaveBeenCalledOnce(),
+    );
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'input-response',
+      status: 'completed',
+    });
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'authorized-response',
+      authority: 'delegate_result',
+    });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'authorized-response',
+      status: 'completed',
+    });
+    callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'adapter-replay-response',
+      authority: 'delegate_result',
+    });
+    callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'adapter-replay-response',
+      status: 'completed',
+    });
+
+    await expect(harness.coordinator.stop(call)).resolves.toBeUndefined();
+    expect(harness.realtime.commitInputAudio).not.toHaveBeenCalled();
+    expect(harness.realtime.close).toHaveBeenCalledOnce();
+  });
+
   it('does not create a Coordinator for committed noise with an empty transcript', async () => {
     const harness = makeHarness();
     const call = { epoch: 1, callId: 'call-empty-transcript' };
@@ -2074,6 +2125,7 @@ describe('LiveSessionCoordinator', () => {
           callEpoch: 1,
           responseId: 'empty-response',
           inputItemId: 'empty-input',
+          authority: 'untrusted_input',
         });
       }
       callbacks.onInputTranscriptDone?.({
@@ -2086,6 +2138,7 @@ describe('LiveSessionCoordinator', () => {
           callEpoch: 1,
           responseId: 'empty-response',
           inputItemId: 'empty-input',
+          authority: 'untrusted_input',
         });
       }
 
@@ -2507,6 +2560,7 @@ describe('LiveSessionCoordinator', () => {
     oldCallbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'response-remote',
+      authority: 'untrusted_input',
     });
     oldCallbacks.onInputTranscriptDone?.({
       callEpoch: 1,
@@ -2605,6 +2659,7 @@ describe('LiveSessionCoordinator', () => {
         callbacks.onResponseCreated?.({
           callEpoch: 1,
           responseId: 'ordinary-response',
+          authority: 'untrusted_input',
         });
       },
     },
@@ -2712,6 +2767,7 @@ describe('LiveSessionCoordinator', () => {
         callbacks.onResponseCreated?.({
           callEpoch: 1,
           responseId: 'response-authorized-answer',
+          authority: 'delegate_result',
         });
       }
 
@@ -2749,6 +2805,7 @@ describe('LiveSessionCoordinator', () => {
     callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'response-authorized-answer-failed',
+      authority: 'delegate_result',
     });
     harness.host.setCallState.mockClear();
 
@@ -2901,6 +2958,7 @@ describe('LiveSessionCoordinator', () => {
     callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'speech-response',
+      authority: 'untrusted_input',
     });
     callbacks.onInputTranscriptDone?.({
       callEpoch: 1,
@@ -2926,6 +2984,7 @@ describe('LiveSessionCoordinator', () => {
     callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'speech-authorized-response',
+      authority: 'delegate_result',
     });
     callbacks.onResponseDone?.({
       callEpoch: 1,
@@ -2957,6 +3016,7 @@ describe('LiveSessionCoordinator', () => {
     callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'active-response',
+      authority: 'untrusted_input',
     });
     await vi.advanceTimersByTimeAsync(50);
     expect(oldRealtime.close).not.toHaveBeenCalled();
@@ -2994,6 +3054,7 @@ describe('LiveSessionCoordinator', () => {
     callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'delegate-initial',
+      authority: 'untrusted_input',
     });
     callbacks.onDelegateCall?.({
       callEpoch: 1,
@@ -3021,6 +3082,7 @@ describe('LiveSessionCoordinator', () => {
     callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'delegate-authorized-followup',
+      authority: 'delegate_result',
     });
     expect(oldRealtime.close).not.toHaveBeenCalled();
     callbacks.onResponseDone?.({

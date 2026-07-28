@@ -1633,7 +1633,12 @@ describe('qwen-realtime-session', () => {
     const socket = new FakeSocket();
     const onDelegateCall = vi.fn();
     const onError = vi.fn();
-    const session = await connect(socket, { onDelegateCall, onError });
+    const onResponseCreated = vi.fn();
+    const session = await connect(socket, {
+      onDelegateCall,
+      onError,
+      onResponseCreated,
+    });
     expect(session.sendCoordinatorUpdate('后台任务已经完成。')).toBe(true);
     socket.message({
       type: 'response.created',
@@ -1667,8 +1672,75 @@ describe('qwen-realtime-session', () => {
     expect(sentJson(socket, socket.sent.length - 1)).toMatchObject({
       type: 'response.create',
     });
+    socket.message({
+      type: 'response.created',
+      event_id: 'trusted-replay-created',
+      response: { id: 'trusted-replay-response', status: 'in_progress' },
+    });
+    expect(onResponseCreated).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ authority: 'coordinator_update' }),
+    );
+    expect(onResponseCreated).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ authority: 'delegate_result' }),
+    );
     session.close();
   });
+
+  it.each([false, true])(
+    'fails closed when a cached authorized replay disconnects (created: %s)',
+    async (created) => {
+      const socket = new FakeSocket();
+      const onError = vi.fn();
+      const session = await connect(socket, { onError });
+      expect(session.sendCoordinatorUpdate('后台任务已经完成。')).toBe(true);
+      socket.message({
+        type: 'response.created',
+        event_id: 'trusted-created-before-close',
+        response: {
+          id: 'trusted-response-before-close',
+          status: 'in_progress',
+        },
+      });
+      socket.message({
+        type: 'response.function_call_arguments.done',
+        event_id: 'trusted-tool-before-close',
+        response_id: 'trusted-response-before-close',
+        call_id: 'trusted-call-before-close',
+        name: 'delegate_to_coordinator',
+        arguments: '{}',
+      });
+      socket.message({
+        type: 'response.done',
+        event_id: 'trusted-done-before-close',
+        response: {
+          id: 'trusted-response-before-close',
+          status: 'completed',
+        },
+      });
+      if (created) {
+        socket.message({
+          type: 'response.created',
+          event_id: 'trusted-replay-created-before-close',
+          response: {
+            id: 'trusted-replay-response-before-close',
+            status: 'in_progress',
+          },
+        });
+      }
+
+      socket.emit('close', 1006, Buffer.from('socket lost'));
+
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'authorized_response_failed' }),
+      );
+      await expect(session.closed).resolves.toMatchObject({
+        reason: 'error',
+        error: expect.objectContaining({ code: 'authorized_response_failed' }),
+      });
+    },
+  );
 
   it('fails closed when an authorized response exceeds the cached-output replay limit', async () => {
     const socket = new FakeSocket();
@@ -2066,6 +2138,16 @@ describe('qwen-realtime-session', () => {
     const clientSession = await connect(clientSocket);
     clientSession.close();
     await expect(clientSession.closed).resolves.toEqual({ reason: 'client' });
+
+    const pendingClientSocket = new FakeSocket();
+    const pendingClientSession = await connect(pendingClientSocket);
+    expect(
+      pendingClientSession.sendCoordinatorUpdate('authorized response'),
+    ).toBe(true);
+    pendingClientSession.close();
+    await expect(pendingClientSession.closed).resolves.toEqual({
+      reason: 'client',
+    });
   });
 
   it('classifies a provider rate-limit close as transient before readiness', async () => {

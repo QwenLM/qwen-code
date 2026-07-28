@@ -607,12 +607,14 @@ export class LiveSessionCoordinator {
             this.maybeFinishGracefulStop(context);
           });
       },
-      onResponseCreated: ({ responseId, inputItemId }) => {
+      onResponseCreated: ({ responseId, inputItemId, authority }) => {
         if (!this.isCurrentSocket(context, generation)) return;
-        context.authorizedResponseInFlight =
-          context.authorizedResponsesPending > 0;
+        context.authorizedResponseInFlight = authority !== 'untrusted_input';
         if (context.authorizedResponseInFlight) {
-          context.authorizedResponsesPending -= 1;
+          context.authorizedResponsesPending = Math.max(
+            0,
+            context.authorizedResponsesPending - 1,
+          );
           context.activeUntrustedResponseId = undefined;
           context.activeUntrustedResponseInputItemId = undefined;
           context.untrustedResponsePending = false;
