@@ -50,14 +50,18 @@ const EXPLICIT_NEW_TASK_PATTERNS = [
   /brainstorm/i,
 ];
 
-interface TopicShiftDecision {
-  shouldSuggestNewSession: boolean;
+type SuggestionKind = 'btw' | 'new_session' | 'none';
+
+interface ComposerSuggestionDecision {
+  suggestion: SuggestionKind;
   confidence: number;
 }
 
 export interface NewSessionSuggestionState {
-  isVisible: boolean;
+  suggestion: Exclude<SuggestionKind, 'none'>;
+  confidence: number;
   classifiedInput: string;
+  sourceSessionId: string;
 }
 
 export interface UseNewSessionSuggestionOptions {
@@ -68,6 +72,7 @@ export interface UseNewSessionSuggestionOptions {
   contextUsageRatio: number;
   isRunning: boolean;
   dialogOpen: boolean;
+  hasAttachments: boolean | null;
   generateContent?: DaemonSessionActions['generateSessionContent'];
 }
 
@@ -119,11 +124,12 @@ function buildPrompt(params: {
     .map((message, index) => `${index + 1}. ${message.role}: ${message.text}`)
     .join('\n');
   return [
-    "You are deciding whether a user's new message still belongs in the current coding session.",
-    'Suggest starting a new session only when the new message is clearly a different task or topic, and continuing in the current session would likely add context noise or wasted token usage.',
-    'Be conservative. When in doubt, keep the current session.',
-    'Do NOT suggest a new session for follow-up questions, implementation continuations, debugging iterations, review follow-ups, or adjacent design discussion about the same repo, PR, bug, or feature.',
-    'Return JSON only with keys: shouldSuggestNewSession (boolean) and confidence (0-1 number).',
+    "You are deciding how a user's new message should be handled in the current coding session.",
+    'Choose "new_session" only when the message is clearly a different task or topic and continuing here would add context noise.',
+    'Choose "btw" only for a brief side question that can be answered without changing the main task or adding its answer to the main conversation context.',
+    'Choose "none" for follow-ups, implementation continuations, debugging iterations, review follow-ups, and adjacent discussion about the same repo, PR, bug, or feature.',
+    'Be conservative. When in doubt, choose "none".',
+    'Return JSON only with keys: suggestion ("btw", "new_session", or "none") and confidence (0-1 number).',
     '',
     `Context usage ratio: ${params.contextUsageRatio.toFixed(2)}`,
     `Visible message count: ${params.messageCount}`,
@@ -136,13 +142,26 @@ function buildPrompt(params: {
   ].join('\n');
 }
 
-function tryParseDecision(text: string): TopicShiftDecision | null {
+function tryParseDecision(text: string): ComposerSuggestionDecision | null {
   try {
-    const parsed = JSON.parse(text) as Partial<TopicShiftDecision>;
-    if (typeof parsed.shouldSuggestNewSession !== 'boolean') return null;
-    if (typeof parsed.confidence !== 'number') return null;
+    const parsed = JSON.parse(text) as Partial<ComposerSuggestionDecision>;
+    if (
+      parsed.suggestion !== 'btw' &&
+      parsed.suggestion !== 'new_session' &&
+      parsed.suggestion !== 'none'
+    ) {
+      return null;
+    }
+    if (
+      typeof parsed.confidence !== 'number' ||
+      !Number.isFinite(parsed.confidence) ||
+      parsed.confidence < 0 ||
+      parsed.confidence > 1
+    ) {
+      return null;
+    }
     return {
-      shouldSuggestNewSession: parsed.shouldSuggestNewSession,
+      suggestion: parsed.suggestion,
       confidence: parsed.confidence,
     };
   } catch {
@@ -150,7 +169,7 @@ function tryParseDecision(text: string): TopicShiftDecision | null {
   }
 }
 
-function parseDecision(text: string): TopicShiftDecision | null {
+function parseDecision(text: string): ComposerSuggestionDecision | null {
   const direct = tryParseDecision(text);
   if (direct) return direct;
   // Despite the JSON-only instruction, the model sometimes wraps a perfectly
@@ -176,6 +195,7 @@ export function useNewSessionSuggestion({
   contextUsageRatio,
   isRunning,
   dialogOpen,
+  hasAttachments,
   generateContent,
 }: UseNewSessionSuggestionOptions): UseNewSessionSuggestionReturn {
   const [suggestion, setSuggestion] =
@@ -280,10 +300,16 @@ export function useNewSessionSuggestion({
           const decision = parseDecision(text.trim());
           if (
             decision &&
-            decision.shouldSuggestNewSession &&
+            decision.suggestion !== 'none' &&
+            (decision.suggestion !== 'btw' || hasAttachments === false) &&
             decision.confidence >= MIN_CONFIDENCE
           ) {
-            setSuggestion({ isVisible: true, classifiedInput: trimmed });
+            setSuggestion({
+              suggestion: decision.suggestion,
+              confidence: decision.confidence,
+              classifiedInput: trimmed,
+              sourceSessionId: sessionId,
+            });
             return;
           }
           setSuggestion(null);
@@ -308,6 +334,7 @@ export function useNewSessionSuggestion({
     dialogOpen,
     enabled,
     generateContent,
+    hasAttachments,
     inputText,
     isRunning,
     recentMessages,

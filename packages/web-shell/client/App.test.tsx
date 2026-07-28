@@ -426,7 +426,7 @@ vi.mock('./components/ChatEditor', async () => {
         hasInput: () => testState.prompt.trim().length > 0,
         insertText: editorInsertText,
         submit: (input) => {
-          props.onSubmit(
+          const accepted = props.onSubmit(
             input?.text ?? testState.prompt,
             testState.promptImages,
             editorCommit,
@@ -434,6 +434,7 @@ vi.mock('./components/ChatEditor', async () => {
               ? { inputAnnotations: testState.inputAnnotations }
               : undefined,
           );
+          if (accepted) editorCommit();
         },
         // The panel focus effect calls editorRef.current?.focus() when a panel
         // closes with no pending approval (e.g. resuming a session).
