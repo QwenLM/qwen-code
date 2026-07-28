@@ -505,6 +505,10 @@
     "telemetry": {
       "type": "object",
       "properties": {
+        "userId": {
+          "description": "Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.",
+          "type": "string"
+        },
         "includeSensitiveSpanAttributes": {
           "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
           "type": "boolean",

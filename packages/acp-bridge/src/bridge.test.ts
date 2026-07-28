@@ -82,6 +82,7 @@ import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import {
   MID_TURN_QUEUE_DRAIN_METHOD,
   PROMPT_CANCEL_METHOD,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 
@@ -4922,6 +4923,74 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('waits for custom channel teardown when connection construction fails', async () => {
+    const constructionError = new Error('stream unavailable');
+    const teardown = deferred<void>();
+    const handle = makeChannel();
+    const killSync = vi.fn();
+    const kill = vi.fn(async () => {
+      await teardown.promise;
+      await handle.channel.kill();
+    });
+    const channel = {
+      ...handle.channel,
+      kill,
+      killSync,
+    };
+    Object.defineProperty(channel, 'stream', {
+      get: () => {
+        throw constructionError;
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => channel,
+    });
+    const settled = vi.fn();
+
+    const spawn = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    void spawn.then(settled, settled);
+
+    await vi.waitFor(() => {
+      expect(killSync).toHaveBeenCalledOnce();
+      expect(kill).toHaveBeenCalledOnce();
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).not.toHaveBeenCalled();
+
+    teardown.resolve();
+    await expect(spawn).rejects.toBe(constructionError);
+  });
+
+  it('reports both construction and custom channel teardown failures', async () => {
+    const constructionError = new Error('stream unavailable');
+    const teardownError = new Error('raw exit was not confirmed');
+    const handle = makeChannel();
+    const channel = {
+      ...handle.channel,
+      kill: vi.fn().mockRejectedValue(teardownError),
+      killSync: vi.fn(),
+    };
+    Object.defineProperty(channel, 'stream', {
+      get: () => {
+        throw constructionError;
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => channel,
+    });
+
+    const error = await bridge
+      .spawnOrAttach({ workspaceCwd: WS_A })
+      .catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([
+      constructionError,
+      teardownError,
+    ]);
+    await handle.channel.kill();
+  });
+
   it('kills the spawned channel and rejects when initialize fails', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
@@ -4987,6 +5056,67 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
     expect(handles[0]?.killed).toBe(true);
     expect(bridge.sessionCount).toBe(0);
+  });
+
+  it('keeps a channel kill failure as the stable shutdown result', async () => {
+    const handle = makeChannel();
+    const failure = new Error('raw exit was not confirmed');
+    handle.channel = {
+      ...handle.channel,
+      kill: vi.fn().mockRejectedValue(failure),
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const first = bridge.shutdown();
+    const second = bridge.shutdown();
+
+    expect(second).toBe(first);
+    await expect(first).rejects.toBe(failure);
+    handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+    await expect(bridge.shutdown()).rejects.toBe(failure);
+  });
+
+  it('waits for every live channel before reporting a shutdown failure', async () => {
+    const handles: ChannelHandle[] = [];
+    const teardowns = [deferred<void>(), deferred<void>()];
+    const factory: ChannelFactory = async () => {
+      const index = handles.length;
+      const handle = makeChannel({ sessionIdPrefix: `c${index}` });
+      handle.channel = {
+        ...handle.channel,
+        kill: vi.fn(() => teardowns[index]!.promise),
+      };
+      handles.push(handle);
+      return handle.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const retiring = bridge.killSession(first.sessionId).catch(() => undefined);
+    await vi.waitFor(() => expect(handles[0]!.channel.kill).toHaveBeenCalled());
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const failure = new Error('first channel was not reaped');
+    const shutdown = bridge.shutdown();
+    let shutdownSettled = false;
+    void shutdown.then(
+      () => {
+        shutdownSettled = true;
+      },
+      () => {
+        shutdownSettled = true;
+      },
+    );
+    teardowns[0]!.reject(failure);
+    await retiring;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(shutdownSettled).toBe(false);
+
+    teardowns[1]!.resolve();
+    await expect(shutdown).rejects.toBe(failure);
   });
 
   it('killAllSync force-kills the live channel mid-shutdown (BkUyD)', async () => {
@@ -7066,6 +7196,103 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('clears the Guard wait owner when a queued prompt is promoted', async () => {
+      let resolveFirst!: () => void;
+      const firstDone = new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let resolveSecond!: () => void;
+      const secondDone = new Promise<void>((resolve) => {
+        resolveSecond = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          const text = (req.prompt[0] as { text?: string }).text;
+          if (text === 'first') await firstDone;
+          if (text === 'second') await secondDone;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { promptId: 'promotion-owner' },
+      );
+      const second = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { promptId: 'promoted-prompt' },
+      );
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+          { promptId: 'promotion-owner', state: 'running' },
+          { promptId: 'promoted-prompt', state: 'queued' },
+        ]);
+      });
+      await expect(
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          {
+            sessionId: session.sessionId,
+            promptId: 'promotion-owner',
+          },
+        ),
+      ).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+
+      resolveFirst();
+      await first;
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+          { promptId: 'promoted-prompt', state: 'running' },
+        ]);
+      });
+
+      const third = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'third' }],
+        },
+        undefined,
+        { promptId: 'removed-after-promotion' },
+      );
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+      expect(
+        bridge.removePendingPrompt(
+          session.sessionId,
+          'removed-after-promotion',
+        ),
+      ).toEqual({ removed: true });
+      expect(
+        handle.agent.extMethodCalls.some(
+          (call) => call.method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+        ),
+      ).toBe(false);
+
+      resolveSecond();
+      await second;
+      await expect(third).rejects.toBeDefined();
+      await bridge.shutdown();
+    });
+
     it('removePendingPrompt aborts a queued prompt and removes it from the list', async () => {
       let resolveFirst: (() => void) | undefined;
       const firstDone = new Promise<void>((r) => {
@@ -7122,6 +7349,18 @@ describe('createAcpSessionBridge', () => {
       expect(queuedId).toBe('prompt-removed');
 
       await expect(
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          {
+            sessionId: session.sessionId,
+            promptId: 'prompt-running',
+          },
+        ),
+      ).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+      await expect(
         handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
           sessionId: session.sessionId,
           todoStopGuardWatchQueuedPrompt: true,
@@ -7138,7 +7377,10 @@ describe('createAcpSessionBridge', () => {
         await vi.waitFor(() => {
           expect(handle.agent.extMethodCalls).toContainEqual({
             method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
-            params: { sessionId: session.sessionId },
+            params: {
+              sessionId: session.sessionId,
+              promptId: 'prompt-running',
+            },
           });
         });
         await vi.waitFor(() => {
@@ -7484,12 +7726,22 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('publishes a deadline turn_error, unlocks the FIFO, and clears active state when the agent wedges (DAEMON-003)', async () => {
+      let markFollowupStarted!: () => void;
+      const followupStarted = new Promise<void>((resolve) => {
+        markFollowupStarted = resolve;
+      });
+      let releaseFollowup!: () => void;
+      const followupGate = new Promise<void>((resolve) => {
+        releaseFollowup = resolve;
+      });
       const handle = makeChannel({
         promptImpl: async (request) => {
           const text = (request.prompt[0] as { text?: string }).text;
           if (text === 'wedge') {
             return new Promise<PromptResponse>(() => {});
           }
+          markFollowupStarted();
+          await followupGate;
           return { stopReason: 'end_turn' };
         },
         cancelImpl: () => new Promise<void>(() => {}),
@@ -7528,17 +7780,27 @@ describe('createAcpSessionBridge', () => {
         expect(handle.agent.cancelCalls.length).toBeGreaterThan(0);
       });
       // FIFO released: a follow-up prompt dispatches and completes.
+      const followup = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'after the wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-after' },
+      );
+      await followupStarted;
       await expect(
-        bridge.sendPrompt(
-          session.sessionId,
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
           {
             sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'after the wedge' }],
+            promptId: 'prompt-wedged',
           },
-          undefined,
-          { promptId: 'prompt-after' },
         ),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+      releaseFollowup();
+      await expect(followup).resolves.toEqual({ stopReason: 'end_turn' });
       expect(terminalsFor(events, 'prompt-wedged')).toHaveLength(1);
       await vi.waitFor(() => {
         expect(terminalsFor(events, 'prompt-after')).toHaveLength(1);

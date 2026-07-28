@@ -525,6 +525,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
@@ -591,6 +592,12 @@ function isDaemonRoute(method: string, path: string): boolean {
     method === 'GET' &&
     (/^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/channels\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    (method === 'PUT' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path)
   ) {
     return true;
   }
@@ -758,6 +765,65 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/channels\/?$/.test(path)) {
     await json(route, scenario.channels);
+    return;
+  }
+  const channelMutationMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/?$/,
+  );
+  if (channelMutationMatch && (method === 'PUT' || method === 'DELETE')) {
+    const name = decodeURIComponent(channelMutationMatch[1]);
+    if (
+      !isRecord(body) ||
+      body['expectedRevision'] !== scenario.channels.revision
+    ) {
+      await json(route, { error: 'Channel settings changed.' }, 409);
+      return;
+    }
+    const revision = nextRevision(scenario.channels.revision);
+    if (method === 'DELETE') {
+      const instances = { ...scenario.channels.instances };
+      delete instances[name];
+      scenario.channels = { revision, instances };
+      await json(route, {
+        snapshot: scenario.channels,
+        instance: {
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      });
+      return;
+    }
+    if (!isRecord(body['config'])) {
+      await badRequest(route, 'Invalid Channel configuration.');
+      return;
+    }
+    const previous = scenario.channels.instances[name];
+    const secrets = { ...(previous?.secrets ?? {}) };
+    if (isRecord(body['secrets'])) {
+      for (const [key, update] of Object.entries(body['secrets'])) {
+        if (!isRecord(update)) continue;
+        if (update['operation'] === 'clear') {
+          delete secrets[key];
+        } else if (update['operation'] === 'replace') {
+          secrets[key] = { present: true, source: 'literal' };
+        }
+      }
+    }
+    const instance = {
+      name,
+      config: body['config'],
+      secrets,
+      startsWithServe: previous?.startsWithServe ?? false,
+      runtime: previous?.runtime ?? ({ state: 'stopped' } as const),
+    };
+    scenario.channels = {
+      revision,
+      instances: { ...scenario.channels.instances, [name]: instance },
+    };
+    await json(route, { snapshot: scenario.channels, instance });
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
@@ -980,6 +1046,13 @@ function readStringField(body: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value
     : undefined;
+}
+
+function nextRevision(revision: string): string {
+  const numeric = Number(revision);
+  return Number.isSafeInteger(numeric) && numeric >= 0
+    ? String(numeric + 1)
+    : `${revision}-next`;
 }
 
 function isApprovalMode(mode: string): mode is DaemonApprovalMode {

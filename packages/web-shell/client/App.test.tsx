@@ -84,6 +84,7 @@ type ChatEditorTestProps = {
 type AddWorkspaceDialogTestProps = {
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
+  onPick?: () => Promise<string | undefined>;
   displayNameEnabled?: boolean;
   persistenceSupported?: boolean;
 };
@@ -213,6 +214,7 @@ const {
       addWorkspace: vi.fn(),
       addScratchWorkspace: vi.fn(),
       suggestWorkspacePaths: vi.fn(),
+      pickWorkspaceDirectory: vi.fn(),
     },
     mockMcp: {
       initialize: vi.fn().mockResolvedValue({ accepted: true }),
@@ -1632,6 +1634,7 @@ beforeEach(() => {
   mockWorkspaceActions.addWorkspace.mockReset();
   mockWorkspaceActions.addScratchWorkspace.mockReset();
   mockWorkspaceActions.suggestWorkspacePaths.mockReset();
+  mockWorkspaceActions.pickWorkspaceDirectory.mockReset();
   mockMcp.initialize.mockClear();
   mockMcp.initialize.mockResolvedValue({ accepted: true });
   mockMcp.reloadConfig.mockClear();
@@ -3634,6 +3637,14 @@ describe('App session callbacks', () => {
       displayNameEnabled: true,
       persistenceSupported: true,
     });
+    mockWorkspaceActions.pickWorkspaceDirectory.mockResolvedValue({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/tmp/selected',
+    });
+    await expect(
+      testState.latestAddWorkspaceDialogProps?.onPick?.(),
+    ).resolves.toBe('/tmp/selected');
 
     act(() => {
       testState.latestAddWorkspaceDialogProps?.onClose();

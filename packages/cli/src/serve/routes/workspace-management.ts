@@ -38,6 +38,10 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from '../managed-scratch-workspace.js';
+import {
+  NativeDirectoryPickerUnavailableError,
+  pickNativeDirectory,
+} from '../native-directory-picker.js';
 
 // Upper bound on total registered workspaces (startup + dynamic). Each
 // registration allocates a full runtime (bridge, channel factory, sub-session
@@ -66,6 +70,9 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
+  pickWorkspaceDirectory?: (
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
 }
 
 export interface WorkspaceRemovalActivity {
@@ -113,7 +120,10 @@ export function registerWorkspaceManagementRoutes(
     workspaceRegistrationStore,
     getAcpHandle,
     runtimeRemoval,
+    pickWorkspaceDirectory: pickWorkspaceDirectoryOverride,
   } = deps;
+  const pickWorkspaceDirectory =
+    pickWorkspaceDirectoryOverride ?? pickNativeDirectory;
   // Serialize runtime addition, persistence promotion/forget, updates, and
   // removal by canonical cwd so conflicting management mutations cannot cross
   // their validation and persistence commit points concurrently.
@@ -429,6 +439,42 @@ export function registerWorkspaceManagementRoutes(
         suggestions,
         truncated,
       });
+    },
+  );
+
+  app.post(
+    '/workspace-directory-picker',
+    mutate(),
+    async (req: Request, res: Response) => {
+      const controller = new AbortController();
+      res.on('close', () => controller.abort());
+      try {
+        const path = await pickWorkspaceDirectory(controller.signal);
+        res.status(200).json({
+          kind: 'workspace-directory-picker',
+          selected: path !== undefined,
+          ...(path === undefined ? {} : { path }),
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (error instanceof NativeDirectoryPickerUnavailableError) {
+          writeStderrLine(
+            `qwen serve: native directory picker unavailable: ${detail}`,
+          );
+          res.status(501).json({
+            error: 'Native directory picker is unavailable',
+            code: 'directory_picker_unavailable',
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: native directory picker failed: ${detail}`,
+        );
+        res.status(500).json({
+          error: 'Failed to open native directory picker',
+          code: 'directory_picker_failed',
+        });
+      }
     },
   );
 
