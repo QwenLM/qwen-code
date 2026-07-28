@@ -348,7 +348,7 @@ function sanitizeErrorText(raw: unknown, apiKey?: string): string {
   let text =
     typeof raw === 'string'
       ? raw
-      : raw instanceof Uint8Array
+      : Buffer.isBuffer(raw) || raw instanceof Uint8Array
         ? Buffer.from(raw).toString('utf8')
         : 'Qwen Realtime request failed.';
   if (apiKey) text = text.split(apiKey).join('[REDACTED]');
@@ -2128,6 +2128,7 @@ export function openQwenRealtimeSession(
       const code = optionalFiniteNumber(args[0]);
       const reason = sanitizeErrorText(args[1], config.apiKey);
       const suffix = code ? ` (${code}${reason ? `: ${reason}` : ''})` : '';
+      const reasonKind = classifyRealtimeErrorKind(undefined, reason);
       const error = new QwenRealtimeError(
         `Realtime connection closed unexpectedly${suffix}.`,
         'connection_closed',
@@ -2136,7 +2137,7 @@ export function openQwenRealtimeSession(
           kind:
             code !== undefined && [1001, 1006, 1011, 1012, 1013].includes(code)
               ? 'transient'
-              : 'protocol',
+              : reasonKind,
           closeCode: code,
         },
       );

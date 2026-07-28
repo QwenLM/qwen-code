@@ -1967,4 +1967,30 @@ describe('qwen-realtime-session', () => {
     clientSession.close();
     await expect(clientSession.closed).resolves.toEqual({ reason: 'client' });
   });
+
+  it('classifies a provider rate-limit close as transient before readiness', async () => {
+    const socket = new FakeSocket();
+    const opening = openQwenRealtimeSession(
+      {
+        endpoint: 'https://dashscope.example/v1',
+        apiKey: 'secret-key',
+        model: 'qwen3.5-omni-plus-realtime',
+        callEpoch: 1,
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+
+    socket.emit(
+      'close',
+      1007,
+      Buffer.from('Requests rate limit exceeded, please try again later.'),
+    );
+
+    await expect(opening).rejects.toMatchObject({
+      code: 'connection_closed',
+      kind: 'transient',
+      closeCode: 1007,
+    });
+  });
 });
