@@ -914,6 +914,57 @@ describe('SessionWriterLease', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('rejects a dangling transcript symlink introduced before sealing', async () => {
+    const fixture = await createFixture('dangling-seal-session');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const activeRaw = await fs.readFile(lockPath, 'utf8');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.symlink(
+      `${fixture.transcriptPath}.missing`,
+      fixture.transcriptPath,
+    );
+
+    await expect(lease.sealForHandoff()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(activeRaw);
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('rejects a dangling transcript symlink before certified takeover', async () => {
+    const fixture = await createFixture('dangling-takeover-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const sealedRaw = await fs.readFile(lockPath, 'utf8');
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.symlink(
+      `${fixture.transcriptPath}.missing`,
+      fixture.transcriptPath,
+    );
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+        takeoverPolicy: 'certified',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(sealedRaw);
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('detects an equal-length atomic transcript replacement', async () => {
     const fixture = await createFixture();
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
@@ -1217,6 +1268,29 @@ describe('SessionWriterLease', () => {
     await expect(first.sealForHandoff()).resolves.toBeUndefined();
     expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
       schema_version: 2,
+      state: 'sealed',
+    });
+  });
+
+  it('reconciles a sealing claim link error after effect', async () => {
+    const fixture = await createFixture('sealed-claim-link-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    claimInstallFault.path = `${lockPath}.claim`;
+    claimInstallFault.afterInstall = () => {
+      throw Object.assign(new Error('injected error after claim link'), {
+        code: 'EIO',
+      });
+    };
+
+    await expect(first.sealForHandoff()).resolves.toBeUndefined();
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
       state: 'sealed',
     });
   });
@@ -1627,6 +1701,36 @@ describe('SessionWriterLease', () => {
     });
     expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
       schema_version: 2,
+      state: 'active',
+      owner_id: replacement.ownerId,
+    });
+    await replacement.release();
+  });
+
+  it('reconciles a takeover claim link error after effect', async () => {
+    const fixture = await createFixture('takeover-claim-link-session');
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.sealForHandoff();
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    claimInstallFault.path = `${lockPath}.claim`;
+    claimInstallFault.afterInstall = () => {
+      throw Object.assign(new Error('injected error after claim link'), {
+        code: 'EIO',
+      });
+    };
+
+    const replacement = await SessionWriterLease.acquire({
+      ...fixture.options,
+      reclaimPolicy: 'never',
+      takeoverPolicy: 'certified',
+    });
+    await expect(fs.lstat(`${lockPath}.claim`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
       state: 'active',
       owner_id: replacement.ownerId,
     });

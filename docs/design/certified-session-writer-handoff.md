@@ -17,6 +17,9 @@ managed child can replace its active lock with a sealed record. A trusted
 managed replacement can take ownership only after validating that record
 against the exact transcript requested by the new Config.
 
+Transcript paths must be absent or resolve to the same regular file opened for
+the proof. A dangling symlink is not treated as an absent transcript.
+
 The protocol remains gated by `experimental.sessionWriterLease`, which is
 disabled by default and snapshotted at ACP process startup. Standalone ACP,
 interactive, and headless recorders do not gain certified takeover. Normal
@@ -72,9 +75,10 @@ The fixed claim path is:
 
 It serializes the two transitions that temporarily remove the primary path:
 active-to-sealed and sealed-to-active. The claim is created with the existing
-write-sync-and-hard-link primitive. A claim is never reclaimed by PID,
-hostname, or age. Any pre-existing claim returns
-`session_writer_unavailable`; manual cleanup is allowed only after an
+write-sync-and-hard-link primitive. Ambiguous link errors are reconciled
+against the exact claim bytes before the transition continues or cleans up. A
+claim is never reclaimed by PID, hostname, or age. Any pre-existing claim
+returns `session_writer_unavailable`; manual cleanup is allowed only after an
 authoritative external writer fence.
 
 Ordinary acquisition checks the claim before every attempt to install a

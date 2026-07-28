@@ -397,6 +397,18 @@ function sameTranscriptState(
   );
 }
 
+async function assertTranscriptPathMissing(filePath: string): Promise<void> {
+  try {
+    await fs.lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  throw new SessionWriterUnavailableError({
+    cause: new Error('Session transcript path is not a regular file'),
+  });
+}
+
 async function getTranscriptState(filePath: string): Promise<TranscriptState> {
   let handle: fs.FileHandle | undefined;
   try {
@@ -404,6 +416,7 @@ async function getTranscriptState(filePath: string): Promise<TranscriptState> {
       handle = await fs.open(filePath, 'r');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        await assertTranscriptPathMissing(filePath);
         return { exists: false, byteLength: 0 };
       }
       throw error;
@@ -478,6 +491,7 @@ async function openTranscriptProof(
       handle = await fs.open(filePath, 'r');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        await assertTranscriptPathMissing(filePath);
         return {
           state: { exists: false, byteLength: 0 },
           sha256: createHash('sha256').digest('hex'),
@@ -668,8 +682,9 @@ async function installLockRecord(
   const temporaryPath = `${lockPath}.${record.owner_id}.tmp`;
   let handle: fs.FileHandle | undefined;
   try {
+    const recordRaw = JSON.stringify(record);
     handle = await fs.open(temporaryPath, 'wx', 0o600);
-    await handle.writeFile(JSON.stringify(record), 'utf8');
+    await handle.writeFile(recordRaw, 'utf8');
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -677,7 +692,14 @@ async function installLockRecord(
       await fs.link(temporaryPath, lockPath);
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      const state = await inspectExactRecord(lockPath, recordRaw);
+      if (state === 'exact') return true;
+      if (
+        state === 'other' ||
+        (error as NodeJS.ErrnoException).code === 'EEXIST'
+      ) {
+        return false;
+      }
       throw error;
     }
   } catch (error) {
