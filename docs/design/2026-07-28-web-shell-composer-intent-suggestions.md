@@ -8,7 +8,7 @@ sending a substantial new topic in a fresh session.
 
 The composer continues to show at most one non-blocking action. A valid
 `none` decision renders nothing. Invalid, failed, or cancelled classifications
-also render nothing, but remain distinguishable from a valid negative result.
+also render nothing.
 
 ## Decision contract
 

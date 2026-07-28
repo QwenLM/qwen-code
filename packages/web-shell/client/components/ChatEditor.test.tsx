@@ -24,6 +24,7 @@ Element.prototype.scrollIntoView = vi.fn();
 
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
+  pastedImages: [] as Array<{ data: string; media_type: string }>,
   removeTopTag: vi.fn(),
 }));
 
@@ -74,7 +75,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         removeInlineTags: vi.fn(),
         submit: vi.fn(),
       },
-      pastedImages: [],
+      pastedImages: mockComposerCoreState.pastedImages,
       removeImage: vi.fn(),
       composerTags: mockComposerCoreState.composerTags,
       removeTopTag: mockComposerCoreState.removeTopTag,
@@ -158,11 +159,13 @@ afterEach(() => {
     portalRoot.remove();
   }
   mockComposerCoreState.composerTags = [];
+  mockComposerCoreState.pastedImages = [];
   mockComposerCoreState.removeTopTag.mockReset();
 });
 
 function renderChatEditor(props: {
   composerTags?: WebShellComposerTag[];
+  pastedImages?: Array<{ data: string; media_type: string }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -179,6 +182,7 @@ function renderChatEditor(props: {
 }) {
   const {
     composerTags,
+    pastedImages,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -186,6 +190,9 @@ function renderChatEditor(props: {
   } = props;
   if (composerTags) {
     mockComposerCoreState.composerTags = composerTags;
+  }
+  if (pastedImages) {
+    mockComposerCoreState.pastedImages = pastedImages;
   }
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
@@ -262,6 +269,13 @@ describe('ChatEditor attachment reporting', () => {
       onAttachmentsChange: onTaggedAttachmentsChange,
     });
     expect(onTaggedAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const onImageAttachmentsChange = vi.fn();
+    renderChatEditor({
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+      onAttachmentsChange: onImageAttachmentsChange,
+    });
+    expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
   });
 });
 
