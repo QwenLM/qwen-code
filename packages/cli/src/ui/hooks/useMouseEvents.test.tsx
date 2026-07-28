@@ -85,11 +85,13 @@ describe('useMouseEvents', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.clearAllMocks();
     stdin.removeAllListeners();
   });
 
   it('keeps terminal mouse mode enabled until all subscribers are inactive', () => {
+    const processOnSpy = vi.spyOn(process, 'on');
     const { rerender, unmount } = renderHook(
       ({ firstActive, secondActive }) =>
         useTwoMouseSubscribers(firstActive, secondActive),
@@ -101,6 +103,7 @@ describe('useMouseEvents', () => {
 
     expect(stdout.write).toHaveBeenCalledTimes(1);
     expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    expect(processOnSpy).not.toHaveBeenCalledWith('exit', expect.any(Function));
 
     stdout.write.mockClear();
     rerender({ firstActive: false, secondActive: true });

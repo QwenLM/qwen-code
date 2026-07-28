@@ -29,12 +29,14 @@ describe('<AlternateScreen />', () => {
     });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     writeRaw.mockClear();
     setTTY(origIsTTY);
   });
 
   it('enters on mount and exits on unmount when stdout is a TTY', () => {
     setTTY(true);
+    const processOnSpy = vi.spyOn(process, 'on');
     const { unmount } = render(
       <AlternateScreen>
         <Text>x</Text>
@@ -43,6 +45,7 @@ describe('<AlternateScreen />', () => {
     expect(writeRaw).toHaveBeenCalledWith(
       expect.stringContaining(ENTER_ALT_SCREEN),
     );
+    expect(processOnSpy).not.toHaveBeenCalledWith('exit', expect.any(Function));
 
     writeRaw.mockClear();
     unmount();
