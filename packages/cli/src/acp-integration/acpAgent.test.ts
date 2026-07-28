@@ -1796,6 +1796,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    beginManagedShutdown: () => {
+      configs: Config[];
+      writerShutdown: Promise<void>;
+    };
     prompt: (args: Record<string, unknown>) => Promise<unknown>;
     cancel: (args: { sessionId: string }) => Promise<void>;
     extMethod: (
@@ -2071,6 +2075,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(mockRunExitCleanup).toHaveBeenCalledOnce();
   });
 
+  it('maps new-session rejection after managed shutdown begins', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      { privateParentCapability: 'expected-capability' },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+
+    await agent.beginManagedShutdown().writerShutdown;
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toMatchObject({
+      code: -32023,
+      data: { errorKind: 'session_writer_unavailable' },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('waits for an initializing managed Config after closing its writer', async () => {
     const innerConfig = await setupSessionMocks('managed-initializing-session');
     let releaseInitialization!: () => void;
@@ -2127,7 +2163,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(innerConfig.shutdown).toHaveBeenCalled();
 
     releaseInitialization();
-    await expect(newSessionResult).resolves.toBeInstanceOf(Error);
+    await expect(newSessionResult).resolves.toMatchObject({
+      code: -32023,
+      data: { errorKind: 'session_writer_unavailable' },
+    });
     await expect(agentPromise).resolves.toBeUndefined();
     expect(mockRunExitCleanup).toHaveBeenCalledOnce();
   });

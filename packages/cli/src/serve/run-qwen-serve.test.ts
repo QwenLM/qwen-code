@@ -7981,6 +7981,82 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('retries only the channel worker error when ACP process shutdown also fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-combined-error-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      pid: 1234,
+      channels: ['telegram'],
+      error: 'Channel worker did not exit after SIGKILL.',
+    });
+    worker.stop
+      .mockRejectedValueOnce(
+        new Error('Channel worker did not exit after SIGKILL.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    vi.spyOn(processRegistry, 'shutdown').mockRejectedValue(
+      new Error('ACP process shutdown failed'),
+    );
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+      expect(exitSpy).not.toHaveBeenCalled();
+
+      await signalListener!('SIGTERM');
+      expect(worker.stop).toHaveBeenCalledTimes(2);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
   it('bounds the logger flush before allowing a retryable close to reject', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-log-stuck-')),

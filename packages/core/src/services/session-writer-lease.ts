@@ -15,6 +15,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const LOCK_SCHEMA_VERSION = 1;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
+const RELEASE_PRECHECK_ATTEMPTS = 3;
+const RELEASE_PRECHECK_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
 const debugLogger = createDebugLogger('SESSION_WRITER_LEASE');
 
@@ -853,7 +855,7 @@ export class SessionWriterLease {
 
   private async releaseOnce(): Promise<void> {
     if (this.released) return;
-    await this.readOwnedLock();
+    await this.readOwnedLockForRelease();
     try {
       await fs.rename(this.lockPath, this.retiredPath);
       this.released = true;
@@ -882,6 +884,23 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError({
         cause: error instanceof Error ? error : undefined,
       });
+    }
+  }
+
+  private async readOwnedLockForRelease(): Promise<void> {
+    for (let attempt = 0; attempt < RELEASE_PRECHECK_ATTEMPTS; attempt++) {
+      try {
+        await this.readOwnedLock();
+        return;
+      } catch (error) {
+        if (
+          !(error instanceof SessionWriterUnavailableError) ||
+          attempt + 1 === RELEASE_PRECHECK_ATTEMPTS
+        ) {
+          throw error;
+        }
+      }
+      await delay(RELEASE_PRECHECK_RETRY_DELAY_MS);
     }
   }
 

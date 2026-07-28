@@ -6441,6 +6441,7 @@ async function runQwenServeImpl(
                     channelWorkerShutdownError !== undefined &&
                     channelWorkerManager?.state().enabled === true;
                   if (retryableChannelClose) {
+                    const retryableError = channelWorkerShutdownError!;
                     await flushDaemonLogBounded(
                       daemonLog,
                       DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
@@ -6448,8 +6449,8 @@ async function runQwenServeImpl(
                     closePromise = undefined;
                     shuttingDown = false;
                     channelControlDraining = false;
-                    retryableChannelWorkerShutdownErrors.add(finalErr!);
-                    rej(finalErr);
+                    retryableChannelWorkerShutdownErrors.add(retryableError);
+                    rej(retryableError);
                     return;
                   }
                   if (loggerPublished || loggerSignalOwned) {
@@ -6574,7 +6575,7 @@ async function runQwenServeImpl(
                     'ACP process registry shutdown error',
                     processRegistryError,
                   );
-                  bridgeShutdownError = processRegistryError;
+                  bridgeShutdownError ??= processRegistryError;
                 }
               })
               .finally(() => {

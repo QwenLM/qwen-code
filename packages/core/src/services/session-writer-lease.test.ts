@@ -36,6 +36,31 @@ import type {
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
 
+const lstatFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  remainingFailures: 0,
+  calls: 0,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    lstat: async (filePath: Parameters<typeof actual.lstat>[0]) => {
+      if (filePath === lstatFault.path) {
+        lstatFault.calls++;
+        if (lstatFault.remainingFailures > 0) {
+          lstatFault.remainingFailures--;
+          throw Object.assign(new Error('temporary I/O failure'), {
+            code: 'EIO',
+          });
+        }
+      }
+      return actual.lstat(filePath);
+    },
+  };
+});
+
 const helperPath = fileURLToPath(
   new URL('./session-writer-lease.test-helper.ts', import.meta.url),
 );
@@ -134,6 +159,9 @@ function record(
 }
 
 afterEach(async () => {
+  lstatFault.path = undefined;
+  lstatFault.remainingFailures = 0;
+  lstatFault.calls = 0;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -751,6 +779,23 @@ describe('SessionWriterLease', () => {
       await fs.unlink(lockPath);
     },
   );
+
+  it('retries a transient ownership precheck failure before release', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    lstatFault.path = lockPath;
+    lstatFault.remainingFailures = 1;
+
+    await expect(lease.release()).resolves.toBeUndefined();
+    expect(lstatFault.calls).toBe(2);
+    expect(lease.isReleased).toBe(true);
+    lstatFault.path = undefined;
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 
   it('never reclaims a dead local owner when managed policy is enabled', async () => {
     const fixture = await createFixture();

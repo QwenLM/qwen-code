@@ -2806,6 +2806,7 @@ describe('Server Config (config.ts)', () => {
         .shutdown({
           shutdownTelemetry: false,
           skipSessionWriter: true,
+          strictResourceCleanup: true,
         })
         .then(() => {
           shutdownSettled = true;
@@ -2820,6 +2821,84 @@ describe('Server Config (config.ts)', () => {
       releaseInitialization();
       await expect(initialize).resolves.toBeUndefined();
       await expect(shutdown).resolves.toBeUndefined();
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('does not let incomplete initialization block best-effort shutdown', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      const initializeInternal = vi
+        .spyOn(internal, 'initializeInternal')
+        .mockImplementation(async () => {
+          await initializationGate;
+          internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        });
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(stop).not.toHaveBeenCalled();
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    });
+
+    it('keeps strict shutdown waiting when best-effort shutdown starts first', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        await initializationGate;
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+
+      const initialize = config.initialize();
+      const bestEffortShutdown = config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+      let strictShutdownSettled = false;
+      const strictShutdown = config
+        .shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        })
+        .then(() => {
+          strictShutdownSettled = true;
+        });
+
+      await bestEffortShutdown;
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(strictShutdownSettled).toBe(false);
+
+      releaseInitialization();
+      await initialize;
+      await strictShutdown;
       expect(stop).toHaveBeenCalledOnce();
     });
 
