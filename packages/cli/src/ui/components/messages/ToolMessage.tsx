@@ -686,6 +686,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  visionBridgeNotice,
   detailedDisplay,
   status,
   availableTerminalHeight,
@@ -827,11 +828,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
     ? resultDisplay
     : undefined;
-  const visionBridgeNoticeText = visionBridgeNoticeDisplay
-    ? sanitizeTerminalText(
-        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
-      )
-    : undefined;
+  const visionBridgeNoticeText = [
+    visionBridgeNoticeDisplay
+      ? formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay)
+      : undefined,
+    visionBridgeNotice,
+  ]
+    .filter((notice): notice is string => notice !== undefined)
+    .map((notice) => sanitizeTerminalText(notice))
+    .join('\n');
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay
     : visionBridgeNoticeDisplay
