@@ -358,7 +358,10 @@ describe('RipGrepTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.returnDisplay).toBe('Found 1 match');
-      expect(result.llmContent).not.toContain('truncated');
+      // Case-insensitive so the guard covers both notice formats: the
+      // `[N lines truncated]` count and the `[Truncated by ripgrep's output
+      // limit: ...]` uncertainty notice, whose only match is capitalized.
+      expect(result.llmContent).not.toMatch(/truncat/i);
     });
 
     it('should preserve absolute result paths reported by ripgrep', async () => {
