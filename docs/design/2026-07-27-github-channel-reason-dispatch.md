@@ -22,19 +22,21 @@ unique event. A notification with `reason: review_requested` may therefore be
 returned again after unrelated activity.
 
 For `review_requested` and `assign`, the adapter reads the newest page of issue
-events (and the preceding page when the last page is partial, so the window
-covers the newest ~100 events rather than only the last page, which can hold a
-single event) and accepts only the latest matching direct-user event within the
-poll window that has not already been dispatched. A later removal or unassignment cancels the trigger. The
+events (and the preceding page when the last page is partial) and accepts only
+the latest matching direct-user event after the channel's installation floor
+that has not already been dispatched. This fixed floor allows delayed
+notifications without replaying pre-installation events. A later removal or
+unassignment cancels the trigger. Sticky direct reasons also check new comments
+for real mentions, so later conversation is not hidden by the old reason. The
 event actor becomes the envelope sender, so `senderPolicy` checks the person who
 requested the review or assignment instead of the PR or issue author. Team
 review requests fail closed because a notification does not prove that the bot
 belongs to the requested team.
 
 PR and issue bodies are labeled as untrusted data before they enter the prompt.
-Aggregated comments are filtered by sender policy before joining (except for
-`pairing` policy, where the envelope must reach `preflightInbound` so the
-pairing flow can trigger) and remain behind the normal mention gate. The
+Aggregated comments are filtered by sender policy before joining and remain
+behind the normal mention gate. Pairing-policy comments stay in per-sender
+envelopes so one sender can never authorize another sender's content. The
 envelope's `isMentioned` is computed from comment content: it is true when any
 shown comment mentions the bot, matching the per-comment lane's behavior.
 
@@ -45,7 +47,8 @@ The cursor keeps three bounded lists and a failure counter:
 - `dispatchedBodies` for first-contact issue or PR bodies
 - `dispatchedComments` for comment node IDs
 - `dispatchedEvents` for issue event node IDs
-- `failedAttempts` mapping notification IDs to consecutive failure counts
+- `failedAttempts` mapping notification IDs to consecutive failure counts,
+  with the maximum value marking terminal notifications
 
 New keys are saved immediately, so a process crash or a later mark-read failure
 does not repeat work already accepted by the channel. The lists are trimmed to
@@ -59,16 +62,15 @@ mark avoids swallowing activity that arrives during the poll.
 
 A notification that fails with a permanent GitHub error (a deleted or
 transferred subject returning 404/410, or a 403 permission error without
-rate-limit headers) is logged and skipped instead of being treated as a batch
-failure, so one dead thread cannot wedge the cursor and be re-fetched every
-poll. A 403 with `x-ratelimit-remaining: 0` is a rate limit and stays
-retryable via the cooldown branch.
+rate-limit headers) is logged and persisted as terminal instead of being
+treated as a batch failure. A 403 with `retry-after` or
+`x-ratelimit-remaining: 0` is a rate limit and stays retryable.
 
 Transient failures hold the batch open for at-least-once retry, bounded by a
 per-notification attempt counter persisted in the cursor. After 5 consecutive
-failures across polls, the notification is treated as terminal: an error
-comment is posted on the thread so the user has a visible signal, and the
-batch advances.
+failures across polls, the notification is persisted as terminal: an error
+comment is posted once so the user has a visible signal, and the batch
+advances. A successful retry clears its failure count.
 
 ## Bounds
 
@@ -83,9 +85,11 @@ The package test covers one contract per route plus the failure boundaries:
 - real mention gating for `mention` and aggregate routes
 - issue-event actor attribution for review and assignment
 - sticky reasons without a new matching issue event do not dispatch
+- mentions still dispatch under sticky direct reasons
 - per-sender aggregate filtering
+- per-sender pairing authorization
 - persisted comment dedup
-- processing failures remain unread without blocking later threads
+- bounded retries, success reset, and persistent terminal failures
 
 Run:
 

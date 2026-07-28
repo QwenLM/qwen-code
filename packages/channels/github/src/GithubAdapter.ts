@@ -16,6 +16,7 @@ interface GithubConfig extends ChannelConfig {
 
 interface GithubCursor {
   lastProcessedAt: string;
+  metaFloor?: string;
   /**
    * Thread keys (`chatId|threadId`) whose issue/PR body has already been fed as
    * a first-contact trigger. Dedupes body dispatch when a thread is re-fetched
@@ -26,7 +27,6 @@ interface GithubCursor {
   dispatchedBodies?: string[];
   dispatchedComments?: string[];
   dispatchedEvents?: string[];
-  skippedNotifications?: string[];
   failedAttempts?: Record<string, number>;
 }
 
@@ -62,6 +62,7 @@ interface LaneContext {
   issueNumber: number;
   lastReadAt: string | null;
   windowSince: string;
+  metaFloor: string;
   maxUpdatedAt: string;
   subjectTitle: string;
 }
@@ -103,11 +104,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;
     if (Number.isNaN(new Date(base.lastProcessedAt).getTime())) return null;
+    if (
+      base.metaFloor !== undefined &&
+      (typeof base.metaFloor !== 'string' ||
+        Number.isNaN(new Date(base.metaFloor).getTime()))
+    ) {
+      delete base.metaFloor;
+    }
     for (const key of [
       'dispatchedBodies',
       'dispatchedComments',
       'dispatchedEvents',
-      'skippedNotifications',
     ] as const) {
       if (base[key] !== undefined && !Array.isArray(base[key])) base[key] = [];
     }
@@ -192,6 +199,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   protected async pollOnce(): Promise<void> {
+    if (!this.cursor.metaFloor) {
+      this.cursor.metaFloor = this.cursor.lastProcessedAt;
+      this.saveCursor();
+    }
     const since = new Date(
       new Date(this.cursor.lastProcessedAt).getTime() - 1000,
     ).toISOString();
@@ -221,7 +232,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     let firstError: unknown;
     for (const notification of notifications) {
       const nKey = String(notification.id);
-      if (this.cursor.skippedNotifications?.includes(nKey)) continue;
+      if ((this.cursor.failedAttempts?.[nKey] ?? 0) >= MAX_FAILED_ATTEMPTS) {
+        continue;
+      }
       try {
         const url = notification.subject.url;
         const extracted = url ? this.extractFromSubjectUrl(url) : null;
@@ -233,6 +246,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             issueNumber,
             lastReadAt: notification.last_read_at,
             windowSince,
+            metaFloor: this.cursor.metaFloor,
             maxUpdatedAt,
             subjectTitle: notification.subject.title || '',
           };
@@ -249,6 +263,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 trigger,
                 'Trigger: review_requested. You were asked to review this pull request.',
               );
+            await this.processPerCommentLane(
+              ctx,
+              true,
+              'Trigger: mention. You were @mentioned in this thread.',
+              false,
+            );
           } else if (notification.reason === 'assign') {
             const isPr = threadId.startsWith('pr:');
             const trigger = await this.findMetaTrigger(ctx, 'assign');
@@ -261,6 +281,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                   ? 'Trigger: assign. You were assigned to this pull request.'
                   : 'Trigger: assign. You were assigned to this issue.',
               );
+            await this.processPerCommentLane(
+              ctx,
+              true,
+              'Trigger: mention. You were @mentioned in this thread.',
+              false,
+            );
           } else if (
             notification.reason === 'author' ||
             notification.reason === 'comment'
@@ -277,7 +303,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             );
           }
         }
+        if (this.cursor.failedAttempts?.[nKey] !== undefined) {
+          delete this.cursor.failedAttempts[nKey];
+          this.saveCursor();
+        }
       } catch (err) {
+        const attempts = (this.cursor.failedAttempts ??= {});
         if (err instanceof TerminalGithubError) {
           // A permanently failing subject must not wedge the batch: log and
           // skip it so the cursor still advances past it instead of the same
@@ -285,10 +316,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           process.stderr.write(
             `[Channel:${this.name}] skipping notification ${notification.id} (${notification.reason}): permanent GitHub error ${err.status}: ${err.message}\n`,
           );
-          this.recordDispatched('skippedNotifications', [nKey]);
+          attempts[nKey] = MAX_FAILED_ATTEMPTS;
+          this.saveCursor();
           continue;
         }
-        const attempts = (this.cursor.failedAttempts ??= {});
         attempts[nKey] = (attempts[nKey] ?? 0) + 1;
         this.saveCursor();
         if (attempts[nKey] >= MAX_FAILED_ATTEMPTS) {
@@ -304,9 +335,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               extracted.issueNumber,
             );
           }
-          this.recordDispatched('skippedNotifications', [nKey]);
-          delete attempts[nKey];
-          this.saveCursor();
           continue;
         }
         process.stderr.write(
@@ -325,7 +353,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       'dispatchedBodies',
       'dispatchedComments',
       'dispatchedEvents',
-      'skippedNotifications',
     ] as const) {
       this.cursor[field] = this.cursor[field]?.slice(-MAX_DISPATCHED);
     }
@@ -344,6 +371,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ctx: LaneContext,
     onlyMentioned: boolean,
     framing: string,
+    tryBody = true,
   ): Promise<void> {
     const {
       chatId,
@@ -397,12 +425,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           framing,
         ),
       };
-      this.recordDispatched('dispatchedComments', [dedupKey]);
       await this.handleInbound(envelope);
+      this.recordDispatched('dispatchedComments', [dedupKey]);
       if (isMentioned && this.gate.isAllowed(envelope.senderId))
         dispatchedMention = true;
     }
-    if (!dispatchedMention && !lastReadAt) {
+    if (tryBody && !dispatchedMention && !lastReadAt) {
       await this.tryFirstContactBody(ctx, framing);
     }
   }
@@ -467,7 +495,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (
         !candidate.created_at ||
         candidate.created_at > ctx.maxUpdatedAt ||
-        candidate.created_at <= ctx.windowSince
+        candidate.created_at <= ctx.metaFloor
       ) {
         return false;
       }
@@ -558,12 +586,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata,
     };
+    await this.handleInbound(envelope);
     this.recordDispatched('dispatchedEvents', [trigger.key]);
     this.recordDispatched('dispatchedBodies', [`${chatId}|${threadId}`]);
-    await this.handleInbound(envelope);
   }
 
   private async processAggregateLane(ctx: LaneContext): Promise<void> {
+    const framing = 'Trigger: new comments on a thread you follow.';
+    if (this.config.senderPolicy === 'pairing') {
+      await this.processPerCommentLane(ctx, false, framing, false);
+      return;
+    }
     const {
       chatId,
       threadId,
@@ -579,23 +612,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       windowSince,
       maxUpdatedAt,
     );
-    // For 'pairing', skip the isAllowed pre-filter so the envelope reaches
-    // preflightInbound where gate.check() triggers the pairing flow. The
-    // pre-filter stays for 'allowlist' (correct since round 1) and is a no-op
-    // for 'open'.
-    const skipSenderFilter = this.config.senderPolicy === 'pairing';
     const newComments = comments.filter((c) => {
       const key = this.eventKey(c);
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        (skipSenderFilter ||
-          this.gate.isAllowed((c.user?.login || 'unknown').toLowerCase()))
+        this.gate.isAllowed((c.user?.login || 'unknown').toLowerCase())
       );
     });
     if (newComments.length === 0) return;
     const shownComments = newComments.slice(-MAX_AGGREGATE_COMMENTS);
     const first = shownComments[0]!;
-    const framing = 'Trigger: new comments on a thread you follow.';
     const summary = this.buildCommentsSummary(newComments);
     const metadata = this.appendFraming(
       this.buildMetadata(chatId, threadId, subjectTitle),
@@ -629,11 +655,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata,
     };
+    await this.handleInbound(envelope);
     this.recordDispatched(
       'dispatchedComments',
       shownComments.map((comment) => this.eventKey(comment)),
     );
-    await this.handleInbound(envelope);
   }
 
   private async tryFirstContactBody(
@@ -674,8 +700,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         framing,
       ),
     };
-    this.recordDispatched('dispatchedBodies', [bodyKey]);
     await this.handleInbound(envelope);
+    this.recordDispatched('dispatchedBodies', [bodyKey]);
   }
 
   private async fetchNewComments(
@@ -780,7 +806,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const shown = comments.slice(-MAX_AGGREGATE_COMMENTS);
     const lines = shown.map((c) => {
       const who = c.user?.login || 'unknown';
-      const body = Array.from((c.body || '').trim().replace(/\s+/g, ' '))
+      const body = Array.from((c.body || '').trim())
         .slice(0, MAX_COMMENT_CHARS)
         .join('');
       return `- @${who}: ${body}`;
@@ -801,11 +827,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private recordDispatched(
-    field:
-      | 'dispatchedBodies'
-      | 'dispatchedComments'
-      | 'dispatchedEvents'
-      | 'skippedNotifications',
+    field: 'dispatchedBodies' | 'dispatchedComments' | 'dispatchedEvents',
     keys: string[],
   ): void {
     const list = this.cursor[field] ?? [];
