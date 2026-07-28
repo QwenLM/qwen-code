@@ -8606,6 +8606,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(bridge.calls[0]).toMatchObject({
         sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        sessionScope: 'thread',
       });
     });
 
