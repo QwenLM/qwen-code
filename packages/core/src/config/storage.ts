@@ -7,9 +7,13 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
 import { FatalConfigError } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const logger = createDebugLogger('storage');
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -33,6 +37,83 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
   );
 }
 
+/**
+ * Worktree sessions snapshot a project dir under
+ * `<runtimeBaseDir>/projects/<sanitizeCwd(worktreePath)>` whose transcripts
+ * point at the temp worktree. The worktree is deleted on exit (or lost on
+ * crash), but the snapshot dir is never removed, so
+ * `%TEMP%/qwen-*-sess-*` entries accumulate forever (#7906). Sweep the
+ * project dirs whose worktree sidecar points at a path that no longer
+ * exists. Anything that cannot prove itself stale (no sidecar, corrupted
+ * sidecar, live worktree) is kept; this never touches normal project dirs.
+ */
+export async function sweepStaleWorktreeProjects(
+  runtimeBaseDir: string,
+): Promise<string[]> {
+  const projectsDir = path.join(runtimeBaseDir, PROJECT_DIR_NAME);
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(projectsDir);
+  } catch {
+    return [];
+  }
+
+  const removed: string[] = [];
+  for (const entry of entries) {
+    const chatsDir = path.join(projectsDir, entry, 'chats');
+    let sidecarNames: string[];
+    try {
+      sidecarNames = (await fsp.readdir(chatsDir)).filter((name) =>
+        name.endsWith('.worktree.json'),
+      );
+    } catch {
+      continue;
+    }
+    if (sidecarNames.length === 0) continue;
+
+    // Every session under one project dir shares the same worktree root, so
+    // a single valid sidecar is enough to judge.
+    let worktreePath: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(
+        await fsp.readFile(path.join(chatsDir, sidecarNames[0]!), 'utf-8'),
+      );
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        typeof (parsed as Record<string, unknown>)['worktreePath'] === 'string'
+      ) {
+        worktreePath = (parsed as Record<string, string>)['worktreePath'];
+      }
+    } catch {
+      continue;
+    }
+    if (worktreePath === undefined) continue;
+
+    if (!fs.existsSync(worktreePath)) {
+      await fsp.rm(path.join(projectsDir, entry), {
+        recursive: true,
+        force: true,
+      });
+      removed.push(entry);
+      logger.debug(
+        `Removed stale worktree project snapshot ${entry} (worktree ${worktreePath} no longer exists)`,
+      );
+    }
+  }
+  return removed;
+}
+
+const staleWorktreeSweepStarted = new Set<string>();
+
+function scheduleStaleWorktreeSweep(runtimeBaseDir: string): void {
+  if (staleWorktreeSweepStarted.has(runtimeBaseDir)) return;
+  staleWorktreeSweepStarted.add(runtimeBaseDir);
+  void sweepStaleWorktreeProjects(runtimeBaseDir).catch((error: unknown) => {
+    logger.warn(`stale worktree project sweep failed: ${error}`);
+  });
+}
+
 export class Storage {
   private readonly targetDir: string;
   private readonly runtimeBaseDir: string;
@@ -53,6 +134,7 @@ export class Storage {
   ) {
     this.targetDir = targetDir;
     this.runtimeBaseDir = path.resolve(runtimeBaseDir);
+    scheduleStaleWorktreeSweep(this.runtimeBaseDir);
   }
 
   /**
