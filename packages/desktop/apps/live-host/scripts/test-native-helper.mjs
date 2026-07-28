@@ -5,6 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 
 const appDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const productionBuild = spawnSync(
+  process.execPath,
+  [join(appDir, 'scripts', 'build-native-helper.mjs')],
+  { stdio: 'inherit' },
+);
+if (productionBuild.status !== 0) {
+  process.exit(productionBuild.status ?? 1);
+}
 const temporaryDirectory = mkdtempSync(
   join(tmpdir(), 'qwen-live-native-test-'),
 );
