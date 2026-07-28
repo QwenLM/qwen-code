@@ -5,12 +5,20 @@ import {
 } from './interactive-card-types.js';
 
 describe('interactive card config', () => {
-  it('applies defaults and supports independent disabling', () => {
+  it('keeps omitted cards disabled while treating an object as opt-in', () => {
     expect(parseDingtalkInteractiveCardConfig(undefined)).toEqual({
+      enabled: false,
+      statusCard: { enabled: true },
+      questionCard: { enabled: true, timeoutMs: 300_000 },
+    });
+    expect(parseDingtalkInteractiveCardConfig({})).toEqual({
       enabled: true,
       statusCard: { enabled: true },
       questionCard: { enabled: true, timeoutMs: 300_000 },
     });
+  });
+
+  it('supports explicit and independent disabling', () => {
     expect(
       parseDingtalkInteractiveCardConfig({
         enabled: true,

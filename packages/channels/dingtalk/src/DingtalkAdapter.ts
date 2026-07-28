@@ -1364,21 +1364,10 @@ export class DingtalkChannel extends ChannelBase {
     if (!run || run.ownerId !== context.owner.id) {
       return { kind: 'unsupported' };
     }
-    if (this.questionCardController && this.interactionPresenter) {
-      return this.interactionPresenter.presentInput(context);
+    if (!this.questionCardController || !this.interactionPresenter) {
+      return { kind: 'unsupported' };
     }
-    try {
-      await this.sendMessage(
-        context.target.chatId,
-        'Interactive questions are disabled for this DingTalk channel, so this request was cancelled. Enable question cards and retry.',
-      );
-    } catch (error) {
-      process.stderr.write(
-        `[DingTalk:${this.name}] disabled question fallback failed: ${sanitizeLogText(String(error), 300)}\n`,
-      );
-    }
-    await context.respond({ outcome: { outcome: 'cancelled' } });
-    return { kind: 'handled' };
+    return this.interactionPresenter.presentInput(context);
   }
 
   /**

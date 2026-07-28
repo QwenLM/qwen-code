@@ -175,6 +175,7 @@ function createChannel(
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
+      interactiveCards: {},
       ...overrides,
     } as never,
     {} as never,
@@ -258,6 +259,28 @@ it('validates interactive card config in the adapter', () => {
   ).toThrow('questionCard.timeoutMs');
 });
 
+it('does not initialize or subscribe to cards when configuration is omitted', () => {
+  const channel = createChannel({ interactiveCards: undefined });
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+
+  expect([...client.callbacks.keys()]).toEqual(['robot']);
+  expect(
+    (
+      channel as unknown as {
+        interactionPresenter?: unknown;
+      }
+    ).interactionPresenter,
+  ).toBeUndefined();
+  expect(
+    (channel as unknown as { statusCardController?: unknown })
+      .statusCardController,
+  ).toBeUndefined();
+  expect(
+    (channel as unknown as { questionCardController?: unknown })
+      .questionCardController,
+  ).toBeUndefined();
+});
+
 it('ACKs a parsed card callback before starting asynchronous handling', async () => {
   const events: string[] = [];
   class CallbackTestChannel extends DingtalkChannel {
@@ -281,6 +304,7 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
+      interactiveCards: {},
     } as never,
     {} as never,
   );
@@ -331,6 +355,7 @@ it('ACKs duplicate card callbacks while executing one claimed action', async () 
       groupPolicy: 'open',
       dmPolicy: 'open',
       groups: {},
+      interactiveCards: {},
     } as never,
     {} as never,
   );
@@ -1602,6 +1627,50 @@ describe('DingtalkChannel status cards', () => {
 });
 
 describe('DingtalkChannel question cards', () => {
+  it.each([
+    undefined,
+    { enabled: false },
+    { questionCard: { enabled: false } },
+  ])(
+    'returns unsupported without cancelling when question cards are disabled: %j',
+    async (interactiveCards) => {
+      const channel = createChannel({ interactiveCards });
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      const respond = vi.fn().mockResolvedValue(true);
+      Object.assign(channel, { sendMessage });
+      (
+        channel as unknown as {
+          cardRuns: Map<string, unknown>;
+        }
+      ).cardRuns.set('run-disabled', {
+        ownerId: 'owner-1',
+        target: { chatId: 'conversation-1', isGroup: false },
+      });
+      const context = {
+        requestId: 'request-disabled',
+        sessionId: 'session-disabled',
+        runId: 'run-disabled',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          senderId: 'owner-1',
+          chatId: 'conversation-1',
+          isGroup: false,
+        },
+        questions: [],
+        submitOptionId: 'proceed_once',
+        onSettled: () => () => {},
+        respond,
+      } as ChannelUserInputRequestContext;
+
+      await expect(getUserInputHook(channel)(context)).resolves.toEqual({
+        kind: 'unsupported',
+      });
+      expect(respond).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps question cards eligible while block streaming is enabled', () => {
     const channel = createChannel({ blockStreaming: 'on' });
 

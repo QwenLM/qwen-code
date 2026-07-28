@@ -56,6 +56,7 @@ export function parseDingtalkInteractiveCardConfig(
   if (value !== undefined && !asRecord(value)) {
     throw new Error('DingTalk interactiveCards must be an object.');
   }
+  const configured = value !== undefined;
   const root = asRecord(value) ?? {};
   const status = asRecord(root['statusCard']);
   const question = asRecord(root['questionCard']);
@@ -81,7 +82,7 @@ export function parseDingtalkInteractiveCardConfig(
     );
   }
   return {
-    enabled: optionalBoolean(root['enabled'], 'enabled', true),
+    enabled: optionalBoolean(root['enabled'], 'enabled', configured),
     statusCard: {
       enabled: optionalBoolean(status?.['enabled'], 'statusCard.enabled', true),
     },
