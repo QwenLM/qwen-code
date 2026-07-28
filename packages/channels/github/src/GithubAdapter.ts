@@ -390,8 +390,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           framing,
         ),
       };
-      await this.handleInbound(envelope);
       this.recordDispatched('dispatchedComments', [dedupKey]);
+      await this.handleInbound(envelope);
       if (isMentioned && this.gate.isAllowed(envelope.senderId))
         dispatchedMention = true;
     }
@@ -551,9 +551,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata,
     };
-    await this.handleInbound(envelope);
     this.recordDispatched('dispatchedEvents', [trigger.key]);
     this.recordDispatched('dispatchedBodies', [`${chatId}|${threadId}`]);
+    await this.handleInbound(envelope);
   }
 
   private async processAggregateLane(ctx: LaneContext): Promise<void> {
@@ -622,11 +622,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata,
     };
-    await this.handleInbound(envelope);
     this.recordDispatched(
       'dispatchedComments',
       shownComments.map((comment) => this.eventKey(comment)),
     );
+    await this.handleInbound(envelope);
   }
 
   private async tryFirstContactBody(
@@ -667,8 +667,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         framing,
       ),
     };
-    await this.handleInbound(envelope);
     this.recordDispatched('dispatchedBodies', [bodyKey]);
+    await this.handleInbound(envelope);
   }
 
   private async fetchNewComments(

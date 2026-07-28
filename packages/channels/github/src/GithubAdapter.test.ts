@@ -1873,6 +1873,88 @@ describe('GithubChannel', () => {
       expect(channel.cursor.failedAttempts?.['100']).toBe(1);
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
+
+    it('records comment dispatch before a transient handler failure', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await expect(pollOnce()).rejects.toThrow('agent down');
+
+      expect(channel.cursor.dispatchedComments).toContain('C_kw1001');
+    });
+
+    it('records meta dispatch before a transient handler failure', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ reason: 'assign' }),
+      ]);
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 8,
+            node_id: 'E_assign',
+            event: 'assigned',
+            assigner: { login: 'bob' },
+            assignee: { login: 'test-bot' },
+          }),
+        ],
+        headers: {},
+      });
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: 'please triage',
+          state: 'open',
+          user: { login: 'bob' },
+        },
+      });
+
+      await expect(pollOnce()).rejects.toThrow('agent down');
+
+      expect(channel.cursor.dispatchedEvents).toContain('E_assign');
+      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:42');
+    });
+
+    it('records aggregate dispatch before a transient handler failure', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 2001, body: 'new follow-up' }),
+        ]);
+
+      await expect(pollOnce()).rejects.toThrow('agent down');
+
+      expect(channel.cursor.dispatchedComments).toContain('C_kw2001');
+    });
+
+    it('records first-contact body dispatch before a transient handler failure', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
+        .mockResolvedValueOnce([makeComment({ body: 'regular comment' })]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: '@test-bot please look',
+          created_at: '2026-07-02T08:00:00.000Z',
+          user: { id: 10002, login: 'bob' },
+        },
+      });
+
+      await expect(pollOnce()).rejects.toThrow('agent down');
+
+      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:42');
+    });
   });
 
   describe('sendThreadMessage', () => {
