@@ -165,6 +165,11 @@ import {
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
 import {
+  isImagePart,
+  normalizeParts,
+} from '../services/visionBridge/image-part-utils.js';
+import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
+import {
   getInvocationContext,
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
@@ -959,6 +964,9 @@ function serializeToolResponse(
     error: response.error?.message,
     error_type: response.errorType,
     content_length: response.contentLength,
+    ...(response.visionBridgeNotice !== undefined
+      ? { vision_bridge_notice: response.visionBridgeNotice }
+      : {}),
   };
 }
 
@@ -1155,6 +1163,7 @@ interface CoreToolSchedulerOptions {
    * Aggregating runtimes record at their outer boundary instead.
    */
   chatRecordingService?: ChatRecordingService;
+  onToolResultFullTurnModel?: (model: string) => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1272,6 +1281,7 @@ export class CoreToolScheduler {
   private config: Config;
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
+  private onToolResultFullTurnModel?: (model: string) => boolean;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
@@ -1337,6 +1347,7 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+    this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1350,6 +1361,34 @@ export class CoreToolScheduler {
       this.config.isInteractive()
       ? compactToolResultDisplayForHistory(resultDisplay)
       : resultDisplay;
+  }
+
+  private async processToolResultImages(
+    responseParts: Part[],
+    signal: AbortSignal,
+  ): Promise<{
+    responseParts: Part[];
+    modelOverride?: string;
+    visionBridgeNotice?: string;
+  }> {
+    let modelOverride: string | undefined;
+    const notices: string[] = [];
+    const processedParts = await bridgeToolResultImages({
+      config: this.config,
+      responseParts,
+      signal,
+      onFullTurnModel: (model) => {
+        if (!this.onToolResultFullTurnModel?.(model)) return false;
+        modelOverride = model;
+        return true;
+      },
+      onVisionBridgeNotice: (notice) => notices.push(notice),
+    });
+    return {
+      responseParts: processedParts,
+      ...(modelOverride !== undefined ? { modelOverride } : {}),
+      ...(notices.length > 0 ? { visionBridgeNotice: notices.join('\n') } : {}),
+    };
   }
 
   private setStatusInternal(
@@ -4591,7 +4630,22 @@ export class CoreToolScheduler {
         contentLength =
           typeof content === 'string' ? content.length : undefined;
 
-        const response = convertToFunctionResponse(toolName, callId, content);
+        const convertedResponse = convertToFunctionResponse(
+          toolName,
+          callId,
+          content,
+        );
+        const processedImages = await this.processToolResultImages(
+          convertedResponse,
+          signal,
+        );
+        const response = processedImages.responseParts;
+        if (response !== convertedResponse) {
+          contentLength = response.reduce(
+            (total, part) => total + extractTextFromPartListUnion(part).length,
+            0,
+          );
+        }
         const artifacts = [
           ...(toolResult.artifacts ?? []),
           ...(postToolUseArtifacts ?? []),
@@ -4610,8 +4664,13 @@ export class CoreToolScheduler {
             : {}),
           // Propagate modelOverride from skill tools. Use `in` to distinguish
           // "skill returned undefined (inherit)" from "non-skill tool (no field)".
-          ...('modelOverride' in toolResult
-            ? { modelOverride: toolResult.modelOverride }
+          ...(processedImages.modelOverride !== undefined
+            ? { modelOverride: processedImages.modelOverride }
+            : 'modelOverride' in toolResult
+              ? { modelOverride: toolResult.modelOverride }
+              : {}),
+          ...(processedImages.visionBridgeNotice !== undefined
+            ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
@@ -4749,6 +4808,11 @@ export class CoreToolScheduler {
               failureHookAdditionalContext,
             );
           }
+          const processedImages = await this.processToolResultImages(
+            responseParts,
+            signal,
+          );
+          responseParts = processedImages.responseParts;
 
           const contentLength = responseParts.reduce((total, part) => {
             const error = part.functionResponse?.response?.['error'];
@@ -4779,6 +4843,12 @@ export class CoreToolScheduler {
             contentLength,
             ...(timeoutPersistedOutputFiles !== undefined
               ? { persistedOutputFiles: timeoutPersistedOutputFiles }
+              : {}),
+            ...(processedImages.modelOverride !== undefined
+              ? { modelOverride: processedImages.modelOverride }
+              : {}),
+            ...(processedImages.visionBridgeNotice !== undefined
+              ? { visionBridgeNotice: processedImages.visionBridgeNotice }
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
           });
@@ -4813,7 +4883,7 @@ export class CoreToolScheduler {
         }
 
         const error = new Error(errorMessage);
-        const errorResponse = createErrorResponse(
+        let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
           toolResult.error.type,
@@ -4828,6 +4898,54 @@ export class CoreToolScheduler {
           errorResponse.persistedOutputFiles = Array.from(
             new Set(errorPersistedOutputFiles),
           );
+        }
+        const imageParts = normalizeParts(toolResult.llmContent).flatMap(
+          (part) => {
+            const nestedImages = (part.functionResponse?.parts ?? [])
+              .filter((nested) => isImagePart(nested as Part))
+              .map((nested) => nested as Part);
+            return isImagePart(part) ? [part, ...nestedImages] : nestedImages;
+          },
+        );
+        if (imageParts.length > 0) {
+          const basePart = errorResponse.responseParts[0];
+          const functionResponse = basePart?.functionResponse;
+          const imageErrorParts = functionResponse
+            ? [
+                {
+                  ...basePart,
+                  functionResponse: {
+                    ...functionResponse,
+                    parts: imageParts,
+                  },
+                },
+              ]
+            : errorResponse.responseParts;
+          const processedImages = await this.processToolResultImages(
+            imageErrorParts,
+            signal,
+          );
+          const bridgedErrorParts = processedImages.responseParts;
+          if (
+            bridgedErrorParts !== imageErrorParts ||
+            this.config.getEffectiveInputModalities?.()?.image === true
+          ) {
+            errorResponse = {
+              ...errorResponse,
+              responseParts: bridgedErrorParts,
+              contentLength: bridgedErrorParts.reduce((total, part) => {
+                const response = part.functionResponse?.response;
+                const text = response?.['error'] ?? response?.['output'];
+                return total + (typeof text === 'string' ? text.length : 0);
+              }, 0),
+              ...(processedImages.modelOverride !== undefined
+                ? { modelOverride: processedImages.modelOverride }
+                : {}),
+              ...(processedImages.visionBridgeNotice !== undefined
+                ? { visionBridgeNotice: processedImages.visionBridgeNotice }
+                : {}),
+            };
+          }
         }
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -5173,6 +5291,9 @@ export class CoreToolScheduler {
         callId: call.request.callId,
         status: call.status,
         resultDisplay: call.response.resultDisplay,
+        ...(call.response.visionBridgeNotice !== undefined
+          ? { visionBridgeNotice: call.response.visionBridgeNotice }
+          : {}),
         error: call.response.error,
         errorType: call.response.errorType,
       });
