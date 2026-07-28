@@ -1162,8 +1162,13 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
-            mkdir -p "$proxy_bin"
+            # This job runs in a container, and RUNNER_TEMP is bind-mounted
+            # from the self-hosted runner's host filesystem. Writing the
+            # wrappers there leaves root-owned files on the host that later
+            # non-container jobs (the PR review) can neither overwrite nor
+            # delete, breaking every review scheduled on that runner. Keep
+            # them on the container's own disk, under a per-run directory.
+            proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
 
             if command -v gh >/dev/null 2>&1; then
               local real_gh
@@ -2415,8 +2420,13 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
-            mkdir -p "$proxy_bin"
+            # This job runs in a container, and RUNNER_TEMP is bind-mounted
+            # from the self-hosted runner's host filesystem. Writing the
+            # wrappers there leaves root-owned files on the host that later
+            # non-container jobs (the PR review) can neither overwrite nor
+            # delete, breaking every review scheduled on that runner. Keep
+            # them on the container's own disk, under a per-run directory.
+            proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
 
             if command -v gh >/dev/null 2>&1; then
               local real_gh
