@@ -403,6 +403,7 @@ async function deliverSentCompletion(
   const isolatedCwd = isolatedWorkspace
     ? await isolatedWorkspace.materializeDirectory(parentSessionId)
     : undefined;
+  let materializedDirectoryUnused = isolatedCwd !== undefined;
   try {
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
@@ -417,13 +418,20 @@ async function deliverSentCompletion(
           'Active restored parent is outside its isolated conversation directory.',
         );
       }
+      if (restoredParent.hasActivePrompt === true) {
+        materializedDirectoryUnused = false;
+      }
       if (restoredParent.hasActivePrompt !== true) {
+        // Once relocation begins, retain the directory if the bridge throws: a
+        // caller-facing timeout does not cancel the queued cwd change.
+        materializedDirectoryUnused = false;
         const changed = await bridge.changeSessionCwd(parentSessionId, {
           path: isolatedCwd,
           allowedRoots: [boundWorkspace],
           managedRelocation: 'live-conversation',
         });
         if (changed.newCwd !== isolatedCwd) {
+          materializedDirectoryUnused = true;
           throw new Error(
             'Restored parent workspace directory relocation was rejected.',
           );
@@ -506,19 +514,11 @@ async function deliverSentCompletion(
         recoveredParentClosed = false;
       }
     }
-    if (isolatedWorkspace && recoveredParentClosed) {
-      await isolatedWorkspace
-        .discardEmptyDirectory(parentSessionId)
-        .catch(() => {});
-    }
     if (
       isolatedWorkspace &&
       isolatedCwd !== undefined &&
-      restoredParent === undefined
+      (recoveredParentClosed || materializedDirectoryUnused)
     ) {
-      // The directory was materialized but the parent was never restored, so
-      // nothing was relocated into it; discard it rather than orphan an empty
-      // directory on disk.
       await isolatedWorkspace
         .discardEmptyDirectory(parentSessionId)
         .catch(() => {});

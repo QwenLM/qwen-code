@@ -937,7 +937,7 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
-  it('sent mode: only detaches an attached restored parent when relocation is rejected', async () => {
+  it('sent mode: detaches an attached parent and discards its unused directory when relocation is rejected', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],
       reapedParentSessionId: 'parent-reaped',
@@ -970,11 +970,11 @@ describe('sub-session launcher', () => {
     );
     expect(fake.kills).toEqual([]);
     expect(fake.closes).toEqual([]);
-    expect(discarded).toEqual([]);
+    expect(discarded).toEqual(['parent-reaped']);
     launcher.stop();
   });
 
-  it('sent mode: keeps a restored parent directory when zero-attach reap is rejected', async () => {
+  it('sent mode: discards an unused directory when zero-attach reap is rejected', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],
       reapedParentSessionId: 'parent-reaped',
@@ -1002,7 +1002,7 @@ describe('sub-session launcher', () => {
 
     await vi.waitFor(() => expect(fake.kills).toEqual(['parent-reaped']));
     expect(fake.closes).toEqual([]);
-    expect(discarded).toEqual([]);
+    expect(discarded).toEqual(['parent-reaped']);
     launcher.stop();
   });
 
