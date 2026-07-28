@@ -1618,9 +1618,9 @@ describe('Tool Control Parameters (E2E)', () => {
           const writeFileResults = findToolResults(messages, 'write_file');
           expect(writeFileResults.length).toBeGreaterThan(0);
 
-          // Verify file was modified
+          // Verify file was modified (trim to tolerate trailing newline)
           const content = await helper.readFile('test.txt');
-          expect(content).toBe('updated');
+          expect(content.trim()).toBe('updated');
         } finally {
           await q.close();
         }
