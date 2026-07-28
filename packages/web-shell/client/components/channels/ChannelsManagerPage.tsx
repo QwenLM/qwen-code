@@ -109,6 +109,7 @@ export function ChannelsManagerPage({
     start,
     stop,
     restart,
+    pairing,
   } = useChannels({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
@@ -555,6 +556,8 @@ export function ChannelsManagerPage({
           }}
           onSave={saveChannel}
           onReload={reload}
+          listPairingRequests={pairing.list}
+          approvePairingRequest={pairing.approve}
         />
       ) : null}
 

@@ -347,25 +347,31 @@ central claim from being tested — say why.
 
 1. **Verdict line first**, with assertion totals and the verified head OID
    (`git rev-parse HEAD^2` — not the snapshot's, which may have drifted).
-2. **Central claim + A/B table** (cells, oracles, head vs control counts).
-3. **Corrections**, when an earlier review round or bot comment described
+2. **中文摘要** in a collapsed `<details>` block, **immediately after the
+   verdict**: verdict, A/B 结论, findings, 未覆盖范围. Collapsed, so it costs a
+   reader who does not want it exactly one line; placed here rather than at
+   the end, because the whole report is already inside a `<details>` on the
+   PR — burying the Chinese summary under it made a Chinese reader expand a
+   fold and scroll the entire report to reach the one section written for
+   them. Cite the tables below by name instead of restating their numbers in
+   prose: a number written twice is a number that can disagree with itself.
+3. **Central claim + A/B table** (cells, oracles, head vs control counts).
+4. **Corrections**, when an earlier review round or bot comment described
    the code inaccurately (a wrong ARIA role, a wrong mechanism, a
    misattributed cause). State the correct fact with its evidence and label
    it explicitly as a correction to the description — not as a request to
    change the code. Leaving a wrong description standing costs the next
    reader more than the original finding did.
-4. **Findings**, ordered by severity, each with the exact reproducing
+5. **Findings**, ordered by severity, each with the exact reproducing
    command; for a blocker, enumerate the blast radius (the affected call
    sites, not just the one you hit), demonstrate the sharpest consequence
    end-to-end when budget allows, and where the cause is clear add a
    collapsed minimal suggested fix that preserves the original commit's
    intent.
-5. **Not covered** — every claim, surface, or gate you skipped. A silent cap
+6. **Not covered** — every claim, surface, or gate you skipped. A silent cap
    reads as "covered everything"; never allow that.
-6. **Methodology** — one paragraph: environment, how each harness drove the
+7. **Methodology** — one paragraph: environment, how each harness drove the
    code, where the raw logs live.
-7. **中文摘要** in a collapsed `<details>` block: verdict, A/B 结论, findings,
-   未覆盖范围.
 
 ## Hard rules
 
