@@ -62,7 +62,6 @@ function makeTodo(overrides: Record<string, unknown> = {}) {
     project: {
       id: 1,
       path_with_namespace: 'owner/repo',
-      web_url: 'https://gitlab.com/owner/repo',
     },
     author: { id: 10, username: 'alice', name: 'Alice' },
     target: { id: 200, iid: 42, title: 'Test Issue' },
@@ -75,6 +74,7 @@ function makeNote(overrides: Record<string, unknown> = {}) {
     id: 1001,
     body: '@test-bot please fix this',
     system: false,
+    confidential: false,
     created_at: '2026-07-02T09:30:00.000Z',
     updated_at: '2026-07-02T09:30:00.000Z',
     author: { id: 10, username: 'alice', name: 'Alice' },
@@ -125,6 +125,12 @@ function createMockApi() {
     MergeRequestNotes: {
       all: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({}),
+    },
+    Issues: {
+      show: vi.fn().mockResolvedValue({ description: 'Issue description' }),
+    },
+    MergeRequests: {
+      show: vi.fn().mockResolvedValue({ description: 'MR description' }),
     },
   };
 }
@@ -257,7 +263,7 @@ describe('GitlabChannel', () => {
     it('filters system notes', async () => {
       await initWithoutLoop();
 
-      const todo = makeTodo({ body: '' });
+      const todo = makeTodo({ author: { id: 99999, username: 'test-bot' } });
       const systemNote = makeNote({ system: true, body: 'assigned to @alice' });
 
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
@@ -271,7 +277,7 @@ describe('GitlabChannel', () => {
     it('filters bot own notes', async () => {
       await initWithoutLoop();
 
-      const todo = makeTodo({ body: '' });
+      const todo = makeTodo({ author: { id: 99999, username: 'test-bot' } });
       const botNote = makeNote({
         author: { id: 99999, username: 'test-bot', name: 'Test Bot' },
       });
@@ -287,7 +293,7 @@ describe('GitlabChannel', () => {
     it('excludes notes outside the comment window', async () => {
       await initWithoutLoop();
 
-      const todo = makeTodo({ body: '' });
+      const todo = makeTodo({ author: { id: 99999, username: 'test-bot' } });
       const oldNote = makeNote({ created_at: '2026-06-30T00:00:00.000Z' });
       const futureNote = makeNote({
         id: 1002,
@@ -405,10 +411,10 @@ describe('GitlabChannel', () => {
   });
 
   describe('first-contact body', () => {
-    it('dispatches todo body when no notes found', async () => {
+    it('dispatches target description when no notes found', async () => {
       await initWithoutLoop();
 
-      const todo = makeTodo({ body: '@test-bot look at this issue' });
+      const todo = makeTodo();
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
       mockApi.IssueNotes.all.mockResolvedValueOnce([]);
 
@@ -417,7 +423,10 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.messageId).toBe('todo-body-100');
-      expect(env.text).toContain('look at this issue');
+      expect(env.text).toContain('Issue description');
+      expect(mockApi.Issues.show).toHaveBeenCalledWith('owner/repo', {
+        issueIId: 42,
+      });
     });
 
     it('advances per-repo cursor after successful processing', async () => {
@@ -457,12 +466,13 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes[0]!.messageId).toBe('1002');
     });
 
-    it('skips first-contact when todo body is empty', async () => {
+    it('skips first-contact when description and title are empty', async () => {
       await initWithoutLoop();
 
-      const todo = makeTodo({ body: '' });
+      const todo = makeTodo({ target: { id: 200, iid: 42, title: '' } });
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
       mockApi.IssueNotes.all.mockResolvedValueOnce([]);
+      mockApi.Issues.show.mockResolvedValueOnce({ description: '' });
 
       await pollOnce();
 

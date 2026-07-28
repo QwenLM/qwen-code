@@ -29,7 +29,7 @@ interface Todo {
   target_type: string;
   body: string;
   updated_at: string;
-  project: { path_with_namespace: string; web_url: string };
+  project: { path_with_namespace: string };
   author: { username: string };
   target: { iid: number; title: string };
 }
@@ -38,12 +38,14 @@ interface Note {
   id: number;
   body: string;
   system: boolean;
+  confidential: boolean;
   created_at: string;
   author: { username: string };
 }
 
 export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   private api!: InstanceType<typeof Gitlab>;
+  private apiHost = 'https://gitlab.com';
   private botUsername = '';
 
   constructor(
@@ -76,18 +78,11 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GitlabConfig;
-    const host = (cfg.baseUrl || 'https://gitlab.com').replace(/\/+$/, '');
-
-    let proxyAgent: unknown;
-    if (this.proxy) {
-      const { ProxyAgent } = await import('undici');
-      proxyAgent = new ProxyAgent(this.proxy);
-    }
+    this.apiHost = (cfg.baseUrl || 'https://gitlab.com').replace(/\/+$/, '');
 
     this.api = new Gitlab({
-      host,
+      host: this.apiHost,
       token: cfg.token,
-      ...(proxyAgent ? { proxyAgent } : {}),
     });
 
     const user = await this.api.Users.showCurrentUser();
@@ -154,18 +149,18 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         continue;
       }
 
-      const template = templates[todo.action_name];
+      const template = this.resolveTemplate(templates, todo.action_name);
       if (!template) {
         this.cursor.lastProcessedAt = todo.updated_at;
         this.saveCursor();
         continue;
       }
 
-      const chatId = todo.project.path_with_namespace;
-      const targetType = todo.target_type === 'MergeRequest' ? 'mr' : 'issue';
-      const threadId = `${targetType}:${todo.target.iid}`;
-
       try {
+        const chatId = todo.project.path_with_namespace;
+        const targetType = todo.target_type === 'MergeRequest' ? 'mr' : 'issue';
+        const threadId = `${targetType}:${todo.target.iid}`;
+
         await this.processTodo(
           todo,
           template,
@@ -192,6 +187,15 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
   }
 
+  private resolveTemplate(
+    templates: Record<string, string>,
+    actionName: string,
+  ): string | undefined {
+    if (templates[actionName]) return templates[actionName];
+    if (actionName === 'directly_addressed') return templates['mentioned'];
+    return undefined;
+  }
+
   private async processTodo(
     todo: Todo,
     template: string,
@@ -213,6 +217,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     const newNotes = allNotes.filter(
       (n) =>
         !n.system &&
+        !n.confidential &&
         n.author.username !== this.botUsername &&
         n.created_at > repoSince &&
         n.created_at <= todo.updated_at,
@@ -246,30 +251,74 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
 
     if (newNotes.length === 0) {
-      const body = todo.body || '';
-      if (body && todo.author.username !== this.botUsername) {
-        const envelope = this.buildEnvelope(
-          body,
-          todo.author.username,
-          chatId,
-          threadId,
-          `todo-body-${todo.id}`,
-          this.buildMetadata(
-            template,
-            todo,
-            chatId,
-            todo.author.username,
-            String(todo.id),
-          ),
-        );
-        try {
-          await this.handleInbound(envelope);
-        } catch (err) {
-          process.stderr.write(
-            `[Channel:${this.name}] handleInbound failed for todo body ${todo.id}: ${err}\n`,
-          );
-        }
+      await this.tryFirstContact(todo, template, chatId, targetType, threadId);
+    }
+  }
+
+  private async tryFirstContact(
+    todo: Todo,
+    template: string,
+    chatId: string,
+    targetType: string,
+    threadId: string,
+  ): Promise<void> {
+    if (todo.author.username === this.botUsername) return;
+
+    let description: string;
+    try {
+      const api = this.api as unknown as {
+        Issues: {
+          show: (
+            p: string,
+            o: { issueIId: number },
+          ) => Promise<{ description?: string }>;
+        };
+        MergeRequests: {
+          show: (
+            p: string,
+            o: { mergeRequestIId: number },
+          ) => Promise<{ description?: string }>;
+        };
+      };
+      if (targetType === 'mr') {
+        const mr = await api.MergeRequests.show(chatId, {
+          mergeRequestIId: todo.target.iid,
+        });
+        description = mr.description || '';
+      } else {
+        const issue = await api.Issues.show(chatId, {
+          issueIId: todo.target.iid,
+        });
+        description = issue.description || '';
       }
+    } catch {
+      description = '';
+    }
+
+    const text = description || todo.target.title;
+    if (!text) return;
+
+    const envelope = this.buildEnvelope(
+      text,
+      todo.author.username,
+      chatId,
+      threadId,
+      `todo-body-${todo.id}`,
+      this.buildMetadata(
+        template,
+        todo,
+        chatId,
+        todo.author.username,
+        String(todo.id),
+      ),
+    );
+
+    try {
+      await this.handleInbound(envelope);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] handleInbound failed for first contact ${todo.id}: ${err}\n`,
+      );
     }
   }
 
@@ -307,7 +356,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     return template.replace(/%(\w+)%/g, (match, key: string) => {
       const vars: Record<string, string> = {
         repo: chatId,
-        repo_url: todo.project.web_url,
+        repo_url: `${this.apiHost}/${chatId}`,
         author,
         thread_type: todo.target_type,
         thread_id: String(todo.target.iid),
