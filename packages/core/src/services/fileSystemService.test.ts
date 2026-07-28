@@ -183,71 +183,11 @@ describe('StandardFileSystemService', () => {
       });
     });
 
-    it('should force handle-bound reads through the streaming range path', async () => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-      const stats = { size: 300_000 } as import('node:fs').Stats;
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'line 2',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 3,
-        originalLineCountExact: false,
-        truncatedByBytes: false,
-      });
-
-      const result = await fileSystem.readTextFileFromHandle({
-        path: '/test/large.txt',
-        fileHandle,
-        stats,
-        limit: 1,
-        line: 1,
-        maxOutputBytes: 262_144,
-        maxScanBytes: 8 * 1024 * 1024,
-      });
-
-      expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
-        path: '/test/large.txt',
-        fileHandle,
-        forceStreaming: true,
-        stats,
-        limit: 1,
-        line: 1,
-        maxOutputBytes: 262_144,
-        maxScanBytes: 8 * 1024 * 1024,
-      });
-      expect(result.content).toBe('line 2');
-      expect(result._meta?.originalLineCountExact).toBe(false);
-    });
-
-    it('should allow an unbounded limit when both byte bounds are finite', async () => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-      const stats = { size: 300_000 } as import('node:fs').Stats;
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'head of file',
-        originalLineCount: 3,
-        originalLineCountExact: false,
-        truncatedByBytes: true,
-      });
-
-      const result = await fileSystem.readTextFileFromHandle({
-        path: '/test/large.txt',
-        fileHandle,
-        stats,
-        limit: Number.POSITIVE_INFINITY,
-        maxOutputBytes: 262_144,
-        maxScanBytes: 8 * 1024 * 1024,
-      });
-
-      expect(result.content).toBe('head of file');
-      expect(readFileWithLineAndLimit).toHaveBeenCalledWith(
-        expect.objectContaining({
-          limit: Number.POSITIVE_INFINITY,
-          maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
-        }),
-      );
-    });
-
+    // Handle-bound reads no longer route through `readFileWithLineAndLimit`,
+    // so asserting the arguments it was called with would test nothing. The
+    // behaviour is covered against real files in `read-text-range.test.ts`
+    // and at the real boundary in `workspace-file-system.test.ts`; only the
+    // argument validation below needs a unit test, and it needs no mock.
     it.each([
       ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
       ['maxScanBytes', { maxScanBytes: Number.POSITIVE_INFINITY }],
@@ -255,20 +195,35 @@ describe('StandardFileSystemService', () => {
       ['maxScanBytes', { maxScanBytes: -1 }],
     ])('should reject a handle read with unbounded %s', async (bound, over) => {
       const fileHandle = {} as import('node:fs/promises').FileHandle;
-      const stats = { size: 300_000 } as import('node:fs').Stats;
 
       await expect(
         fileSystem.readTextFileFromHandle({
           path: '/test/large.txt',
           fileHandle,
-          stats,
           limit: 20,
           maxOutputBytes: 262_144,
           maxScanBytes: 8 * 1024 * 1024,
           ...over,
         }),
       ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
-      expect(readFileWithLineAndLimit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a fractional limit', 2.5],
+      ['a zero limit', 0],
+      ['a negative limit', -1],
+    ])('should reject %s on a handle read', async (_label, limit) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          path: '/test/large.txt',
+          fileHandle,
+          limit,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+        }),
+      ).rejects.toThrow(/positive integer limit or Infinity/);
     });
 
     it('should return encoding info for GBK file', async () => {

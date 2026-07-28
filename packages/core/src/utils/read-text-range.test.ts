@@ -13,6 +13,7 @@ import {
   LargeNonUtf8TextError,
   TextScanBudgetExceededError,
   readTextRange,
+  readTextRangeFromHandle,
 } from './read-text-range.js';
 
 describe('readTextRange', () => {
@@ -100,14 +101,11 @@ describe('readTextRange', () => {
     const fileHandle = await fs.open(filePath, 'r');
     try {
       const stats = await fileHandle.stat();
-      const result = await readTextRange({
-        path: filePath,
-        fileHandle,
-        stats,
-        forceStreaming: true,
+      const result = await readTextRangeFromHandle(fileHandle, {
         offset: 1_500,
         limit: 3,
         maxOutputBytes: 10_000,
+        maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
 
       expect(result.content.split('\n')).toEqual([
@@ -117,14 +115,11 @@ describe('readTextRange', () => {
       ]);
       expect(result.originalLineCountExact).toBe(false);
 
-      const beyondEof = await readTextRange({
-        path: filePath,
-        fileHandle,
-        stats,
-        forceStreaming: true,
+      const beyondEof = await readTextRangeFromHandle(fileHandle, {
         offset: 10_000,
         limit: 3,
         maxOutputBytes: 10_000,
+        maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
       expect(beyondEof.content).toBe('');
       expect(beyondEof.originalLineCount).toBe(2_000);
@@ -137,8 +132,11 @@ describe('readTextRange', () => {
     }
   });
 
-  it('uses only the supplied file handle when the path names another file', async () => {
-    const originalPath = await writeFile(
+  it('reads the pinned inode after the path is replaced underneath it', async () => {
+    // The handle variant takes no path, so "read the wrong file" is no longer
+    // representable. What is still worth pinning down is the property that
+    // motivated the API: once opened, the read follows the inode, not the name.
+    const targetPath = await writeFile(
       'original.log',
       'safe-one\nsafe-two\nsafe-three\n',
     );
@@ -146,16 +144,15 @@ describe('readTextRange', () => {
       'replacement.log',
       'secret-one\nsecret-two\n',
     );
-    const fileHandle = await fs.open(originalPath, 'r');
+    const fileHandle = await fs.open(targetPath, 'r');
     try {
-      const result = await readTextRange({
-        path: replacementPath,
-        fileHandle,
-        stats: await fileHandle.stat(),
-        forceStreaming: true,
+      await fs.rename(replacementPath, targetPath);
+
+      const result = await readTextRangeFromHandle(fileHandle, {
         offset: 0,
         limit: 2,
         maxOutputBytes: 1_024,
+        maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
 
       expect(result.content).toBe('safe-one\nsafe-two');
@@ -200,17 +197,19 @@ describe('readTextRange', () => {
   it('does not charge a budget failure to a file that ends within it', async () => {
     // The scan reaches EOF on the same chunk that exhausts the budget; the
     // window was fully satisfied, so there is nothing to refuse.
+    // Goes through the handle variant purely because that is the one that
+    // always streams: this file is far too small to leave the path variant's
+    // buffering fast path, and the buffered path never consults the budget.
     const body = largeUtf8Lines(100);
     const filePath = await writeFile('budget-exact.log', body);
+    const fileHandle = await fs.open(filePath, 'r');
 
-    const result = await readTextRange({
-      path: filePath,
+    const result = await readTextRangeFromHandle(fileHandle, {
       offset: 98,
       limit: 10,
       maxOutputBytes: 262_144,
       maxScanBytes: Buffer.byteLength(body),
-      forceStreaming: true,
-    });
+    }).finally(() => fileHandle.close());
 
     expect(result.content.split('\n')).toEqual([
       expect.stringContaining('line-99 '),

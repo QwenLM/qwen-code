@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
+import { readTextRangeFromHandle } from '../utils/read-text-range.js';
 import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
 import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
@@ -63,7 +64,6 @@ export type CoreReadTextFileHandleRequest = Omit<
   'limit' | 'stats' | 'maxOutputBytes'
 > & {
   fileHandle: FileHandle;
-  stats: Stats;
   limit?: number;
   maxOutputBytes: number;
   maxScanBytes: number;
@@ -347,11 +347,14 @@ export class StandardFileSystemService implements FileSystemService {
         `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
       );
     }
-    return readTextFileStandard(params, {
-      fileHandle: params.fileHandle,
-      forceStreaming: true,
+    const range = await readTextRangeFromHandle(params.fileHandle, {
+      offset: params.line ?? 0,
+      limit: params.limit ?? Number.POSITIVE_INFINITY,
+      maxOutputBytes: params.maxOutputBytes,
       maxScanBytes: params.maxScanBytes,
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
+    return toReadTextFileResponse(range);
   }
 
   async writeTextFile(
@@ -390,11 +393,6 @@ function isPositiveSafeInteger(value: unknown): value is number {
 
 async function readTextFileStandard(
   params: CoreReadTextFileRequest,
-  source?: {
-    fileHandle: FileHandle;
-    forceStreaming: boolean;
-    maxScanBytes: number;
-  },
 ): Promise<ReadTextFileResponse> {
   const { path, limit, line, maxOutputBytes, signal, stats } = params;
   const readResult = await readFileWithLineAndLimit({
@@ -404,8 +402,20 @@ async function readTextFileStandard(
     ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
     ...(signal !== undefined ? { signal } : {}),
     ...(stats !== undefined ? { stats } : {}),
-    ...(source !== undefined ? source : {}),
   });
+  return toReadTextFileResponse(readResult);
+}
+
+/** Shared metadata shaping so both read paths report identically. */
+function toReadTextFileResponse(readResult: {
+  content: string;
+  bom?: boolean;
+  encoding?: string;
+  originalLineCount: number;
+  originalLineCountExact?: boolean;
+  lineEnding?: LineEnding;
+  truncatedByBytes?: boolean;
+}): ReadTextFileResponse {
   const detectedLineEnding =
     readResult.lineEnding ?? detectLineEnding(readResult.content);
   return {

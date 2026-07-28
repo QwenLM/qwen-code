@@ -1550,7 +1550,6 @@ async function readLargeTextWindowFromResolvedFile(
       result = await lowFs.readTextFileFromHandle({
         path: p as string,
         fileHandle: fh,
-        stats: opened,
         limit: opts.limit ?? Number.POSITIVE_INFINITY,
         line: opts.line !== undefined ? opts.line - 1 : 0,
         maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,

@@ -7,11 +7,7 @@
 import { createReadStream, type Stats } from 'node:fs';
 import { stat, type FileHandle } from 'node:fs/promises';
 import { TextDecoder } from 'node:util';
-import {
-  decodeBufferWithEncodingInfoAsync,
-  detectFileEncoding,
-  readFileWithEncodingInfo,
-} from './fileUtils.js';
+import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
 import { isUtf8CompatibleEncoding } from './encoding.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
@@ -26,13 +22,6 @@ export interface ReadTextRangeRequest {
   signal?: AbortSignal;
   stats?: Stats;
   /**
-   * Optional caller-owned handle. When present, every read is bound to this
-   * already-open inode; this function never closes the handle.
-   */
-  fileHandle?: FileHandle;
-  /** Skip the small-file full-buffer fast path. */
-  forceStreaming?: boolean;
-  /**
    * Upper bound on bytes read off disk while locating the requested window.
    * Line offsets address a byte stream, so a deep `offset` costs a scan from
    * byte 0 — this is what keeps that scan from being unbounded. Defaults to
@@ -40,6 +29,23 @@ export interface ReadTextRangeRequest {
    * security boundaries must pass a finite value.
    */
   maxScanBytes?: number;
+}
+
+/**
+ * Request shape for {@link readTextRangeFromHandle}.
+ *
+ * No `path`: the read is bound to the descriptor, so there is nothing for a
+ * path to disambiguate. Both byte bounds are required rather than optional —
+ * a handle-bound read exists because some caller pinned an inode at a security
+ * boundary, and what makes such a read safe is that the bytes it *returns* and
+ * the bytes it *scans* are each capped.
+ */
+export interface ReadTextRangeFromHandleRequest {
+  offset?: number;
+  limit?: number;
+  maxOutputBytes: number;
+  maxScanBytes: number;
+  signal?: AbortSignal;
 }
 
 export interface ReadTextRangeResult {
@@ -87,11 +93,7 @@ export async function readTextRange(
   request: ReadTextRangeRequest,
 ): Promise<ReadTextRangeResult> {
   request.signal?.throwIfAborted();
-  const stats =
-    request.stats ??
-    (request.fileHandle !== undefined
-      ? await request.fileHandle.stat()
-      : await stat(request.path));
+  const stats = request.stats ?? (await stat(request.path));
   const maxOutputBytes = normalizeMaxBytes(request.maxOutputBytes);
   const maxScanBytes = request.maxScanBytes ?? Number.POSITIVE_INFINITY;
 
@@ -101,20 +103,13 @@ export async function readTextRange(
   // the same bound apply, and raises `TextScanBudgetExceededError` if the
   // window really is out of reach.
   if (
-    request.forceStreaming !== true &&
     stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE &&
     stats.size <= maxScanBytes
   ) {
-    const { content, encoding, bom } =
-      request.fileHandle === undefined
-        ? await readFileWithEncodingInfo(request.path, request.signal)
-        : await decodeBufferWithEncodingInfoAsync(
-            await readFileHandleBuffer(
-              request.fileHandle,
-              stats.size,
-              request.signal,
-            ),
-          );
+    const { content, encoding, bom } = await readFileWithEncodingInfo(
+      request.path,
+      request.signal,
+    );
     request.signal?.throwIfAborted();
     const range = sliceDecodedContent(
       content,
@@ -130,7 +125,33 @@ export async function readTextRange(
     };
   }
 
-  return readLargeUtf8Range(request, maxOutputBytes, maxScanBytes);
+  return readLargeUtf8Range(
+    request.path,
+    request,
+    maxOutputBytes,
+    maxScanBytes,
+  );
+}
+
+/**
+ * Range read bound to a caller-owned descriptor.
+ *
+ * Always streams: the buffering fast path would read the whole file, and a
+ * caller reaches for a handle precisely when it needs the read bounded. The
+ * handle is borrowed — every read uses an explicit position, and this function
+ * never closes it.
+ */
+export async function readTextRangeFromHandle(
+  fileHandle: FileHandle,
+  request: ReadTextRangeFromHandleRequest,
+): Promise<ReadTextRangeResult> {
+  request.signal?.throwIfAborted();
+  return readLargeUtf8Range(
+    fileHandle,
+    request,
+    normalizeMaxBytes(request.maxOutputBytes),
+    request.maxScanBytes,
+  );
 }
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
@@ -174,14 +195,15 @@ function sliceDecodedContent(
 }
 
 async function readLargeUtf8Range(
-  request: ReadTextRangeRequest,
+  source: string | FileHandle,
+  request: { offset?: number; limit?: number; signal?: AbortSignal },
   maxOutputBytes: number,
   maxScanBytes: number,
 ): Promise<ReadTextRangeResult> {
-  const encoding =
-    request.fileHandle === undefined
-      ? await detectFileEncoding(request.path)
-      : await detectFileHandleEncoding(request.fileHandle, request.signal);
+  const encoding = await detectFileEncoding(source);
+  // Detection is one bounded 8 KiB read, but check here anyway so an abort
+  // that lands during it is still observed before the streaming loop starts.
+  request.signal?.throwIfAborted();
   if (!isUtf8CompatibleEncoding(encoding)) {
     throw new LargeNonUtf8TextError(encoding);
   }
@@ -206,15 +228,17 @@ async function readLargeUtf8Range(
     ignoreBOM: true,
   });
 
-  const pathStream =
-    request.fileHandle === undefined
-      ? createReadStream(request.path, {
-          highWaterMark: 512 * 1024,
-          signal: request.signal,
-        })
-      : undefined;
-  const chunks =
-    pathStream ?? readFileHandleChunks(request.fileHandle!, request.signal);
+  let pathStream: ReturnType<typeof createReadStream> | undefined;
+  let chunks: AsyncIterable<Buffer>;
+  if (typeof source === 'string') {
+    pathStream = createReadStream(source, {
+      highWaterMark: 512 * 1024,
+      signal: request.signal,
+    });
+    chunks = pathStream;
+  } else {
+    chunks = chunksFromHandle(source, 0, request.signal);
+  }
 
   function appendSelected(fragment: string): void {
     if (fragment.length === 0 || truncatedByBytes) {
@@ -332,29 +356,21 @@ async function readLargeUtf8Range(
   };
 }
 
-async function readFileHandleBuffer(
+/**
+ * Sequential chunks off a borrowed descriptor, starting at `from`.
+ *
+ * Reads use explicit positions, so the caller's file position is untouched and
+ * two readers can share one handle. Each chunk is a fresh buffer and stays
+ * valid after the next iteration — do not "optimize" this into one reused
+ * buffer without giving the yielded value a documented lifetime.
+ */
+async function* chunksFromHandle(
   fileHandle: FileHandle,
-  size: number,
-  signal?: AbortSignal,
-): Promise<Buffer> {
-  const buffer = Buffer.alloc(size);
-  let offset = 0;
-  while (offset < size) {
-    signal?.throwIfAborted();
-    const read = await fileHandle.read(buffer, offset, size - offset, offset);
-    if (read.bytesRead === 0) break;
-    offset += read.bytesRead;
-  }
-  signal?.throwIfAborted();
-  return offset === buffer.length ? buffer : buffer.subarray(0, offset);
-}
-
-async function* readFileHandleChunks(
-  fileHandle: FileHandle,
+  from = 0,
   signal?: AbortSignal,
 ): AsyncGenerator<Buffer> {
   const highWaterMark = 512 * 1024;
-  let position = 0;
+  let position = from;
   while (true) {
     signal?.throwIfAborted();
     const buffer = Buffer.allocUnsafe(highWaterMark);
@@ -369,24 +385,6 @@ async function* readFileHandleChunks(
     position += bytesRead;
     yield buffer.subarray(0, bytesRead);
   }
-}
-
-async function detectFileHandleEncoding(
-  fileHandle: FileHandle,
-  signal?: AbortSignal,
-): Promise<string> {
-  signal?.throwIfAborted();
-  const stats = await fileHandle.stat();
-  if (stats.size === 0) return 'utf-8';
-
-  const sample = Buffer.alloc(Math.min(8192, stats.size));
-  const { bytesRead } = await fileHandle.read(sample, 0, sample.length, 0);
-  signal?.throwIfAborted();
-  if (bytesRead === 0) return 'utf-8';
-  return (
-    (await decodeBufferWithEncodingInfoAsync(sample.subarray(0, bytesRead)))
-      .encoding ?? 'utf-8'
-  );
 }
 
 function truncateUtf8(
