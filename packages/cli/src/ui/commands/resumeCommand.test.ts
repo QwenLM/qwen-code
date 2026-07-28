@@ -62,6 +62,18 @@ describe('resumeCommand', () => {
     });
   });
 
+  it('blocks resume inside an attached background agent', async () => {
+    mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(true);
+
+    const result = await resumeCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'worker resume message',
+    });
+  });
+
   it('should return error when config is not available and args given', async () => {
     mockContext.services.config = null;
 

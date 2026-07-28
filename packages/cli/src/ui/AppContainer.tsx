@@ -2310,6 +2310,18 @@ export const AppContainer = (props: AppContainerProps) => {
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
+  agentViewIdleGateStateRef.current = {
+    hasPendingToolConfirmation: pendingToolCalls.some(
+      (call) => call.status === 'awaiting_approval',
+    ),
+    hasPendingCommandConfirmation: Boolean(
+      shellConfirmationRequest ||
+        confirmationRequest ||
+        loopDetectionConfirmationRequest,
+    ),
+    hasForegroundShell: Boolean(activePtyId || embeddedShellFocused),
+    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
+  };
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
