@@ -3176,7 +3176,7 @@ jobs:
                           and ([.pass, .fail, .total] | all(type == "number" and . >= 0 and . == floor))
                           and (.total > 0)
                           and (.total == .pass + .fail)
-                       then "Scripted assertions: \(.pass) passed · \(.fail) failed · \(.total) total"
+                       then "Scripted assertions: \(.pass) passed · \(.fail) failed · \(.total) total\n\n脚本断言：\(.pass) 通过 · \(.fail) 失败 · \(.total) 总计"
                        else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
               )"
               if [ -z "$ASSERT_LINE" ]; then
@@ -3198,20 +3198,25 @@ jobs:
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
               esac
             fi
+            # Every headline carries its Chinese twin. The verdict is the one
+            # line a reader acts on, and until now it was the only part of
+            # the unfolded comment that was English-only — the scope
+            # disclaimer below it has been bilingual all along, so a Chinese
+            # reader got the caveat and not the conclusion.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
               case "$AGENT_VERDICT" in
-                merge-ready) HEADLINE='merge-ready (agent verdict)' ;;
-                findings) HEADLINE='findings reported (agent verdict)' ;;
-                blocked) HEADLINE='blocked (agent verdict)' ;;
-                inconclusive) HEADLINE='inconclusive (agent verdict)' ;;
+                merge-ready) HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
+                findings) HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                blocked) HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
+                inconclusive) HEADLINE='inconclusive (agent verdict)'; HEADLINE_ZH='结论不足（agent 判定）' ;;
               esac
             else
               case "${VERDICT:-}" in
-                pass) HEADLINE='completed (no usable structured verdict)' ;;
-                fail) HEADLINE='agent run failed' ;;
-                timeout) HEADLINE='timeout — partial evidence' ;;
-                infra-error) HEADLINE='infra-error (crash, OOM, or unwritable results)' ;;
-                *) HEADLINE='unknown' ;;
+                pass) HEADLINE='completed (no usable structured verdict)'; HEADLINE_ZH='已完成（无可用的结构化判定）' ;;
+                fail) HEADLINE='agent run failed'; HEADLINE_ZH='agent 运行失败' ;;
+                timeout) HEADLINE='timeout — partial evidence'; HEADLINE_ZH='超时——证据不完整' ;;
+                infra-error) HEADLINE='infra-error (crash, OOM, or unwritable results)'; HEADLINE_ZH='基础设施故障（崩溃、OOM 或结果不可写）' ;;
+                *) HEADLINE='unknown'; HEADLINE_ZH='未知' ;;
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
@@ -3237,7 +3242,8 @@ jobs:
                 printf '%s\n' '<!-- qwen-triage:verify-substantive -->'
               fi
               printf '\n'
-              printf '**Sandboxed verification: %s** - [workflow run](%s)\n\n' "$HEADLINE" "$RUN_URL"
+              printf '**Sandboxed verification: %s** - [workflow run](%s)\n' "$HEADLINE" "$RUN_URL"
+              printf '**沙箱验证：%s**\n\n' "${HEADLINE_ZH:-$HEADLINE}"
               if [ "${VERDICT:-}" = 'pass' ]; then
                 printf '%s\n\n' "$SCOPE_EN"
                 printf '%s\n\n' "$SCOPE_ZH"

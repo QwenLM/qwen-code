@@ -21,6 +21,7 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1472,6 +1473,24 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // The whole report is already inside a <details> on the PR. With the
+  // Chinese summary as the last item, reaching it meant expanding that fold
+  // and scrolling the entire English report — ~90 lines on a real one.
+  it('puts the report Chinese summary next to the verdict, not last', () => {
+    const struct = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(struct).toBeTruthy();
+    const zh = struct.indexOf('中文摘要');
+    expect(zh).toBeGreaterThan(-1);
+    expect(zh).toBeLessThan(struct.indexOf('Central claim + A/B table'));
+    expect(zh).toBeLessThan(struct.indexOf('**Not covered**'));
+    expect(zh).toBeLessThan(struct.indexOf('**Methodology**'));
+    // Moved, not duplicated — two summaries would drift apart.
+    expect(struct.match(/中文摘要/g)?.length).toBe(1);
+  });
+
   // Only a validated assertions object counts as evidence.
   it('rejects inconsistent assertions objects', () => {
     const publishStep = step('Post verification report comment');
@@ -1632,6 +1651,94 @@ describe('qwen-triage verify publish fidelity', () => {
 
   // Only bodies carrying findings are substantive; weak notices must not be
   // snapshotted as the previous round's report.
+  // The scope disclaimer under the headline has been bilingual since the
+  // lane shipped, but the verdict itself — the one line a reader acts on —
+  // was English-only. A Chinese reader got the caveat and not the
+  // conclusion.
+  it('renders every verdict headline in both languages', () => {
+    const dir = fixture();
+    try {
+      const ARMS = [
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' },
+          'merge-ready (agent verdict)',
+          '可合入（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
+          'findings reported (agent verdict)',
+          '报告了发现（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
+          'blocked (agent verdict)',
+          '阻塞（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
+          'inconclusive (agent verdict)',
+          '结论不足（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass' },
+          'completed (no usable structured verdict)',
+          '已完成（无可用的结构化判定）',
+        ],
+        [{ VERDICT: 'fail' }, 'agent run failed', 'agent 运行失败'],
+        [
+          { VERDICT: 'timeout' },
+          'timeout — partial evidence',
+          '超时——证据不完整',
+        ],
+      ];
+      const seenZh = new Set();
+      ARMS.forEach(([env, en, zh], i) => {
+        const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
+        expect(body).toContain(`**Sandboxed verification: ${en}**`);
+        expect(body).toContain(`**沙箱验证：${zh}**`);
+        seenZh.add(zh);
+      });
+      // Distinct per arm. A single hardcoded Chinese string — or one that
+      // renders the English text twice — satisfies a per-arm containment
+      // check, so the pairing has to be pinned as a bijection.
+      expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the assertion count in both languages', () => {
+    const dir = fixture();
+    try {
+      const body = render(dir, {
+        NAME: 'assertzh',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed · 0 failed · 10 total',
+      );
+      expect(body).toContain('脚本断言：10 通过 · 0 失败 · 10 总计');
+
+      // The Chinese line rides the same validated object as the English one:
+      // an inconsistent assertions.json must suppress BOTH, or the comment
+      // grows a number that no gate checked.
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1,"fail":0,"total":0}',
+      );
+      const bad = render(dir, {
+        NAME: 'assertbad',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(bad).not.toContain('Scripted assertions:');
+      expect(bad).not.toContain('脚本断言');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('marks only finding-bearing bodies as substantive', () => {
     const dir = fixture();
     const M = 'qwen-triage:verify-substantive';
