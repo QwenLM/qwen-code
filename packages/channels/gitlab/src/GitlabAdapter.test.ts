@@ -394,7 +394,11 @@ describe('GitlabChannel', () => {
       expect(mockApi.MergeRequestNotes.all).toHaveBeenCalledWith(
         'owner/repo',
         99,
-        expect.objectContaining({ sort: 'asc', orderBy: 'created_at' }),
+        expect.objectContaining({
+          sort: 'desc',
+          orderBy: 'created_at',
+          maxPages: 1,
+        }),
       );
     });
 
@@ -600,25 +604,6 @@ describe('GitlabChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
-      await initWithoutLoop();
-      channel.handleInboundError = new Error('agent failed');
-
-      const todo = makeTodo();
-      const note = makeNote();
-
-      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
-      mockApi.IssueNotes.all.mockResolvedValueOnce([note]);
-
-      await pollOnce();
-
-      expect(mockApi.IssueNotes.create).toHaveBeenCalledWith(
-        'owner/repo',
-        42,
-        expect.stringContaining('Failed to process'),
-      );
-    });
-
     it('stops processing on failure, does not advance cursor past failed todo', async () => {
       await initWithoutLoop();
 

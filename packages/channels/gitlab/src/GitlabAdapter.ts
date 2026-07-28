@@ -27,7 +27,6 @@ interface Todo {
   id: number;
   action_name: string;
   target_type: string;
-  body: string;
   updated_at: string;
   project: { path_with_namespace: string };
   author: { username: string };
@@ -79,6 +78,15 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   async connect(): Promise<void> {
     const cfg = this.config as GitlabConfig;
     this.apiHost = (cfg.baseUrl || 'https://gitlab.com').replace(/\/+$/, '');
+
+    if (
+      !cfg.action_prompt_template ||
+      Object.keys(cfg.action_prompt_template).length === 0
+    ) {
+      process.stderr.write(
+        `[Channel:${this.name}] warning: action_prompt_template is not configured; no todos will be processed\n`,
+      );
+    }
 
     this.api = new Gitlab({
       host: this.apiHost,
@@ -142,17 +150,16 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     for (const todo of todos) {
       if (
         !todo.target ||
+        !todo.target.iid ||
         (todo.target_type !== 'Issue' && todo.target_type !== 'MergeRequest')
       ) {
-        this.cursor.lastProcessedAt = todo.updated_at;
-        this.saveCursor();
+        await this.skipTodo(todo);
         continue;
       }
 
       const template = this.resolveTemplate(templates, todo.action_name);
       if (!template) {
-        this.cursor.lastProcessedAt = todo.updated_at;
-        this.saveCursor();
+        await this.skipTodo(todo);
         continue;
       }
 
@@ -187,6 +194,16 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
   }
 
+  private async skipTodo(todo: Todo): Promise<void> {
+    try {
+      await this.api.TodoLists.done({ todoId: todo.id });
+    } catch {
+      // best-effort cleanup
+    }
+    this.cursor.lastProcessedAt = todo.updated_at;
+    this.saveCursor();
+  }
+
   private resolveTemplate(
     templates: Record<string, string>,
     actionName: string,
@@ -204,26 +221,15 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     threadId: string,
     repoSince: string,
   ): Promise<void> {
-    const allNotes = (targetType === 'mr'
-      ? await this.api.MergeRequestNotes.all(chatId, todo.target.iid, {
-          sort: 'asc',
-          orderBy: 'created_at',
-        })
-      : await this.api.IssueNotes.all(chatId, todo.target.iid, {
-          sort: 'asc',
-          orderBy: 'created_at',
-        })) as unknown as Note[];
-
-    const newNotes = allNotes.filter(
-      (n) =>
-        !n.system &&
-        !n.confidential &&
-        n.author.username !== this.botUsername &&
-        n.created_at > repoSince &&
-        n.created_at <= todo.updated_at,
+    const notes = await this.fetchRecentNotes(
+      chatId,
+      targetType,
+      todo.target.iid,
+      repoSince,
+      todo.updated_at,
     );
 
-    for (const note of newNotes) {
+    for (const note of notes) {
       const envelope = this.buildEnvelope(
         note.body || '',
         note.author.username,
@@ -245,14 +251,46 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         process.stderr.write(
           `[Channel:${this.name}] handleInbound failed for note ${note.id}: ${err}\n`,
         );
-        await this.postErrorComment(chatId, targetType, todo.target.iid);
         throw err;
       }
     }
 
-    if (newNotes.length === 0) {
+    if (notes.length === 0) {
       await this.tryFirstContact(todo, template, chatId, targetType, threadId);
     }
+  }
+
+  private async fetchRecentNotes(
+    chatId: string,
+    targetType: string,
+    iid: number,
+    since: string,
+    until: string,
+  ): Promise<Note[]> {
+    const page = (targetType === 'mr'
+      ? await this.api.MergeRequestNotes.all(chatId, iid, {
+          sort: 'desc',
+          orderBy: 'created_at',
+          maxPages: 1,
+          perPage: 100,
+        })
+      : await this.api.IssueNotes.all(chatId, iid, {
+          sort: 'desc',
+          orderBy: 'created_at',
+          maxPages: 1,
+          perPage: 100,
+        })) as unknown as Note[];
+
+    return page
+      .filter(
+        (n) =>
+          !n.system &&
+          !n.confidential &&
+          n.author.username !== this.botUsername &&
+          n.created_at > since &&
+          n.created_at <= until,
+      )
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
   private async tryFirstContact(
@@ -377,25 +415,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       await this.api.MergeRequestNotes.create(chatId, iid, body);
     } else {
       await this.api.IssueNotes.create(chatId, iid, body);
-    }
-  }
-
-  private async postErrorComment(
-    chatId: string,
-    targetType: string,
-    iid: number,
-  ): Promise<void> {
-    try {
-      await this.createNote(
-        chatId,
-        targetType,
-        iid,
-        '⚠️ Failed to process this request. Please re-mention the bot to retry.',
-      );
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] postErrorComment failed for ${chatId} ${targetType}:${iid}: ${err}\n`,
-      );
     }
   }
 }
