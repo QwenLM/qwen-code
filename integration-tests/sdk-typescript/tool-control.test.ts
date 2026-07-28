@@ -42,6 +42,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   ? CONTAINER_SANDBOX_NO_PROXY
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+const INITIAL_CONTENT = 'original content';
 
 function fakeModelOptions(baseUrl: string) {
   return {
@@ -76,7 +77,7 @@ describe('Tool Control Parameters (E2E)', () => {
       'should only allow specified tools when coreTools is set',
       async () => {
         // Create a test file
-        await helper.createFile('test.txt', 'original content');
+        await helper.createFile('test.txt', INITIAL_CONTENT);
 
         const q = query({
           prompt:
@@ -119,7 +120,7 @@ describe('Tool Control Parameters (E2E)', () => {
             const input = tc.toolUse.input as { content?: string };
             return (
               typeof input?.content === 'string' &&
-              input.content !== 'original content'
+              input.content !== INITIAL_CONTENT
             );
           });
           expect(writtenContent).toBe(true);
@@ -1551,7 +1552,7 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should invoke canUseTool callback when using asyncGenerator as prompt',
       async () => {
-        await helper.createFile('test.txt', 'original content');
+        await helper.createFile('test.txt', INITIAL_CONTENT);
 
         const resultWaiter = createResultWaiter(1);
         const canUseToolCalls: Array<{
@@ -1630,7 +1631,7 @@ describe('Tool Control Parameters (E2E)', () => {
             const input = tc.toolUse.input as { content?: string };
             return (
               typeof input?.content === 'string' &&
-              input.content !== 'original content'
+              input.content !== INITIAL_CONTENT
             );
           });
           expect(writtenContent).toBe(true);
@@ -1644,7 +1645,7 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should deny tool when canUseTool returns deny with asyncGenerator prompt',
       async () => {
-        await helper.createFile('test.txt', 'original content');
+        await helper.createFile('test.txt', INITIAL_CONTENT);
 
         const resultWaiter = createResultWaiter(1);
         // Create an async generator that yields a single message
@@ -1716,7 +1717,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // File content should remain unchanged (because write was denied)
           const content = await helper.readFile('test.txt');
-          expect(content).toBe('original content');
+          expect(content).toBe(INITIAL_CONTENT);
         } finally {
           await q.close();
         }
