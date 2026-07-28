@@ -701,7 +701,7 @@ describe('GithubChannel', () => {
           makeIssueEvent({
             id: 7,
             node_id: 'E_review',
-            created_at: '2026-06-30T09:00:00.000Z',
+            created_at: '2026-07-01T09:00:00.000Z',
           }),
         ],
         headers: {},
@@ -1152,6 +1152,45 @@ describe('GithubChannel', () => {
         expect(trigger).toBeNull();
       },
     );
+
+    it('ignores meta events older than the window lower bound', async () => {
+      await initWithoutLoop();
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 12,
+            node_id: 'E_old',
+            event: 'review_requested',
+            requested_reviewer: { login: 'test-bot' },
+            review_requester: { login: 'maintainer' },
+            created_at: '2026-06-30T23:00:00.000Z',
+          }),
+        ],
+        headers: {},
+      });
+
+      const trigger = await (
+        channel as unknown as {
+          findMetaTrigger: (
+            ctx: Record<string, unknown>,
+            reason: 'review_requested' | 'assign',
+          ) => Promise<{ actor: string; key: string } | null>;
+        }
+      ).findMetaTrigger(
+        {
+          chatId: 'owner/repo',
+          threadId: 'pr:99',
+          issueNumber: 99,
+          lastReadAt: null,
+          windowSince: '2026-07-01T00:00:00.000Z',
+          maxUpdatedAt: '2026-07-02T10:00:00.000Z',
+          subjectTitle: 'feat: add divide',
+        },
+        'review_requested',
+      );
+
+      expect(trigger).toBeNull();
+    });
 
     it('aggregates only comments from allowed senders', async () => {
       channel = new TestableGithubChannel(
