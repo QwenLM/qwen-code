@@ -11,6 +11,7 @@ import {
   FirstOutputTracker,
   classifyFirstOutputEvent,
   evaluateSingleBundlePrototypeGate,
+  findInvalidTimings,
   measuredPairCountForDwell,
   nullablePercentiles,
   parseBenchmarkPostSessionDwell,
@@ -21,6 +22,7 @@ import {
   validatePromptAcceptance,
   type BenchmarkDaemonEvent,
   type FirstOutputBenchmarkArtifactV2,
+  type FirstOutputSessionTimings,
   type PairedMetricSample,
 } from './_first-output-benchmark.js';
 
@@ -415,6 +417,50 @@ describe('FirstOutputTracker', () => {
       failureMessage: 'More than 1 events arrived before prompt acceptance',
       terminal: { kind: 'error' },
     });
+  });
+});
+
+describe('findInvalidTimings', () => {
+  function makeTimings(
+    overrides: Partial<FirstOutputSessionTimings> = {},
+  ): FirstOutputSessionTimings {
+    return {
+      processToSessionReadyMs: 10,
+      sseReadyToPromptMs: 5,
+      promptToProviderRequestArrivalMs: 20,
+      promptToFirstModelOutputMs: 30,
+      promptToFirstAnswerTextMs: 35,
+      providerReadyToFirstModelOutputMs: 8,
+      processToFirstModelOutputMs: 40,
+      promptToTerminalMs: 50,
+      ...overrides,
+    };
+  }
+
+  it('treats finite non-negative and null timings as valid', () => {
+    expect(findInvalidTimings(makeTimings())).toEqual([]);
+    expect(
+      findInvalidTimings(
+        makeTimings({
+          promptToFirstAnswerTextMs: null,
+          promptToTerminalMs: 0,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('collects every invalid timing instead of stopping at the first', () => {
+    const invalid = findInvalidTimings(
+      makeTimings({
+        sseReadyToPromptMs: -1,
+        promptToFirstModelOutputMs: Number.NaN,
+      }),
+    );
+    expect(invalid).toHaveLength(2);
+    expect(invalid).toEqual([
+      ['sseReadyToPromptMs', -1],
+      ['promptToFirstModelOutputMs', Number.NaN],
+    ]);
   });
 });
 

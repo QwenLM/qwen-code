@@ -42,6 +42,7 @@ import {
   FIRST_OUTPUT_BENCHMARK_VERSION,
   FirstOutputTracker,
   evaluateSingleBundlePrototypeGate,
+  findInvalidTimings,
   measuredPairCountForDwell,
   nullablePercentiles,
   pairedCandidateControlStats,
@@ -1163,22 +1164,6 @@ async function runSession(
       ),
     },
   };
-}
-
-function findInvalidTimings(
-  timings: FirstOutputSessionRunResult['timings'],
-): Array<[keyof FirstOutputSessionRunResult['timings'], number]> {
-  const invalid: Array<[keyof FirstOutputSessionRunResult['timings'], number]> =
-    [];
-  for (const key of Object.keys(timings) as Array<
-    keyof FirstOutputSessionRunResult['timings']
-  >) {
-    const value = timings[key];
-    if (value !== null && (!Number.isFinite(value) || value < 0)) {
-      invalid.push([key, value]);
-    }
-  }
-  return invalid;
 }
 
 function computeSessionTimings(

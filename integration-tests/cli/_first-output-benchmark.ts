@@ -914,6 +914,21 @@ export interface FirstOutputSessionTimings {
   promptToTerminalMs: number | null;
 }
 
+export function findInvalidTimings(
+  timings: FirstOutputSessionTimings,
+): Array<[keyof FirstOutputSessionTimings, number]> {
+  const invalid: Array<[keyof FirstOutputSessionTimings, number]> = [];
+  for (const key of Object.keys(timings) as Array<
+    keyof FirstOutputSessionTimings
+  >) {
+    const value = timings[key];
+    if (value !== null && (!Number.isFinite(value) || value < 0)) {
+      invalid.push([key, value]);
+    }
+  }
+  return invalid;
+}
+
 export interface FirstOutputSessionRunResult {
   ordinal: number;
   sessionId: string | null;
