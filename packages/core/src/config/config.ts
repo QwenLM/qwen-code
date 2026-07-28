@@ -40,6 +40,7 @@ import { resolveInteractionMode } from '../core/prompts.js';
 import {
   AuthType,
   createContentGenerator,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -1052,6 +1053,7 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
    * Days a recurring cron job lives before auto-expiring. `0` disables
@@ -1847,6 +1849,7 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
@@ -2105,6 +2108,9 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.sessionWriterLeaseEnabled =
+      this.experimentalZedIntegration === true &&
+      params.sessionWriterLeaseEnabled === true;
     this.cronEnabled = params.cronEnabled ?? true;
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
@@ -2495,6 +2501,10 @@ export class Config {
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
                   signal,
+                  typeof input['submitted_prompt'] === 'string' &&
+                    input['submitted_prompt'].trim().length > 0
+                    ? input['submitted_prompt']
+                    : undefined,
                 );
                 break;
               case 'UserPromptExpansion':
@@ -2883,7 +2893,9 @@ export class Config {
   }
 
   private async activateChatRecording(): Promise<void> {
-    if (!this.chatRecordingEnabled || !this.experimentalZedIntegration) return;
+    if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
+      return;
+    }
     const recorder = this.chatRecordingService;
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
@@ -4116,6 +4128,7 @@ export class Config {
       if (priorReasoningEffort) {
         this.setReasoningEffort(priorReasoningEffort);
       }
+      resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
@@ -4417,6 +4430,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
@@ -6148,6 +6162,10 @@ export class Config {
     return this.experimentalZedIntegration;
   }
 
+  isSessionWriterLeaseEnabled(): boolean {
+    return this.sessionWriterLeaseEnabled;
+  }
+
   getListExtensions(): boolean {
     return this.listExtensions;
   }
@@ -6689,7 +6707,7 @@ export class Config {
       (event) => {
         this.notifyChatRecordingFailure(event);
       },
-      this.experimentalZedIntegration,
+      this.sessionWriterLeaseEnabled,
     );
   }
 
@@ -7153,6 +7171,10 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
+      const { ZoomImageTool } = await import('../tools/zoom-image.js');
+      return new ZoomImageTool(this);
     });
 
     // --- Grep / RipGrep (conditional) ---
