@@ -2925,4 +2925,16 @@ describe('qwen-triage tmux lane parity', () => {
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
+
+  // The cache step must be restore-only: `actions/cache/restore` has no
+  // post-save hook, so PR lifecycle scripts cannot write to the shared
+  // cache. Swapping to `actions/cache` would re-enable the save path and
+  // let a PR poison subsequent runs.
+  it('pins the npm cache step to restore-only in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain('actions/cache/restore@');
+      expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
+    }
+  });
 });
