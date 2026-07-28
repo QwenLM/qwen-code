@@ -1307,301 +1307,298 @@ export function registerSessionRoutes(
         });
         return;
       }
-    }
-
-    // ── Branch creation ────────────────────────────────────────────
-    // When `branch` is present, create and checkout a new git branch
-    // before spawning. The session runs in the same working directory
-    // but on the new branch. Mutually exclusive with `worktree`.
-    let branchMeta: { name: string; baseBranch: string } | undefined;
-    let branchBaseCommit: string | undefined;
-    const rawBranch = body['branch'];
-    if (rawBranch !== undefined && rawBranch !== null) {
-      if (body['worktree'] !== undefined && body['worktree'] !== null) {
-        res.status(400).json({
-          error: '`branch` and `worktree` are mutually exclusive',
-          code: 'branch_and_worktree_conflict',
-        });
-        return;
-      }
-      if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
-        res.status(400).json({
-          error:
-            '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
-          code: 'invalid_branch',
-        });
-        return;
-      }
-      const branchReq = rawBranch as Record<string, unknown>;
-      const branchName = branchReq['name'];
-      if (typeof branchName !== 'string' || branchName.length === 0) {
-        res.status(400).json({
-          error: '`branch.name` must be a non-empty string',
-          code: 'branch_invalid_name',
-        });
-        return;
-      }
-      // Validate git branch name characters and reserved names.
-      // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
-      if (
-        /[^\p{L}\p{N}._/-]/u.test(branchName) ||
-        branchName.includes('..') ||
-        branchName.includes('//') ||
-        branchName.startsWith('.') ||
-        branchName.startsWith('-') ||
-        branchName.startsWith('/') ||
-        branchName.endsWith('/') ||
-        branchName.endsWith('.') ||
-        branchName.endsWith('.git') ||
-        branchName.includes('@{') ||
-        branchName
-          .split('/')
-          .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-        branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
-        Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
-        branchName
-          .split('/')
-          .some(
-            (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
-          )
-      ) {
-        res.status(400).json({
-          error: `Invalid branch name: ${branchName}`,
-          code: 'branch_invalid_name',
-        });
-        return;
-      }
-      // Reject when another branch session is already active for this
-      // workspace — concurrent branch sessions conflict on HEAD. Runs after
-      // shape/name validation so a malformed body gets 400, not 409.
-      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
-      if (existingBranchSession) {
-        try {
-          // Throws if the session is gone, letting us clean up the stale entry.
-          runtime.bridge.getSessionSummary(existingBranchSession);
-          res.status(409).json({
-            error: 'A branch session is already active for this workspace',
-            code: 'branch_session_conflict',
-            existingSessionId: existingBranchSession,
-          });
-          return;
-        } catch {
-          activeBranchSessions.delete(workspaceCwd);
-        }
-      }
-      // Reject when any other live (client-attached) non-worktree session
-      // already runs in this workspace. `git checkout -b` moves the shared
-      // HEAD, so a concurrent current-branch session with a clean tree would
-      // be silently relocated onto the new branch and commit to the wrong
-      // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
-      // to sessions with an attached client so a detached session left behind
-      // by a "new chat" does not block a fresh branch session.
-      const sharedCheckoutSession = runtime.bridge
-        .listWorkspaceSessions(workspaceCwd)
-        .find((session) => !session.worktree && session.clientCount > 0);
-      if (sharedCheckoutSession) {
-        res.status(409).json({
-          error:
-            'Another session is already active in this workspace; creating a branch would move its shared checkout',
-          code: 'branch_session_conflict',
-          existingSessionId: sharedCheckoutSession.sessionId,
-        });
-        return;
-      }
-      let wtService: GitWorktreeService;
-      try {
-        wtService = new GitWorktreeService(workspaceCwd);
-      } catch {
-        res.status(500).json({
-          error: 'Failed to initialize git service',
-          code: 'branch_init_failed',
-        });
-        return;
-      }
-      if (!(await wtService.isGitRepository())) {
-        res.status(400).json({
-          error: 'Branch creation requires a git repository',
-          code: 'branch_not_git_repo',
-        });
-        return;
-      }
-      // Check the branch doesn't already exist.
-      if (await branchExists(workspaceCwd, branchName)) {
-        res.status(409).json({
-          error: `Branch "${branchName}" already exists`,
-          code: 'branch_already_exists',
-        });
-        return;
-      }
-      // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
-      // uncommitted tracked changes onto the new branch, which would silently
-      // mix the user's WIP with a fresh branch. Untracked files are excluded
-      // (`--untracked-files=no`) because they survive any checkout unchanged.
-      let dirty: boolean;
-      try {
-        dirty = await isDirtyTree(workspaceCwd);
-      } catch {
-        res.status(500).json({
-          error: 'Failed to check working tree status',
-          code: 'branch_status_failed',
-        });
-        return;
-      }
-      if (dirty) {
-        res.status(409).json({
-          error: 'Uncommitted changes detected. Commit or stash first.',
-          code: 'branch_dirty_tree',
-        });
-        return;
-      }
-      const baseCommit = await getHeadCommit(workspaceCwd);
-      const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
-      // Reserve the workspace before mutating HEAD. The conflict guard above
-      // runs before several awaits (rev-parse, status, checkout), so two
-      // concurrent `POST /session { branch }` can both pass it and race on
-      // `git checkout -b`. This synchronous check-and-add (no await between)
-      // serializes the checkout; every exit path below clears the reservation
-      // (transferred to `activeBranchSessions` on success). Re-check
-      // `activeBranchSessions` here too: a request that passed the early guard
-      // before a concurrent request registered can still be in flight while
-      // the first request has already completed and populated the map.
-      if (
-        inFlightBranchWorkspaces.has(workspaceCwd) ||
-        activeBranchSessions.has(workspaceCwd)
-      ) {
-        res.status(409).json({
-          error: 'A branch session is already being created for this workspace',
-          code: 'branch_session_conflict',
-        });
-        return;
-      }
-      inFlightBranchWorkspaces.add(workspaceCwd);
-      try {
-        await createBranch(workspaceCwd, branchName);
-      } catch (checkoutErr) {
-        // `git checkout -b` can reject AFTER git already created the ref and
-        // moved HEAD — a failing post-checkout hook or a timeout past the ref
-        // update both leave the workspace on the new branch while the command
-        // exits nonzero. Roll back transactionally (restore the base ref, then
-        // delete the partial branch) so the shared workspace is never silently
-        // left on the new branch; when nothing was created the rollback is a
-        // harmless no-op. Log the full git error but return a generic detail —
-        // git stderr can embed the absolute workspace path, which must not
-        // reach the caller in the 500 body.
-        daemonLog?.warn('branch checkout failed', {
-          error:
-            checkoutErr instanceof Error
-              ? checkoutErr.message
-              : String(checkoutErr),
-        });
-        await rollbackBranchCreation(
-          workspaceCwd,
-          { name: branchName, baseBranch },
-          baseCommit,
-          daemonLog,
-        );
-        res.status(500).json({
-          error: 'Failed to create branch',
-          code: 'branch_checkout_failed',
-        });
-        return;
-      }
-      branchMeta = { name: branchName, baseBranch };
-      branchBaseCommit = baseCommit;
-      sessionScope = 'thread';
-    }
-
-    // ── Worktree isolation ──────────────────────────────────────────
-    // When `worktree` is present, create a git worktree before spawning
-    // and relocate the session into it immediately after. The workspace
-    // runtime resolution still uses the main workspace cwd; only the
-    // child process's effective working directory changes.
-    let worktreeMeta:
-      | { slug: string; path: string; branch: string }
-      | undefined;
-    const rawWorktree = body['worktree'];
-    if (rawWorktree !== undefined && rawWorktree !== null) {
-      if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
-        res.status(400).json({
-          error:
-            '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
-          code: 'invalid_worktree',
-        });
-        return;
-      }
-      const wtReq = rawWorktree as Record<string, unknown>;
-      let wtService: GitWorktreeService;
-      try {
-        wtService = new GitWorktreeService(workspaceCwd);
-      } catch {
-        res.status(500).json({
-          error: 'Failed to initialize worktree service',
-          code: 'worktree_init_failed',
-        });
-        return;
-      }
-      if (!(await wtService.isGitRepository())) {
-        res.status(400).json({
-          error: 'Worktree isolation requires a git repository',
-          code: 'worktree_not_git_repo',
-        });
-        return;
-      }
-      const rawSlug = wtReq['slug'];
-      let slug: string;
-      if (rawSlug === undefined || rawSlug === null) {
-        slug = GitWorktreeService.generateAutoSlug();
-      } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
-        res.status(400).json({
-          error: '`worktree.slug` must be a non-empty string when provided',
-          code: 'worktree_invalid_slug',
-        });
-        return;
-      } else {
-        slug = rawSlug;
-      }
-      const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
-      if (slugError) {
-        res
-          .status(400)
-          .json({ error: slugError, code: 'worktree_invalid_slug' });
-        return;
-      }
-      const baseBranch = await wtService
-        .getCurrentBranch()
-        .catch(() => undefined);
-      const wtResult = await wtService.createUserWorktree(slug, baseBranch);
-      if (!wtResult.success || !wtResult.worktree) {
-        res.status(500).json({
-          error: wtResult.error ?? 'Failed to create worktree',
-          code: 'worktree_create_failed',
-        });
-        return;
-      }
-      worktreeMeta = {
-        slug,
-        path: wtResult.worktree.path,
-        branch: wtResult.worktree.branch,
-      };
-      // Worktree sessions must be independent — never coalesce onto an
-      // existing single-scope session that lives in the main checkout.
-      sessionScope = 'thread';
-    }
-
-    // Authoritative in-flight reservation: synchronous check-and-add
-    // (no await between) so the finally below always cleans up.
-    if (requestedSessionId !== undefined) {
-      if (inFlightSessionIds.has(requestedSessionId)) {
-        res.status(409).json({
-          error: `Session "${requestedSessionId}" creation already in progress`,
-          code: 'session_id_conflict',
-        });
-        return;
-      }
       inFlightSessionIds.add(requestedSessionId);
     }
 
+    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchBaseCommit: string | undefined;
+    let worktreeMeta:
+      | { slug: string; path: string; branch: string }
+      | undefined;
+
     try {
+      // ── Branch creation ────────────────────────────────────────────
+      // When `branch` is present, create and checkout a new git branch
+      // before spawning. The session runs in the same working directory
+      // but on the new branch. Mutually exclusive with `worktree`.
+      const rawBranch = body['branch'];
+      if (rawBranch !== undefined && rawBranch !== null) {
+        if (body['worktree'] !== undefined && body['worktree'] !== null) {
+          res.status(400).json({
+            error: '`branch` and `worktree` are mutually exclusive',
+            code: 'branch_and_worktree_conflict',
+          });
+          return;
+        }
+        if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
+          res.status(400).json({
+            error:
+              '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
+            code: 'invalid_branch',
+          });
+          return;
+        }
+        const branchReq = rawBranch as Record<string, unknown>;
+        const branchName = branchReq['name'];
+        if (typeof branchName !== 'string' || branchName.length === 0) {
+          res.status(400).json({
+            error: '`branch.name` must be a non-empty string',
+            code: 'branch_invalid_name',
+          });
+          return;
+        }
+        // Validate git branch name characters and reserved names.
+        // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
+        if (
+          /[^\p{L}\p{N}._/-]/u.test(branchName) ||
+          branchName.includes('..') ||
+          branchName.includes('//') ||
+          branchName.startsWith('.') ||
+          branchName.startsWith('-') ||
+          branchName.startsWith('/') ||
+          branchName.endsWith('/') ||
+          branchName.endsWith('.') ||
+          branchName.endsWith('.git') ||
+          branchName.includes('@{') ||
+          branchName
+            .split('/')
+            .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+          branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
+          Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+          branchName
+            .split('/')
+            .some(
+              (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
+            )
+        ) {
+          res.status(400).json({
+            error: `Invalid branch name: ${branchName}`,
+            code: 'branch_invalid_name',
+          });
+          return;
+        }
+        // Reject when another branch session is already active for this
+        // workspace — concurrent branch sessions conflict on HEAD. Runs after
+        // shape/name validation so a malformed body gets 400, not 409.
+        const existingBranchSession = activeBranchSessions.get(workspaceCwd);
+        if (existingBranchSession) {
+          try {
+            // Throws if the session is gone, letting us clean up the stale entry.
+            runtime.bridge.getSessionSummary(existingBranchSession);
+            res.status(409).json({
+              error: 'A branch session is already active for this workspace',
+              code: 'branch_session_conflict',
+              existingSessionId: existingBranchSession,
+            });
+            return;
+          } catch {
+            activeBranchSessions.delete(workspaceCwd);
+          }
+        }
+        // Reject when any other live (client-attached) non-worktree session
+        // already runs in this workspace. `git checkout -b` moves the shared
+        // HEAD, so a concurrent current-branch session with a clean tree would
+        // be silently relocated onto the new branch and commit to the wrong
+        // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
+        // to sessions with an attached client so a detached session left behind
+        // by a "new chat" does not block a fresh branch session.
+        const sharedCheckoutSession = runtime.bridge
+          .listWorkspaceSessions(workspaceCwd)
+          .find((session) => !session.worktree && session.clientCount > 0);
+        if (sharedCheckoutSession) {
+          res.status(409).json({
+            error:
+              'Another session is already active in this workspace; creating a branch would move its shared checkout',
+            code: 'branch_session_conflict',
+            existingSessionId: sharedCheckoutSession.sessionId,
+          });
+          return;
+        }
+        let wtService: GitWorktreeService;
+        try {
+          wtService = new GitWorktreeService(workspaceCwd);
+        } catch {
+          res.status(500).json({
+            error: 'Failed to initialize git service',
+            code: 'branch_init_failed',
+          });
+          return;
+        }
+        if (!(await wtService.isGitRepository())) {
+          res.status(400).json({
+            error: 'Branch creation requires a git repository',
+            code: 'branch_not_git_repo',
+          });
+          return;
+        }
+        // Check the branch doesn't already exist.
+        if (await branchExists(workspaceCwd, branchName)) {
+          res.status(409).json({
+            error: `Branch "${branchName}" already exists`,
+            code: 'branch_already_exists',
+          });
+          return;
+        }
+        // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
+        // uncommitted tracked changes onto the new branch, which would silently
+        // mix the user's WIP with a fresh branch. Untracked files are excluded
+        // (`--untracked-files=no`) because they survive any checkout unchanged.
+        let dirty: boolean;
+        try {
+          dirty = await isDirtyTree(workspaceCwd);
+        } catch {
+          res.status(500).json({
+            error: 'Failed to check working tree status',
+            code: 'branch_status_failed',
+          });
+          return;
+        }
+        if (dirty) {
+          res.status(409).json({
+            error: 'Uncommitted changes detected. Commit or stash first.',
+            code: 'branch_dirty_tree',
+          });
+          return;
+        }
+        const baseCommit = await getHeadCommit(workspaceCwd);
+        const baseBranch = await wtService
+          .getCurrentBranch()
+          .catch(() => 'HEAD');
+        // Reserve the workspace before mutating HEAD. The conflict guard above
+        // runs before several awaits (rev-parse, status, checkout), so two
+        // concurrent `POST /session { branch }` can both pass it and race on
+        // `git checkout -b`. This synchronous check-and-add (no await between)
+        // serializes the checkout; every exit path below clears the reservation
+        // (transferred to `activeBranchSessions` on success). Re-check
+        // `activeBranchSessions` here too: a request that passed the early guard
+        // before a concurrent request registered can still be in flight while
+        // the first request has already completed and populated the map.
+        if (
+          inFlightBranchWorkspaces.has(workspaceCwd) ||
+          activeBranchSessions.has(workspaceCwd)
+        ) {
+          res.status(409).json({
+            error:
+              'A branch session is already being created for this workspace',
+            code: 'branch_session_conflict',
+          });
+          return;
+        }
+        inFlightBranchWorkspaces.add(workspaceCwd);
+        try {
+          await createBranch(workspaceCwd, branchName);
+        } catch (checkoutErr) {
+          // `git checkout -b` can reject AFTER git already created the ref and
+          // moved HEAD — a failing post-checkout hook or a timeout past the ref
+          // update both leave the workspace on the new branch while the command
+          // exits nonzero. Roll back transactionally (restore the base ref, then
+          // delete the partial branch) so the shared workspace is never silently
+          // left on the new branch; when nothing was created the rollback is a
+          // harmless no-op. Log the full git error but return a generic detail —
+          // git stderr can embed the absolute workspace path, which must not
+          // reach the caller in the 500 body.
+          daemonLog?.warn('branch checkout failed', {
+            error:
+              checkoutErr instanceof Error
+                ? checkoutErr.message
+                : String(checkoutErr),
+          });
+          await rollbackBranchCreation(
+            workspaceCwd,
+            { name: branchName, baseBranch },
+            baseCommit,
+            daemonLog,
+          );
+          res.status(500).json({
+            error: 'Failed to create branch',
+            code: 'branch_checkout_failed',
+          });
+          return;
+        }
+        branchMeta = { name: branchName, baseBranch };
+        branchBaseCommit = baseCommit;
+        sessionScope = 'thread';
+      }
+
+      // ── Worktree isolation ──────────────────────────────────────────
+      // When `worktree` is present, create a git worktree before spawning
+      // and relocate the session into it immediately after. The workspace
+      // runtime resolution still uses the main workspace cwd; only the
+      // child process's effective working directory changes.
+      const rawWorktree = body['worktree'];
+      if (rawWorktree !== undefined && rawWorktree !== null) {
+        if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
+          res.status(400).json({
+            error:
+              '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
+            code: 'invalid_worktree',
+          });
+          return;
+        }
+        const wtReq = rawWorktree as Record<string, unknown>;
+        let wtService: GitWorktreeService;
+        try {
+          wtService = new GitWorktreeService(workspaceCwd);
+        } catch {
+          res.status(500).json({
+            error: 'Failed to initialize worktree service',
+            code: 'worktree_init_failed',
+          });
+          return;
+        }
+        if (!(await wtService.isGitRepository())) {
+          res.status(400).json({
+            error: 'Worktree isolation requires a git repository',
+            code: 'worktree_not_git_repo',
+          });
+          return;
+        }
+        const rawSlug = wtReq['slug'];
+        let slug: string;
+        if (rawSlug === undefined || rawSlug === null) {
+          slug = GitWorktreeService.generateAutoSlug();
+        } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
+          res.status(400).json({
+            error: '`worktree.slug` must be a non-empty string when provided',
+            code: 'worktree_invalid_slug',
+          });
+          return;
+        } else {
+          slug = rawSlug;
+        }
+        const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+        if (slugError) {
+          res
+            .status(400)
+            .json({ error: slugError, code: 'worktree_invalid_slug' });
+          return;
+        }
+        const baseBranch = await wtService
+          .getCurrentBranch()
+          .catch(() => undefined);
+        const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+        if (!wtResult.success || !wtResult.worktree) {
+          res.status(500).json({
+            error: wtResult.error ?? 'Failed to create worktree',
+            code: 'worktree_create_failed',
+          });
+          return;
+        }
+        worktreeMeta = {
+          slug,
+          path: wtResult.worktree.path,
+          branch: wtResult.worktree.branch,
+        };
+        // Worktree sessions must be independent — never coalesce onto an
+        // existing single-scope session that lives in the main checkout.
+        sessionScope = 'thread';
+      }
+      // A caller-supplied sessionId implies a new, distinct session —
+      // never coalesce onto an existing single-scope session.
+      if (requestedSessionId !== undefined) {
+        sessionScope = 'thread';
+      }
+
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
         modelServiceId,
