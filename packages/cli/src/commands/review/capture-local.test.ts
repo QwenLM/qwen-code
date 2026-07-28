@@ -11,17 +11,10 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import {
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  readFileSync,
-  writeFileSync,
-  existsSync,
-} from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { PARSE_ARGS_REPORT } from './lib/paths.js';
+import { join } from 'node:path';
+import { seedParseArgs } from './lib/test-utils.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
 vi.mock('./lib/local-diff.js', async (orig) => ({
@@ -63,16 +56,6 @@ function capture(over: Record<string, unknown> = {}) {
     unbornHead: false,
     ...over,
   });
-}
-
-/** Seed the report `parse-args` tees, so the effort fallback has something to read. */
-function seedParseArgs(effort: unknown): void {
-  mkdirSync(join(dir, dirname(PARSE_ARGS_REPORT)), { recursive: true });
-  writeFileSync(
-    join(dir, PARSE_ARGS_REPORT),
-    JSON.stringify({ effort, effortSource: 'flag' }),
-    'utf8',
-  );
 }
 
 beforeEach(() => {
@@ -174,6 +157,7 @@ describe('capture-local (command boundary)', () => {
 
     const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
     expect(plan.effort).toBe('medium');
+    expect(errs.join('')).toContain('from --effort');
   });
 
   it('recovers the effort parse-args resolved when --effort is not re-threaded', () => {
@@ -182,16 +166,17 @@ describe('capture-local (command boundary)', () => {
     // plan carries no effort and the roster safe-expands to the FULL set — the
     // user's `medium` is silently ignored. The report parse-args already wrote is
     // the deterministic source of truth.
-    seedParseArgs('medium');
+    seedParseArgs(dir, 'medium');
     capture();
     run('plan.json'); // note: no effort passed
 
     const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
     expect(plan.effort).toBe('medium');
+    expect(errs.join('')).toContain('from parse-args report');
   });
 
   it('lets an explicit --effort win over the parse-args report', () => {
-    seedParseArgs('high');
+    seedParseArgs(dir, 'high');
     capture();
     run('plan.json', { effort: 'low' });
 
@@ -210,7 +195,7 @@ describe('capture-local (command boundary)', () => {
   it('ignores a malformed effort in the report rather than trusting it', () => {
     // A corrupt/hand-edited report must not smuggle a bogus level into the roster;
     // an unrecognised value falls through to the full-roster fail-safe.
-    seedParseArgs('turbo');
+    seedParseArgs(dir, 'turbo');
     capture();
     run('plan.json');
 

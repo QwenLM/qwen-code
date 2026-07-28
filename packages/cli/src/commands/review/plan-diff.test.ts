@@ -5,18 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import {
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  writeFileSync,
-  readFileSync,
-} from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
-import { PARSE_ARGS_REPORT } from './lib/paths.js';
+import { seedParseArgs } from './lib/test-utils.js';
 
 let dir: string;
 let cwd: string;
@@ -59,16 +53,6 @@ function makeDiff(path: string, n: number): string {
     ...body,
     '',
   ].join('\n');
-}
-
-/** Seed the report `parse-args` tees, so the effort fallback has something to read. */
-function seedParseArgs(effort: unknown): void {
-  mkdirSync(join(dir, dirname(PARSE_ARGS_REPORT)), { recursive: true });
-  writeFileSync(
-    join(dir, PARSE_ARGS_REPORT),
-    JSON.stringify({ effort, effortSource: 'flag' }),
-    'utf8',
-  );
 }
 
 describe('plan-diff', () => {
@@ -131,7 +115,7 @@ describe('plan-diff', () => {
   });
 
   it('recovers the effort from the parse-args report when --effort is not re-threaded', () => {
-    seedParseArgs('medium');
+    seedParseArgs(dir, 'medium');
     const diffPath = join(dir, 'local.diff');
     const out = join(dir, 'plan.json');
     writeFileSync(diffPath, makeDiff('src/a.ts', 60));

@@ -19,6 +19,7 @@
 // `parse-args` already wrote to its conventional report. No model action required.
 
 import { readFileSync } from 'node:fs';
+import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { PARSE_ARGS_REPORT } from './paths.js';
 import { EFFORT_LEVELS } from '../parse-args.js';
 import type { ReviewEffort } from '../parse-args.js';
@@ -57,5 +58,15 @@ export function planEffortField(explicit: string | undefined): {
   effort?: ReviewEffort;
 } {
   const effort = resolveEffort(explicit);
-  return effort ? { effort } : {};
+  if (!effort) return {};
+  // The fallback this PR adds is silent by nature — name the resolved level and
+  // where it came from so a review that ran at an unexpected effort is one stderr
+  // line to diagnose, not a hunt for the parse-args report. Quiet when nothing
+  // resolves: the full-roster fail-safe is the long-standing default, not news.
+  writeStderrLine(
+    `effort: ${effort} (from ${
+      explicit && EFFORT_LEVELS.has(explicit) ? '--effort' : 'parse-args report'
+    })`,
+  );
+  return { effort };
 }
