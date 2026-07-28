@@ -16,7 +16,8 @@ interface GitlabConfig extends ChannelConfig {
 }
 
 interface GitlabCursor {
-  lastProcessedAt: string;
+  lastProcessedId: number;
+  initialized: boolean;
 }
 
 interface Todo {
@@ -32,9 +33,8 @@ interface Todo {
 }
 
 const cursorSchema = z.object({
-  lastProcessedAt: z
-    .string()
-    .refine((s) => !Number.isNaN(new Date(s).getTime())),
+  lastProcessedId: z.number(),
+  initialized: z.boolean(),
 });
 
 export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
@@ -53,7 +53,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   }
 
   protected createInitialCursor(): GitlabCursor {
-    return { lastProcessedAt: new Date().toISOString() };
+    return { lastProcessedId: 0, initialized: false };
   }
 
   protected override validateCursor(parsed: unknown): GitlabCursor | null {
@@ -126,18 +126,31 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     if (!templates || Object.keys(templates).length === 0) return;
 
     this.descriptionCache.clear();
-    const windowSince = this.cursor.lastProcessedAt;
+    const lastId = this.cursor.lastProcessedId;
 
     const allTodos = (await this.api.TodoLists.all({
       state: 'pending',
     })) as unknown as Todo[];
 
+    // First poll: drain all pre-existing todos without processing them.
+    if (!this.cursor.initialized) {
+      this.cursor.initialized = true;
+      if (allTodos.length > 0) {
+        const maxId = Math.max(...allTodos.map((t) => t.id));
+        for (const t of allTodos) {
+          this.api.TodoLists.done({ todoId: t.id }).catch(() => {});
+        }
+        this.cursor.lastProcessedId = maxId;
+      }
+      return;
+    }
+
     const todos = allTodos
-      .filter((t) => t.updated_at > windowSince)
-      .sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+      .filter((t) => t.id > lastId)
+      .sort((a, b) => a.id - b.id);
 
     for (const t of allTodos) {
-      if (t.updated_at <= windowSince) {
+      if (t.id <= lastId) {
         this.api.TodoLists.done({ todoId: t.id }).catch(() => {});
       }
     }
@@ -181,7 +194,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         }
       }
 
-      this.cursor.lastProcessedAt = todo.updated_at;
+      this.cursor.lastProcessedId = todo.id;
 
       try {
         await this.api.TodoLists.done({ todoId: todo.id });
@@ -197,7 +210,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     } catch {
       // best-effort cleanup
     }
-    this.cursor.lastProcessedAt = todo.updated_at;
+    this.cursor.lastProcessedId = todo.id;
   }
 
   private resolveTemplate(

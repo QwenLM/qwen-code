@@ -167,7 +167,8 @@ describe('GitlabChannel', () => {
     await channel.connect();
     channel.disconnect();
     channel.cursor = {
-      lastProcessedAt: '2026-07-01T00:00:00.000Z',
+      lastProcessedId: 0,
+      initialized: true,
       repo: {},
     };
   }
@@ -221,7 +222,7 @@ describe('GitlabChannel', () => {
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
       await ch.connect();
       ch.disconnect();
-      ch.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      ch.cursor = { lastProcessedId: 0, initialized: true };
 
       mockApi.TodoLists.all.mockClear();
       await (ch as unknown as { pollOnce: () => Promise<void> }).pollOnce();
@@ -234,11 +235,49 @@ describe('GitlabChannel', () => {
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
       await ch.connect();
       ch.disconnect();
-      ch.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      ch.cursor = { lastProcessedId: 0, initialized: true };
 
       mockApi.TodoLists.all.mockClear();
       await (ch as unknown as { pollOnce: () => Promise<void> }).pollOnce();
       expect(mockApi.TodoLists.all).not.toHaveBeenCalled();
+    });
+
+    it('drains pre-existing todos on first poll without dispatching', async () => {
+      await channel.connect();
+      channel.disconnect();
+      // cursor starts as { lastProcessedId: 0, initialized: false }
+
+      const todo1 = makeTodo({ id: 10 });
+      const todo2 = makeTodo({ id: 20 });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo1, todo2]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 10 });
+      expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 20 });
+      expect(channel.cursor.lastProcessedId).toBe(20);
+      expect(channel.cursor.initialized).toBe(true);
+    });
+
+    it('processes new todos after first poll drain', async () => {
+      await channel.connect();
+      channel.disconnect();
+
+      // First poll: drain
+      const old = makeTodo({ id: 10 });
+      mockApi.TodoLists.all.mockResolvedValueOnce([old]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      // Second poll: new todo arrives
+      const fresh = makeTodo({ id: 30 });
+      mockApi.TodoLists.all.mockResolvedValueOnce([fresh]);
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('please fix this');
+      expect(channel.cursor.lastProcessedId).toBe(30);
     });
 
     it('dispatches todo body as envelope', async () => {
@@ -302,7 +341,7 @@ describe('GitlabChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
-      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      expect(channel.cursor.lastProcessedId).toBe(100);
     });
 
     it('skips non-issue/MR target types', async () => {
@@ -315,7 +354,7 @@ describe('GitlabChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
-      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      expect(channel.cursor.lastProcessedId).toBe(100);
     });
 
     it('handles directly_addressed via mentioned template fallback', async () => {
@@ -354,10 +393,10 @@ describe('GitlabChannel', () => {
       await pollOnce();
 
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
-      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      expect(channel.cursor.lastProcessedId).toBe(100);
     });
 
-    it('advances cursor to maxUpdatedAt', async () => {
+    it('advances cursor to max todo id', async () => {
       await initWithoutLoop();
 
       const todo1 = makeTodo({ id: 1, updated_at: '2026-07-02T10:00:00.000Z' });
@@ -368,7 +407,7 @@ describe('GitlabChannel', () => {
 
       await pollOnce();
 
-      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T12:00:00.000Z');
+      expect(channel.cursor.lastProcessedId).toBe(2);
     });
 
     it('handles MR todos with correct threadId', async () => {
@@ -452,16 +491,25 @@ describe('GitlabChannel', () => {
   });
 
   describe('cursor validation', () => {
-    it('rejects cursor with invalid lastProcessedAt', () => {
+    it('accepts valid cursor', () => {
       const result = (
         channel as unknown as {
           validateCursor: (p: unknown) => unknown;
         }
-      ).validateCursor({ lastProcessedAt: 'not-a-date' });
+      ).validateCursor({ lastProcessedId: 42, initialized: true });
+      expect(result).toEqual({ lastProcessedId: 42, initialized: true });
+    });
+
+    it('rejects cursor with invalid lastProcessedId', () => {
+      const result = (
+        channel as unknown as {
+          validateCursor: (p: unknown) => unknown;
+        }
+      ).validateCursor({ lastProcessedId: 'not-a-number', initialized: true });
       expect(result).toBeNull();
     });
 
-    it('rejects cursor with missing lastProcessedAt', () => {
+    it('rejects cursor with missing fields', () => {
       const result = (
         channel as unknown as {
           validateCursor: (p: unknown) => unknown;
@@ -526,7 +574,7 @@ describe('GitlabChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 1 });
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 2 });
-      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T12:00:00.000Z');
+      expect(channel.cursor.lastProcessedId).toBe(2);
     });
   });
 });
