@@ -108,6 +108,11 @@
   min-width: 0;
 }
 
+.headerActionSlot {
+  display: inline-flex;
+  align-items: center;
+}
+
 /* Keep host actions mounted while collapsed so stateful actions survive
    resize. Absolutely positioned so they do not affect flex layout. */
 .headerActionsHostHidden {

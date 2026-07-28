@@ -27,6 +27,9 @@ import styles from './ChatPane.module.css';
 /** Minimum width reserved for the truncating pane title. */
 const TITLE_MIN_WIDTH_PX = 64;
 
+const INTERACTIVE_SELECTOR =
+  'button, a[href], [role="button"], input[type="button"], input[type="submit"], summary';
+
 export interface PaneHeaderActionsProps {
   /** Host-provided actions for this pane; omit or null when none. */
   children?: ReactNode;
@@ -50,7 +53,7 @@ function flattenActionElements(node: ReactNode): ReactElement[] {
   return out;
 }
 
-function actionMenuLabel(
+function actionMenuLabelFromProps(
   element: ReactElement,
   defaultLabel: string,
 ): ReactNode {
@@ -71,14 +74,55 @@ function actionMenuLabel(
   return defaultLabel;
 }
 
+function actionSlot(
+  host: HTMLElement | null,
+  index: number,
+): HTMLElement | null {
+  const slot = host?.querySelector(
+    `[data-pane-header-action-index="${index}"]`,
+  );
+  return slot instanceof HTMLElement ? slot : null;
+}
+
+function interactiveInSlot(slot: HTMLElement): HTMLElement {
+  return slot.querySelector<HTMLElement>(INTERACTIVE_SELECTOR) ?? slot;
+}
+
+/** Prefer the mounted DOM label so opaque custom components still get a name. */
+function resolveActionLabel(
+  host: HTMLElement | null,
+  index: number,
+  element: ReactElement,
+  defaultLabel: string,
+): ReactNode {
+  const slot = actionSlot(host, index);
+  if (slot) {
+    const target = interactiveInSlot(slot);
+    const ariaLabel = target.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel;
+    const title = target.getAttribute('title');
+    if (title) return title;
+    const text = target.textContent?.trim();
+    if (text) return text;
+  }
+  return actionMenuLabelFromProps(element, defaultLabel);
+}
+
+function activateHostAction(host: HTMLElement | null, index: number): void {
+  const slot = actionSlot(host, index);
+  if (!slot) return;
+  interactiveInSlot(slot).click();
+}
+
 /**
  * Renders pane-header host actions inline when they fit, otherwise collapses
  * them into a `…` menu. Measures against the header width so split-pane
  * resizing / add-remove does not crush the title.
  *
  * Host actions stay mounted in one host slot across collapse so stateful
- * actions are not reset. The overflow menu uses menuitem proxies that click
- * those mounted hosts.
+ * actions are not reset. Each action is wrapped in a stable slot; the overflow
+ * menu proxies clicks to the interactive descendant inside that slot so opaque
+ * host components do not need to forward internal props.
  */
 export function PaneHeaderActions({
   children,
@@ -92,6 +136,7 @@ export function PaneHeaderActions({
   const [collapsed, setCollapsed] = useState(false);
   const hasHostActions = children != null && children !== false;
   const actionElements = hasHostActions ? flattenActionElements(children) : [];
+  const defaultActionLabel = t('splitView.defaultActionLabel');
 
   useLayoutEffect(() => {
     if (!hasHostActions) {
@@ -170,8 +215,8 @@ export function PaneHeaderActions({
           {actionElements.map((element, index) => (
             <span
               key={element.key ?? `pane-header-action-${index}`}
+              className={styles.headerActionSlot}
               data-pane-header-action-index={String(index)}
-              style={{ display: 'contents' }}
             >
               {element}
             </span>
@@ -202,14 +247,15 @@ export function PaneHeaderActions({
                 <DropdownMenuItem
                   key={element.key ?? `pane-header-menu-${index}`}
                   onSelect={() => {
-                    const wrapper = hostRef.current?.querySelector(
-                      `[data-pane-header-action-index="${index}"]`,
-                    );
-                    const target = wrapper?.firstElementChild;
-                    if (target instanceof HTMLElement) target.click();
+                    activateHostAction(hostRef.current, index);
                   }}
                 >
-                  {actionMenuLabel(element, t('splitView.defaultActionLabel'))}
+                  {resolveActionLabel(
+                    hostRef.current,
+                    index,
+                    element,
+                    defaultActionLabel,
+                  )}
                 </DropdownMenuItem>
               ))}
             </div>

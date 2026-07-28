@@ -242,6 +242,56 @@ describe('PaneHeaderActions', () => {
     expect(menu!.querySelectorAll('[role="menuitem"]')).toHaveLength(2);
   });
 
+  it('activates opaque custom host components from the overflow menu', async () => {
+    const onShare = vi.fn();
+    function ShareButton() {
+      return (
+        <button type="button" data-testid="host-action" onClick={onShare}>
+          Share
+        </button>
+      );
+    }
+
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <ShareButton />
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    const overflow = container!.querySelector(
+      '[data-testid="pane-header-overflow"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      overflow.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const menu = document.querySelector(
+      '[data-testid="pane-header-overflow-menu"]',
+    );
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toBe('Share');
+
+    await act(async () => {
+      items[0]!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(onShare).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps host action instances mounted across collapse', () => {
     let mounts = 0;
     let unmounts = 0;
