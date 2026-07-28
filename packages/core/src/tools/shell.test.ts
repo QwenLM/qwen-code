@@ -184,6 +184,15 @@ describe('ShellTool', () => {
       write: vi.fn(),
       end: vi.fn(),
       on: vi.fn(),
+      // Both settle paths (promote + executeBackground) wait for the
+      // stream flush via `once('finish', ...)` before transitioning
+      // the registry. Default impl: immediately invoke the handler so
+      // tests don't hang waiting for an event the mocked stream never
+      // emits naturally. Ordering-sensitive tests install their own
+      // deferred stream via `mockReturnValueOnce`.
+      once: vi.fn((event: string, handler: () => void) => {
+        if (event === 'finish') handler();
+      }),
     } as unknown as fs.WriteStream);
 
     vi.mocked(os.platform).mockReturnValue('linux');
@@ -1254,6 +1263,134 @@ describe('ShellTool', () => {
         expect.any(Number),
       );
       expect(registry.complete).not.toHaveBeenCalled();
+    });
+
+    describe('background settle waits for the output stream flush', () => {
+      // `stream.end()` is asynchronous — pending writes can still be in
+      // the libuv queue when it returns. Transitioning the registry
+      // before the stream's 'finish' event lets consumers observe a
+      // terminal status (and the status sidecar report it) while the
+      // trailing output bytes are not yet on disk. These tests pin the
+      // ordering with a stream whose events fire only when the test
+      // says so.
+      const makeDeferredStream = () => {
+        const handlers = new Map<string, Array<() => void>>();
+        return {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            const list = handlers.get(event) ?? [];
+            list.push(handler);
+            handlers.set(event, list);
+          }),
+          emit: (event: string) => {
+            const list = handlers.get(event) ?? [];
+            handlers.set(event, []);
+            for (const h of list) h();
+          },
+        };
+      };
+
+      const startBackgroundAndExit = async (deferred: {
+        end: Mock;
+      }): Promise<{ shellId: string }> => {
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          deferred as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'true',
+          is_background: true,
+        });
+        await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        // Flush the .then() microtask attached to resultPromise.
+        await new Promise((r) => setImmediate(r));
+        // The stream has been asked to flush…
+        expect(deferred.end).toHaveBeenCalledTimes(1);
+        return { shellId: entry.shellId };
+      };
+
+      it('holds the registry transition until the stream finish event', async () => {
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // …but the registry must NOT transition before the flush
+        // completes — this is the truncated-log window.
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+
+        // Exactly once: a late duplicate event must not re-transition.
+        deferred.emit('finish');
+        deferred.emit('error');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      it('still transitions when the stream errors instead of finishing', async () => {
+        // A dead stream (EIO / ENOSPC racing `.end()`) must not strand
+        // the entry as running — the flush is best-effort, the
+        // transition is mandatory.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('error');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('transitions after the flush timeout when the stream never settles', async () => {
+        // Wedged fd whose 'finish'/'error' never fire (e.g. destroyed
+        // by an earlier write error): the 10s timer is the backstop.
+        // Fake only the timer functions so the setImmediate-based
+        // microtask flush in the helper stays real.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          const { shellId } = await startBackgroundAndExit(deferred);
+          expect(registry.complete).not.toHaveBeenCalled();
+
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+
+          // The finish landing after the timeout must not double-fire.
+          deferred.emit('finish');
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it('rejects a bare trailing & in managed background mode', async () => {
@@ -3363,6 +3500,25 @@ describe('ShellTool', () => {
         // against the hint leaking in via a shared code path.
         expect(result.llmContent).not.toContain('is_background: true');
       });
+
+      it('teaches status-file liveness checking in the launch message', async () => {
+        // #7626: with only "read the output file" guidance, the model's
+        // sole liveness heuristic becomes "empty file = dead process" —
+        // wrong for block-buffering children (Python/ML jobs) whose
+        // output file stays at 0 bytes for their whole run, which led
+        // to duplicate relaunches of still-running processes.
+        const invocation = shellTool.build({
+          command: 'python train.py',
+          is_background: true,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const text = String(result.llmContent);
+        expect(text).toContain('status file: ');
+        expect(text).toMatch(/status file: .*shell-bg_[0-9a-f]+\.status/);
+        expect(text).toContain('Do NOT infer liveness from the output file');
+        expect(text).toContain('block-buffer');
+        expect(text).toContain('python -u');
+      });
     });
 
     describe('addCoAuthorToGitCommit', () => {
@@ -5354,6 +5510,17 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain(
           `task_stop({ task_id: '${entry.shellId}'`,
         );
+        // #7626: the promoted path must teach the same status-file
+        // liveness heuristic as executeBackground — including the
+        // actionable unbuffering hint, so the two copies cannot drift.
+        expect(result.llmContent).toContain(
+          `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
+        );
+        expect(result.llmContent).toContain(
+          'Do NOT infer liveness from the output file',
+        );
+        expect(result.llmContent).toContain('python -u');
+        expect(result.llmContent).toContain('stdbuf -oL');
         expect(result.returnDisplay).toContain(
           `Promoted to background: ${entry.shellId}`,
         );

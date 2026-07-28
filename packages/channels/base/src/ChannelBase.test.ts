@@ -240,6 +240,7 @@ function createBridge(): ChannelAgentBridge {
     loadSession: vi.fn(),
     prompt: vi.fn().mockResolvedValue('agent response'),
     cancelSession: vi.fn().mockResolvedValue(undefined),
+    discardSession: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     start: vi.fn(),
     isConnected: true,
@@ -712,6 +713,26 @@ describe('ChannelBase', () => {
       const ch = createChannel();
       await ch.handleInbound(envelope());
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('appends envelope.metadata to the prompt text', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(
+        envelope({
+          text: 'fix the bug',
+          metadata:
+            'Type: Issue | Title: Bug | URL: https://github.com/o/r/issues/1',
+        }),
+      );
+      const prompts = bridge.prompt.mock.calls.map((call) => String(call[1]));
+      const prompt = prompts.find(
+        (p) =>
+          p.includes('fix the bug') && p.includes('Type: Issue | Title: Bug'),
+      );
+      expect(prompt).toBeDefined();
+      expect(prompt!.indexOf('fix the bug')).toBeLessThan(
+        prompt!.indexOf('Type: Issue | Title: Bug'),
+      );
     });
 
     it('silently drops DM messages when dmPolicy=disabled', async () => {
@@ -5659,6 +5680,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/clear' }));
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
+      expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -7339,6 +7361,101 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([]);
     });
 
+    it('sendResponseMessage resolves threadId from router target', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await (
+        ch as unknown as {
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage('owner/repo', 'reply text', 's-1');
+
+      expect(threadMessages).toEqual([
+        { chatId: 'owner/repo', threadId: 'issue:42', text: 'reply text' },
+      ]);
+    });
+
+    it('sendResponseMessage prefers active prompt threadId over router target', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      // Seed an active prompt with a different threadId
+      (
+        ch as unknown as {
+          activePrompts: Map<string, { threadId?: string }>;
+        }
+      ).activePrompts.set('s-1', { threadId: 'pr:7' });
+
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await (
+        ch as unknown as {
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage('owner/repo', 'reply text', 's-1');
+
+      expect(threadMessages).toEqual([
+        { chatId: 'owner/repo', threadId: 'pr:7', text: 'reply text' },
+      ]);
+    });
+
     it('leaves supplied router bridge events to the gateway by default', () => {
       const router = {
         getTarget: vi.fn(),
@@ -7578,6 +7695,26 @@ describe('ChannelBase', () => {
       ch.sent = [];
 
       await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
+    it('/clear in a chat_thread group asks for confirmation (shared session)', async () => {
+      const ch = createChannel({
+        sessionScope: 'chat_thread',
+        groupPolicy: 'open',
+      });
+      const g = envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+      });
+      await ch.handleInbound({ ...g, text: 'hello' });
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear' });
+      expect(ch.sent[0]!.text).toContain('/clear confirm');
+      ch.sent = [];
+      await ch.handleInbound({ ...g, text: '/clear confirm' });
       expect(ch.sent[0]!.text).toContain('Session cleared');
     });
 
@@ -12029,6 +12166,28 @@ describe('ChannelBase', () => {
       );
       stderr.mockRestore();
     });
+
+    it('passes threadId through to sendThreadMessage', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await ch.handleInbound(
+        envelope({ senderId: 'stranger', threadId: 'issue:42' }),
+      );
+
+      expect(threadMessages).toHaveLength(1);
+      expect(threadMessages[0]!.threadId).toBe('issue:42');
+      expect(threadMessages[0]!.text).toContain('pairing code');
+    });
   });
 
   describe('setBridge', () => {
@@ -15812,6 +15971,7 @@ describe('ChannelBase', () => {
           message: 'loop timed out',
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
         expect(
           (
             ch as unknown as {

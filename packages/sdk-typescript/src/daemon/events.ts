@@ -157,6 +157,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // clients can seed their reducer without an extra round-trip.
   'session_snapshot',
   'git_branch_changed',
+  // Enriched working-tree summary push: the daemon recomputes `git status`
+  // in the background (stale-while-revalidate on `GET …/git`) and publishes
+  // this only when the summary changed. `data` is a DaemonWorkspaceGitStatus.
+  // Old SDK consumers silently drop it via `asKnownDaemonEvent`.
+  'git_status_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -423,6 +428,16 @@ export interface DaemonHistoryTruncatedData {
   retainedEvents: number;
   maxBytes: number;
   truncatedTurns?: number;
+  /**
+   * Pagination anchor: the last `qwen.session.recordId` observed by the
+   * daemon's compaction engine before the truncation point. Present when
+   * at least one recordId-bearing `session_update` was ingested or seeded
+   * during the engine's lifetime; omitted otherwise. Clients use this as
+   * the `beforeRecordId` for `GET /session/:id/transcript` pagination
+   * when the retained replay window lost every turn-boundary event
+   * (e.g. live-journal truncation during one long in-flight turn).
+   */
+  recordId?: string;
   fullTranscriptAvailable: boolean;
   [key: string]: unknown;
 }

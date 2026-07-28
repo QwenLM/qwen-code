@@ -11,6 +11,23 @@ import {
   type TranscriptReplayStateV1,
 } from './transcript-replay.js';
 import type { TranscriptRecordInput } from '@qwen-code/qwen-code-core/transcriptRecords';
+import type {
+  GoalRecord,
+  GoalStateCause,
+} from '@qwen-code/qwen-code-core/goalWire';
+
+const GOAL: GoalRecord = {
+  goalId: 'goal-1',
+  revision: 3,
+  objective: 'ship it',
+  status: 'active',
+  evidenceCursor: { recordId: 'record-0' },
+  turnCount: 4,
+  activeTimeMs: 2000,
+  createdAt: 100,
+  updatedAt: 200,
+  lastReason: 'continuing',
+};
 
 function record(
   uuid: string,
@@ -34,7 +51,148 @@ function updates(
   return [...machine.project(item)].map((emission) => emission.update);
 }
 
+function goalStateRecord(
+  uuid: string,
+  cause: GoalStateCause,
+  goal: GoalRecord | null,
+): TranscriptRecordInput {
+  return record(uuid, 'system', {
+    subtype: 'goal_state',
+    systemPayload: {
+      v: 2,
+      cause,
+      snapshot: { v: 2, activity: 'idle', goal },
+    },
+  });
+}
+
 describe('createTranscriptReplayMachine', () => {
+  it('does not replay internal Goal runtime prompts as user messages', () => {
+    expect(
+      updates(
+        createTranscriptReplayMachine(),
+        record('goal-runtime', 'user', {
+          subtype: 'goal_runtime',
+          message: { role: 'user', parts: [{ text: 'Continue working.' }] },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('projects goal_state through v2-first metadata', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-create', 'create', GOAL),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?._meta).toMatchObject({
+      goalState: { v: 2, goal: GOAL, activity: 'idle' },
+      goalStatus: { kind: 'set', condition: GOAL.objective },
+      'qwen.session.recordId': 'goal-create',
+    });
+  });
+
+  it('tracks Goal state across replay pages', () => {
+    const first = createTranscriptReplayMachine();
+    updates(first, goalStateRecord('goal-create', 'create', GOAL));
+    const second = createTranscriptReplayMachine({
+      initialState: first.snapshot(),
+    });
+
+    const projected = updates(
+      second,
+      goalStateRecord('goal-clear', 'clear', null),
+    );
+
+    expect(projected[0]?._meta).toMatchObject({
+      goalState: { v: 2, goal: null, activity: 'idle' },
+      goalStatus: { kind: 'cleared', condition: GOAL.objective },
+      'qwen.session.recordId': 'goal-clear',
+    });
+  });
+
+  it('emits legacy goalTerminal metadata for a terminal goal_state', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-complete', 'complete', {
+        ...GOAL,
+        status: 'complete',
+      }),
+    );
+
+    expect(projected[0]?._meta).toMatchObject({
+      goalStatus: { kind: 'achieved', condition: GOAL.objective },
+      goalTerminal: {
+        kind: 'achieved',
+        condition: GOAL.objective,
+        iterations: GOAL.turnCount,
+        durationMs: GOAL.activeTimeMs,
+      },
+    });
+  });
+
+  it('reports and skips a malformed goal_state record', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({ onDiagnostic });
+    const malformed = record('goal-malformed', 'system', {
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause: 'create',
+        snapshot: { v: 2, activity: 'running', goal: GOAL },
+      },
+    });
+
+    expect(updates(machine, malformed)).toEqual([]);
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'malformed_goal_state',
+        recordId: 'goal-malformed',
+        path: 'systemPayload',
+      }),
+    );
+  });
+
+  it('preserves task notification metadata during replay', () => {
+    const machine = createTranscriptReplayMachine();
+    const projected = updates(
+      machine,
+      record('notification-1', 'user', {
+        subtype: 'notification',
+        message: {
+          role: 'user',
+          parts: [{ text: '<task-notification />' }],
+        },
+        systemPayload: {
+          displayText: 'Background agent completed.',
+          backgroundTask: {
+            taskId: 'task-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'Background agent completed.' },
+        _meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'task-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+          qwenTranscript: { sourceRecordIds: ['notification-1'] },
+        },
+      },
+    ]);
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(
@@ -196,6 +354,33 @@ describe('createTranscriptReplayMachine', () => {
         initialState: { v: 2 } as unknown as TranscriptReplayStateV1,
       }),
     ).toThrow('Unsupported transcript replay state version');
+  });
+
+  it('drops a malformed goalState from initialState and reports it', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({
+      onDiagnostic,
+      initialState: {
+        v: 1,
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          promptTokens: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          apiTimeMs: 0,
+        },
+        goalState: { v: 2, activity: 'bogus', goal: null },
+      } as unknown as TranscriptReplayStateV1,
+    });
+
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'invalid_replay_state',
+        message: 'Dropped a malformed Goal state from replay state.',
+        affectsCompleteness: true,
+      }),
+    );
+    expect(machine.snapshot().goalState).toBeUndefined();
   });
 
   it('emits gaps, todo plans, and cumulative usage deterministically', () => {

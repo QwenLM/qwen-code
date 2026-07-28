@@ -28,6 +28,17 @@ describe('normalize', () => {
     expect(normalize('qwen|qwen2.5:qwen2.5-1m')).toBe('qwen2.5-1m');
   });
 
+  it('should keep the model name when the colon carries a variant tag', () => {
+    // OpenRouter variants and Ollama / LM Studio tags put the colon on the
+    // right of the model name — the opposite side from the `family:model`
+    // form above — so the half worth keeping is the left one.
+    expect(normalize('qwen/qwen3-coder:free')).toBe('qwen3-coder');
+    expect(normalize('google/gemini-2.5-pro:online')).toBe('gemini-2.5-pro');
+    expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
+    expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
+    expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
+  });
+
   it('should collapse whitespace to a single hyphen', () => {
     expect(normalize('claude 3.5 sonnet')).toBe('claude-3.5-sonnet');
   });
@@ -278,6 +289,37 @@ describe('tokenLimit', () => {
   it('should handle case-insensitive model names', () => {
     expect(tokenLimit('GPT-4O')).toBe(131072);
     expect(tokenLimit('CLAUDE-3.5-SONNET')).toBe(200000);
+  });
+});
+
+describe('variant-tagged model ids', () => {
+  it('resolves the same limit with and without the tag', () => {
+    for (const [tagged, bare] of [
+      ['qwen/qwen3-coder:free', 'qwen/qwen3-coder'],
+      ['google/gemini-2.5-pro:online', 'google/gemini-2.5-pro'],
+      ['openai/gpt-5:free', 'openai/gpt-5'],
+      ['qwen2.5-coder:32b', 'qwen2.5-coder'],
+      ['qwen3-coder-plus:nitro', 'qwen3-coder-plus'],
+    ] as Array<[string, string]>) {
+      expect(tokenLimit(tagged)).toBe(tokenLimit(bare));
+      expect(tokenLimit(tagged, 'output')).toBe(tokenLimit(bare, 'output'));
+    }
+  });
+
+  it('reports the real window rather than the default fallback', () => {
+    // Pinned absolutely as well as relatively: if both sides of the
+    // comparison above regressed to the default the pairs would still match.
+    expect(tokenLimit('qwen/qwen3-coder:free')).toBe(262_144);
+    expect(tokenLimit('google/gemini-2.5-pro:online')).toBe(1_000_000);
+    expect(tokenLimit('openai/gpt-5:free')).toBe(272_000);
+    expect(tokenLimit('qwen2.5-coder:32b')).toBe(262_144);
+  });
+
+  it('still keeps the right half of a prefixed id', () => {
+    // The guard against over-correcting: a colon suffix is dropped only when
+    // it looks like a tag, so the `family:model` forms stay as they were.
+    expect(tokenLimit('qwen|qwen2.5:qwen2.5-1m')).toBe(262_144);
+    expect(tokenLimit('  a/b/c|GPT-4o:gpt-4o-2024-05-13-q4  ')).toBe(131_072);
   });
 });
 

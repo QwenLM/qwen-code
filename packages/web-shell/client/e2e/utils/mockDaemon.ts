@@ -3,6 +3,8 @@ import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
   type DaemonCapabilities,
+  type DaemonChannelsSnapshot,
+  type DaemonChannelTypeCatalog,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
@@ -11,6 +13,7 @@ import {
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonGitHubPullRequestList,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
@@ -49,6 +52,8 @@ export interface WebShellDaemonScenario {
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  channelTypes: DaemonChannelTypeCatalog;
+  channels: DaemonChannelsSnapshot;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -58,6 +63,11 @@ export interface WebShellDaemonScenario {
    * (non-git workspace), matching the real daemon's graceful degradation.
    */
   gitStatus?: DaemonWorkspaceGitStatus;
+  /**
+   * Response for `GET /workspaces/:cwd/github/prs`. Defaults to an available,
+   * empty pull-request list.
+   */
+  gitHubPrs?: DaemonGitHubPullRequestList;
 }
 
 export interface MockDaemonController {
@@ -82,6 +92,8 @@ type ScenarioOverrides = Partial<
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
+    | 'channelTypes'
+    | 'channels'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -95,6 +107,8 @@ type ScenarioOverrides = Partial<
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  channelTypes?: DaemonChannelTypeCatalog;
+  channels?: DaemonChannelsSnapshot;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -306,11 +320,14 @@ export function createWebShellDaemonScenario(
     extensions,
     extensionOperations,
     extensionUpdateCheck,
+    channelTypes: overrides.channelTypes ?? [],
+    channels: overrides.channels ?? { revision: '1', instances: {} },
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
     gitStatus: overrides.gitStatus,
+    gitHubPrs: overrides.gitHubPrs,
   };
 }
 
@@ -503,11 +520,16 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -539,6 +561,18 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/settings\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(voice|providers)\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -554,6 +588,19 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
     return true;
   }
+  if (
+    method === 'GET' &&
+    (/^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/channels\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    (method === 'PUT' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -566,6 +613,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
     return true;
   }
   if (
@@ -652,6 +702,27 @@ async function handleDaemonRoute(
     await json(route, workspaceVoice(scenario));
     return;
   }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
+    await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
+    await json(route, scenario.providers);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, scenario.settings);
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, {
+      key: getRecordValue(body, 'key') ?? 'unknown',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
+      value: getRecordValue(body, 'value'),
+      requiresRestart: false,
+    });
+    return;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     const serverName = decodeURIComponent(path.split('/')[3] ?? 'server');
     await json(route, workspaceMcpTools(scenario, serverName));
@@ -685,6 +756,76 @@ async function handleDaemonRoute(
     await json(route, catalog);
     return;
   }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path)
+  ) {
+    await json(route, scenario.channelTypes);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/channels\/?$/.test(path)) {
+    await json(route, scenario.channels);
+    return;
+  }
+  const channelMutationMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/?$/,
+  );
+  if (channelMutationMatch && (method === 'PUT' || method === 'DELETE')) {
+    const name = decodeURIComponent(channelMutationMatch[1]);
+    if (
+      !isRecord(body) ||
+      body['expectedRevision'] !== scenario.channels.revision
+    ) {
+      await json(route, { error: 'Channel settings changed.' }, 409);
+      return;
+    }
+    const revision = nextRevision(scenario.channels.revision);
+    if (method === 'DELETE') {
+      const instances = { ...scenario.channels.instances };
+      delete instances[name];
+      scenario.channels = { revision, instances };
+      await json(route, {
+        snapshot: scenario.channels,
+        instance: {
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      });
+      return;
+    }
+    if (!isRecord(body['config'])) {
+      await badRequest(route, 'Invalid Channel configuration.');
+      return;
+    }
+    const previous = scenario.channels.instances[name];
+    const secrets = { ...(previous?.secrets ?? {}) };
+    if (isRecord(body['secrets'])) {
+      for (const [key, update] of Object.entries(body['secrets'])) {
+        if (!isRecord(update)) continue;
+        if (update['operation'] === 'clear') {
+          delete secrets[key];
+        } else if (update['operation'] === 'replace') {
+          secrets[key] = { present: true, source: 'literal' };
+        }
+      }
+    }
+    const instance = {
+      name,
+      config: body['config'],
+      secrets,
+      startsWithServe: previous?.startsWithServe ?? false,
+      runtime: previous?.runtime ?? ({ state: 'stopped' } as const),
+    };
+    scenario.channels = {
+      revision,
+      instances: { ...scenario.channels.instances, [name]: instance },
+    };
+    await json(route, { snapshot: scenario.channels, instance });
+    return;
+  }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
     await json(
       route,
@@ -692,6 +833,18 @@ async function handleDaemonRoute(
         v: 2,
         workspaceCwd: scenario.workspaceCwd,
         branch: null,
+      },
+    );
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitHubPrs ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        pullRequests: [],
       },
     );
     return;
@@ -893,6 +1046,13 @@ function readStringField(body: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value
     : undefined;
+}
+
+function nextRevision(revision: string): string {
+  const numeric = Number(revision);
+  return Number.isSafeInteger(numeric) && numeric >= 0
+    ? String(numeric + 1)
+    : `${revision}-next`;
 }
 
 function isApprovalMode(mode: string): mode is DaemonApprovalMode {

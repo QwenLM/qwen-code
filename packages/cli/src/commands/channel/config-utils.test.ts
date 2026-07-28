@@ -12,6 +12,7 @@ vi.mock('./channel-registry.js', () => ({
         channelType: string;
         requiredConfigFields?: string[];
         envResolvableConfigFields?: string[];
+        defaultSessionScope?: string;
       }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
@@ -34,6 +35,11 @@ vi.mock('./channel-registry.js', () => ({
         envResolvableConfigFields: ['endpoint'],
       },
       bare: { channelType: 'bare' }, // no requiredConfigFields
+      github: {
+        channelType: 'github',
+        requiredConfigFields: ['token'],
+        defaultSessionScope: 'chat_thread',
+      },
     };
     return plugins[type];
   },
@@ -44,6 +50,7 @@ vi.mock('./channel-registry.js', () => ({
     'numeric',
     'overlap',
     'bare',
+    'github',
   ],
 }));
 
@@ -349,6 +356,23 @@ describe('parseChannelConfig', () => {
     expect(result.groupPolicy).toBe('open');
     expect(result.dmPolicy).toBe('disabled');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('uses plugin defaultSessionScope when sessionScope is not configured', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+    });
+    expect(result.sessionScope).toBe('chat_thread');
+  });
+
+  it('explicit sessionScope overrides plugin defaultSessionScope', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      sessionScope: 'user',
+    });
+    expect(result.sessionScope).toBe('user');
   });
 
   it('rejects an unknown approvalMode', async () => {

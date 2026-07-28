@@ -20,7 +20,7 @@
  */
 
 import type { ReactNode } from 'react';
-import { useCallback, useInsertionEffect, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import { Box, Text, type DOMElement, useBoxMetrics, useCursor } from 'ink';
 import type { TextBuffer } from './shared/text-buffer.js';
 import { TextInputMouseController } from './shared/TextInputMouseController.js';
@@ -329,11 +329,9 @@ export const BaseTextInput = ({
     linesToRender,
     prefixWidth,
   });
-
-  useInsertionEffect(() => {
-    setCursorPosition(cursorPosition);
-    return () => setCursorPosition(undefined);
-  }, [setCursorPosition, cursorPosition]);
+  // Ink snapshots this value in its insertion effect, so it must be set
+  // during render rather than from another effect.
+  setCursorPosition(cursorPosition);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (

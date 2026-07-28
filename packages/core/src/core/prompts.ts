@@ -193,8 +193,13 @@ export function resolvePathFromEnv(envVar?: string): {
  * This function should only be used when there is actually a custom instruction.
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
- * @param userMemory - User memory to append
- * @param appendInstruction - Extra instructions to append after user memory
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCustomSystemPrompt(instruction), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
  * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
@@ -224,11 +229,26 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix = buildSystemPromptSuffix(userMemory);
-
-  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+  return assembleSystemPrompt({
+    base: instructionText,
+    contextFiles: userMemory,
+    appendPrompt: appendInstruction,
+  });
 }
 
+/**
+ * Builds the stable base system prompt (identity, mandates, tool guidance).
+ *
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCoreSystemPrompt(undefined, model), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param model - Model id, used to select model-specific prompt variants.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
+ * @param interactionMode - Interactive vs. headless prompt variant.
+ */
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
@@ -442,18 +462,59 @@ Interaction mode reminder: ${interaction.questions}
     fs.writeFileSync(writePath, basePrompt);
   }
 
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? buildSystemPromptSuffix(userMemory)
-      : '';
-  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
-
-  return `${basePrompt}${memorySuffix}${appendSuffix}`;
+  return assembleSystemPrompt({
+    base: basePrompt,
+    contextFiles: userMemory,
+    appendPrompt: appendInstruction,
+  });
 }
 
 function buildSystemPromptSuffix(text?: string): string {
   const trimmed = text?.trim();
   return trimmed ? `\n\n---\n\n${trimmed}` : '';
+}
+
+/**
+ * System prompt segments, one slot per segment, ordered stable → context →
+ * volatile. Callers only classify content into slots; `assembleSystemPrompt`
+ * is the single place that knows the order, so a segment cannot be appended
+ * in the wrong position at a call site.
+ */
+export interface SystemPromptLayers {
+  /**
+   * Stable layer: the base prompt (identity, mandates, tool guidance) —
+   * fixed for the whole session.
+   */
+  base: string;
+  /**
+   * Context layer: concatenated context files (QWEN.md hierarchy, baseline
+   * rules, extension files). Reloaded only on explicit refresh.
+   */
+  contextFiles?: string;
+  /** Context layer: caller-supplied append prompt (e.g. --append-system-prompt). */
+  appendPrompt?: string;
+  /**
+   * Context layer: repo snapshot (branch + recent commits), computed once
+   * per session. Joined without a `---` separator — it carries its own
+   * heading.
+   */
+  gitStatus?: string | null;
+  /**
+   * Volatile layer: the managed auto-memory section, rewritten in-session on
+   * every memory save. Always last, so a save invalidates the shortest
+   * possible cached prompt prefix.
+   */
+  autoMemory?: string;
+}
+
+export function assembleSystemPrompt(layers: SystemPromptLayers): string {
+  return (
+    layers.base +
+    buildSystemPromptSuffix(layers.contextFiles) +
+    buildSystemPromptSuffix(layers.appendPrompt) +
+    (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
+    buildSystemPromptSuffix(layers.autoMemory)
+  );
 }
 
 /**
@@ -1095,6 +1156,23 @@ An exact one-off approval for an unknown shell command approves only that invoca
 ### When to Converge
 
 Your plan is ready when you have addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes. Present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+</system-reminder>`;
+}
+
+/**
+ * One-shot reminder injected on the first model-bound turn after Plan mode
+ * changes outside the approved `exit_plan_mode` flow. While Plan mode is
+ * active {@link getPlanModeSystemReminder} is re-injected every turn, so the
+ * reminder silently disappearing is not a signal models reliably notice
+ * (#7671).
+ *
+ * @param currentMode - The approval mode active when delivery is claimed
+ */
+export function getManualPlanExitSystemReminder(currentMode: string): string {
+  return `<system-reminder>
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: ${currentMode}.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
 </system-reminder>`;
 }
 

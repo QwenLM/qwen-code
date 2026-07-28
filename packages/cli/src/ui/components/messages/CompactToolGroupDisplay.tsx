@@ -26,7 +26,6 @@ interface CompactToolGroupDisplayProps {
   contentWidth: number;
 }
 
-const COMPACT_GROUP_HORIZONTAL_PADDING = 2;
 const ELAPSED_TIME_MARGIN_LEFT = 1;
 const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
 
@@ -290,6 +289,24 @@ function safeDescription(raw: string | undefined): string | undefined {
   return cleaned || undefined;
 }
 
+/**
+ * Whether all tools in the given category have usable descriptions and the
+ * count is within the inline limit — meaning the summary already shows each
+ * description individually, so a separate hint line would be redundant.
+ */
+function categoryShowsDescriptionsInline(
+  toolCalls: IndividualToolCallDisplay[],
+  category: ToolCategory,
+): boolean {
+  const sameCategory = toolCalls.filter(
+    (tc) => getToolCategory(tc.name) === category,
+  );
+  if (sameCategory.length > DESCRIPTION_INLINE_LIMIT) return false;
+  return sameCategory.every(
+    (tc) => safeDescription(tc.description) !== undefined,
+  );
+}
+
 function getActiveToolHint(
   toolCalls: IndividualToolCallDisplay[],
 ): string | undefined {
@@ -305,12 +322,16 @@ function getActiveToolHint(
       const tool = toolCalls[index];
       if (tool.status === status) {
         const category = getToolCategory(tool.name);
-        const usesCountSummary = toolCalls.some(
+        const hasCategoryPeers = toolCalls.some(
           (candidate, candidateIndex) =>
             candidateIndex !== index &&
             getToolCategory(candidate.name) === category,
         );
-        return usesCountSummary ? safeDescription(tool.description) : undefined;
+        if (!hasCategoryPeers) return undefined;
+        // Summary already shows descriptions inline → no hint needed.
+        if (categoryShowsDescriptionsInline(toolCalls, category))
+          return undefined;
+        return safeDescription(tool.description);
       }
     }
   }
@@ -319,11 +340,26 @@ function getActiveToolHint(
 }
 
 /**
+ * Maximum number of tools within one category whose individual descriptions
+ * are shown inline. Beyond this, the first `DESCRIPTION_PREVIEW_COUNT` are
+ * shown followed by "...and N more".
+ */
+const DESCRIPTION_INLINE_LIMIT = 3;
+
+/**
+ * Number of descriptions shown as a preview when the category exceeds
+ * `DESCRIPTION_INLINE_LIMIT`.
+ */
+const DESCRIPTION_PREVIEW_COUNT = 2;
+
+/**
  * Build a semantic summary line from a batch of tool calls.
  *
  * Single tool (with description) → "Read a.ts" / "Ran ls -la"
  * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
- * Multi  same                    → "Read 3 files"
+ * Multi ≤ 3 (with descriptions)  → "Read a.ts, b.ts, c.ts"
+ * Multi ≤ 3 (no descriptions)    → "Read 3 files"
+ * Multi > 3                      → "Read a.ts, b.ts, ... and 3 more"
  * Multi mixed                    → "Read 2 files, ran npm test"
  *
  * Uses past tense when all tools are done, present progressive when active.
@@ -352,6 +388,7 @@ export function buildToolSummary(
     if (!tools || tools.length === 0) continue;
 
     const template = CATEGORY_TEMPLATES[cat];
+    const verb = isActive ? template.activeVerb : template.pastVerb;
     let part: string;
     if (tools.length === 1) {
       const safeDesc = safeDescription(tools[0].description);
@@ -359,7 +396,6 @@ export function buildToolSummary(
         // Single tool with a concrete description: show it ("Read a.ts").
         // Verb is English (see CategoryTemplate note) but the description is
         // language-neutral, so the line reads correctly in every locale.
-        const verb = isActive ? template.activeVerb : template.pastVerb;
         part = `${verb} ${safeDesc}`;
       } else {
         // No usable description → localized count phrase ("Read 1 file").
@@ -367,10 +403,35 @@ export function buildToolSummary(
           count: '1',
         });
       }
+    } else if (tools.length <= DESCRIPTION_INLINE_LIMIT) {
+      // ≤ 3 tools: show all descriptions if available.
+      const descriptions = tools
+        .map((tc) => safeDescription(tc.description))
+        .filter((d): d is string => d !== undefined);
+      if (descriptions.length === tools.length) {
+        part = `${verb} ${descriptions.join(', ')}`;
+      } else {
+        // Not all tools have usable descriptions → count phrase.
+        const forms = isActive ? template.active : template.past;
+        part = t(forms.many, { count: String(tools.length) });
+      }
     } else {
-      // Multiple tools of one category → localized plural count phrase.
-      const forms = isActive ? template.active : template.past;
-      part = t(forms.many, { count: String(tools.length) });
+      // > 3 tools: show first N descriptions + "...and M more".
+      const previewDescs = tools
+        .slice(0, DESCRIPTION_PREVIEW_COUNT)
+        .map((tc) => safeDescription(tc.description))
+        .filter((d): d is string => d !== undefined);
+      if (previewDescs.length === DESCRIPTION_PREVIEW_COUNT) {
+        const remaining = tools.length - DESCRIPTION_PREVIEW_COUNT;
+        const morePhrase = t('... and {{count}} more', {
+          count: String(remaining),
+        });
+        part = `${verb} ${previewDescs.join(', ')}, ${morePhrase}`;
+      } else {
+        // Not enough preview descriptions → count phrase.
+        const forms = isActive ? template.active : template.past;
+        part = t(forms.many, { count: String(tools.length) });
+      }
     }
     // Lowercase the leading character for every part after the first ("Read 3
     // files, edited 2 files"). Operating on the first char only keeps already-
@@ -398,7 +459,6 @@ export function estimateCompactToolGroupHeight(
   const summaryWidth = Math.max(
     1,
     contentWidth -
-      COMPACT_GROUP_HORIZONTAL_PADDING -
       STATUS_INDICATOR_WIDTH -
       getElapsedTimeReservedWidth(activeTool, overallStatus),
   );
@@ -421,7 +481,7 @@ export const CompactToolGroupDisplay: React.FC<
   const hint = getActiveToolHint(toolCalls);
 
   return (
-    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
+    <Box flexDirection="column" width={contentWidth} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>

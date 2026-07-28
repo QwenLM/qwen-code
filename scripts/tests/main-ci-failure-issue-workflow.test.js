@@ -49,11 +49,36 @@ describe('main CI failure issue workflow', () => {
 
   it('deduplicates failures for the same commit and includes run context', () => {
     expect(workflow).toContain('qwen-main-ci-failure:${HEAD_SHA}');
+    expect(workflow).toContain('--search "${marker} in:body"');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('gh issue create');
-    expect(workflow).toContain('apply_autofix_route "${existing_issue}"');
+    expect(workflow).toContain('apply_autofix_route "${existing_sha_issue}"');
+    expect(workflow).toContain(
+      'apply_autofix_route "${existing_workflow_issue}"',
+    );
+    expect(workflow.indexOf('existing_sha_issue')).toBeLessThan(
+      workflow.indexOf('existing_workflow_issue'),
+    );
+    expect(workflow).toContain('title_prefix="Main CI failed:"');
+    expect(workflow).toContain(
+      '--search "\\"${title_prefix} ${WORKFLOW_NAME}\\" in:title"',
+    );
+    expect(workflow).toContain(
+      '--jq "[.[] | select(.author.login == \\"${bot_login}\\") | select(.title | startswith(\\"${title_prefix} ${WORKFLOW_NAME} on \\"))] | .[0].number // \\"\\""',
+    );
+    expect(workflow).toContain('--title "${title_prefix} ${WORKFLOW_NAME}');
+    expect(workflow).toContain('gh issue comment "${existing_workflow_issue}"');
+    expect(workflow).toContain('## Additional CI Failure');
+    expect(workflow.match(/echo "<!-- \$\{marker\} -->"/g)).toHaveLength(2);
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
+    expect(workflow.match(/exit 0/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('verifies workflow ownership before reusing a title-matched issue', () => {
+    expect(workflow).toContain('bot_login="$(gh api user --jq .login)"');
+    expect(workflow).toContain('--json number,title,author');
+    expect(workflow).toContain('select(.author.login == \\"${bot_login}\\")');
   });
 
   it('does not check out repository code', () => {

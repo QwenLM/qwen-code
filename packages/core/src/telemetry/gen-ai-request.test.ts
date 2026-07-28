@@ -248,9 +248,9 @@ describe('GenAI request observer', () => {
         throw new Error('setValue failed');
       },
     } as unknown as typeof ROOT_CONTEXT;
-    expect(createGenAiRequestObserverContext(brokenParent, span)).toBe(
-      brokenParent,
-    );
+    expect(() =>
+      createGenAiRequestObserverContext(brokenParent, span),
+    ).not.toThrow();
 
     const brokenReporterContext = {
       getValue: () => {

@@ -2047,16 +2047,6 @@ jobs:
                 | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
                 | {sha: .[0], at: ($c.created_at // "")} ]
               | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
-            # The head a gate-rejection handoff last parked this PR on (mirror of
-            # RED_HEAD). While it equals LIVE_HEAD the PR is parked on the CURRENT
-            # head: a later push writes a newer eval comment WITHOUT this marker,
-            # so the latest handoff head stops matching and the parking clears.
-            # Used only to auto-recover a stale-base parking (see the idle path).
-            HANDOFF_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                | [ scan("<!-- autofix-handoff head=([0-9a-f]+) -->") ] | .[]
-                | {sha: .[0], at: ($c.created_at // "")} ]
-              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
             # A maintainer '@qwen-code /retry' posts that marker to say
             # "evaluate this feedback again": markers written BEFORE it stop
             # holding the watermark down. This is the sanctioned exception to
@@ -2313,27 +2303,6 @@ jobs:
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
             if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
-              # Nothing new — but is this a stale-base PARKING? A gate-rejection
-              # handoff left an autofix-handoff marker on the head it parked on.
-              # While that still matches LIVE_HEAD (no push since) and the head is
-              # now BEHIND main, the build that failed may have failed on a
-              # since-changed dependency (#7471), not the fix. Merge main in and
-              # re-arm so the loop re-reads the feedback against fresh main. The
-              # forward case is handled in-round by the report step; this recovers
-              # a PR that was ALREADY parked when the base moved under it. Guarded
-              # by head-match (a push clears it) and behind-main (self-limiting:
-              # the update makes it current, so it cannot re-fire), and every API
-              # call is fail-safe — any failure just falls through to idle.
-              if [[ -n "${LIVE_HEAD}" && "${HANDOFF_HEAD}" == "${LIVE_HEAD}" ]]; then
-                UNPARK_CMP="$(gh api "repos/${REPO}/compare/${DEFAULT_BRANCH:-main}...${LIVE_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                if [[ "${UNPARK_CMP}" == 'behind' || "${UNPARK_CMP}" == 'diverged' ]] \
-                  && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${LIVE_HEAD}" > /dev/null 2>&1; then
-                  gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '♻️ AutoFix auto-recovered a stale base: this PR was parked after a fix failed to build, but its head was behind `%s`, so current main was merged in via update-branch and the next scan will re-read the feedback against it. A stale base can fail the build without being the fix at fault; if it still fails once current, it hands off to a human again.\n\n<details>\n<summary>中文说明</summary>\n\n♻️ AutoFix 自动恢复了陈旧 base:本 PR 因修复构建失败而被搁置,但其 head 落后于 `%s`,故已将当前 main 合入,下次扫描会对它重读反馈。陈旧 base 可能使构建失败而并非修复之过;若更新后仍失败,将再次交人。\n\n</details>\n\n<!-- autofix-rearm -->' "${DEFAULT_BRANCH:-main}" "${DEFAULT_BRANCH:-main}")" || echo "::warning::Failed to post stale-base recovery comment on PR #${PR}"
-                  echo "♻️ #${PR}: parked on a stale base (behind ${DEFAULT_BRANCH:-main}) — merged main + re-armed"
-                  fleet_row "${PR}" 'unparked' "stale-base parking recovered — merged ${DEFAULT_BRANCH:-main} + re-armed"
-                  continue
-                fi
-              fi
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
@@ -2397,7 +2366,7 @@ jobs:
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       contents: 'read'
     strategy:
@@ -2485,6 +2454,7 @@ jobs:
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+          cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -2943,17 +2913,69 @@ jobs:
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
 
+      # The agent below runs for up to 80 minutes and the verification gate adds
+      # more, but nothing reaches the PR thread until "Push and report" at the
+      # very end: a maintainer who just engaged takeover sees silence and cannot
+      # tell a working round from a stuck one. The agent's output already
+      # streams live to the Actions log, so publish that link up front.
+      # Upserted by marker so one status comment per PR is EDITED each round
+      # (edits notify nobody) rather than stacking a new comment against a
+      # 100-round cap. Runs after prepare so a revalidated-away stale duplicate
+      # never announces a round it will not run. Best-effort: a status post that
+      # fails warns and continues — it must never cost the round.
+      - name: 'Post autofix status comment'
+        id: 'post_status'
+        if: |-
+          ${{ steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- autofix-status -->'
+          ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+          # ROUND counts rounds already DONE; every other message numbers the
+          # round being performed (the report posts ROUND + 1). Match it, or
+          # the same round carries two different numbers in one thread.
+          if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
+            ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
+          fi
+          BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
+            "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
+            "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
+          STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
+            jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
+              '[ .[][] | select((.user.login // "") == $ab)
+                 | select((.body // "") | contains($m)) ] | last | .id // empty')" ||
+            STATUS_ID=''
+          if [[ -n "${STATUS_ID}" ]]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+              -f body="${BODY}" > /dev/null ||
+              echo "::warning::Failed to update the autofix status comment on PR #${PR}; continuing."
+          else
+            STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" \
+              -f body="${BODY}" --jq '.id')" ||
+              {
+                STATUS_ID=''
+                echo "::warning::Failed to post the autofix status comment on PR #${PR}; continuing."
+              }
+          fi
+          # Hand the id to the finalize step so it does not repeat this scan.
+          echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Triage and address'
         id: 'address'
         # Skipped entirely for a stale duplicate target (see the live-watermark
         # revalidation in prepare) — no agent run, no marker, no comment.
         if: |-
           ${{ steps.prepare.outputs.stale != 'true' }}
-        # Bound the agent well below the 120-minute job timeout so a runaway agent
+        # Bound the agent well below the 150-minute job timeout so a runaway agent
         # fails THIS step (not the whole job), leaving the always() verify and
         # report steps time to run and post a handoff. A job-level timeout would
-        # cancel those steps too and leave the loop silent. 80 leaves ~40 minutes
-        # of headroom for setup (install/build) plus verify + report.
+        # cancel those steps too and leave the loop silent. The 80-minute primary
+        # attempt plus one 20-minute repair leaves ~50 minutes for setup, two
+        # verification passes, and reporting.
         timeout-minutes: 80
         env:
           PR: '${{ env.PR }}'
@@ -3029,162 +3051,136 @@ jobs:
         id: 'verify'
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
+        continue-on-error: true
         run: |-
-          # Record whether the agent left a commit FIRST — this is a ref-only
-          # diff, so it runs before the failure.md early-exits and covers an
-          # agent that commits and then aborts. The failure handoff keys its
-          # "was NOT pushed / commit discarded" wording on this, NOT on
-          # outcome=failed: abort / pre-commit-gate paths that never committed
-          # keep the neutral framing. `git diff --quiet` exits 1 for a real diff
-          # (committed) but 128 on a bad ref — only 1 counts as a commit, so a
-          # git error is not misreported as a discarded commit.
-          committed_rc=0
-          git diff --quiet "origin/${BRANCH}...${BRANCH}" || committed_rc=$?
-          if [[ "${committed_rc}" -eq 1 ]]; then
-            echo "committed=true" >> "${GITHUB_OUTPUT}"
-          fi
+          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
-          if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
-            echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
-            git status --short
-            cat "${WORKDIR}/failure.md"
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-
-          if [[ -f "${WORKDIR}/failure.md" ]]; then
-            echo "🛑 Agent aborted intentionally:"
-            cat "${WORKDIR}/failure.md"
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-
-          # Convention: hooks are severed at EVERY host checkout of the PR
-          # branch (no secret sits in this step's env, but a post-checkout
-          # hook still runs branch code on the host).
-          git config core.hooksPath /dev/null
-          git checkout "${BRANCH}"
-
-          # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
-          # no-op/unchanged return: on a stale-schema PR the agent can wrongly
-          # write no-action.md, and without this the no-op path would report the
-          # feedback as evaluated (acted=false) while CI stays red — the exact bug
-          # this PR fixes. So it runs on EVERY path. The gate is shared with the
-          # issue-fix verify step (rationale + the generator crash guard live in
-          # the script); the write is on a tracked file compared by `git status`,
-          # not the commit-level no-op git-diff below, and it is restored on
-          # failure. On failure it writes outcome=failed and exits 1.
-          # Run the copy staged from the trusted base checkout: a PR branch
-          # that predates the script does not contain it (bash would exit 127
-          # and kill the gate with no outcome), and the gate logic must come
-          # from the trusted base, not the branch under verification.
-          bash "${RUNNER_TEMP}/check-settings-schema.sh"
-          git diff --name-only "origin/main...${BRANCH}" \
-            | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
-
-          if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
-            # No new commit. That is only legitimate as a deliberate no-action.
-            if [[ -s "${WORKDIR}/no-action.md" ]]; then
-              echo "🟰 No action needed:"
-              cat "${WORKDIR}/no-action.md"
-              echo "outcome=noop" >> "${GITHUB_OUTPUT}"
-              exit 0
-            fi
-            echo "❌ Branch unchanged and no no-action.md — agent produced nothing"
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-
-          if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
-            echo "❌ Branch changed but address-summary.md is missing"
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-
-          # Every check below can legitimately REJECT the agent's attempt, so
-          # each declares that verdict explicitly. That is what lets the handoff
-          # tell a rejection apart from the gate's OWN death: an empty outcome
-          # on a failed job means the gate never reached a verdict (its own bug,
-          # an infra blip), and the agent's work must then be retried rather
-          # than buried by a watermark advance.
-          # Capture each check's output. A rejection has to tell the agent WHY
-          # its change was refused: without that, the next round re-reads only
-          # the original review feedback and re-makes the same mistake - #7208
-          # was handed to a human over a two-character TS4111 fix its own
-          # compiler output already spelled out.
-          GATE_LOG="${WORKDIR}/gate-output.log"
-          : > "${GATE_LOG}"
-          reject_fix() {
-            echo "❌ ${1}"
-            # Declare the verdict FIRST. The handoff routes on outcome=, and an
-            # empty outcome on a failed job means "the gate never reached a
-            # verdict" — i.e. a crash, which is RETRIED. So a rejection that
-            # dies while writing its detail file would be re-attempted forever
-            # instead of reported once. A detail we cannot write is a degraded
-            # message; it must never cost the verdict, hence this order and the
-            # non-fatal write below.
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+      - name: 'Repair deterministic rejection'
+        id: 'repair'
+        if: |-
+          ${{ always() && steps.verify.outputs.retryable == 'true' }}
+        timeout-minutes: 20
+        env:
+          PR: '${{ env.PR }}'
+          ISSUE: '${{ env.ISSUE }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
+          QWEN_TIMEOUT_MS: '1080000'
+          CONFLICT: '${{ steps.prepare.outputs.conflict }}'
+          BASE: 'main'
+          SETTINGS_JSON: |-
             {
-              echo "**${1}**"
-              echo
-              # A four-backtick fence cannot be closed by a ``` line, so
-              # captured output containing its own fences stays inside the
-              # block when this is posted verbatim as a PR comment.
-              echo '````'
-              tail -c 3000 "${GATE_LOG}" 2> /dev/null
-              echo '````'
-            } > "${WORKDIR}/gate-rejection.md" ||
-              echo "::warning::could not write the gate rejection detail; the verdict stands."
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "read_many_files",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(git add)",
+                "run_shell_command(git checkout)",
+                "run_shell_command(git commit)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git merge)",
+                "run_shell_command(git status)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(npm run build)",
+                "run_shell_command(npm run typecheck)",
+                "run_shell_command(npm run lint)",
+                "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
+                "run_shell_command(pwd)"
+              ],
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          echo "attempted=true" >> "${GITHUB_OUTPUT}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
             exit 1
-          }
-          run_check() {
-            # pipefail makes the pipeline carry the command's status, not tee's.
-            local label="${1}"
-            shift
-            if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
-              reject_fix "${label}"
-            fi
-          }
-
-          echo '🔬 Re-running deterministic checks (independent of the agent)...'
-          run_check 'build failed on the agent-committed fix' npm run build
-          run_check 'typecheck failed on the agent-committed fix' npm run typecheck
-          run_check 'lint failed on the agent-committed fix' npm run lint
-
-          # Test changed/related files for the packages this PR touches.
-          # --changed follows the import graph so transitive breakage is caught.
-          # Full regression is covered by regular CI on the PR after the push.
-          # Map each changed file to its OWNING npm workspace via the trusted
-          # staged resolver, shared with the other verify gate so both resolve
-          # packages identically. It expands the on-disk root package.json
-          # workspaces globs (so a workspace the branch ADDS is included) and
-          # takes each file's longest-prefix workspace — never a flat
-          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
-          # package.json inside a workspace's src tree (would skip the owning
-          # workspace's tests). No '|| true': a resolver error (missing node, an
-          # unreadable manifest) must fail the gate loudly rather than silently
-          # skip package tests; legitimate no-match input already exits 0 empty.
-          CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
-          if [[ -z "${CHANGED_PKGS}" ]]; then
-            echo 'No package changes detected; skipping package tests.'
-          else
-            for p in ${CHANGED_PKGS}; do
-              if [[ ! -f "${p}/package.json" ]]; then
-                echo "Skipping ${p}: no package.json."
-                continue
-              fi
-              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
-              if [[ "${test_script}" != *vitest* ]]; then
-                echo "Skipping ${p}: test script is not Vitest."
-                continue
-              fi
-              echo "🧪 Testing ${p} (changed files only)..."
-              run_check "tests failed in ${p}" \
-                npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
-            done
           fi
-          echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
+          if [[ ! -s "${WORKDIR}/gate-rejection.md" ]]; then
+            echo '::error::Retryable verification rejection has no gate-rejection.md.'
+            exit 1
+          fi
+          {
+            cat "${WORKDIR}/feedback.md"
+            if [[ -s "${WORKDIR}/address-summary.md" ]]; then
+              echo
+              echo '## Previous attempt summary'
+              cat "${WORKDIR}/address-summary.md"
+            fi
+            echo
+            echo '## Same-run verification repair'
+            echo
+            echo 'The previous commit was rejected by deterministic verification.'
+            echo 'Keep that commit and add one follow-up commit that fixes this rejection:'
+            echo
+            cat "${WORKDIR}/gate-rejection.md"
+          } > "${WORKDIR}/feedback.retry.md"
+          mv "${WORKDIR}/feedback.retry.md" "${WORKDIR}/feedback.md"
+          rm -f \
+            "${WORKDIR}/address-summary.md" \
+            "${WORKDIR}/no-action.md" \
+            "${WORKDIR}/failure.md" \
+            "${WORKDIR}/handoff.md" \
+            "${WORKDIR}/gate-output.log" \
+            "${WORKDIR}/agent-api-error" \
+            "${WORKDIR}/agent-api-error-kind" \
+            "${WORKDIR}/agent-timeout"
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          git config core.hooksPath .husky
+          node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
+            --mode address-review \
+            --pr "${PR}" \
+            --issue "${ISSUE}" \
+            --workdir "${WORKDIR}" \
+            --conflict "${CONFLICT}" \
+            --base "${BASE}"
+
+      - name: 'Repair verification gate'
+        id: 'verify_repair'
+        if: |-
+          ${{ always() && steps.repair.outputs.attempted == 'true' }}
+        continue-on-error: true
+        run: |-
+          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+
+      - name: 'Finalize verification'
+        id: 'final_verify'
+        if: |-
+          ${{ always() && steps.prepare.outputs.stale != 'true' }}
+        env:
+          FIRST_OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          FIRST_COMMITTED: '${{ steps.verify.outputs.committed }}'
+          REPAIR_ATTEMPTED: '${{ steps.repair.outputs.attempted }}'
+          REPAIR_OUTCOME: '${{ steps.verify_repair.outputs.outcome }}'
+          REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
+        run: |-
+          OUTCOME="${FIRST_OUTCOME}"
+          COMMITTED="${FIRST_COMMITTED}"
+          if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
+            OUTCOME="${REPAIR_OUTCOME}"
+            COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
+          fi
+          echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${COMMITTED}" ]]; then
+            echo "committed=${COMMITTED}" >> "${GITHUB_OUTPUT}"
+          fi
+          case "${OUTCOME}" in
+            fixed|noop) ;;
+            *) exit 1 ;;
+          esac
 
       - name: 'Show run artifacts'
         if: |-
@@ -3193,7 +3189,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3212,14 +3208,14 @@ jobs:
 
       - name: 'Push and report'
         if: |-
-          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
+          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.final_verify.outputs.outcome == 'fixed' || steps.final_verify.outputs.outcome == 'noop') }}
         env:
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) pushes the branch and
           # posts the report as qwen-code-dev-bot, the same identity that opened
           # the PR. The default GITHUB_TOKEN cannot do either on a bot-owned PR
           # in a way that re-triggers CI.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
@@ -3280,8 +3276,13 @@ jobs:
             # which already holds the PAT, maps each to its thread. Findings it
             # DECLINED or deferred are deliberately left open. Best-effort
             # throughout: a resolve failure must never fail a good push.
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              # first-100 page cap: threads beyond this page are not resolved
+            # Both this resolve block and the reply block below map an
+            # inline-comment id to its review thread, so the threads are
+            # fetched once here and shared. Hoisted above both so a round that
+            # only replies (no resolved-comments.txt) still has them.
+            # first-100 page cap: a comment in a thread past this page is not
+            # mapped, and each block falls back to the id as given.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
               THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
                 query($owner:String!,$name:String!,$pr:Int!){
                   repository(owner:$owner,name:$name){
@@ -3292,8 +3293,10 @@ jobs:
                 }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
               THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
               if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
-                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved"
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
               fi
+            fi
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
               RESOLVED_N=0
               while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
                 rc_id="${rc_id%$'\r'}"
@@ -3317,6 +3320,51 @@ jobs:
                 fi
               done < "${WORKDIR}/resolved-comments.txt"
               echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
+            fi
+            # The mirror of the resolve above: a finding the agent did NOT
+            # resolve keeps its thread open, and this answers it IN that thread.
+            # Without it the reason sits only in the round summary, so the
+            # reviewer who opens the still-open thread sees silence and cannot
+            # tell their finding was read. Same neutralisation as the summary
+            # body — a reply is model output posted verbatim under the bot
+            # identity, so it could otherwise smuggle a forged control marker.
+            # Best-effort: a reply failure must never fail a good push.
+            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
+              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
+              REPLIED_N=0
+              while IFS=$'\t' read -r rc_id reply_b64; do
+                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
+                # A finding cannot be both resolved and replied to; the resolve
+                # block above already closed anything in resolved-comments.txt,
+                # so skip it here rather than answer a thread we just resolved.
+                # Match tolerates the rc: prefix and a trailing CR, as the
+                # resolve block's own parsing does.
+                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
+                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
+                  grep -qxE "(rc:)?${rc_id}"; then
+                  continue
+                fi
+                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
+                [[ -n "${REPLY_BODY}" ]] || continue
+                # GitHub rejects a reply aimed at another reply ("Replies to
+                # replies are not supported"), and rc_id can itself be a reply
+                # id — the feedback step lists every review comment, replies
+                # included. Map to the thread's top-level comment (the one
+                # valid target), falling back to rc_id when the thread is past
+                # the first-100 page cap and so absent from THREADS_JSON.
+                root_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
+                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
+                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
+                  REPLIED_N=$(( REPLIED_N + 1 ))
+                else
+                  echo "::warning::could not reply to review comment ${rc_id}"
+                fi
+              done < <(jq -r '.[] | select(.id != null and .body != null)
+                | [(.id | tostring), (.body | @base64)] | @tsv' \
+                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
+              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
@@ -3380,8 +3428,8 @@ jobs:
         if: |-
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
-          COMMITTED: '${{ steps.verify.outputs.committed }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.final_verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -3639,12 +3687,6 @@ jobs:
                   HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
                 else
                   HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
-                  # The gate rejected a real fix and the PR is up to date now, so
-                  # this is a genuine parking. Flag it head-scoped so a LATER
-                  # scan can auto-recover it if the base goes stale under it
-                  # (behind main → the build may have failed on a since-changed
-                  # dependency, not the fix). See the autofix-handoff marker.
-                  PARKED_STALE_CANDIDATE=true
                 fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
@@ -3805,18 +3847,61 @@ jobs:
               if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
                 echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
               fi
-              # A gate-REJECTION handoff (the agent produced a fix that failed
-              # verification, so the PR is now parked with the watermark
-              # advanced) is a stale-base recovery candidate: if this head later
-              # falls behind main, the build may have failed on something main
-              # has since changed (#7471's update-notifier), not the fix. The
-              # scan reads this head-scoped marker and, only while it still
-              # matches LIVE_HEAD (a later push clears it), auto-updates the base
-              # and re-arms. Head-scoped like autofix-redcheck, and only on this
-              # branch — a crash/timeout handoff produced no fix to re-verify.
-              if [[ "${PARKED_STALE_CANDIDATE:-false}" == 'true' ]]; then
-                echo "<!-- autofix-handoff head=${REPORT_HEAD} -->"
-              fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
+
+      # Flip the status comment out of "working" so a finished round never
+      # leaves a live-looking line behind. PATCH-only on purpose: a round that
+      # never posted a status (stale duplicate, dry run) must not gain one here.
+      # The verdict stays in the round report this job already posts; this only
+      # records that the round ended, and keeps the run link reachable.
+      # Gated on 'stale' for the same reason the announcement is: the per-PR
+      # concurrency group serialises duplicate address jobs, so the discarded
+      # one runs AFTER the real round already finalised. Ungated, it would
+      # overwrite that round's "finished" with its own "ended without
+      # publishing" and report a successful round as a failed one. An empty
+      # 'stale' (prepare itself crashed) still finalises — that IS this job's
+      # round, and it is exactly the case that must not stay "working".
+      - name: 'Finalize autofix status comment'
+        if: |-
+          ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # The id the announcement wrote. Empty means this round never
+          # announced (its step was skipped, or the post itself failed) — then
+          # no comment claims this round is working, so there is nothing to
+          # flip and no reason to scan for one. A previous round's comment is
+          # already terminal, and the next round's announcement re-PATCHes it.
+          STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- autofix-status -->'
+          if [[ -z "${STATUS_ID}" ]]; then
+            echo "This round posted no status comment on PR #${PR}; nothing to finalize."
+            exit 0
+          fi
+          ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+          # ROUND counts rounds already DONE; every other message numbers the
+          # round being performed (the report posts ROUND + 1). Match it, or
+          # the same round carries two different numbers in one thread.
+          if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
+            ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
+          fi
+          # 'fixed'/'noop' are the two outcomes that published a round report;
+          # anything else means the round stopped before publishing one.
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]]; then
+            EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
+            ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
+          else
+            EN="$(printf '⚠️ **AutoFix round %s ended without publishing a report** — [view run](%s).' "${ROUND_DISPLAY}" "${RUN_URL}")"
+            ZH="$(printf '⚠️ **AutoFix 第 %s 轮结束但未发布报告** —— [查看运行](%s)。' "${ROUND_DISPLAY}" "${RUN_URL}")"
+          fi
+          BODY="$(printf '%s\n\n%s\n\n<details>\n<summary>中文说明</summary>\n\n%s\n\n</details>' \
+            "${MARKER}" "${EN}" "${ZH}")"
+          gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+            -f body="${BODY}" > /dev/null ||
+            echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
