@@ -2181,110 +2181,138 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }),
       );
       const sessionIds = new Set<string>();
-      const client = new BridgeClient(
-        // BfFut: ACP today carries a sessionId on every per-session
-        // notification / request, so the no-sessionId branch is
-        // technically unreachable. But the channel is multi-session
-        // (Stage 1.5 multiplex), so if ACP ever grows a no-sessionId
-        // call we'd silently drop it on a multi-session channel
-        // instead of throwing. Surface that ambiguity loudly.
-        (sessionId) => {
-          if (sessionId) return byId.get(sessionId);
-          if (channelInfo && channelInfo.sessionIds.size > 1) {
-            throw new Error(
-              'BridgeClient: ACP call without sessionId on a ' +
-                'multi-session channel cannot be routed — workspace=' +
-                boundWorkspace,
+      let client: BridgeClient;
+      let connection: ClientSideConnection;
+      try {
+        client = new BridgeClient(
+          // BfFut: ACP today carries a sessionId on every per-session
+          // notification / request, so the no-sessionId branch is
+          // technically unreachable. But the channel is multi-session
+          // (Stage 1.5 multiplex), so if ACP ever grows a no-sessionId
+          // call we'd silently drop it on a multi-session channel
+          // instead of throwing. Surface that ambiguity loudly.
+          (sessionId) => {
+            if (sessionId) return byId.get(sessionId);
+            if (channelInfo && channelInfo.sessionIds.size > 1) {
+              throw new Error(
+                'BridgeClient: ACP call without sessionId on a ' +
+                  'multi-session channel cannot be routed — workspace=' +
+                  boundWorkspace,
+              );
+            }
+            return undefined;
+          },
+          (sessionId) =>
+            sessionId ? pendingRestoreEvents.get(sessionId) : undefined,
+          permissionMediator,
+          permissionTimeoutMs,
+          maxPendingPerSession,
+          // Forward the optional `BridgeFileSystem` injection so
+          // production `qwen serve` can wire the `WorkspaceFileSystem`
+          // adapter into BridgeClient's fs proxy methods. Tests + Mode A
+          // consumers + channels / IDE companion omit it; BridgeClient
+          // falls back to its inline fs proxy.
+          opts.fileSystem,
+          // §2.3: centralised model_switched publish — keeps cache + generation
+          // update atomic. BridgeClient calls this instead of inlining publish.
+          (entry, modelId, originator) =>
+            publishModelSwitched(entry as SessionEntry, modelId, originator),
+          // A2: centralised approval_mode_changed publish on in-session mode
+          // promotion. `previous` is read from the bridge state cache.
+          (entry, modeId, originator) => {
+            const se = entry as SessionEntry;
+            publishApprovalModeChanged(
+              se,
+              {
+                previous: se.currentApprovalMode ?? 'default',
+                next: modeId,
+                persisted: false,
+              },
+              originator,
             );
-          }
-          return undefined;
-        },
-        (sessionId) =>
-          sessionId ? pendingRestoreEvents.get(sessionId) : undefined,
-        permissionMediator,
-        permissionTimeoutMs,
-        maxPendingPerSession,
-        // Forward the optional `BridgeFileSystem` injection so
-        // production `qwen serve` can wire the `WorkspaceFileSystem`
-        // adapter into BridgeClient's fs proxy methods. Tests + Mode A
-        // consumers + channels / IDE companion omit it; BridgeClient
-        // falls back to its inline fs proxy.
-        opts.fileSystem,
-        // §2.3: centralised model_switched publish — keeps cache + generation
-        // update atomic. BridgeClient calls this instead of inlining publish.
-        (entry, modelId, originator) =>
-          publishModelSwitched(entry as SessionEntry, modelId, originator),
-        // A2: centralised approval_mode_changed publish on in-session mode
-        // promotion. `previous` is read from the bridge state cache.
-        (entry, modeId, originator) => {
-          const se = entry as SessionEntry;
-          publishApprovalModeChanged(
-            se,
-            {
-              previous: se.currentApprovalMode ?? 'default',
-              next: modeId,
-              persisted: false,
-            },
-            originator,
+          },
+          // Reverse tool channel (issue #5626, Phase 2): forward the optional
+          // client-hosted-MCP sender lookup so `BridgeClient.extMethod` can
+          // answer `qwen/control/client_mcp/message` from the child by reaching
+          // the per-WS-connection `ClientMcpRegistrar`. Omitted callers (tests,
+          // Mode A) never host a client MCP server, so the method stays
+          // unreachable.
+          opts.clientMcpSender,
+          (sessionId) => sessionIds.has(sessionId),
+          // Daemon token-burn accounting: forward per-round token usage observed
+          // at the session/update fan-in to the daemon host's metrics ring via
+          // the telemetry seam. Optional-chained so non-daemon callers (tests,
+          // Mode A) that wire no `tokenUsage` metric are a silent no-op.
+          (inputTokens, outputTokens, durationMs, apiErrors, apiRetries) =>
+            telemetry.metrics?.tokenUsage?.(
+              inputTokens,
+              outputTokens,
+              durationMs,
+              apiErrors,
+              apiRetries,
+            ),
+          // `create_sub_session` tool: forward the request/response hook so a child
+          // tool can ask the daemon to spawn a sub-session and (for 'first-turn')
+          // return its result. Omitted → the method reports daemon-only.
+          opts.onCreateSubSession,
+          (sessionId, event) => {
+            const request = generationRequests.get(event.requestId);
+            if (!request || request.sessionId !== sessionId) return;
+            if (request.queue.push(event)) return;
+            request.settled = true;
+            generationRequests.delete(event.requestId);
+            request.queue.fail(
+              new Error('Generation stream consumer too slow'),
+            );
+            void request.connection
+              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
+                sessionId,
+                requestId: event.requestId,
+              })
+              .catch(() => undefined);
+          },
+          (event) => {
+            const request = workspaceGenerationRequests.get(event.requestId);
+            if (!request) return;
+            if (request.queue.push(event)) return;
+            request.settled = true;
+            workspaceGenerationRequests.delete(event.requestId);
+            request.queue.fail(
+              new Error('Generation stream consumer too slow'),
+            );
+            void request.connection
+              ?.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel, {
+                requestId: event.requestId,
+              })
+              .catch(() => undefined);
+          },
+          opts.onChannelDelivery,
+          () =>
+            channelInfo?.sessionIds === sessionIds &&
+            channelInfo.sessionSpawnsInFlight > 0,
+        );
+        connection = new ClientSideConnection(() => client, channel.stream);
+      } catch (error) {
+        try {
+          channel.killSync();
+        } catch {
+          // The asynchronous teardown below remains authoritative.
+        }
+        try {
+          // Raw exit is successful teardown after the forced signal; kill()
+          // supplies the bounded failure path when exit is never observed.
+          await Promise.race([
+            channel.exited.then(() => undefined),
+            channel.kill(),
+          ]);
+        } catch (teardownError) {
+          throw new AggregateError(
+            [error, teardownError],
+            'ACP channel construction and teardown failed',
           );
-        },
-        // Reverse tool channel (issue #5626, Phase 2): forward the optional
-        // client-hosted-MCP sender lookup so `BridgeClient.extMethod` can
-        // answer `qwen/control/client_mcp/message` from the child by reaching
-        // the per-WS-connection `ClientMcpRegistrar`. Omitted callers (tests,
-        // Mode A) never host a client MCP server, so the method stays
-        // unreachable.
-        opts.clientMcpSender,
-        (sessionId) => sessionIds.has(sessionId),
-        // Daemon token-burn accounting: forward per-round token usage observed
-        // at the session/update fan-in to the daemon host's metrics ring via
-        // the telemetry seam. Optional-chained so non-daemon callers (tests,
-        // Mode A) that wire no `tokenUsage` metric are a silent no-op.
-        (inputTokens, outputTokens, durationMs, apiErrors, apiRetries) =>
-          telemetry.metrics?.tokenUsage?.(
-            inputTokens,
-            outputTokens,
-            durationMs,
-            apiErrors,
-            apiRetries,
-          ),
-        // `create_sub_session` tool: forward the request/response hook so a child
-        // tool can ask the daemon to spawn a sub-session and (for 'first-turn')
-        // return its result. Omitted → the method reports daemon-only.
-        opts.onCreateSubSession,
-        (sessionId, event) => {
-          const request = generationRequests.get(event.requestId);
-          if (!request || request.sessionId !== sessionId) return;
-          if (request.queue.push(event)) return;
-          request.settled = true;
-          generationRequests.delete(event.requestId);
-          request.queue.fail(new Error('Generation stream consumer too slow'));
-          void request.connection
-            .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
-              sessionId,
-              requestId: event.requestId,
-            })
-            .catch(() => undefined);
-        },
-        (event) => {
-          const request = workspaceGenerationRequests.get(event.requestId);
-          if (!request) return;
-          if (request.queue.push(event)) return;
-          request.settled = true;
-          workspaceGenerationRequests.delete(event.requestId);
-          request.queue.fail(new Error('Generation stream consumer too slow'));
-          void request.connection
-            ?.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel, {
-              requestId: event.requestId,
-            })
-            .catch(() => undefined);
-        },
-        opts.onChannelDelivery,
-        () =>
-          channelInfo?.sessionIds === sessionIds &&
-          channelInfo.sessionSpawnsInFlight > 0,
-      );
-      const connection = new ClientSideConnection(() => client, channel.stream);
+        }
+        throw error;
+      }
 
       // Add to `aliveChannels` + register the `channel.exited` handler
       // BEFORE the `initialize` handshake: the agent child exists from
@@ -8662,12 +8690,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               () => undefined,
             )
           : Promise.resolve();
-        await Promise.all([
-          ...channels.map((ci) => ci.channel.kill().catch(() => {})),
+        const teardownResults = await Promise.allSettled([
+          ...channels.map((ci) => ci.channel.kill()),
           ...inFlightSessionAwaits,
           ...inFlightRestoreAwaits,
           inFlightChannelAwait,
         ]);
+        const teardownFailures = teardownResults.flatMap((result) =>
+          result.status === 'rejected' ? [result.reason] : [],
+        );
+        if (teardownFailures.length === 1) throw teardownFailures[0];
+        if (teardownFailures.length > 1) {
+          throw new AggregateError(
+            teardownFailures,
+            'ACP bridge shutdown failed',
+          );
+        }
       })().then(resolveShutdown, rejectShutdown);
       return shutdownPromise;
     },
