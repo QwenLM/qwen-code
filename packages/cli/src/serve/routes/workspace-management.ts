@@ -447,7 +447,7 @@ export function registerWorkspaceManagementRoutes(
     mutate(),
     async (req: Request, res: Response) => {
       const controller = new AbortController();
-      req.on('close', () => controller.abort());
+      res.on('close', () => controller.abort());
       try {
         const path = await pickWorkspaceDirectory(controller.signal);
         res.status(200).json({

@@ -2497,4 +2497,47 @@ describe('POST /workspace-directory-picker', () => {
       expect.any(AbortSignal),
     );
   });
+
+  it('does not abort the picker before it can resolve, for the body the Web Shell actually sends', async () => {
+    // A real picker resolves only after the user interacts — model that with a
+    // delay so an already-aborted signal surfaces as a rejection.
+    const pickWorkspaceDirectory = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<string | undefined>((resolve, reject) => {
+          setTimeout(() => {
+            if (signal?.aborted) {
+              reject(new Error('The operation was aborted'));
+              return;
+            }
+            resolve('/Users/me/code');
+          }, 50);
+        }),
+    );
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker').send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('still aborts a picker that is genuinely in flight when the client hangs up', async () => {
+    let observed: AbortSignal | undefined;
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn((signal?: AbortSignal) => {
+        observed = signal;
+        return new Promise<string | undefined>(() => {});
+      }),
+    });
+    const req = request(app).post('/workspace-directory-picker').send({});
+    req.end(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    req.abort();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(observed?.aborted).toBe(true);
+  });
 });
