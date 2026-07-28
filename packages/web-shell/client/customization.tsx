@@ -1,10 +1,13 @@
 import {
   createContext,
   useContext,
+  type CSSProperties,
   type ComponentType,
   type ReactNode,
 } from 'react';
 import type { Components, Options } from 'react-markdown';
+import type { ChartRendererRegistry } from '@datafe-open/markdown-chart';
+import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
@@ -32,6 +35,8 @@ export interface WebShellCodeBlockRenderInfo {
   code: string;
   /** True while the assistant message is still streaming partial content. */
   isStreaming: boolean;
+  /** True only when this block is the active unterminated tail fence. */
+  isIncomplete: boolean;
   source: MarkdownContentSource;
   theme: WebShellTheme;
 }
@@ -39,18 +44,33 @@ export interface WebShellCodeBlockRenderInfo {
 /**
  * Return a React node to replace the default code block rendering. Return
  * `null`, `undefined`, or `false` to decline and fall back to the built-in code
- * block renderer. Expensive renderers should debounce or defer work while
- * `info.isStreaming` is true.
+ * block renderer. Expensive renderers should defer parsing while
+ * `info.isIncomplete` is true; `info.isStreaming` describes the surrounding
+ * assistant message and may remain true after this block has closed.
  */
 export type CodeBlockRenderer = (
   info: WebShellCodeBlockRenderInfo,
 ) => ReactNode | null | undefined;
+
+export interface WebShellMarkdownChartCustomization {
+  registry: ChartRendererRegistry;
+  loadingLabel?: string;
+  onError?: MarkdownChartReactErrorHandler;
+  chartClassName?: string;
+  chartStyle?: CSSProperties;
+}
 
 export interface WebShellMarkdownCustomization {
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
   ) => string;
+  /**
+   * Override Web Shell's built-in Markdown chart registry or its presentation
+   * callbacks. The registry must remain referentially stable while a chart is
+   * mounted.
+   */
+  chart?: WebShellMarkdownChartCustomization;
   renderCodeBlock?: CodeBlockRenderer;
   /**
    * Custom markdown components override Web Shell's built-ins. In particular,
