@@ -1383,6 +1383,20 @@
             }
           }
         },
+        "modelGrades": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Maps semantic model grade names exposed to the Agent tool to concrete model selectors."
+        },
+        "allowedGrades": {
+          "description": "Optional whitelist of model grade names the Agent tool may use.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,
@@ -3113,6 +3127,11 @@
         },
         "todoStopGuard": {
           "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionWriterLease": {
+          "description": "Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
           "type": "boolean",
           "default": false
         },

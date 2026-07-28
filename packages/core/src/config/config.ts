@@ -40,6 +40,7 @@ import { resolveInteractionMode } from '../core/prompts.js';
 import {
   AuthType,
   createContentGenerator,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -310,6 +311,22 @@ export interface ApprovalModeInfo {
   id: ApprovalMode;
   name: string;
   description: string;
+}
+
+type ManualPlanExitNoticeEventKind = 'clear' | 'manual-exit';
+
+interface ManualPlanExitNoticeEventState {
+  version: number;
+  kind: ManualPlanExitNoticeEventKind;
+}
+
+interface ManualPlanExitNoticeCursorState {
+  seenVersion: number;
+}
+
+export interface ManualPlanExitNotice {
+  version: number;
+  currentMode: ApprovalMode;
 }
 
 /**
@@ -848,6 +865,10 @@ export interface AgentsCollabSettings {
     /** Model selector for the built-in Explore subagent (default: inherit). */
     exploreModel?: string;
   };
+  /** Maps model grade names exposed to the Agent tool to model selectors. */
+  modelGrades?: Record<string, string>;
+  /** Optional whitelist of model grades exposed to the Agent tool. */
+  allowedGrades?: string[];
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -1032,6 +1053,7 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
    * Days a recurring cron job lives before auto-expiring. `0` disables
@@ -1769,7 +1791,13 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
-  private pendingManualPlanExitNotice = false;
+  private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
+    version: 0,
+    kind: 'clear',
+  };
+  private manualPlanExitNoticeCursorState: ManualPlanExitNoticeCursorState = {
+    seenVersion: 0,
+  };
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -1821,6 +1849,7 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
@@ -2079,6 +2108,9 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.sessionWriterLeaseEnabled =
+      this.experimentalZedIntegration === true &&
+      params.sessionWriterLeaseEnabled === true;
     this.cronEnabled = params.cronEnabled ?? true;
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
@@ -2469,6 +2501,10 @@ export class Config {
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
                   signal,
+                  typeof input['submitted_prompt'] === 'string' &&
+                    input['submitted_prompt'].trim().length > 0
+                    ? input['submitted_prompt']
+                    : undefined,
                 );
                 break;
               case 'UserPromptExpansion':
@@ -2857,7 +2893,9 @@ export class Config {
   }
 
   private async activateChatRecording(): Promise<void> {
-    if (!this.chatRecordingEnabled || !this.experimentalZedIntegration) return;
+    if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
+      return;
+    }
     const recorder = this.chatRecordingService;
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
@@ -4090,6 +4128,7 @@ export class Config {
       if (priorReasoningEffort) {
         this.setReasoningEffort(priorReasoningEffort);
       }
+      resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
@@ -4391,6 +4430,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
@@ -5422,6 +5462,34 @@ export class Config {
     return this.approvalModeRevision;
   }
 
+  private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeEventState',
+      ) &&
+      Object.prototype.hasOwnProperty.call(this, 'approvalMode')
+    ) {
+      const inheritedEvent = this.manualPlanExitNoticeEventState;
+      this.manualPlanExitNoticeEventState = inheritedEvent
+        ? { ...inheritedEvent }
+        : { version: 0, kind: 'clear' };
+    }
+    return this.manualPlanExitNoticeEventState;
+  }
+
+  private getOwnManualPlanExitNoticeCursorState(): ManualPlanExitNoticeCursorState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeCursorState',
+      )
+    ) {
+      this.manualPlanExitNoticeCursorState = { seenVersion: 0 };
+    }
+    return this.manualPlanExitNoticeCursorState;
+  }
+
   setApprovalMode(
     mode: ApprovalMode,
     options?: {
@@ -5462,20 +5530,22 @@ export class Config {
     }
     // Update all mode bookkeeping only after fallible transition work has
     // succeeded, so callers never observe a partially applied mode change.
+    let noticeEvent =
+      Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    if (!Object.prototype.hasOwnProperty.call(this, 'approvalMode')) {
+      noticeEvent = { ...noticeEvent };
+      this.manualPlanExitNoticeEventState = noticeEvent;
+    }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
       this.prePlanMode = fromMode;
-      // A stale exit notice must not survive a re-entry: the plan-mode
-      // reminder takes over again on the next turn.
-      this.pendingManualPlanExitNotice = false;
+      noticeEvent.version++;
+      noticeEvent.kind = 'clear';
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
-      if (!options?.fromApprovedPlanExit) {
-        // While in plan mode the model is told "plan mode is active" on
-        // every turn; on a manual exit that reminder just stops appearing,
-        // which models do not reliably notice (#7671). Queue an explicit
-        // one-shot exit notice for the next turn's reminder assembly.
-        this.pendingManualPlanExitNotice = true;
-      }
+      noticeEvent.version++;
+      noticeEvent.kind = options?.fromApprovedPlanExit
+        ? 'clear'
+        : 'manual-exit';
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -5488,14 +5558,48 @@ export class Config {
   }
 
   /**
-   * One-shot: returns whether a manual (non-approved) plan-mode exit is
-   * pending model notification, and clears the flag. Consumed by the
-   * system-reminder assembly in `GeminiClient` on the next model-bound turn.
+   * Claims the latest manual plan-exit notice for this conversation.
    */
+  takePendingManualPlanExitNotice(): ManualPlanExitNotice | undefined {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (event.version <= cursor.seenVersion) {
+      return undefined;
+    }
+
+    cursor.seenVersion = event.version;
+    if (
+      event.kind !== 'manual-exit' ||
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      return undefined;
+    }
+
+    return {
+      version: event.version,
+      currentMode: this.approvalMode,
+    };
+  }
+
+  restorePendingManualPlanExitNotice(version: number): void {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (
+      event.version === version &&
+      event.kind === 'manual-exit' &&
+      this.approvalMode !== ApprovalMode.PLAN &&
+      cursor.seenVersion === version
+    ) {
+      cursor.seenVersion = Math.max(0, version - 1);
+    }
+  }
+
   consumePendingManualPlanExitNotice(): boolean {
-    const pending = this.pendingManualPlanExitNotice;
-    this.pendingManualPlanExitNotice = false;
-    return pending;
+    return (
+      Config.prototype.takePendingManualPlanExitNotice.call(this) !== undefined
+    );
   }
 
   /**
@@ -6058,6 +6162,10 @@ export class Config {
     return this.experimentalZedIntegration;
   }
 
+  isSessionWriterLeaseEnabled(): boolean {
+    return this.sessionWriterLeaseEnabled;
+  }
+
   getListExtensions(): boolean {
     return this.listExtensions;
   }
@@ -6599,7 +6707,7 @@ export class Config {
       (event) => {
         this.notifyChatRecordingFailure(event);
       },
-      this.experimentalZedIntegration,
+      this.sessionWriterLeaseEnabled,
     );
   }
 
@@ -7063,6 +7171,10 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
+      const { ZoomImageTool } = await import('../tools/zoom-image.js');
+      return new ZoomImageTool(this);
     });
 
     // --- Grep / RipGrep (conditional) ---

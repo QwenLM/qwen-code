@@ -394,6 +394,10 @@ export function coverageFromTranscripts(
   // roster collapses to one line covering the whole run, and repeating "none was
   // built" once per chunk transcript would put N more copies of the same fact
   // into the posted body, right next to the line that already states it.
+  // The roster reads the effort from the plan itself (`plan.effort`, written by
+  // the capturing command), so this recomputation — and `compose-review`'s, which
+  // calls the same helper with no effort argument — agree with `check-coverage`
+  // on a medium run automatically. No effort is threaded through here.
   const rosterForRun = requiredAgents(plan as unknown as RosterPlan);
   // ONE predicate for "was this prompt built", everywhere. A partial write can
   // leave a zero-byte record, and the Step 4/5 classifier already reads that as
@@ -1069,9 +1073,11 @@ export interface VerificationReport {
  * two, so its roster (`requiredAgents`) cannot reach them. And their count is not
  * in the plan: verify shards on the finding count (`ceil(N/8)`), reverse audit
  * loops until it goes dry. So this is not an exact roster — it is a floor, and it
- * is asked only by `compose-review`, which runs only at high effort. A low/medium
- * quick pass has no verify and no reverse audit, and never reaches here (it emits
- * no verdict, so it calls no `compose-review`).
+ * is asked only by `compose-review`, which runs at high AND medium effort. High
+ * requires both steps; medium runs verify but skips the reverse audit by design
+ * (see `balancedMedium` below), so at medium the reverse-audit floor becomes a
+ * Comment cap, not a repairable gap. Low emits no verdict, calls no
+ * `compose-review`, and never reaches here.
  *
  * The floor is deliberately one agent per step, for the failure it exists to catch:
  * the step skipped **wholesale**, or run with agents that never opened their brief —
@@ -1095,6 +1101,14 @@ export function verificationGaps(
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];
   const remediation: string[] = [];
+  // The balanced (medium) tier deliberately skips Step 5 (reverse audit). Read
+  // the effort from the plan, so this reader and the roster agree. At medium the
+  // absent reverse audit is a by-design omission that caps the verdict at Comment
+  // — NOT a gap to repair: flagging it missing, and emitting a FIX line telling
+  // the orchestrator to run it, made the one mandated repair round rebuild the
+  // full high pipeline and escalate every medium review back to high. Verify
+  // (Step 4) still runs at medium, so its floor below is untouched.
+  const balancedMedium = (plan as { effort?: unknown }).effort === 'medium';
 
   // How a step's agents actually got their prompt. The floor needs the four shapes
   // apart, not one boolean, because the fix for each is different — and a refusal
@@ -1156,7 +1170,9 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
-  if (reverse !== 'ok') {
+  // A repairable reverse-audit gap only at high: medium is complete without it.
+  const reverseGap = !balancedMedium && reverse !== 'ok';
+  if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
     // prescribes could never run. This function is handed the real path.
@@ -1203,7 +1219,7 @@ export function verificationGaps(
   // keeps its own precise text. The remediation above stays per-role either
   // way — the two rebuild commands differ, and the combined sentence lands in
   // the posted body while the fixes land on stderr.
-  if (reverse !== 'ok' && verify !== null && verify === reverse) {
+  if (reverseGap && verify !== null && verify === reverse) {
     gaps.push({
       subject: 'verification and reverse audit',
       reason: COMBINED_STEP45_GAP[reverse].en,
@@ -1211,7 +1227,7 @@ export function verificationGaps(
       reasonZh: COMBINED_STEP45_GAP[reverse].zh,
     });
   } else {
-    if (reverse !== 'ok') {
+    if (reverseGap) {
       gaps.push({
         subject: 'reverse audit',
         reason: REVERSE_AUDIT_GAP[reverse].gap,
@@ -1227,6 +1243,22 @@ export function verificationGaps(
         reasonZh: VERIFY_GAP[verify].gapZh,
       });
     }
+  }
+  // Medium discloses the reverse audit as a by-design omission — no FIX line
+  // (above), honest wording here — and lets it stand as the one coverage entry
+  // that caps a clean medium verdict at Comment, which is exactly what the tier
+  // promises. A medium review is complete without the second look; it simply does
+  // not certify the diff the way a high review does.
+  if (balancedMedium) {
+    gaps.push({
+      subject: 'reverse audit',
+      reason:
+        'not run — the balanced (medium) tier skips the second-look pass, so ' +
+        'this verdict is capped at Comment rather than Approve',
+      subjectZh: '反向审计',
+      reasonZh:
+        '未运行——均衡（medium）档跳过二次审查步骤，因此本次判定上限为 Comment，不会 Approve',
+    });
   }
 
   return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };

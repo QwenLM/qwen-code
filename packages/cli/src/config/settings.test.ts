@@ -49,7 +49,7 @@ import {
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import * as commentJsonUtils from '../utils/commentJson.js';
+import * as jsoncEditor from '../utils/jsonc-editor.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
@@ -156,9 +156,9 @@ vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
 
-vi.mock('../utils/commentJson.js', async (importOriginal) => {
+vi.mock('../utils/jsonc-editor.js', async (importOriginal) => {
   const original =
-    await importOriginal<typeof import('../utils/commentJson.js')>();
+    await importOriginal<typeof import('../utils/jsonc-editor.js')>();
   return {
     ...original,
     // Wrap with vi.fn so tests can spy/mock, but default to calling through
@@ -3000,8 +3000,7 @@ describe('Settings Loading and Merging', () => {
         },
       );
       // Simulate the write-back being refused (e.g. validation failure)
-      const mockFn =
-        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValue(false);
 
       // Should not throw — the error is caught and logged internally
@@ -3622,8 +3621,7 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      const mockFn =
-        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValueOnce(false);
 
       expect(() =>
@@ -3687,8 +3685,7 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      const mockFn =
-        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValueOnce(true).mockReturnValueOnce(false);
       const committed: SettingScope[] = [];
 

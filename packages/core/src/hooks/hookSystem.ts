@@ -153,10 +153,12 @@ export class HookSystem {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
+      submittedPrompt,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)

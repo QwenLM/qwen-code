@@ -86,7 +86,7 @@ gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
 
 **Approve once per commit — and only your OWN approval counts as already done.** Re-running triage three times must not stack three approvals, so check before posting. But "already approved" means **this bot's** `APPROVED` review on **this exact** `HEAD_SHA`, and nothing else:
 
-- **Another account's approval is not yours.** `main` requires two approving reviews, so a maintainer's approval is a *different* vote — the whole reason the bot's is still needed. Never read it as "already approved".
+- **Another account's approval is not yours.** `main` requires two approving reviews, so a maintainer's approval is a _different_ vote — the whole reason the bot's is still needed. Never read it as "already approved".
 - **A `DISMISSED` review is not an approval.** Branch protection runs with `dismiss_stale_reviews: true`, so every push dismisses the bot's prior approval. That is precisely when a fresh one is required.
 - **An approval on an earlier commit does not carry over**, for the same reason.
 
@@ -227,6 +227,29 @@ If you spot a materially simpler path, or changes that go beyond the minimal set
 
 Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 10 files") belong in Stage 2a code review — you need to see the code for those.
 
+**1e. High-risk path detection (data-backed escalation):**
+
+A revert-history analysis of this repo (111 revert commits, 46 unique reverted PRs) found that certain file paths are correlated with post-merge reverts. Check this signal before proceeding to Stage 2 — it does NOT block or close the PR, but it determines the review depth.
+
+**High-risk paths** — check the PR's changed files against these patterns:
+
+```bash
+FILES=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
+if [ -n "$FILES" ]; then
+  echo "$FILES" | grep -Ev '\.(test|spec)\.' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
+else
+  echo "WARNING: could not fetch PR files"
+fi
+```
+
+If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs touched these paths vs 5 of 60 control PRs, p = 0.006):
+
+- For non-maintainer PRs: do not skip any Stage 2 enrichment (2a-bis); require Stage 2b CI evidence before approving.
+- Flag the high-risk paths in the Stage 1 comment so the reviewer knows where to focus.
+- If the PR author has write access, recommend E2E verification in tmux (Stage 2c) before approval. If the author lacks write access, the sandboxed lanes are unavailable — recommend that a maintainer check the PR out in a disposable container or reproduce the specific behavioural claim by hand (see Stage 2c).
+
+This signal is NOT a terminal gate — it does not stop the review or close the PR. It escalates review depth and flags risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
+
 Post a single Stage 1 comment. Be direct — say what you actually think, not what's polite:
 
 ```markdown
@@ -243,6 +266,8 @@ Direction: <state your honest assessment — aligned and why, or concerns and wh
 Size: <if core paths are touched, report production lines vs. test lines vs. generated/schema lines; mention maintainer awareness for 500+ production lines or the 1000+ advisory when applicable. Otherwise say "not applicable".>
 
 Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
+
+Risk: <if Stage 1e matched, list the high-risk paths and recommended review depth. Otherwise say "no elevated risk signals".>
 
 <If passing:> Moving on to code review. 🔍
 <If concerns:> Flagging these for discussion before diving deeper.
@@ -261,6 +286,8 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 规模：<如果触及核心路径，报告生产行数、测试行数、生成/schema 行数；适用时说明 500+ 生产行需维护者关注，或 1000+ 大 PR 建议。否则写"不适用"。>
 
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
+
+风险：<如果 Stage 1e 命中，列出匹配的高风险路径和建议的 review 深度。否则写"无升级风险信号"。>
 
 <如果通过：> 进入代码审查 🔍
 <如果有顾虑：> 先提出来讨论，再深入看代码。
@@ -442,11 +469,21 @@ check identity, not from claims in the log body.
 
 #### 2c. Real-Scenario Testing — local invocation ONLY
 
-**Never in unattended CI.** The CI path gets its live-behavior signal from the
-isolated `@qwen-code /tmux` job (containerized, token-free); if the PR touches
-a TUI surface and that signal would matter, say so in the Stage 2 comment so a
-maintainer can trigger it. Everything below applies to local invocation (no
-`GITHUB_EVENT_NAME`) only.
+**Never in unattended CI.** The CI path gets its live-behavior signal from two
+isolated, token-free jobs a maintainer can trigger by comment: `@qwen-code
+/tmux` (drive the TUI as a real user) and `@qwen-code /verify` (deep
+verification — A/B load-bearing proof against the base build, mock-free
+wire-oracle harnesses, targeted gates; see the `verify-pr` skill). **Both
+execute the PR author's code, so both require the AUTHOR to have write
+access** — recommending them on an external contributor's PR sends the
+maintainer into a guaranteed denial. When the author lacks write, say the
+sandboxed lanes are unavailable for this PR and name what a maintainer can do
+instead (check the PR out in a disposable container, or reproduce the specific
+behavioural claim by hand). When the PR
+touches a TUI surface, or its central claim is behavioral and static review
+plus CI cannot substantiate it (a bug "fixed", a perf win, a wire-format
+change), name the trigger that would close the gap in the Stage 2 comment.
+Everything below applies to local invocation (no `GITHUB_EVENT_NAME`) only.
 
 **Runs in the main working tree, not the worktree** — tmux needs the local build environment.
 

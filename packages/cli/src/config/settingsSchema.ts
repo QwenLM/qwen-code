@@ -2947,6 +2947,32 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      modelGrades: {
+        type: 'object',
+        label: 'Model Grades',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as Record<string, string> | undefined,
+        description:
+          'Maps semantic model grade names exposed to the Agent tool to concrete model selectors.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+      },
+      allowedGrades: {
+        type: 'array',
+        label: 'Allowed Model Grades',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Optional whitelist of model grade names the Agent tool may use.',
+        showInDialog: false,
+        items: { type: 'string' },
+      },
       maxParallelAgents: {
         type: 'number',
         label: 'Max Parallel Agents',
@@ -3324,6 +3350,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
         showInDialog: false,
+      },
+      sessionWriterLease: {
+        type: 'boolean',
+        label: 'Enable ACP Session Writer Lease',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.',
+        showInDialog: true,
       },
       cronRecurringMaxAgeDays: {
         type: 'number',

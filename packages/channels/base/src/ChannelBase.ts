@@ -1751,6 +1751,11 @@ export abstract class ChannelBase {
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
+        this.discardRetiredSession(
+          promptBridge,
+          sessionId,
+          `timed-out loop ${jobId}`,
+        );
         process.stderr.write(
           `[${this.name}] retired timed out loop ${jobId} session ${sessionId} after cancel did not settle\n`,
         );
@@ -1763,6 +1768,26 @@ export abstract class ChannelBase {
       );
     } finally {
       clearTimeout(graceTimer);
+    }
+  }
+
+  private discardRetiredSession(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    reason: string,
+  ): void {
+    const safeSessionId = sanitizeLogText(sessionId, 64);
+    const safeReason = sanitizeLogText(reason, 128);
+    try {
+      void promptBridge.discardSession?.(sessionId).catch((err) => {
+        process.stderr.write(
+          `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+      );
     }
   }
 
@@ -2466,6 +2491,7 @@ export abstract class ChannelBase {
             // bumped value — reclaim it immediately.
             this.sessionGenerations.delete(id);
           }
+          this.discardRetiredSession(this.bridge, id, 'cleared');
         }
         await this.sendThreadMessage(
           envelope.chatId,

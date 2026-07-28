@@ -933,6 +933,15 @@
   min-width: 0;
 }
 
+.toolbar[data-mobile-voice-active='true'] .toolbarLeading,
+.toolbar[data-mobile-voice-active='true'] [data-hide-during-mobile-voice] {
+  display: none;
+}
+
+.toolbar[data-mobile-voice-active='true'] .toolbarRight {
+  margin-left: auto;
+}
+
 .toolbarStart {
   min-width: 0;
 }

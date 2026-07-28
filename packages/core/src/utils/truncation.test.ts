@@ -700,3 +700,99 @@ describe('truncateLlmContent', () => {
     expect(result.content).toEqual(content);
   });
 });
+
+describe('truncateAndSaveToFile preview budget', () => {
+  const mockWriteFile = vi.mocked(fs.writeFile);
+  const mockMkdir = vi.mocked(fs.mkdir);
+  const PREVIEW_MARKER = 'Truncated part of the output:\n';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  const previewOf = (wrapped: string): string =>
+    wrapped.slice(wrapped.indexOf(PREVIEW_MARKER) + PREVIEW_MARKER.length);
+
+  const content = Array.from(
+    { length: 200 },
+    (_, i) => `line ${i} ${'y'.repeat(40)}`,
+  ).join('\n');
+
+  // The separator is 39 characters and the ellipsis 3, and both were emitted
+  // without being charged to the budget, so a small previewChars came back
+  // over it: 0 produced 39 characters, 10 produced 42, 40 produced 47.
+  it.each([
+    ['both' as const, 0],
+    ['both' as const, 10],
+    ['both' as const, 40],
+    ['both' as const, 47],
+    ['head' as const, 40],
+    ['tail' as const, 40],
+  ])(
+    'keeps the %s preview within previewChars=%d',
+    async (keep, previewChars) => {
+      const result = await truncateAndSaveToFile(
+        content,
+        'budget',
+        '/tmp',
+        100,
+        20,
+        keep,
+        previewChars,
+      );
+
+      expect(previewOf(result.content).length).toBeLessThanOrEqual(
+        previewChars,
+      );
+    },
+  );
+
+  it('stays within budget for every previewChars from 0 to 120', async () => {
+    for (const keep of ['both', 'head', 'tail'] as const) {
+      for (let previewChars = 0; previewChars <= 120; previewChars++) {
+        const result = await truncateAndSaveToFile(
+          content,
+          'sweep',
+          '/tmp',
+          100,
+          20,
+          keep,
+          previewChars,
+        );
+        expect(previewOf(result.content).length).toBeLessThanOrEqual(
+          previewChars,
+        );
+      }
+    }
+  });
+
+  // Guards against over-correcting: where the budget has room, the separator
+  // and real content must both survive. The two `toContain` assertions are the
+  // guard proper and hold before and after; the length assertion alongside
+  // them does not, since `keep: 'head'` overran even at 200.
+  it.each([
+    ['both' as const, 200],
+    ['head' as const, 200],
+    ['tail' as const, 200],
+  ])(
+    'still marks the cut for %s at previewChars=%d',
+    async (keep, previewChars) => {
+      const result = await truncateAndSaveToFile(
+        content,
+        'roomy',
+        '/tmp',
+        100,
+        20,
+        keep,
+        previewChars,
+      );
+      const preview = previewOf(result.content);
+
+      expect(preview.length).toBeLessThanOrEqual(previewChars);
+      expect(preview).toContain('[CONTENT TRUNCATED]');
+      expect(preview).toContain('line ');
+    },
+  );
+});

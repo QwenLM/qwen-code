@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
@@ -20,6 +20,17 @@ const dingtalkSdkMock = vi.hoisted(() => ({
   nextConnect: undefined as (() => Promise<void>) | undefined,
   rawLog: vi.fn(),
 }));
+
+const PNG_DATA = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+]);
+
+function createTempPng(): { dir: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'dingtalk-outbound-image-'));
+  const path = join(dir, 'image.png');
+  writeFileSync(path, PNG_DATA);
+  return { dir, path };
+}
 
 vi.mock('dingtalk-stream-sdk-nodejs', () => ({
   DWClient: class {
@@ -217,6 +228,16 @@ it('rejects a non-boolean useConnectionManager value', () => {
   expect(() => createChannel({ useConnectionManager: 'false' })).toThrow(
     'useConnectionManager must be a boolean',
   );
+});
+
+it('adds outbound image instructions without replacing custom instructions', () => {
+  const channel = createChannel({ instructions: 'Keep the answer concise.' });
+  const instructions = (
+    channel as unknown as { config: { instructions: string } }
+  ).config.instructions;
+
+  expect(instructions).toContain('Keep the answer concise.');
+  expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
 });
 
 it('keeps callbacks and ACKs bound to the client that received them', async () => {
@@ -2457,6 +2478,184 @@ describe('DingtalkChannel mention target lifecycle', () => {
   });
 });
 
+describe('DingtalkChannel outbound image delivery', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubImageReplyFetch(
+    mediaHandler: (uploadCall: number) => Response = () =>
+      new Response(
+        JSON.stringify({ errcode: 0, media_id: '@lAL-test-media-id' }),
+        { status: 200 },
+      ),
+  ) {
+    let tokenCall = 0;
+    let uploadCall = 0;
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          tokenCall++;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: `proactive-token-${tokenCall}`,
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+          return Promise.resolve(mediaHandler(uploadCall++));
+        }
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      });
+    const calls = (prefix: string) =>
+      spy.mock.calls.filter((call) => String(call[0]).startsWith(prefix));
+    return {
+      uploadCalls: () => calls('https://oapi.dingtalk.com/media/upload'),
+      tokenCalls: () => calls('https://oapi.dingtalk.com/gettoken'),
+      webhookCalls: () =>
+        calls('https://oapi.dingtalk.com/robot/send?access_token=token'),
+    };
+  }
+
+  it('uploads a local image and embeds its MediaID in a reply', async () => {
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      const { uploadCalls, tokenCalls, webhookCalls } = stubImageReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `before\n[IMAGE: ${image.path}]\nafter`,
+      );
+
+      expect(tokenCalls()).toHaveLength(1);
+      expect(uploadCalls()).toHaveLength(1);
+      const calls = webhookCalls();
+      expect(calls).toHaveLength(1);
+      const body = JSON.parse(String((calls[0]![1] as RequestInit).body)) as {
+        msgtype: string;
+        markdown: { text: string };
+      };
+      expect(body.msgtype).toBe('markdown');
+      expect(body.markdown.text).toContain('before');
+      expect(body.markdown.text).toContain('![image](@lAL-test-media-id)');
+      expect(body.markdown.text).toContain('after');
+      expect(body.markdown.text).not.toContain('[IMAGE:');
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes the token and retries one expired media upload', async () => {
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      const { uploadCalls, tokenCalls } = stubImageReplyFetch((uploadCall) =>
+        uploadCall === 0
+          ? new Response(
+              JSON.stringify({ errcode: 42001, errmsg: 'token expired' }),
+              { status: 200 },
+            )
+          : new Response(
+              JSON.stringify({
+                errcode: 0,
+                media_id: '@lAL-refreshed-media-id',
+              }),
+              { status: 200 },
+            ),
+      );
+
+      await channel.sendMessage('cid123', `[IMAGE: ${image.path}]`);
+
+      expect(uploadCalls()).toHaveLength(2);
+      expect(tokenCalls()).toHaveLength(2);
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sends a visible fallback without leaking the token when upload fails', async () => {
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const { webhookCalls } = stubImageReplyFetch(
+        () =>
+          new Response(
+            JSON.stringify({ errcode: 40035, errmsg: 'invalid media' }),
+            { status: 200 },
+          ),
+      );
+
+      await channel.sendMessage('cid123', `[IMAGE: ${image.path}]`);
+
+      const body = JSON.parse(
+        String((webhookCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(body.markdown.text).toContain(
+        '[Image delivery failed: image.png]',
+      );
+      const logged = writeSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(logged).toContain('outbound image upload failed');
+      expect(logged).not.toContain('proactive-token-1');
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sends a mentioned image response as one message', async () => {
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ atSender: true, cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      seedMentionTarget(channel, 'm1', 'staff-1');
+      const { webhookCalls } = stubImageReplyFetch();
+
+      getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+      await getResponseHook(channel)(
+        'cid123',
+        `[IMAGE: ${image.path}]`,
+        'session-1',
+      );
+
+      const calls = webhookCalls();
+      expect(calls).toHaveLength(1);
+      expect(
+        JSON.parse(String((calls[0]![1] as RequestInit).body)),
+      ).toMatchObject({
+        msgtype: 'markdown',
+        markdown: {
+          text: expect.stringContaining('@staff-1\n\n'),
+        },
+        at: { atUserIds: ['staff-1'] },
+      });
+      expect(
+        JSON.parse(String((calls[0]![1] as RequestInit).body)),
+      ).toMatchObject({
+        markdown: {
+          text: expect.stringContaining('![image](@lAL-test-media-id)'),
+        },
+      });
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('DingtalkChannel proactive send', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2497,14 +2696,23 @@ describe('DingtalkChannel proactive send', () => {
         }),
         { status: 200 },
       ),
+    mediaHandler: (uploadCall: number) => Response = () =>
+      new Response(
+        JSON.stringify({ errcode: 0, media_id: '@lAL-proactive-media-id' }),
+        { status: 200 },
+      ),
   ) {
     let sendCall = 0;
+    let uploadCall = 0;
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockImplementation((input: RequestInfo | URL) => {
         const url = String(input);
         if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
           return Promise.resolve(tokenHandler());
+        }
+        if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+          return Promise.resolve(mediaHandler(uploadCall++));
         }
         return Promise.resolve(sendHandler(sendCall++));
       });
@@ -2516,6 +2724,7 @@ describe('DingtalkChannel proactive send', () => {
         calls('https://api.dingtalk.com/v1.0/robot/groupMessages/send'),
       directSendCalls: () =>
         calls('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend'),
+      mediaCalls: () => calls('https://oapi.dingtalk.com/media/upload'),
       tokenCalls: () => calls('https://oapi.dingtalk.com/gettoken'),
     };
   }
@@ -2612,6 +2821,40 @@ describe('DingtalkChannel proactive send', () => {
     expect(body.msgKey).toBe('sampleMarkdown');
     expect(msgParamOf(sends[0]!).title).toBe('Result');
     expect(msgParamOf(sends[0]!).text).toContain('loop output');
+  });
+
+  it('uploads and embeds images in proactive group messages', async () => {
+    const image = createTempPng();
+    try {
+      const channel = proactive(createChannel({ cwd: image.dir }));
+      const { mediaCalls, sendCalls } = stubProactiveFetch();
+
+      await channel.pushProactive(groupTarget, `[IMAGE: ${image.path}]`);
+
+      expect(mediaCalls()).toHaveLength(1);
+      expect(msgParamOf(sendCalls()[0]!).text).toContain(
+        '![image](@lAL-proactive-media-id)',
+      );
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads and embeds images in proactive direct messages', async () => {
+    const image = createTempPng();
+    try {
+      const channel = proactive(createChannel({ cwd: image.dir }));
+      const { directSendCalls, mediaCalls } = stubProactiveFetch();
+
+      await channel.pushProactive(directTarget, `[IMAGE: ${image.path}]`);
+
+      expect(mediaCalls()).toHaveLength(1);
+      expect(msgParamOf(directSendCalls()[0]!).text).toContain(
+        '![image](@lAL-proactive-media-id)',
+      );
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
+    }
   });
 
   it('rejects direct messages when DingTalk reports an invalid recipient', async () => {

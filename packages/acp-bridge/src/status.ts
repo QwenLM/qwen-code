@@ -166,6 +166,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
+  sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
+  sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
@@ -675,6 +677,7 @@ export interface ServeSessionMonitorTaskStatus {
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
+  toolUseId?: string;
 }
 
 export type ServeSessionTaskStatus =

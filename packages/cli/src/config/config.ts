@@ -2144,6 +2144,8 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    sessionWriterLeaseEnabled:
+      settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
@@ -2303,6 +2305,8 @@ export async function loadCliConfig(
                 exploreModel: settings.agents.builtin.exploreModel,
               }
             : undefined,
+          modelGrades: settings.agents.modelGrades,
+          allowedGrades: settings.agents.allowedGrades,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

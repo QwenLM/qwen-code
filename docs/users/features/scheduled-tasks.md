@@ -4,7 +4,9 @@
 
 Scheduled tasks let Qwen Code re-run a prompt automatically on an interval. Use them to poll a deployment, babysit a PR, check back on a long-running build, or remind yourself to do something later in the session.
 
-Tasks are session-scoped: they live in the current Qwen Code process and are gone when you exit. Nothing is written to disk.
+Tasks created from the terminal are session-scoped: they live in the current Qwen Code process and are gone when you exit. Nothing is written to disk.
+
+Messaging channels use a separate persistent scheduler so results can be pushed back to the originating chat after the current turn. See [Scheduled Channel Loops](./channels/overview#scheduled-channel-loops) for the channel commands, persistence behavior, and delivery constraints.
 
 > **Tip:** Scheduled tasks are enabled by default. To disable them, set `experimental.cron: false` in your [settings](../configuration/settings.md), or set `QWEN_CODE_DISABLE_CRON=1` in your environment.
 
