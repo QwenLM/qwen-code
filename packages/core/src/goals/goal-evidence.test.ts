@@ -368,6 +368,39 @@ describe('Goal evidence catalog', () => {
     );
   });
 
+  it('treats only display metadata as real-user evidence', () => {
+    const user = record('user', 'user', {
+      provenance: 'real_user',
+      turnId: 'turn-3',
+      text: 'expanded model prompt',
+    });
+    user.message?.parts?.push({
+      text: [
+        '<qwen:user-prompt-submit-context>',
+        'hook-only context',
+        '</qwen:user-prompt-submit-context>',
+      ].join('\n'),
+    });
+    user.systemPayload = {
+      displayText: 'raw @file prompt',
+      hookContext: 'hook-only context',
+    };
+    const records = [record('cursor', 'system'), user];
+
+    const catalog = buildGoalEvidenceCatalog({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+    const validated = validate(records, complete(['user']));
+
+    expect(catalog.entries[0]?.preview).toBe('raw @file prompt');
+    expect(validated.citedRecords[0]?.content).toBe('raw @file prompt');
+    expect(JSON.stringify({ catalog, validated })).not.toContain(
+      'hook-only context',
+    );
+  });
+
   it.each([
     ['cursor_unset', null, [record('root', 'system')]],
     ['cursor_not_found', 'absent', [record('root', 'system')]],

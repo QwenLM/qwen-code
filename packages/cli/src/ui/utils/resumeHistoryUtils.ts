@@ -16,7 +16,10 @@ import type {
   AtCommandRecordPayload,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
-import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
+import {
+  getToolResponseDisplayText,
+  projectUserTranscriptForDisplay,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -34,7 +37,7 @@ import {
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
  */
-function extractTextFromParts(parts: Part[] | undefined): string {
+function extractTextFromParts(parts: readonly Part[] | undefined): string {
   if (!parts) return '';
 
   const textParts: string[] = [];
@@ -381,7 +384,10 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractTextFromParts(record.message?.parts as Part[]);
+        const projection = projectUserTranscriptForDisplay(record);
+        const text =
+          projection.displayText ??
+          extractTextFromParts(projection.parts as readonly Part[]);
         if (text) {
           items.push({ type: 'user', text });
         }

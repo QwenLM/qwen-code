@@ -32,6 +32,7 @@ import type {
 import {
   getInsightPrompt,
   runSideQuery,
+  projectUserTranscriptForDisplay,
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
@@ -217,10 +218,18 @@ export class DataProcessor {
 
     for (const record of records) {
       if (record.type === 'user') {
-        const text =
-          record.message?.parts
-            ?.map((p) => ('text' in p ? p.text : ''))
-            .join('') || '';
+        const projection = projectUserTranscriptForDisplay(record);
+        const fallbackText = projection.parts
+          .map((part: unknown) =>
+            typeof part === 'object' &&
+            part !== null &&
+            'text' in part &&
+            typeof part.text === 'string'
+              ? part.text
+              : '',
+          )
+          .join('');
+        const text = projection.displayText ?? fallbackText;
         output += `[User]: ${text}\n`;
       } else if (record.type === 'assistant') {
         if (record.message?.parts) {

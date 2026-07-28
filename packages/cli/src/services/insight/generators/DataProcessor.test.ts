@@ -112,6 +112,45 @@ describe('DataProcessor', () => {
       expect(result).toContain('[User]: Hello, world!');
     });
 
+    it('should analyze clean user display text instead of hook context', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: raw @file prompt');
+      expect(result).not.toContain('hook-only context');
+    });
+
     it('should format assistant text messages correctly', () => {
       const records: ChatRecord[] = [
         {

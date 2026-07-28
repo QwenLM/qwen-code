@@ -193,6 +193,99 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it('uses clean user display metadata while preserving image parts', () => {
+    const machine = createTranscriptReplayMachine();
+    const projected = updates(
+      machine,
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'expanded model prompt' },
+            {
+              inlineData: {
+                data: 'image-data',
+                mimeType: 'image/png',
+              },
+            },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                'hook-only context',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+        },
+        systemPayload: {
+          displayText: 'raw @file prompt',
+          hookContext: 'hook-only context',
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'raw @file prompt' },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'image',
+          data: 'image-data',
+          mimeType: 'image/png',
+        },
+      },
+    ]);
+  });
+
+  it('strips only a complete final tag-only context part', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'user prompt' },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                'hook-only context',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      content: { type: 'text', text: 'user prompt' },
+    });
+  });
+
+  it('preserves legacy bare hook context without a reliable boundary', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'user prompt' },
+            { text: 'legacy bare hook context' },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      { content: { type: 'text', text: 'user prompt' } },
+      { content: { type: 'text', text: 'legacy bare hook context' } },
+    ]);
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(

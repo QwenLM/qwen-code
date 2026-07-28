@@ -349,6 +349,7 @@ export interface ChatRecord {
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
     | NotificationRecordPayload
+    | UserPromptRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | FileHistorySnapshotRecordPayload
@@ -399,6 +400,13 @@ export interface NotificationRecordPayload {
     kind: 'agent' | 'monitor' | 'shell';
     toolUseId?: string;
   };
+}
+
+export interface UserPromptRecordPayload {
+  /** User-authored prompt projection, before hook augmentation. */
+  displayText: string;
+  /** Sanitized context appended by UserPromptSubmit for the model. */
+  hookContext: string;
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -1251,10 +1259,13 @@ export class ChatRecordingService {
    * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object as used with the API
+   * @param goalContext Goal identity and turn that own this message
+   * @param promptPayload User-authored display text and hook-context provenance
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
+    promptPayload?: UserPromptRecordPayload,
   ): void {
     try {
       this.turnParentUuids.push(this.lastRecordUuid);
@@ -1262,6 +1273,7 @@ export class ChatRecordingService {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
+        ...(promptPayload ? { systemPayload: promptPayload } : {}),
       };
       this.appendRecord(record);
     } catch (error) {

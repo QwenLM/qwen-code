@@ -15,6 +15,7 @@ import type {
   TranscriptRecordInput,
   TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
+import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
@@ -473,29 +474,21 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
-    if (
-      record.subtype === 'goal_runtime' ||
-      record.subtype === 'notification' ||
-      record.subtype === 'cron' ||
-      record.subtype === 'mid_turn_user_message'
-    ) {
-      const payload = isObjectRecord(record.systemPayload)
-        ? record.systemPayload
+    const projection = projectUserTranscriptForDisplay(record);
+    const payload = isObjectRecord(record.systemPayload)
+      ? record.systemPayload
+      : undefined;
+    const backgroundTask =
+      payload && isObjectRecord(payload['backgroundTask'])
+        ? payload['backgroundTask']
         : undefined;
-      const displayText =
-        payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
-          : undefined;
-      const backgroundTask =
-        payload && isObjectRecord(payload['backgroundTask'])
-          ? payload['backgroundTask']
-          : undefined;
-      if (displayText) {
+    if (projection.displayText !== undefined) {
+      if (projection.displayText.length > 0) {
         const isNotification = record.subtype === 'notification';
         yield emit(
           createTranscriptMessageUpdate({
             role: 'user',
-            text: displayText,
+            text: projection.displayText,
             ...meta,
             ...(isNotification
               ? {
@@ -510,11 +503,34 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
-        return;
       }
+      yield* this.projectMessageParts(
+        record,
+        'user',
+        emit,
+        meta,
+        undefined,
+        projection.parts,
+      );
+      return;
+    }
+
+    if (
+      record.subtype === 'goal_runtime' ||
+      record.subtype === 'notification' ||
+      record.subtype === 'cron' ||
+      record.subtype === 'mid_turn_user_message'
+    ) {
       if (record.subtype !== 'mid_turn_user_message') return;
     }
-    yield* this.projectMessageParts(record, 'user', emit, meta);
+    yield* this.projectMessageParts(
+      record,
+      'user',
+      emit,
+      meta,
+      undefined,
+      projection.parts,
+    );
   }
 
   private *projectAssistantRecord(
@@ -549,8 +565,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
     beforeToolCall?: () => SessionUpdate | undefined,
+    partsOverride?: readonly unknown[],
   ): Iterable<TranscriptReplayEmission> {
-    const parts = record.message?.parts;
+    const parts = partsOverride ?? record.message?.parts;
     if (!parts) return;
     for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
       const part = parts[partIndex];

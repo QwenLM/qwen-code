@@ -67,6 +67,7 @@ import {
 // Services
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -133,6 +134,7 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 
 // Hook types and utilities
 import {
@@ -2016,6 +2018,11 @@ export class GeminiClient {
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
     const hooksEnabled = !this.config.getDisableAllHooks();
     const messageBus = this.config.getMessageBus();
+    const preHookUserPromptText =
+      messageType === SendMessageType.UserQuery
+        ? partToString(request)
+        : undefined;
+    let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     if (
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Steer &&
@@ -2030,7 +2037,7 @@ export class GeminiClient {
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
     ) {
-      const promptText = partToString(request);
+      const promptText = preHookUserPromptText ?? partToString(request);
       const submittedPrompt =
         messageType === SendMessageType.UserQuery &&
         typeof options?.submittedPrompt === 'string' &&
@@ -2076,7 +2083,16 @@ export class GeminiClient {
       const additionalContext = hookOutput?.getAdditionalContext();
       if (additionalContext) {
         const requestArray = Array.isArray(request) ? request : [request];
-        request = [...requestArray, { text: additionalContext }];
+        request = [
+          ...requestArray,
+          { text: wrapUserPromptSubmitContext(additionalContext) },
+        ];
+        if (messageType === SendMessageType.UserQuery) {
+          userPromptRecordPayload = {
+            displayText: submittedPrompt ?? promptText,
+            hookContext: additionalContext,
+          };
+        }
       }
     }
 
@@ -2120,7 +2136,7 @@ export class GeminiClient {
         addUserPromptAttributes(
           this.config,
           interactionSpan,
-          partToString(request),
+          preHookUserPromptText ?? partToString(request),
         );
       }
     }
@@ -2170,12 +2186,16 @@ export class GeminiClient {
           }
           const promise = this.config
             .getMemoryManager()
-            .recall(this.config.getProjectRoot(), partToString(request), {
-              config: this.config,
-              excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-              recentTools: [...this.recentCompletedToolNames],
-              abortSignal: controller.signal,
-            })
+            .recall(
+              this.config.getProjectRoot(),
+              preHookUserPromptText ?? partToString(request),
+              {
+                config: this.config,
+                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+                recentTools: [...this.recentCompletedToolNames],
+                abortSignal: controller.signal,
+              },
+            )
             .catch((error: unknown) => {
               // Abort sources are now numerous (caller signal, new UserQuery,
               // cleanup paths, safety-net timeout). Keep a debug trace so
@@ -2236,7 +2256,9 @@ export class GeminiClient {
             .getChatRecordingService()
             ?.recordCronPrompt(request, options?.notificationDisplayText);
         } else {
-          this.config.getChatRecordingService()?.recordUserMessage(request);
+          this.config
+            .getChatRecordingService()
+            ?.recordUserMessage(request, undefined, userPromptRecordPayload);
         }
       }
 

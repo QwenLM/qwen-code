@@ -37,6 +37,24 @@ export interface TranscriptRecordInput {
   readonly systemPayload?: unknown;
 }
 
+export const USER_PROMPT_SUBMIT_CONTEXT_OPEN =
+  '<qwen:user-prompt-submit-context>';
+export const USER_PROMPT_SUBMIT_CONTEXT_CLOSE =
+  '</qwen:user-prompt-submit-context>';
+
+export interface UserTranscriptDisplayProjection {
+  /**
+   * Authoritative user-authored text when provenance metadata is present.
+   * An empty string is meaningful and must not fall back to model-facing parts.
+   */
+  readonly displayText: string | undefined;
+  /**
+   * User-visible model parts. With display metadata, text parts are replaced
+   * by `displayText` while non-text parts (for example images) are retained.
+   */
+  readonly parts: readonly unknown[];
+}
+
 export interface TranscriptReplayGapInput {
   readonly childUuid: string;
   readonly missingParentUuid: string;
@@ -109,6 +127,57 @@ const KNOWN_RECORD_SUBTYPES = new Set([
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function wrapUserPromptSubmitContext(context: string): string {
+  return `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n${context}\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
+}
+
+function isUserPromptSubmitContextPart(part: unknown): boolean {
+  if (!isObjectRecord(part) || typeof part['text'] !== 'string') return false;
+  const text = part['text'];
+  const prefix = `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n`;
+  const suffix = `\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) return false;
+  const body = text.slice(prefix.length, -suffix.length);
+  return (
+    !body.includes(USER_PROMPT_SUBMIT_CONTEXT_OPEN) &&
+    !body.includes(USER_PROMPT_SUBMIT_CONTEXT_CLOSE)
+  );
+}
+
+/**
+ * Selects the user-visible projection of a transcript record.
+ *
+ * New records use authoritative `systemPayload.displayText`. For tag-only
+ * third-party records, only a complete final hook-context part is removed.
+ * Legacy records without either shape retain their model-facing parts.
+ */
+export function projectUserTranscriptForDisplay(
+  record: Pick<TranscriptRecordInput, 'message' | 'systemPayload'>,
+): UserTranscriptDisplayProjection {
+  const payload = isObjectRecord(record.systemPayload)
+    ? record.systemPayload
+    : undefined;
+  const displayText =
+    payload && typeof payload['displayText'] === 'string'
+      ? payload['displayText']
+      : undefined;
+  if (displayText !== undefined) {
+    const parts = (record.message?.parts ?? []).filter(
+      (part) => !isObjectRecord(part) || typeof part['text'] !== 'string',
+    );
+    return { displayText, parts };
+  }
+
+  const parts = record.message?.parts ?? [];
+  if (
+    parts.length > 1 &&
+    isUserPromptSubmitContextPart(parts[parts.length - 1])
+  ) {
+    return { displayText: undefined, parts: parts.slice(0, -1) };
+  }
+  return { displayText: undefined, parts };
 }
 
 function diagnostic(

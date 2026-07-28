@@ -7,6 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   prepareTranscriptRecords,
+  projectUserTranscriptForDisplay,
+  wrapUserPromptSubmitContext,
   type TranscriptRecordPreparationError,
 } from './transcript-records.js';
 
@@ -202,5 +204,56 @@ describe('prepareTranscriptRecords', () => {
         code: 'leaf_not_found',
       }),
     );
+  });
+});
+
+describe('projectUserTranscriptForDisplay', () => {
+  it('uses display metadata even when the display text is empty', () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'data' },
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            imagePart,
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+        systemPayload: { displayText: '' },
+      }),
+    ).toEqual({ displayText: '', parts: [imagePart] });
+  });
+
+  it('removes only a complete final tag-only context part', () => {
+    const userPart = { text: 'user text' };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            userPart,
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+      }),
+    ).toEqual({ displayText: undefined, parts: [userPart] });
+  });
+
+  it('preserves legacy bare context and user-authored tag-like text', () => {
+    const legacyParts = [{ text: 'user text' }, { text: 'bare hook context' }];
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: legacyParts },
+      }),
+    ).toEqual({ displayText: undefined, parts: legacyParts });
+
+    const userAuthoredTag = {
+      text: wrapUserPromptSubmitContext('user-authored text'),
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [userAuthoredTag] },
+      }),
+    ).toEqual({ displayText: undefined, parts: [userAuthoredTag] });
   });
 });

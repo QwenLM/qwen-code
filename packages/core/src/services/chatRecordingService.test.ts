@@ -158,6 +158,58 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
     });
 
+    it('preserves model-bound parts and records clean display text', async () => {
+      const modelParts: Part[] = [
+        { text: 'expanded model prompt' },
+        {
+          text: [
+            '<qwen:user-prompt-submit-context>',
+            'hook-only context',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
+        },
+      ];
+
+      chatRecordingService.recordUserMessage(modelParts, undefined, {
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.message).toEqual({ role: 'user', parts: modelParts });
+      expect(record.systemPayload).toEqual({
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
+      });
+    });
+
+    it('records empty display text without dropping prompt provenance', async () => {
+      chatRecordingService.recordUserMessage(
+        [
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ],
+        undefined,
+        {
+          displayText: '',
+          hookContext: 'hook-only context',
+        },
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: 'hook-only context',
+      });
+    });
+
     it('blocks later turns after a generic durable write failure', async () => {
       const failure = new Error('disk full');
       vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
