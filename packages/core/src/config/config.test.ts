@@ -2863,6 +2863,36 @@ describe('Server Config (config.ts)', () => {
       acquire.mockRestore();
     });
 
+    it('does not duplicate a concurrent activation and close failure', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      let rejectAcquire!: (error: Error) => void;
+      const acquireGate = new Promise<SessionWriterLease>(
+        (_resolve, reject) => {
+          rejectAcquire = reject;
+        },
+      );
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockReturnValue(acquireGate);
+
+      const initialize = config.initialize().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+      const close = config
+        .closeSessionWriter()
+        .catch((error: unknown) => error);
+      rejectAcquire(activationError);
+
+      expect(await close).toBe(activationError);
+      expect(await initialize).toBe(activationError);
+      acquire.mockRestore();
+    });
+
     it('preserves initialization and recording close failures', async () => {
       const config = new Config(baseParams);
       const initializationError = new Error('initialization failed');

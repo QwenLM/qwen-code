@@ -403,7 +403,7 @@ function transcriptHashesEqual(left: Hash, right: Hash): boolean {
 async function getOpenTranscriptState(
   filePath: string,
   handle: fs.FileHandle,
-  invalidPathIsChange = false,
+  invalidPathIsChange: boolean,
 ): Promise<Extract<TranscriptState, { exists: true }>> {
   let handleStat: Stats;
   try {
@@ -563,7 +563,7 @@ async function captureOpenTranscriptSnapshot(
   expectedState: TranscriptState | undefined,
   shouldAbort: () => boolean,
 ): Promise<TranscriptSnapshot> {
-  const buffer = Buffer.allocUnsafe(TRANSCRIPT_HASH_BUFFER_BYTES);
+  let buffer: Buffer | undefined;
   for (let attempt = 1; attempt <= TRANSCRIPT_SNAPSHOT_ATTEMPTS; attempt++) {
     if (shouldAbort()) throw new SessionWriterLostError();
     const beforeState = await getOpenTranscriptState(
@@ -575,6 +575,9 @@ async function captureOpenTranscriptSnapshot(
       throw new SessionTranscriptChangedError();
     }
 
+    buffer ??= Buffer.allocUnsafe(
+      Math.min(TRANSCRIPT_HASH_BUFFER_BYTES, beforeState.byteLength),
+    );
     const hasher = createHash('sha256');
     let position = 0;
     while (position < beforeState.byteLength) {
@@ -928,6 +931,7 @@ export class SessionWriterLease {
           lockRecord,
           normalizedOptions,
         );
+        // finishAcquisition now owns exact-record cleanup for this primary lock.
         primaryInstalled = false;
         const lease = await finishingLease;
         await removeOwnedLock(reclaimPath, lockRecord.owner_id).catch(() => {});

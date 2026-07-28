@@ -1634,6 +1634,15 @@ export type SubSessionSpawner = (
 
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
+function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
+  return (
+    error === candidate ||
+    (error instanceof Error &&
+      error.cause instanceof AggregateError &&
+      error.cause.errors.includes(candidate))
+  );
+}
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -2464,11 +2473,7 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
-        if (
-          error instanceof Error &&
-          error.cause instanceof AggregateError &&
-          error.cause.errors.includes(closeError)
-        ) {
+        if (containsErrorByIdentity(error, closeError)) {
           throw error;
         }
         throw new SessionWriterUnavailableError({
@@ -3043,13 +3048,7 @@ export class Config {
           (lease ?? this.pendingSessionWriterLease)?.isReleased
         ) {
           this.pendingSessionWriterLease = undefined;
-        } else if (
-          !(
-            failure instanceof Error &&
-            failure.cause instanceof AggregateError &&
-            failure.cause.errors.includes(releaseError)
-          )
-        ) {
+        } else if (!containsErrorByIdentity(failure, releaseError)) {
           failure = new SessionWriterUnavailableError({
             cause: new AggregateError(
               [failure, releaseError],

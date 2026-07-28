@@ -1194,6 +1194,60 @@ describe('SessionWriterLease', () => {
     }
   });
 
+  it('requires a stable scan when an already-read prefix changes', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const transcript = Buffer.alloc(2 * 1024 * 1024, 0x20);
+    transcript[transcript.byteLength - 1] = 0x0a;
+    await fs.writeFile(fixture.transcriptPath, transcript);
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1_000),
+    );
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let injected = false;
+    let scanStarts = 0;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        const values = args as readonly unknown[];
+        if ((positionalReadLength(args) ?? 0) > 1 && values[3] === 0) {
+          scanStarts++;
+        }
+        if (!injected && values[2] === 1024 * 1024 && values[3] === 0) {
+          injected = true;
+          const mutator = await fs.open(fixture.transcriptPath, 'r+');
+          try {
+            await mutator.write(Buffer.from('!'), 0, 1, 0);
+            await mutator.sync();
+          } finally {
+            await mutator.close();
+          }
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(injected).toBe(true);
+      expect(scanStarts).toBe(2);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
   it('fails bounded when transcript timestamps never stabilize', async () => {
     const fixture = await createFixture();
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
