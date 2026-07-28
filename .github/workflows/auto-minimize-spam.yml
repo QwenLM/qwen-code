@@ -9,6 +9,10 @@ name: 'Auto-minimize spam comments'
 # The blocklist is a plain-text file in the repo — one username per
 # line, case-insensitive, # for comments. No special API scopes
 # needed beyond issues:write + pull-requests:write.
+#
+# Note: the lookback window (LOOKBACK_HOURS) only filters issues —
+# the GraphQL pullRequests connection has no `since` filter, so PRs
+# are always scoped to the 100 most recently updated.
 
 on:
   schedule:
@@ -61,12 +65,15 @@ jobs:
             exit 0
           fi
           # Strip comments, blank lines, whitespace; lowercase for matching.
+          # `|| true` keeps an all-comment/blank blocklist from tripping
+          # `set -e` (grep exits 1 when nothing passes the filter).
           BLOCKED_USERS="$(
             grep -v '^\s*#' "$BLOCKLIST" \
               | grep -v '^\s*$' \
               | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
               | tr '[:upper:]' '[:lower:]' \
-              | sort -u
+              | sort -u \
+              || true
           )"
           BLOCKED_COUNT="$(printf '%s\n' "$BLOCKED_USERS" | grep -c . || true)"
           echo "Blocklisted users: ${BLOCKED_COUNT}"
@@ -105,7 +112,7 @@ jobs:
               ]
               | map(select(.isMinimized == false and .author != null))
               | .[] | "\(.author.login)\t\(.id)"
-            ' 2>/dev/null
+            '
           )"
 
           MATCHED_IDS=""
@@ -159,4 +166,5 @@ jobs:
           echo "- Comments minimized: ${SUCCESS}" >> "$GITHUB_STEP_SUMMARY"
           if [ "$FAIL" -gt 0 ]; then
             echo "- Failures: ${FAIL}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
