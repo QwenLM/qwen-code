@@ -827,25 +827,25 @@ jobs:
           }
 
           # Retry budget: all attempts SHARE QWEN_TIMEOUT, so two tries can never
-          # exceed the single-review budget (nor the job timeout). The first
-          # attempt gets the whole remaining budget; a retry is capped at 5 min —
-          # a transient that has cleared succeeds fast, and a still-failing retry
-          # can't burn another hour. Retry only a `retryable` outcome, only once,
-          # and only with real budget left.
+          # exceed the single-review budget (nor the job timeout), and that
+          # shared budget is the only thing that needs to bound them. A retry
+          # re-runs the whole review from scratch rather than resuming the failed
+          # one, so on a large PR it spends minutes re-fetching, re-chunking and
+          # re-launching agents before the first finding exists — a short retry
+          # cap makes the retry die on the clock instead of clearing the
+          # transient it was meant to clear. Every attempt therefore gets the
+          # whole remaining budget. Retry only a `retryable` outcome, only once,
+          # and only when enough budget is left for the retry to plausibly
+          # finish; below that, report the transient failure so the next run
+          # starts over with a full budget.
           BUDGET_SECONDS=$(( QWEN_TIMEOUT * 60 ))
-          RETRY_CAP_SECONDS=300
           RETRY_BACKOFF_SECONDS=60
+          RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
           START_TS="$(date +%s)"
           attempt=1
           while :; do
-            remaining=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
-            if [ "$attempt" -eq 1 ]; then
-              attempt_timeout="$remaining"
-            else
-              attempt_timeout="$RETRY_CAP_SECONDS"
-              [ "$remaining" -lt "$attempt_timeout" ] && attempt_timeout="$remaining"
-            fi
+            attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
@@ -854,7 +854,7 @@ jobs:
               break
             fi
             if [ "$OUTCOME" = "retryable" ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ] \
-              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_CAP_SECONDS ))" ]; then
+              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
               echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
               sleep "$RETRY_BACKOFF_SECONDS"
               attempt=$(( attempt + 1 ))
