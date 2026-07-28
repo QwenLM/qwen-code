@@ -29,7 +29,12 @@ import {
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
-import { getInitialChatHistory } from '../utils/environmentContext.js';
+import {
+  buildAvailableSkillsReminder,
+  buildDeferredToolsReminder,
+  buildMcpServerInstructionsReminder,
+  getInitialChatHistory,
+} from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
@@ -77,8 +82,11 @@ export const DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE =
 
 const LEGACY_FORK_RESUME_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
-const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
-  'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
+const CURRENT_FORK_RUNTIME_BLOCKED_REASON =
+  'Fork background task cannot be safely resumed because the current parent system prompt or tool surface is unavailable.';
+const FORK_RESUME_CAPABILITY_NOTICE = `<system-reminder>
+This fork was resumed in a new runtime. The current system instruction, tool declarations, MCP connections, and skill listing are authoritative. Earlier capability listings in the conversation history are obsolete; do not invoke a tool or skill unless it is available in the current runtime.
+</system-reminder>`;
 const MISSING_TRANSCRIPT_BLOCKED_REASON =
   'Background task transcript is missing or unreadable.';
 const TRANSCRIPT_IDENTITY_BLOCKED_REASON =
@@ -125,6 +133,11 @@ interface ResolvedResumeTarget {
   isFork: boolean;
   subagentConfig?: SubagentConfig;
   unavailableReason?: string;
+}
+
+interface CurrentForkRuntime {
+  systemInstruction: string | Content;
+  toolNames: string[];
 }
 
 interface ResumeOperation {
@@ -531,11 +544,7 @@ export class BackgroundAgentResumeService {
           target.unavailableReason ||
           (target.isFork && !recovery.forkBootstrap
             ? LEGACY_FORK_RESUME_BLOCKED_REASON
-            : target.isFork &&
-                (!recovery.forkBootstrap?.systemInstruction ||
-                  !recovery.forkBootstrap?.tools)
-              ? LEGACY_FORK_CAPABILITIES_BLOCKED_REASON
-              : undefined);
+            : undefined);
 
         const registration: AgentTaskRegistration = {
           agentId: meta.agentId,
@@ -859,6 +868,20 @@ export class BackgroundAgentResumeService {
         return undefined;
       }
 
+      const currentForkRuntime = target.isFork
+        ? await this.resolveCurrentForkRuntime()
+        : undefined;
+      if (target.isFork && !currentForkRuntime) {
+        patchAgentMeta(metaPath, {
+          lastError: undefined,
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        this.restorePausedEntry(agentId, {
+          resumeBlockedReason: CURRENT_FORK_RUNTIME_BLOCKED_REASON,
+        });
+        return undefined;
+      }
+
       const parentApprovalMode = normalizeApprovalMode(
         this.config.getApprovalMode() as ApprovalModeValue,
         'default',
@@ -948,20 +971,12 @@ export class BackgroundAgentResumeService {
         cleanupPreparedRuntime();
         return undefined;
       }
-      if (
-        target.isFork &&
-        (!recovery.forkBootstrap?.systemInstruction ||
-          !recovery.forkBootstrap?.tools)
-      ) {
-        const reason = LEGACY_FORK_CAPABILITIES_BLOCKED_REASON;
-        patchAgentMeta(metaPath, {
-          lastError: undefined,
-          lastUpdatedAt: new Date().toISOString(),
-        });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
-        cleanupPreparedRuntime();
-        return undefined;
-      }
+      const forkResumeCapabilityReminder = target.isFork
+        ? await this.buildForkResumeCapabilityReminder(
+            bgConfig as Config,
+            currentForkRuntime!.toolNames,
+          )
+        : undefined;
 
       const bgEventEmitter = new AgentEventEmitter();
       const launchModel = meta.model ?? meta.persistedCliFlags?.model;
@@ -971,7 +986,7 @@ export class BackgroundAgentResumeService {
           bgConfig as Config,
           bgEventEmitter,
           resumeHistory ?? [],
-          recovery.forkBootstrap!,
+          currentForkRuntime!,
         );
       } else {
         const resumeSubagentConfig =
@@ -1097,7 +1112,12 @@ export class BackgroundAgentResumeService {
 
       const hookSystem = this.config.getHookSystem();
       const contextState = new ContextState();
-      contextState.set('task_prompt', continuationPrompt);
+      contextState.set(
+        'task_prompt',
+        forkResumeCapabilityReminder
+          ? `${forkResumeCapabilityReminder}\n\n${continuationPrompt}`
+          : continuationPrompt,
+      );
       const resolvedMode = approvalModeToPermissionMode(resolvedApprovalMode);
       await this.applySubagentStartHook(contextState, {
         agentId: meta.agentId,
@@ -1558,18 +1578,108 @@ export class BackgroundAgentResumeService {
     return restored;
   }
 
+  private async resolveCurrentForkRuntime(): Promise<
+    CurrentForkRuntime | undefined
+  > {
+    try {
+      const geminiClient = this.config.getGeminiClient();
+      const generationConfig = geminiClient?.getChat().getGenerationConfig();
+      if (!generationConfig?.systemInstruction) {
+        return undefined;
+      }
+
+      const advertisedNames = Array.from(
+        new Set(
+          (
+            generationConfig.tools as Array<{
+              functionDeclarations?: FunctionDeclaration[];
+            }>
+          )
+            ?.flatMap((tool) => tool.functionDeclarations ?? [])
+            .map((declaration) => declaration.name)
+            .filter(
+              (name): name is string =>
+                typeof name === 'string' &&
+                name.length > 0 &&
+                !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(name),
+            ) ?? [],
+        ),
+      );
+      if (advertisedNames.length === 0) {
+        return undefined;
+      }
+
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const registeredNames = new Set(
+        toolRegistry
+          .getFunctionDeclarationsFiltered(advertisedNames)
+          .map((declaration) => declaration.name)
+          .filter((name): name is string => Boolean(name)),
+      );
+      const toolNames = advertisedNames.filter((name) =>
+        registeredNames.has(name),
+      );
+      if (toolNames.length === 0) {
+        return undefined;
+      }
+
+      return {
+        systemInstruction: structuredClone(
+          generationConfig.systemInstruction as string | Content,
+        ),
+        toolNames,
+      };
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Failed to reconstruct current fork runtime: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  private async buildForkResumeCapabilityReminder(
+    agentConfig: Config,
+    toolNames: string[],
+  ): Promise<string> {
+    const reminders = [FORK_RESUME_CAPABILITY_NOTICE];
+    try {
+      const toolRegistry = agentConfig.getToolRegistry();
+      await toolRegistry.warmAll();
+      const mcpInstructions = buildMcpServerInstructionsReminder(toolRegistry);
+      if (mcpInstructions) reminders.push(mcpInstructions);
+
+      if (toolNames.includes(ToolNames.SKILL)) {
+        const skills = await buildAvailableSkillsReminder(agentConfig);
+        if (skills) reminders.push(skills.reminder);
+      }
+
+      const deferredTools = buildDeferredToolsReminder(toolRegistry);
+      if (deferredTools) reminders.push(deferredTools);
+    } catch (error) {
+      debugLogger.warn(
+        `[BackgroundAgentResume] Failed to build current fork capability reminder: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return reminders.join('\n\n');
+  }
+
   private async createResumedForkSubagent(
     agentConfig: Config,
     eventEmitter: AgentEventEmitter,
     initialMessages: Content[],
-    bootstrap: NonNullable<TranscriptRecovery['forkBootstrap']>,
+    runtime: CurrentForkRuntime,
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
-      renderedSystemPrompt: structuredClone(bootstrap.systemInstruction!),
+      renderedSystemPrompt: structuredClone(runtime.systemInstruction),
       initialMessages,
     };
     const toolConfig: ToolConfig = {
-      tools: structuredClone(bootstrap.tools!),
+      tools: [...runtime.toolNames],
     };
 
     return AgentHeadless.create(
