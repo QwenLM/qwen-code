@@ -333,6 +333,17 @@ export interface DaemonWorkspacePathSuggestions {
   truncated: boolean;
 }
 
+export type DaemonWorkspaceDirectoryPickerResult =
+  | {
+      kind: 'workspace-directory-picker';
+      selected: true;
+      path: string;
+    }
+  | {
+      kind: 'workspace-directory-picker';
+      selected: false;
+    };
+
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(
@@ -603,6 +614,7 @@ export interface DaemonWorkspaceActions {
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
+  pickWorkspaceDirectory(): Promise<DaemonWorkspaceDirectoryPickerResult>;
   updateWorkspace(
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,

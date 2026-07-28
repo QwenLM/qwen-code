@@ -1003,6 +1003,9 @@ const EN: Messages = {
   'sidebar.scratchOutcomeAcknowledge': 'I checked the workspace list',
   'sidebar.addWorkspaceTitle': 'Add Workspace',
   'sidebar.addWorkspacePath': 'Directory path',
+  'sidebar.addWorkspaceBrowse': 'Browse…',
+  'sidebar.addWorkspaceBrowseError':
+    'Unable to open the system folder picker. Enter an absolute path instead.',
   'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
   'sidebar.addWorkspaceDisplayNameHint':
     'Shown in Web Shell; the directory path remains the workspace identity.',
@@ -3346,6 +3349,9 @@ const ZH: Messages = {
   'sidebar.scratchOutcomeAcknowledge': '我已检查工作区列表',
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
+  'sidebar.addWorkspaceBrowse': '浏览…',
+  'sidebar.addWorkspaceBrowseError':
+    '无法打开系统文件夹选择器，请改为输入绝对路径。',
   'sidebar.addWorkspaceDisplayName': '展示名称（可选）',
   'sidebar.addWorkspaceDisplayNameHint':
     '用于 Web Shell 展示；目录路径仍是工作区身份。',
