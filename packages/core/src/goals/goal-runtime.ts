@@ -64,8 +64,8 @@ export interface GoalEvidenceSource {
 }
 
 export class GoalPersistenceUnavailableError extends Error {
-  constructor() {
-    super('Goal persistence is unavailable for this session');
+  constructor(message = 'Goal persistence is unavailable for this session') {
+    super(message);
     this.name = 'GoalPersistenceUnavailableError';
   }
 }
@@ -578,7 +578,7 @@ export function createGoalRuntime(
         if (restored) return;
         const recovery = recoverGoalFromRecords(records);
         if (recovery.kind === 'unsupported') {
-          recoveryError = new Error(recovery.reason);
+          recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
           throw recoveryError;
         }
         try {

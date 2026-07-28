@@ -17,6 +17,7 @@ import {
 } from './goal-protocol.js';
 import {
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
   type GoalEvidenceSource,
   type GoalJournal,
   type GoalTurnHost,
@@ -1393,7 +1394,7 @@ describe('goal runtime', () => {
     expect(newHost.preemptGoalTurn).not.toHaveBeenCalled();
   });
 
-  it('migrates a legacy active goal once before making it schedulable', async () => {
+  it('migrates a legacy active goal once into a paused state', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
@@ -1409,14 +1410,15 @@ describe('goal runtime', () => {
         goal: {
           objective: 'ship it',
           revision: 1,
-          status: 'active',
+          status: 'paused',
           evidenceCursor: { recordId: expect.any(String) },
         },
       },
     });
     expect(host.started).toEqual([]);
     runtime.bindHost(host);
-    await vi.waitFor(() => expect(host.started).toHaveLength(1));
+    await Promise.resolve();
+    expect(host.started).toEqual([]);
   });
 
   it('releases a rejected host start without an unhandled rejection', async () => {
@@ -2001,8 +2003,8 @@ describe('goal runtime', () => {
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
     runtime.bindHost(host);
 
-    await expect(runtime.restore([malformed])).rejects.toThrow(
-      'malformed or uses an unsupported version',
+    await expect(runtime.restore([malformed])).rejects.toBeInstanceOf(
+      GoalPersistenceUnavailableError,
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
@@ -2030,11 +2032,11 @@ describe('goal runtime', () => {
     await runtime.restore([legacyGoalRecord()]);
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship it',
-      status: 'active',
+      status: 'paused',
     });
   });
 
-  it('commits successful legacy recovery before reentrant subscribers run', async () => {
+  it('commits paused legacy recovery before a reentrant resume', async () => {
     const journal = fakeGoalJournal({
       appendErrors: [new Error('migration write failed'), undefined],
     });
@@ -2047,7 +2049,7 @@ describe('goal runtime', () => {
     let reentrantDispatch: Promise<unknown> | undefined;
     let reentered = false;
     runtime.subscribe((snapshot) => {
-      if (reentered || snapshot.goal?.status !== 'active') return;
+      if (reentered || snapshot.goal?.status !== 'paused') return;
       reentered = true;
       try {
         runtime.bindHost(host);
@@ -2055,7 +2057,7 @@ describe('goal runtime', () => {
         bindError = error;
       }
       reentrantDispatch = runtime.dispatch({
-        action: 'pause',
+        action: 'resume',
         expectedGoalId: snapshot.goal.goalId,
         expectedRevision: snapshot.goal.revision,
       });
@@ -2066,7 +2068,7 @@ describe('goal runtime', () => {
 
     expect(bindError).toBeUndefined();
     expect(host.started).toHaveLength(1);
-    expect(runtime.getSnapshot().goal?.status).toBe('paused');
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
   });
 
   it('preempts replace and clear after commit and admits only active replacements', async () => {

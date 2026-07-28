@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import type { GeminiChat } from './geminiChat.js';
 import {
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
   type GoalJournal,
   type GoalRuntime,
 } from '../goals/goal-runtime.js';
@@ -211,6 +212,9 @@ function setupGoalClient() {
     getStopHookBlockingCap: vi.fn(() => 8),
     isManagedMemoryAvailable: vi.fn(() => false),
     getManagedAutoMemoryEnabled: vi.fn(() => false),
+    getMemoryManager: vi.fn(() => ({})),
+    getAutoSkillEnabled: vi.fn(() => false),
+    getSessionId: vi.fn(() => 'goal-test-session'),
     getProjectRoot: vi.fn(() => '/tmp'),
     getTargetDir: vi.fn(() => '/tmp'),
     getClearContextOnIdle: vi.fn(() => ({
@@ -501,6 +505,49 @@ describe('GeminiClient Goal admission', () => {
     ).rejects.toThrow('active Goal requires an exact turn permit');
 
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
+    expect(turnMocks.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps ordinary turns available when Goal recovery is unsupported', async () => {
+    const { client, config } = setupGoalClient();
+    vi.mocked(config.getGoalRuntimeReady).mockRejectedValue(
+      new GoalPersistenceUnavailableError(
+        'Goal lifecycle record is malformed or uses an unsupported version',
+      ),
+    );
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+
+    await expect(
+      drain(
+        client.sendMessageStream(
+          [{ text: 'hello' }],
+          new AbortController().signal,
+          'plain-user-turn',
+          { type: SendMessageType.UserQuery },
+        ),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(turnMocks.run).toHaveBeenCalledOnce();
+  });
+
+  it('keeps unexpected Goal initialization failures fail-closed', async () => {
+    const { client, config } = setupGoalClient();
+    vi.mocked(config.getGoalRuntimeReady).mockRejectedValue(
+      new TypeError('unexpected Goal initialization failure'),
+    );
+
+    await expect(
+      drain(
+        client.sendMessageStream(
+          [{ text: 'hello' }],
+          new AbortController().signal,
+          'plain-user-turn',
+          { type: SendMessageType.UserQuery },
+        ),
+      ),
+    ).rejects.toThrow('unexpected Goal initialization failure');
+
     expect(turnMocks.run).not.toHaveBeenCalled();
   });
 
