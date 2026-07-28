@@ -68,6 +68,10 @@ describe('parseSessionId', () => {
     expect(parseSessionId('/session/a%20b%2Fc')).toBe('a b/c');
   });
 
+  it('returns undefined for malformed percent-encoding', () => {
+    expect(parseSessionId('/session/%E0%A4%A')).toBeUndefined();
+  });
+
   it('returns undefined when there is no session segment', () => {
     expect(parseSessionId('/')).toBeUndefined();
     expect(parseSessionId('/app')).toBeUndefined();
