@@ -41,6 +41,7 @@ import {
   tmpFile,
   worktreePath,
 } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -377,8 +378,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-    ...(args.effort ? { effort: args.effort } : {}),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
