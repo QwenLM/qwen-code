@@ -31,6 +31,10 @@ draft and source session so both can be checked again when the user clicks.
   the main task.
 - `new_session` is for a clearly different, substantial task or topic.
 - `none` covers continuations, uncertainty, and drafts that fit neither action.
+- BTW classification starts after one prior user/assistant exchange. New-session
+  suggestions keep their stricter existing context thresholds.
+- Follow-up-like wording may be classified for BTW, but can never use the
+  relaxed BTW threshold to surface a new-session action.
 - Clicking a `btw` suggestion submits `/btw <draft>` through the existing
   editor path, which preserves the command's current history and composer-clear
   semantics.

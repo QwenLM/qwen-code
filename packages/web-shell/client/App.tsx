@@ -5279,14 +5279,10 @@ export function App({
       dismissNewSessionSuggestion();
       return;
     }
-    suppressNewSessionSuggestion();
+    dismissNewSessionSuggestion();
     editorRef.current?.submit({ text: `/btw ${draft}` });
     editorRef.current?.focus();
-  }, [
-    dismissNewSessionSuggestion,
-    newSessionSuggestion,
-    suppressNewSessionSuggestion,
-  ]);
+  }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
   const shellApi = useMemo<WebShellApi>(
     () => ({

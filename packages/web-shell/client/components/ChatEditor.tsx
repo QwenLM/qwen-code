@@ -1259,10 +1259,9 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
-    const hasAttachments = core.handle.hasAttachments();
     useEffect(() => {
-      onAttachmentsChange?.(hasAttachments);
-    }, [hasAttachments, onAttachmentsChange]);
+      onAttachmentsChange?.(core.hasAttachments);
+    }, [core.hasAttachments, onAttachmentsChange]);
 
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);

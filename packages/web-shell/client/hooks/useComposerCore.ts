@@ -1269,6 +1269,7 @@ export interface UseComposerCoreReturn {
   clearText: () => void;
   getText: () => string;
   hasInput: () => boolean;
+  hasAttachments: boolean;
   hasContent: boolean;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1608,6 +1609,7 @@ export function useComposerCore(
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
+  const [hasInlineTags, setHasInlineTags] = useState(false);
   const historyDraftComposerTagsRef = useRef<WebShellComposerTag[] | null>(
     null,
   );
@@ -2826,6 +2828,7 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
+          setHasInlineTags(getInlineComposerTags(update.view).length > 0);
           if (update.docChanged) {
             const text = getDocText(update.state);
             if (draftIdentityRef.current.storageKey === undefined) {
@@ -3916,6 +3919,8 @@ export function useComposerCore(
     clearText,
     getText,
     hasInput,
+    hasAttachments:
+      hasInlineTags || composerTags.length > 0 || pastedImages.length > 0,
     hasContent,
     handle,
     pastedImages,

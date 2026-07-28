@@ -3,6 +3,7 @@ import type { Message } from '../adapters/types';
 import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
 
 const MIN_PROMPT_LENGTH = 12;
+const MIN_BTW_MESSAGE_COUNT = 2;
 const MIN_MESSAGE_COUNT = 8;
 const MIN_CONTEXT_USAGE_RATIO = 0.35;
 const MIN_EXPLICIT_CUE_MESSAGE_COUNT = 2;
@@ -59,7 +60,6 @@ interface ComposerSuggestionDecision {
 
 export interface NewSessionSuggestionState {
   suggestion: Exclude<SuggestionKind, 'none'>;
-  confidence: number;
   classifiedInput: string;
   sourceSessionId: string;
 }
@@ -119,6 +119,8 @@ function buildPrompt(params: {
   currentInput: string;
   contextUsageRatio: number;
   messageCount: number;
+  allowBtw: boolean;
+  allowNewSession: boolean;
 }): string {
   const recent = params.recentMessages
     .map((message, index) => `${index + 1}. ${message.role}: ${message.text}`)
@@ -129,6 +131,7 @@ function buildPrompt(params: {
     'Choose "btw" only for a brief side question that can be answered without changing the main task or adding its answer to the main conversation context.',
     'Choose "none" for follow-ups, implementation continuations, debugging iterations, review follow-ups, and adjacent discussion about the same repo, PR, bug, or feature.',
     'Be conservative. When in doubt, choose "none".',
+    `Allowed actions: btw=${params.allowBtw ? 'yes' : 'no'}, new_session=${params.allowNewSession ? 'yes' : 'no'}. Never choose an action marked no.`,
     'Return JSON only with keys: suggestion ("btw", "new_session", or "none") and confidence (0-1 number).',
     '',
     `Context usage ratio: ${params.contextUsageRatio.toFixed(2)}`,
@@ -246,22 +249,22 @@ export function useNewSessionSuggestion({
       setSuggestion(null);
       return;
     }
-    if (isFollowupLike(trimmed)) {
-      setSuggestion(null);
-      return;
-    }
     const explicitNewTaskCue = hasExplicitNewTaskCue(trimmed);
     if (isRunning || dialogOpen) {
       setSuggestion(null);
       return;
     }
-    if (
-      explicitNewTaskCue
-        ? recentMessages.length < MIN_EXPLICIT_CUE_MESSAGE_COUNT &&
-          contextUsageRatio < MIN_EXPLICIT_CUE_CONTEXT_USAGE_RATIO
-        : recentMessages.length < MIN_MESSAGE_COUNT &&
-          contextUsageRatio < MIN_CONTEXT_USAGE_RATIO
-    ) {
+    const allowBtw =
+      hasAttachments === false &&
+      recentMessages.length >= MIN_BTW_MESSAGE_COUNT;
+    const allowNewSession =
+      !isFollowupLike(trimmed) &&
+      (explicitNewTaskCue
+        ? recentMessages.length >= MIN_EXPLICIT_CUE_MESSAGE_COUNT ||
+          contextUsageRatio >= MIN_EXPLICIT_CUE_CONTEXT_USAGE_RATIO
+        : recentMessages.length >= MIN_MESSAGE_COUNT ||
+          contextUsageRatio >= MIN_CONTEXT_USAGE_RATIO);
+    if (!allowBtw && !allowNewSession) {
       setSuggestion(null);
       return;
     }
@@ -279,6 +282,8 @@ export function useNewSessionSuggestion({
         currentInput: trimmed,
         contextUsageRatio,
         messageCount: recentMessages.length,
+        allowBtw,
+        allowNewSession,
       });
       void (async () => {
         let text = '';
@@ -301,12 +306,12 @@ export function useNewSessionSuggestion({
           if (
             decision &&
             decision.suggestion !== 'none' &&
-            (decision.suggestion !== 'btw' || hasAttachments === false) &&
+            ((decision.suggestion === 'btw' && allowBtw) ||
+              (decision.suggestion === 'new_session' && allowNewSession)) &&
             decision.confidence >= MIN_CONFIDENCE
           ) {
             setSuggestion({
               suggestion: decision.suggestion,
-              confidence: decision.confidence,
               classifiedInput: trimmed,
               sourceSessionId: sessionId,
             });

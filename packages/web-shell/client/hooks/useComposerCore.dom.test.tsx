@@ -884,6 +884,7 @@ describe('useComposerCore tags', () => {
     await mount();
 
     expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
 
     act(() => {
       latest!.addTags(
@@ -892,11 +893,13 @@ describe('useComposerCore tags', () => {
       );
     });
     expect(latest!.handle.hasAttachments()).toBe(true);
+    expect(latest!.hasAttachments).toBe(true);
 
     act(() => {
       latest!.removeInlineTags();
     });
     expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
   });
 
   it('keeps inline tags after trimming leading whitespace on submit', async () => {

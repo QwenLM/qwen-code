@@ -5463,6 +5463,44 @@ describe('App session callbacks', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(editorCommit).toHaveBeenCalledTimes(1);
+
+    const newTask = '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案';
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-new-session-after-btw',
+          seq: 0,
+          text: JSON.stringify({
+            suggestion: 'new_session',
+            confidence: 0.94,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-new-session-after-btw',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+    testState.prompt = newTask;
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(newTask);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="new-session-suggestion"]'),
+    ).not.toBeNull();
   });
 
   it('refuses a visible BTW suggestion when an inline tag is added before acceptance', async () => {

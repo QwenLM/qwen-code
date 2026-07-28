@@ -64,6 +64,9 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       clearText: vi.fn(),
       getText: vi.fn(() => ''),
       hasInput: vi.fn(() => false),
+      hasAttachments:
+        mockComposerCoreState.pastedImages.length > 0 ||
+        mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
       handle: {
         focus: vi.fn(),

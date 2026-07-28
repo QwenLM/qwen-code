@@ -152,7 +152,6 @@ describe('useNewSessionSuggestion', () => {
     expect(testState.generateContent).toHaveBeenCalledOnce();
     expect(latestSuggestion).toEqual({
       suggestion: 'new_session',
-      confidence: 0.9,
       classifiedInput: '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案',
       sourceSessionId: 'session-1',
     });
@@ -186,10 +185,14 @@ describe('useNewSessionSuggestion', () => {
     },
   ] as Message[];
 
-  async function classify(decisionText: string) {
+  async function classify(
+    decisionText: string,
+    inputText = NEW_TASK_DRAFT,
+    messages = CONTEXT_MESSAGES,
+  ) {
     vi.useFakeTimers();
-    testState.inputText = NEW_TASK_DRAFT;
-    testState.messages = CONTEXT_MESSAGES;
+    testState.inputText = inputText;
+    testState.messages = messages;
     testState.generateContent.mockImplementation(async function* () {
       yield {
         type: 'delta',
@@ -212,6 +215,67 @@ describe('useNewSessionSuggestion', () => {
     await flush(3);
   }
 
+  it('classifies a side question after only one prior exchange', async () => {
+    const sideQuestion = '这里的 confidence 阈值为什么是 0.75？';
+    await classify(
+      JSON.stringify({ suggestion: 'btw', confidence: 0.92 }),
+      sideQuestion,
+    );
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toEqual({
+      suggestion: 'btw',
+      classifiedInput: sideQuestion,
+      sourceSessionId: 'session-1',
+    });
+  });
+
+  it('lets common side-question wording reach the classifier', async () => {
+    const sideQuestion = '顺手问下，这里的 confidence 阈值为什么是 0.75？';
+    await classify(
+      JSON.stringify({ suggestion: 'btw', confidence: 0.9 }),
+      sideQuestion,
+    );
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion?.suggestion).toBe('btw');
+  });
+
+  it('does not surface new_session from the relaxed BTW context floor', async () => {
+    await classify(
+      JSON.stringify({ suggestion: 'new_session', confidence: 0.96 }),
+      '这里的 confidence 阈值为什么是 0.75？',
+    );
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toBeNull();
+  });
+
+  it('does not classify BTW with less than one prior exchange', async () => {
+    await classify(
+      JSON.stringify({ suggestion: 'btw', confidence: 0.96 }),
+      '这里的 confidence 阈值为什么是 0.75？',
+      CONTEXT_MESSAGES.slice(0, 1),
+    );
+
+    expect(testState.generateContent).not.toHaveBeenCalled();
+    expect(latestSuggestion).toBeNull();
+  });
+
+  it.each([true, null])(
+    'does not classify a low-context side question when attachment presence is %s',
+    async (hasAttachments) => {
+      testState.hasAttachments = hasAttachments;
+      await classify(
+        JSON.stringify({ suggestion: 'btw', confidence: 0.96 }),
+        '这里的 confidence 阈值为什么是 0.75？',
+      );
+
+      expect(testState.generateContent).not.toHaveBeenCalled();
+      expect(latestSuggestion).toBeNull();
+    },
+  );
+
   it('recovers a positive decision wrapped in prose (observed live)', async () => {
     // Verbatim shape from a live run: prose preamble + bare JSON.
     await classify(
@@ -223,7 +287,6 @@ describe('useNewSessionSuggestion', () => {
     expect(testState.generateContent).toHaveBeenCalledOnce();
     expect(latestSuggestion).toEqual({
       suggestion: 'new_session',
-      confidence: 0.98,
       classifiedInput: NEW_TASK_DRAFT,
       sourceSessionId: 'session-1',
     });
@@ -238,7 +301,6 @@ describe('useNewSessionSuggestion', () => {
 
     expect(latestSuggestion).toEqual({
       suggestion: 'new_session',
-      confidence: 0.95,
       classifiedInput: NEW_TASK_DRAFT,
       sourceSessionId: 'session-1',
     });
@@ -259,7 +321,6 @@ describe('useNewSessionSuggestion', () => {
 
     expect(latestSuggestion).toEqual({
       suggestion: 'btw',
-      confidence: 0.92,
       classifiedInput: NEW_TASK_DRAFT,
       sourceSessionId: 'session-1',
     });
