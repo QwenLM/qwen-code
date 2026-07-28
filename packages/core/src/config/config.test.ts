@@ -4079,6 +4079,36 @@ describe('Server Config (config.ts)', () => {
         expect(config.getCompactionModel()).toBeUndefined();
       });
 
+      it('returns undefined when the compaction model is visionOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'vision-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'vision-model',
+                name: 'Vision Model',
+                visionOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
       it('falls back to the main model when the compaction model selector is malformed', async () => {
         const config = new Config({
           ...baseParams,

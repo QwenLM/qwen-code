@@ -70,6 +70,8 @@ export interface ModelConfig {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector, not the main model list */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector, not the main model list */
+  visionOnly?: boolean;
   /** When true, this model only appears in the image generation model selector */
   imageOnly?: boolean;
 }

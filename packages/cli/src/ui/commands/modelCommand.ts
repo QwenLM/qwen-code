@@ -785,7 +785,14 @@ export const modelCommand: SlashCommand = {
     if (isCompactionModelCommand) {
       const modelName = args.replace('--compaction', '').trim();
       if (!modelName || modelName === 'clear') {
-        if (modelName === 'clear' && settings) {
+        if (modelName === 'clear') {
+          if (!settings) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Settings service not available.'),
+            };
+          }
           persistSetting(settings, 'compactionModel', undefined, scopeOverride);
           config.setCompactionModel(undefined);
           return {
