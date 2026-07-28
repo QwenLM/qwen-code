@@ -3532,6 +3532,44 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('reports the selected workspace, not the stale connection workspace, when no session is active', async () => {
+    // A cleared session leaves connection.workspaceCwd pointing at the old
+    // workspace (here: a secondary with a running task). Starting a new chat
+    // in the primary must report the primary, not route the host back to the
+    // stale workspace.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+
+    renderApp({
+      onSessionIdChange,
+      initialSelectedWorkspaceCwd: '/workspace',
+    });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      '/workspace',
+    );
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(
+      undefined,
+      'secondary',
+      '/work/secondary',
+    );
+  });
+
   it('creates scratch once, accepts refreshed capabilities, and opens a fresh chat', async () => {
     mockWorkspace.capabilities = {
       features: [

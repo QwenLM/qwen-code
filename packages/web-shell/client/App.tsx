@@ -4619,8 +4619,16 @@ export function App({
       lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
+    // With no active session (deferred or just cleared) the connection's
+    // workspaceCwd is a leftover from the previous session — routing the host
+    // by it would send a "new chat in workspace A" back to the old workspace
+    // (e.g. one with a running task). The workspace picked for the next
+    // session is the source of truth in that state.
+    const reportedWorkspaceCwd = connection.sessionId
+      ? connection.workspaceCwd
+      : (selectedWorkspaceCwd ?? connection.workspaceCwd);
     const activeWorkspace = workspaces.find(
-      (entry) => entry.cwd === connection.workspaceCwd,
+      (entry) => entry.cwd === reportedWorkspaceCwd,
     );
     if (connection.sessionId && !workspace.capabilities) return;
     const workspaceId =
@@ -4630,23 +4638,24 @@ export function App({
     if (
       lastNotifiedSessionIdRef.current === connection.sessionId &&
       lastNotifiedWorkspaceIdRef.current === workspaceId &&
-      lastNotifiedWorkspaceCwdRef.current === connection.workspaceCwd
+      lastNotifiedWorkspaceCwdRef.current === reportedWorkspaceCwd
     ) {
       return;
     }
     lastNotifiedSessionIdRef.current = connection.sessionId;
     lastNotifiedWorkspaceIdRef.current = workspaceId;
-    lastNotifiedWorkspaceCwdRef.current = connection.workspaceCwd;
+    lastNotifiedWorkspaceCwdRef.current = reportedWorkspaceCwd;
     onSessionIdChange?.(
       connection.sessionId,
       workspaceId,
-      connection.workspaceCwd,
+      reportedWorkspaceCwd,
     );
   }, [
     connection.missingSession,
     connection.sessionId,
     connection.workspaceCwd,
     onSessionIdChange,
+    selectedWorkspaceCwd,
     workspace.capabilities,
     workspaces,
   ]);
