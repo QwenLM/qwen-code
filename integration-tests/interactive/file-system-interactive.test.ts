@@ -50,7 +50,7 @@ describe('Interactive file system', () => {
       await type(ptyProcess, readPrompt);
       await type(ptyProcess, '\r');
 
-      const readCall = await rig.waitForToolCall('read_file', 30000);
+      const readCall = await rig.waitForToolCall('read_file');
       expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
       const containsExpectedVersion = await rig.waitForText(
@@ -67,10 +67,7 @@ describe('Interactive file system', () => {
       await type(ptyProcess, writePrompt);
       await type(ptyProcess, '\r');
 
-      const toolCall = await rig.waitForAnyToolCall(
-        ['write_file', 'edit'],
-        30000,
-      );
+      const toolCall = await rig.waitForAnyToolCall(['write_file', 'edit']);
 
       if (!toolCall) {
         printDebugInfo(rig, rig._interactiveOutput, {
