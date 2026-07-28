@@ -501,6 +501,11 @@ export interface TelemetrySettings {
   /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
+  /**
+   * Stable end-user identifier written to GenAI spans as `gen_ai.user.id`.
+   * This is an ARMS extension and may contain linkable personal data.
+   */
+  userId?: string;
   includeSensitiveSpanAttributes?: boolean;
   sensitiveSpanAttributeMaxLength?: number;
   outfile?: string;
@@ -2047,6 +2052,7 @@ export class Config {
       otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
       otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
+      userId: params.telemetry?.userId?.trim() || undefined,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       sensitiveSpanAttributeMaxLength: resolveSensitiveSpanAttributeMaxLength(
@@ -5780,6 +5786,10 @@ export class Config {
 
   getTelemetryLogPromptsEnabled(): boolean {
     return this.telemetrySettings.logPrompts ?? true;
+  }
+
+  getTelemetryUserId(): string | undefined {
+    return this.telemetrySettings.userId;
   }
 
   getTelemetryIncludeSensitiveSpanAttributes(): boolean {
