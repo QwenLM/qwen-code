@@ -729,6 +729,8 @@ export interface RunHandle {
   close(): Promise<void>;
 }
 
+const retryableChannelWorkerShutdownErrors = new WeakSet<Error>();
+
 type CoreRuntime = typeof import('./core-runtime.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
@@ -1048,6 +1050,7 @@ async function loadServeRuntimeModules() {
     serverModule,
     bridgeModule,
     spawnChannelModule,
+    processRegistryModule,
     workspaceModule,
     workspaceTypesModule,
     daemonStatusProviderModule,
@@ -1059,6 +1062,7 @@ async function loadServeRuntimeModules() {
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
     import('@qwen-code/acp-bridge/spawnChannel'),
+    import('@qwen-code/acp-bridge/processRegistry'),
     import('./workspace-service/index.js'),
     import('./workspace-service/types.js'),
     import('./daemon-status-provider.js'),
@@ -1075,6 +1079,7 @@ async function loadServeRuntimeModules() {
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
+    ProcessRegistry: processRegistryModule.ProcessRegistry,
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
@@ -2678,6 +2683,12 @@ async function runQwenServeImpl(
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
+  let managedProcessRegistry:
+    | {
+        shutdown(): Promise<void>;
+        killAllSync(): void;
+      }
+    | undefined;
   const internalRuntimeBridgesForCleanup: AcpSessionBridge[] = [];
   let daemonEventLoopMonitor:
     | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
@@ -3336,6 +3347,8 @@ async function runQwenServeImpl(
     const workspaceTrustOperationGate = new PathMutexRegistry();
     const runWorkspaceTrustOperation = <T>(operation: () => Promise<T>) =>
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
+    const processRegistry = new runtime.ProcessRegistry();
+    managedProcessRegistry = processRegistry;
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -3358,6 +3371,7 @@ async function runQwenServeImpl(
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
+      processRegistry,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -3955,6 +3969,7 @@ async function runQwenServeImpl(
           : {}),
       });
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
+        processRegistry,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4454,6 +4469,7 @@ async function runQwenServeImpl(
             })
           : wsFsFactory;
       const wsChannelFactory = runtime.createSpawnChannelFactory({
+        processRegistry,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -6255,6 +6271,7 @@ async function runQwenServeImpl(
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
+            managedProcessRegistry?.killAllSync();
             channelWorkerManager?.killAllSync();
             for (const runtimeBridge of getRuntimeBridgesForCleanup()) {
               runtimeBridge.killAllSync();
@@ -6282,7 +6299,10 @@ async function runQwenServeImpl(
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          if (channelWorkerManager?.state().enabled) {
+          if (
+            err instanceof Error &&
+            retryableChannelWorkerShutdownErrors.has(err)
+          ) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
@@ -6330,6 +6350,17 @@ async function runQwenServeImpl(
             // yields so no management request can enter the shutdown window.
             const initialManagementWait =
               initiallyMountedManagement?.sealAndWait?.();
+            let processRegistryShutdown: Promise<Error | undefined> | undefined;
+            const startProcessRegistryShutdown = () => {
+              processRegistryShutdown ??= managedProcessRegistry
+                ?.shutdown()
+                .then(
+                  () => undefined,
+                  (error: unknown) =>
+                    error instanceof Error ? error : new Error(String(error)),
+                );
+            };
+            startProcessRegistryShutdown();
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
@@ -6340,10 +6371,10 @@ async function runQwenServeImpl(
             // AFTER drain completes (`finish` below).
 
             // Two-phase shutdown:
-            //   1. `bridge.shutdown()` — tears down agent children with
-            //      its own internal `KILL_HARD_DEADLINE_MS` (10s) so
-            //      a wedged child can't block forever. We wait
-            //      unconditionally; the bridge bounds itself.
+            //   1. The shared process registry starts every agent child's
+            //      5s TERM/KILL and 10s raw-exit timeline before slower worker
+            //      or bridge cleanup. `bridge.shutdown()` then drains its
+            //      in-flight state against those same terminal promises.
             //   2. `server.close()` — drains in-flight HTTP connections
             //      (long-lived SSE subscribers especially). This is
             //      what `SHUTDOWN_FORCE_CLOSE_MS` actually protects:
@@ -6356,8 +6387,7 @@ async function runQwenServeImpl(
             // timer; if the bridge took 5–10s to kill its children
             // (e.g. SIGTERM grace period), the timer fired first,
             // resolved this promise, and `process.exit(0)` ran while
-            // the bridge was still tearing children down — orphaning
-            // any that hadn't yet hit `KILL_HARD_DEADLINE_MS`.
+            // the bridge was still tearing children down.
             let settled = false;
             // Track bridge.shutdown failures so close()
             // doesn't silently report success when the bridge
@@ -6411,6 +6441,7 @@ async function runQwenServeImpl(
                     channelWorkerShutdownError !== undefined &&
                     channelWorkerManager?.state().enabled === true;
                   if (retryableChannelClose) {
+                    const retryableError = channelWorkerShutdownError!;
                     await flushDaemonLogBounded(
                       daemonLog,
                       DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
@@ -6418,13 +6449,18 @@ async function runQwenServeImpl(
                     closePromise = undefined;
                     shuttingDown = false;
                     channelControlDraining = false;
-                    rej(finalErr);
+                    retryableChannelWorkerShutdownErrors.add(retryableError);
+                    rej(retryableError);
                     return;
                   }
                   if (loggerPublished || loggerSignalOwned) {
-                    writeDaemonLifecycleBestEffort(() =>
-                      daemonLog.info('daemon stopped'),
-                    );
+                    writeDaemonLifecycleBestEffort(() => {
+                      if (finalErr) {
+                        daemonLog.error('daemon shutdown incomplete', finalErr);
+                      } else {
+                        daemonLog.info('daemon stopped');
+                      }
+                    });
                     await daemonLog.close();
                   }
                   if (finalErr) rej(finalErr);
@@ -6470,10 +6506,11 @@ async function runQwenServeImpl(
                     err instanceof Error ? err : null,
                   );
                 });
+                startProcessRegistryShutdown();
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
-                // The worker owns daemon-backed sessions; disconnect it before
-                // tearing down the ACP bridge it is attached to.
+                // Writer terminals are already in flight. Stop the worker
+                // before tearing down the bridge state it is attached to.
                 if (channelWorkerManager) {
                   await channelWorkerManager.shutdown().catch((err) => {
                     daemonLog.error(
@@ -6531,6 +6568,14 @@ async function runQwenServeImpl(
                     bridgeShutdownError =
                       err instanceof Error ? err : new Error(String(err));
                   });
+                }
+                const processRegistryError = await processRegistryShutdown;
+                if (processRegistryError) {
+                  daemonLog.error(
+                    'ACP process registry shutdown error',
+                    processRegistryError,
+                  );
+                  bridgeShutdownError ??= processRegistryError;
                 }
               })
               .finally(() => {
@@ -6647,7 +6692,10 @@ async function runQwenServeImpl(
                     closeErr instanceof Error ? closeErr : null,
                   ),
                 );
-                if (channelWorkerManager?.state().enabled) {
+                if (
+                  closeErr instanceof Error &&
+                  retryableChannelWorkerShutdownErrors.has(closeErr)
+                ) {
                   writeDaemonLifecycleBestEffort(() =>
                     daemonLog.error(
                       'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
