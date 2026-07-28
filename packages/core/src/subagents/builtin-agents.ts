@@ -97,9 +97,10 @@ Notes:
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,
-        // ASK_USER_QUESTION is deliberately absent: Explore is a read-only
-        // search worker that typically runs as a subagent with no human in
-        // the loop — an interactive question would block forever (#7126).
+        // ASK_USER_QUESTION is in EXCLUDED_TOOLS_FOR_SUBAGENTS (see
+        // agent-core.ts), so it is excluded globally for all subagents.
+        // The comment is kept here to document why it's not in the
+        // explicit tool list.
       ],
     },
     {

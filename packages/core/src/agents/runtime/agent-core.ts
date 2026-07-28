@@ -165,6 +165,11 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
+  // ASK_USER_QUESTION is excluded because background subagents (fork,
+  // general-purpose) have no mechanism to deliver questions to the user
+  // and answer them — the subagent hangs indefinitely waiting for input
+  // that can never arrive. #7835.
+  ToolNames.ASK_USER_QUESTION,
 ]);
 
 /**
