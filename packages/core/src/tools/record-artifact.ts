@@ -346,7 +346,7 @@ function hasControlCharacter(
   return false;
 }
 
-function hasUnsafeDisplayPayload(value: string): boolean {
+export function hasUnsafeDisplayPayload(value: string): boolean {
   return (
     /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript|image\/svg\+xml)/i.test(
       value,

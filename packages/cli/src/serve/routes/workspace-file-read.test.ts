@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import {
   buildRecordArtifactReminder,
+  buildWorkspaceArtifactMetadata,
   Ignore,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -570,17 +571,17 @@ describe('artifact workspacePath contract (write_file ⇄ GET /file)', () => {
 
   /** The workspacePath emitted by the real producer. */
   function emittedWorkspacePath(sessionCwd: string, filePath: string): string {
-    const reminder = buildRecordArtifactReminder(
-      {
-        isRecordArtifactEnabled: () => true,
-        getTargetDir: () => sessionCwd,
-      } as unknown as Config,
-      filePath,
-    );
+    const config = {
+      isRecordArtifactEnabled: () => true,
+      getTargetDir: () => sessionCwd,
+    } as unknown as Config;
+    const reminder = buildRecordArtifactReminder(config, filePath);
     const match = /workspacePath "([^"]+)"/.exec(reminder ?? '');
     if (!match?.[1]) {
       throw new Error(`no workspacePath in reminder: ${reminder ?? 'null'}`);
     }
+    const artifact = buildWorkspaceArtifactMetadata(config, filePath);
+    expect(artifact?.workspacePath).toBe(match[1]);
     return match[1];
   }
 

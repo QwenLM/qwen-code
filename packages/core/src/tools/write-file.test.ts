@@ -524,6 +524,22 @@ describe('WriteFileTool', () => {
       });
     });
 
+    it('sets application/x-ipynb+json mimeType for notebooks', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'notes', 'analysis.ipynb');
+      const params = {
+        file_path: filePath,
+        content: '{"cells":[]}',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.artifacts?.[0]).toMatchObject({
+        kind: 'notebook',
+        mimeType: 'application/x-ipynb+json',
+      });
+    });
+
     it('does not record artifact-like files when artifact recording is disabled', async () => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
       const filePath = path.join(rootDir, 'reports', 'weather.html');
@@ -534,6 +550,25 @@ describe('WriteFileTool', () => {
 
       const result = await tool.build(params).execute(abortSignal);
 
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifacts whose filename contains unsafe markup', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(
+        rootDir,
+        'reports',
+        '<img src=x onerror=alert(1)>.html',
+      );
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>XSS</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
       expect(result.llmContent).not.toContain('automatically recorded');
       expect(result.artifacts).toBeUndefined();
     });

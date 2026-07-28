@@ -53,6 +53,7 @@ import {
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { hasUnsafeDisplayPayload } from './record-artifact.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
 const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
@@ -686,7 +687,7 @@ function formatRecordArtifactReminder(workspacePath: string): string {
   );
 }
 
-function buildWorkspaceArtifactMetadata(
+export function buildWorkspaceArtifactMetadata(
   config: Config,
   filePath: string,
   sizeBytes?: number,
@@ -695,12 +696,22 @@ function buildWorkspaceArtifactMetadata(
   if (!workspacePath) {
     return null;
   }
+  const title = path.basename(filePath);
+  // The daemon store rejects titles with unsafe markup; skip the artifact
+  // rather than tell the model it was recorded when it will be dropped.
+  if (hasUnsafeDisplayPayload(title)) {
+    return null;
+  }
   return {
-    title: path.basename(filePath),
+    title,
     kind: inferWorkspaceArtifactKind(filePath),
     storage: 'workspace',
     workspacePath,
-    mimeType: getSpecificMimeType(filePath),
+    mimeType:
+      getSpecificMimeType(filePath) ??
+      (filePath.toLowerCase().endsWith('.ipynb')
+        ? 'application/x-ipynb+json'
+        : undefined),
     sizeBytes,
   };
 }
