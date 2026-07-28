@@ -187,6 +187,7 @@ function convertToHistoryItems(
     name: string;
     description: string;
     resultDisplay: ToolResultDisplay | undefined;
+    visionBridgeNotice?: string;
     detailedDisplay?: string;
     status: ToolCallStatus;
     confirmationDetails: undefined;
