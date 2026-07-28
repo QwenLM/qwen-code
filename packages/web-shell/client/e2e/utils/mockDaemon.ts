@@ -70,6 +70,14 @@ export interface WebShellDaemonScenario {
    * empty pull-request list.
    */
   gitHubPrs?: DaemonGitHubPullRequestList;
+  /** Response for `GET /workspaces/:cwd/git/branches`. */
+  gitBranches?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/diff`. */
+  gitDiff?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/log`. */
+  gitLog?: unknown;
+  /** Response for `POST /session/:id/btw`. */
+  btwAnswer?: string;
 }
 
 export interface MockDaemonController {
@@ -333,6 +341,10 @@ export function createWebShellDaemonScenario(
     state,
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
+    gitBranches: overrides.gitBranches,
+    gitDiff: overrides.gitDiff,
+    gitLog: overrides.gitLog,
+    btwAnswer: overrides.btwAnswer,
   };
 }
 
@@ -537,11 +549,19 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
+    /^\/workspace\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
     /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
+    /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -617,6 +637,41 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspace\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspace\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/github\/default-branch\/?$/.test(path)
+  )
+    return true;
+  if (method === 'GET' && /^\/workspace\/github\/default-branch\/?$/.test(path))
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/github\/prs\/create\/?$/.test(path)
+  )
+    return true;
+  if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
+    return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -889,6 +944,179 @@ async function handleDaemonRoute(
         pullRequests: [],
       },
     );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/branches\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitBranches ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        local: [
+          {
+            name: 'main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'feat/demo',
+            isHead: true,
+            ahead: 3,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        remote: [
+          {
+            name: 'origin/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'origin/develop',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'upstream/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        tags: [{ name: 'v1.0.0', date: 0, subject: 'Release 1.0' }],
+        recent: ['main', 'develop'],
+        head: 'feat/demo',
+        detached: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/diff\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitDiff ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        files: [
+          {
+            path: 'src/foo.ts',
+            added: 10,
+            removed: 3,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+          },
+          {
+            path: 'src/bar.ts',
+            added: 5,
+            removed: 0,
+            isBinary: false,
+            isUntracked: true,
+            isDeleted: false,
+          },
+        ],
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/log\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitLog ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        entries: [
+          {
+            sha: 'abc1234',
+            shortSha: 'abc1234',
+            subject: 'feat: add branch picker',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            refs: 'HEAD -> feat/demo',
+            parents: [],
+          },
+          {
+            sha: 'def5678',
+            shortSha: 'def5678',
+            subject: 'fix: resolve session per workspace',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            parents: [],
+          },
+        ],
+        hasMore: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/(checkout|branch|push|pull|commit)\/?$/.test(
+      path,
+    )
+  ) {
+    const action = path.replace(/\/$/, '').split('/').pop();
+    if (action === 'commit') {
+      await json(route, { sha: 'abc1234', subject: 'test commit' });
+    } else if (action === 'checkout' || action === 'branch') {
+      await json(route, { branch: 'feat/demo', detached: false });
+    } else {
+      await json(route, { success: true, output: '' });
+    }
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/default-branch\/?$/.test(path)
+  ) {
+    await json(route, { branch: 'origin/main' });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/prs\/create\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      { url: 'https://github.com/example/repo/pull/42', number: 42 },
+      201,
+    );
+    return;
+  }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
+    await json(route, {
+      sessionId: path.split('/')[2],
+      answer:
+        scenario.btwAnswer ??
+        'feat(web-shell): add git branch picker and commit dialog\n\n## What this PR does\nAdds branch picker, commit dialog, and create PR flow to the web shell.\n\n## Why it is needed\nCompletes the git workflow in the browser.',
+    });
     return;
   }
   if (method === 'POST' && path === '/session') {
