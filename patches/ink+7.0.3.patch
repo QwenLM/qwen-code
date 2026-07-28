@@ -18,7 +18,7 @@ index 1d7bf6b..29401a6 100644
 -export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 +export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, selectable, selectionFlow, selectionBreakAfter, selectionJoiner, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 diff --git a/node_modules/ink/build/components/Text.js b/node_modules/ink/build/components/Text.js
-index 2e4b9ff..1ec2ae6 100644
+index 2e4b9ff..77ed0f6 100644
 --- a/node_modules/ink/build/components/Text.js
 +++ b/node_modules/ink/build/components/Text.js
 @@ -6,7 +6,7 @@ import { backgroundContext } from './BackgroundContext.js';
@@ -38,6 +38,7 @@ index 2e4b9ff..1ec2ae6 100644
 +    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform, selectable: selectable, selectionFlow: selectionFlow, selectionBreakAfter: selectionBreakAfter, selectionJoiner: selectionJoiner }, childrenOrAriaLabel));
  }
  //# sourceMappingURL=Text.js.map
+\ No newline at end of file
 diff --git a/node_modules/ink/build/frame-controller.d.ts b/node_modules/ink/build/frame-controller.d.ts
 new file mode 100644
 index 0000000..c294036
@@ -153,7 +154,7 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..6e97480 100644
+index ef659f3..767d861 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
 @@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
@@ -254,7 +255,7 @@ index 0f4523f..a3ef634 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..ac81f2e 100644
+index c763b77..bfd3d08 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
 @@ -1,6 +1,26 @@
@@ -451,8 +452,70 @@ index c763b77..ac81f2e 100644
          };
      }
  }
+diff --git a/node_modules/ink/build/reconciler.js b/node_modules/ink/build/reconciler.js
+index 5b4a9d7..25cc017 100644
+--- a/node_modules/ink/build/reconciler.js
++++ b/node_modules/ink/build/reconciler.js
+@@ -53,6 +53,25 @@ const cleanupYogaNode = (node) => {
+     node?.unsetMeasureFunc();
+     node?.freeRecursive();
+ };
++// Clear staticNode when the node it points at is removed as part of a larger
++// subtree. The previous identity check (staticNode === removeNode) only caught
++// direct removal of <Static>; removing an ancestor left a dangling reference
++// whose freed WASM memory crashed the next render (QwenLM/qwen-code#6820).
++// Must be called BEFORE removeChildNode breaks the parent chain.
++const clearStaticNodeIfContained = (removeNode) => {
++    const staticNode = currentRootNode?.staticNode;
++    if (!staticNode) {
++        return;
++    }
++    let current = staticNode;
++    while (current) {
++        if (current === removeNode) {
++            currentRootNode.staticNode = undefined;
++            return;
++        }
++        current = current.parentNode;
++    }
++};
+ let currentUpdatePriority = NoEventPriority;
+ let currentRootNode;
+ async function loadPackageJson() {
+@@ -212,13 +231,10 @@ export default createReconciler({
+     appendChildToContainer: appendChildNode,
+     insertInContainerBefore: insertBeforeNode,
+     removeChildFromContainer(node, removeNode) {
++        clearStaticNodeIfContained(removeNode);
+         removeChildNode(node, removeNode);
+         cleanupYogaNode(removeNode.yogaNode);
+-        // Only clear staticNode if it still points at the removed node. On key-driven remounts, `createInstance` already registered the new node before this removal fires.
+-        if (removeNode.internal_static &&
+-            currentRootNode?.staticNode === removeNode) {
+-            currentRootNode.staticNode = undefined;
+-        }
++        removeNode.yogaNode = undefined;
+     },
+     commitUpdate(node, _type, oldProps, newProps) {
+         if (currentRootNode && node.internal_static) {
+@@ -254,13 +270,10 @@ export default createReconciler({
+         setTextNodeValue(node, newText);
+     },
+     removeChild(node, removeNode) {
++        clearStaticNodeIfContained(removeNode);
+         removeChildNode(node, removeNode);
+         cleanupYogaNode(removeNode.yogaNode);
+-        // Same guard as removeChildFromContainer: only clear if this is still the active static node.
+-        if (removeNode.internal_static &&
+-            currentRootNode?.staticNode === removeNode) {
+-            currentRootNode.staticNode = undefined;
+-        }
++        removeNode.yogaNode = undefined;
+     },
+     setCurrentUpdatePriority(newPriority) {
+         currentUpdatePriority = newPriority;
 diff --git a/node_modules/ink/build/render-background.js b/node_modules/ink/build/render-background.js
-index db5c807..bb54771 100644
+index db5c807..3ac805a 100644
 --- a/node_modules/ink/build/render-background.js
 +++ b/node_modules/ink/build/render-background.js
 @@ -18,7 +18,10 @@ const renderBackground = (x, y, node, output) => {
@@ -482,7 +545,7 @@ index 127c620..6d5a005 100644
  }) => void;
  export default renderNodeToOutput;
 diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
-index f00a278..07a98d0 100644
+index f00a278..e6bc4ca 100644
 --- a/node_modules/ink/build/render-node-to-output.js
 +++ b/node_modules/ink/build/render-node-to-output.js
 @@ -1,7 +1,6 @@
@@ -615,7 +678,7 @@ index 8c35aea..26e3196 100644
 +declare const renderer: (node: DOMElement, isScreenReaderEnabled: boolean, selection?: ScreenSelection | null) => Result;
  export default renderer;
 diff --git a/node_modules/ink/build/renderer.js b/node_modules/ink/build/renderer.js
-index bf23246..81d72e9 100644
+index bf23246..7fa831f 100644
 --- a/node_modules/ink/build/renderer.js
 +++ b/node_modules/ink/build/renderer.js
 @@ -1,6 +1,6 @@
@@ -678,7 +741,7 @@ index 935cfb8..3dddced 100644
 +};
  export default wrapText;
 diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-text.js
-index 51f696c..d96d438 100644
+index 51f696c..1f66ca0 100644
 --- a/node_modules/ink/build/wrap-text.js
 +++ b/node_modules/ink/build/wrap-text.js
 @@ -1,5 +1,6 @@
@@ -740,3 +803,4 @@ index 51f696c..d96d438 100644
 +};
  export default wrapText;
  //# sourceMappingURL=wrap-text.js.map
+\ No newline at end of file
