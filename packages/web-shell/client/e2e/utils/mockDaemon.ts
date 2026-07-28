@@ -4,6 +4,7 @@ import {
   type DaemonApprovalMode,
   type DaemonCapabilities,
   type DaemonChannelsSnapshot,
+  type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
   type DaemonEvent,
   type DaemonRestoredSession,
@@ -54,6 +55,7 @@ export interface WebShellDaemonScenario {
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
+  pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -94,6 +96,7 @@ type ScenarioOverrides = Partial<
     | 'extensionUpdateCheck'
     | 'channelTypes'
     | 'channels'
+    | 'pairingRequests'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -109,6 +112,7 @@ type ScenarioOverrides = Partial<
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
+  pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -322,6 +326,7 @@ export function createWebShellDaemonScenario(
     extensionUpdateCheck,
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
+    pairingRequests: overrides.pairingRequests ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -525,6 +530,9 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    ) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
@@ -598,6 +606,14 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (
     (method === 'PUT' || method === 'DELETE') &&
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    )
   ) {
     return true;
   }
@@ -766,6 +782,32 @@ async function handleDaemonRoute(
   if (method === 'GET' && /^\/workspaces\/[^/]+\/channels\/?$/.test(path)) {
     await json(route, scenario.channels);
     return;
+  }
+  const pairingMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/pairing-requests(\/approve)?\/?$/,
+  );
+  if (pairingMatch) {
+    const name = decodeURIComponent(pairingMatch[1]);
+    const requests = scenario.pairingRequests[name] ?? [];
+    if (method === 'GET' && !pairingMatch[2]) {
+      await json(route, { requests });
+      return;
+    }
+    if (method === 'POST' && pairingMatch[2]) {
+      const code = String(getRecordValue(body, 'code') ?? '').toUpperCase();
+      const approved = requests.find((request) => request.code === code);
+      if (!approved) {
+        await json(route, { error: 'Pairing request not found.' }, 404);
+        return;
+      }
+      const remaining = requests.filter((request) => request.code !== code);
+      scenario.pairingRequests = {
+        ...scenario.pairingRequests,
+        [name]: remaining,
+      };
+      await json(route, { approved, requests: remaining });
+      return;
+    }
   }
   const channelMutationMatch = path.match(
     /^\/workspaces\/[^/]+\/channels\/([^/]+)\/?$/,

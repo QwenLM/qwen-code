@@ -2335,6 +2335,21 @@ const EN: Messages = {
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
+  'channels.editor.pairing.title': 'Pending requests',
+  'channels.editor.pairing.description':
+    'Match the code shared by the person before approving access.',
+  'channels.editor.pairing.refresh': 'Refresh pairing requests',
+  'channels.editor.pairing.approve': 'Approve',
+  'channels.editor.pairing.approved': (v) =>
+    `${v?.sender ?? 'This person'} can now use this Channel.`,
+  'channels.editor.pairing.error': 'Pairing requests were not updated',
+  'channels.editor.pairing.retry': 'Try again',
+  'channels.editor.pairing.empty.title': 'No pending requests',
+  'channels.editor.pairing.empty.description':
+    'New requests appear here after someone messages the bot.',
+  'channels.editor.pairing.saveFirst.title': 'Save pairing mode first',
+  'channels.editor.pairing.saveFirst.description':
+    'Pending requests will appear here after this Channel is saved in pairing mode.',
   'channels.editor.policy.open.title': 'Open',
   'channels.editor.policy.open.description':
     'Anyone who can reach the bot can start a conversation.',
@@ -4634,6 +4649,21 @@ const ZH: Messages = {
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
+  'channels.editor.pairing.title': '待处理的配对请求',
+  'channels.editor.pairing.description':
+    '批准前，请核对用户提供的配对码是否一致。',
+  'channels.editor.pairing.refresh': '刷新配对请求',
+  'channels.editor.pairing.approve': '允许',
+  'channels.editor.pairing.approved': (v) =>
+    `${v?.sender ?? '该用户'}现在可以使用此频道。`,
+  'channels.editor.pairing.error': '未能更新配对请求',
+  'channels.editor.pairing.retry': '重试',
+  'channels.editor.pairing.empty.title': '暂无待处理请求',
+  'channels.editor.pairing.empty.description':
+    '用户向机器人发送消息后，新的配对请求会显示在这里。',
+  'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
+  'channels.editor.pairing.saveFirst.description':
+    '频道以配对模式保存后，待处理请求会显示在这里。',
   'channels.editor.policy.open.title': '开放模式',
   'channels.editor.policy.open.description':
     '所有能够访问机器人的用户均可直接开始对话。',
