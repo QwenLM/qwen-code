@@ -29,6 +29,7 @@ const testState = {
   contextUsageRatio: 0,
   isRunning: false,
   dialogOpen: false,
+  hasAttachments: false as boolean | null,
   generateContent: vi.fn(async function* () {}),
 };
 
@@ -78,6 +79,7 @@ afterEach(async () => {
   testState.contextUsageRatio = 0;
   testState.isRunning = false;
   testState.dialogOpen = false;
+  testState.hasAttachments = false;
   testState.generateContent.mockReset();
   vi.useRealTimers();
 });
@@ -129,7 +131,7 @@ describe('useNewSessionSuggestion', () => {
         requestId: 'req-1',
         seq: 0,
         text: JSON.stringify({
-          shouldSuggestNewSession: true,
+          suggestion: 'new_session',
           confidence: 0.9,
         }),
       };
@@ -149,8 +151,10 @@ describe('useNewSessionSuggestion', () => {
 
     expect(testState.generateContent).toHaveBeenCalledOnce();
     expect(latestSuggestion).toEqual({
-      isVisible: true,
+      suggestion: 'new_session',
+      confidence: 0.9,
       classifiedInput: '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案',
+      sourceSessionId: 'session-1',
     });
 
     testState.inputText = '顺手补个测试';
@@ -213,36 +217,71 @@ describe('useNewSessionSuggestion', () => {
     await classify(
       'The user is explicitly switching to a completely new task, which is ' +
         'unrelated to the previous discussion. This is a clear topic change.\n\n' +
-        JSON.stringify({ shouldSuggestNewSession: true, confidence: 0.98 }),
+        JSON.stringify({ suggestion: 'new_session', confidence: 0.98 }),
     );
 
     expect(testState.generateContent).toHaveBeenCalledOnce();
     expect(latestSuggestion).toEqual({
-      isVisible: true,
+      suggestion: 'new_session',
+      confidence: 0.98,
       classifiedInput: NEW_TASK_DRAFT,
+      sourceSessionId: 'session-1',
     });
   });
 
   it('recovers a positive decision inside a code fence', async () => {
     await classify(
       '```json\n' +
-        JSON.stringify({ shouldSuggestNewSession: true, confidence: 0.95 }) +
+        JSON.stringify({ suggestion: 'new_session', confidence: 0.95 }) +
         '\n```',
     );
 
     expect(latestSuggestion).toEqual({
-      isVisible: true,
+      suggestion: 'new_session',
+      confidence: 0.95,
       classifiedInput: NEW_TASK_DRAFT,
+      sourceSessionId: 'session-1',
     });
   });
 
-  it('keeps the banner hidden for a prose-wrapped negative decision', async () => {
+  it('keeps the banner hidden for a valid none decision', async () => {
     await classify(
       'This is a follow-up on the same topic.\n\n' +
-        JSON.stringify({ shouldSuggestNewSession: false, confidence: 0.97 }),
+        JSON.stringify({ suggestion: 'none', confidence: 0.97 }),
     );
 
     expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toBeNull();
+  });
+
+  it('suggests BTW for a side question without attachments', async () => {
+    await classify(JSON.stringify({ suggestion: 'btw', confidence: 0.92 }));
+
+    expect(latestSuggestion).toEqual({
+      suggestion: 'btw',
+      confidence: 0.92,
+      classifiedInput: NEW_TASK_DRAFT,
+      sourceSessionId: 'session-1',
+    });
+  });
+
+  it.each([true, null])(
+    'does not suggest BTW when attachment presence is %s',
+    async (hasAttachments) => {
+      testState.hasAttachments = hasAttachments;
+      await classify(JSON.stringify({ suggestion: 'btw', confidence: 0.92 }));
+
+      expect(latestSuggestion).toBeNull();
+    },
+  );
+
+  it.each([
+    JSON.stringify({ shouldSuggestNewSession: true, confidence: 0.98 }),
+    JSON.stringify({ suggestion: 'later', confidence: 0.98 }),
+    JSON.stringify({ suggestion: 'btw', confidence: 1.1 }),
+  ])('stays fail-closed for an invalid decision: %s', async (decision) => {
+    await classify(decision);
+
     expect(latestSuggestion).toBeNull();
   });
 

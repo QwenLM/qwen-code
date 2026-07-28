@@ -51,6 +51,7 @@ type ChatEditorTestProps = {
   ) => boolean | void;
   onCancel?: () => void;
   onInputTextChange?: (text: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   onStartNewSessionSuggestion?: () => void;
   newSessionSuggestion?: { isVisible: boolean; classifiedInput: string } | null;
   skills?: Array<{ name: string; description: string }>;
@@ -169,6 +170,7 @@ const {
     mockConnection: connection,
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
+      btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
       generateSessionContent: vi.fn(async function* () {}),
       createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
       attachSession: vi.fn().mockResolvedValue(undefined),
@@ -400,10 +402,20 @@ vi.mock('./components/ChatEditor', async () => {
         clear: () => void;
         hasInput: () => boolean;
         insertText: (text: string) => void;
+        submit: (input?: { text?: string }) => void;
         focus: () => void;
       }>,
     ) {
       testState.latestChatEditorProps = props;
+      const { onAttachmentsChange } = props;
+      React.useEffect(() => {
+        onAttachmentsChange?.(
+          Boolean(
+            testState.promptImages?.length ||
+              testState.inputAnnotations?.length,
+          ),
+        );
+      }, [onAttachmentsChange]);
       React.useImperativeHandle(ref, () => ({
         clear: () => {
           testState.prompt = '';
@@ -413,9 +425,9 @@ vi.mock('./components/ChatEditor', async () => {
         },
         hasInput: () => testState.prompt.trim().length > 0,
         insertText: editorInsertText,
-        submit: () => {
+        submit: (input) => {
           props.onSubmit(
-            testState.prompt,
+            input?.text ?? testState.prompt,
             testState.promptImages,
             editorCommit,
             testState.inputAnnotations
@@ -1585,6 +1597,7 @@ beforeEach(() => {
     if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
   }
   mockSessionActions.sendPrompt.mockResolvedValue(undefined);
+  mockSessionActions.btwSession.mockResolvedValue({ answer: 'side answer' });
   mockSessionActions.createSession.mockResolvedValue({
     sessionId: 'session-1',
   });
@@ -5311,7 +5324,7 @@ describe('App session callbacks', () => {
           requestId: 'req-1',
           seq: 0,
           text: JSON.stringify({
-            shouldSuggestNewSession: true,
+            suggestion: 'new_session',
             confidence: 0.91,
           }),
         };
@@ -5368,6 +5381,148 @@ describe('App session callbacks', () => {
     expect(editorInsertText).not.toHaveBeenCalled();
   });
 
+  it('suggests sending a side question with BTW and clears the accepted draft', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-btw-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    const sideQuestion = '这里的 confidence 阈值为什么是 0.75？';
+    testState.prompt = sideQuestion;
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-btw',
+          seq: 0,
+          text: JSON.stringify({
+            suggestion: 'btw',
+            confidence: 0.92,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-btw',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="btw-suggestion"]')?.textContent,
+    ).toContain('side question');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="btw-suggestion-send"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.btwSession).toHaveBeenCalledWith(
+      sideQuestion,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(editorCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('never suggests BTW for a draft with an attachment', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_generation'];
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).tokenCount = 600;
+    (
+      mockConnection as typeof mockConnection & {
+        tokenCount?: number;
+        contextWindow?: number;
+      }
+    ).contextWindow = 1000;
+    testState.messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-btw-attachment-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `existing session topic ${index} about daemon generation review work`,
+      timestamp: index,
+    }));
+    testState.prompt = '顺便看看这张截图里为什么会报错？';
+    testState.promptImages = [{ data: 'abc', media_type: 'image/png' }];
+    mockSessionActions.generateSessionContent.mockImplementation(
+      async function* () {
+        yield {
+          type: 'delta',
+          requestId: 'req-btw-attachment',
+          seq: 0,
+          text: JSON.stringify({
+            suggestion: 'btw',
+            confidence: 0.95,
+          }),
+        };
+        yield {
+          type: 'done',
+          requestId: 'req-btw-attachment',
+          model: 'fast-model',
+          modelSource: 'fast',
+        };
+      },
+    );
+
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="btw-suggestion"]'),
+    ).toBeNull();
+    expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+  });
+
   it('waits for the current session to detach before auto-submitting the suggested new-session draft', async () => {
     vi.useFakeTimers();
     const clear = deferred<void>();
@@ -5404,7 +5559,7 @@ describe('App session callbacks', () => {
           requestId: 'req-2',
           seq: 0,
           text: JSON.stringify({
-            shouldSuggestNewSession: true,
+            suggestion: 'new_session',
             confidence: 0.91,
           }),
         };
@@ -5493,7 +5648,7 @@ describe('App session callbacks', () => {
           requestId: 'req-stale',
           seq: 0,
           text: JSON.stringify({
-            shouldSuggestNewSession: true,
+            suggestion: 'new_session',
             confidence: 0.91,
           }),
         };
@@ -5581,7 +5736,7 @@ describe('App session callbacks', () => {
           requestId: 'req-switch',
           seq: 0,
           text: JSON.stringify({
-            shouldSuggestNewSession: true,
+            suggestion: 'new_session',
             confidence: 0.91,
           }),
         };

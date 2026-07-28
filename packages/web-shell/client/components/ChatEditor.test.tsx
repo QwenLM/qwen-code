@@ -174,6 +174,7 @@ function renderChatEditor(props: {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   customization?: WebShellCustomization;
 }) {
   const {
@@ -238,6 +239,29 @@ describe('ChatEditor voice toolbar integration', () => {
         visibleToolbarActions: [],
       }).querySelector('[data-testid="voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor attachment reporting', () => {
+  it('reports whether the composer has tags or pasted images', () => {
+    const onEmptyAttachmentsChange = vi.fn();
+    renderChatEditor({
+      onAttachmentsChange: onEmptyAttachmentsChange,
+    });
+    expect(onEmptyAttachmentsChange).toHaveBeenLastCalledWith(false);
+
+    const onTaggedAttachmentsChange = vi.fn();
+    renderChatEditor({
+      composerTags: [
+        {
+          id: 'file:reference',
+          kind: 'file',
+          value: 'reference',
+        },
+      ],
+      onAttachmentsChange: onTaggedAttachmentsChange,
+    });
+    expect(onTaggedAttachmentsChange).toHaveBeenLastCalledWith(true);
   });
 });
 
