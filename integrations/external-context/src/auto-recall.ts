@@ -21,9 +21,11 @@ const HOOK_WALL_CLOCK_TIMEOUT_MS = 6500;
 // keeps a worst-case prompt from driving the assignment regex into quadratic
 // backtracking that would block the event loop past the wall-clock budget.
 const MAX_SANITIZER_INPUT_CHARACTERS = 4096;
-const ASSIGNMENT_PATTERN =
-  /\b([A-Za-z_][A-Za-z0-9_-]*)\s*(?:=|:)\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi;
-const SECRET_NAME_PATTERN = /(?:api[_-]?key|token|password|secret)/i;
+// The secret keyword must belong to the name that owns the separator, so a
+// preceding prose label cannot claim the match and a secret word used as
+// ordinary prose is not redacted.
+const SECRET_ASSIGNMENT_PATTERN =
+  /["']?[A-Za-z0-9_.-]*(?:api[_-]?key|token|password|secret)[A-Za-z0-9_.-]*["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)?/gi;
 
 interface HookInput {
   hook_event_name: 'UserPromptSubmit';
@@ -115,9 +117,7 @@ export function createAutoRecallQuery(
   }
 
   query = query
-    .replace(ASSIGNMENT_PATTERN, (assignment: string) =>
-      SECRET_NAME_PATTERN.test(assignment) ? ' ' : assignment,
-    )
+    .replace(SECRET_ASSIGNMENT_PATTERN, ' ')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, ' ')
     .replace(
       /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,

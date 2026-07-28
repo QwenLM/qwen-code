@@ -145,6 +145,43 @@ describe('createAutoRecallQuery', () => {
       ),
     ).toBe('Deploy failed: the release branch is red, please look at CI');
   });
+
+  it('redacts a secret assignment with spaces around the separator', async () => {
+    const { createAutoRecallQuery } = await import('./auto-recall.js');
+
+    const query = createAutoRecallQuery(
+      'Deploy failed: api_key = sk-live-SECRET-ABC123 please help',
+      '',
+    );
+
+    expect(query).not.toContain('sk-live-SECRET-ABC123');
+    expect(query).not.toContain('api_key');
+    expect(query).toContain('please help');
+  });
+
+  it('redacts an inline JSON secret but keeps benign quoted prose', async () => {
+    const { createAutoRecallQuery } = await import('./auto-recall.js');
+
+    const query = createAutoRecallQuery(
+      'my config is {"api_key": "sk-live-SECRET-ABC123", "region": "cn"} why does it fail?',
+      '',
+    );
+
+    expect(query).not.toContain('sk-live-SECRET-ABC123');
+    expect(query).toContain('"region": "cn"');
+    expect(query).toContain('why does it fail?');
+  });
+
+  it('does not redact a secret word used as ordinary prose', async () => {
+    const { createAutoRecallQuery } = await import('./auto-recall.js');
+
+    expect(
+      createAutoRecallQuery(
+        'readme: token refresh flow, where is it documented?',
+        '',
+      ),
+    ).toBe('readme: token refresh flow, where is it documented?');
+  });
 });
 
 describe('runAutoRecall', () => {
