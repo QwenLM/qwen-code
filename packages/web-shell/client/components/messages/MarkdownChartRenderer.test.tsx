@@ -645,6 +645,60 @@ describe('Web Shell markdown-chart integration', () => {
 });
 
 describe('deprecated echarts-fulldata compatibility adapter', () => {
+  it('keeps an incomplete legacy fence in the loading state', async () => {
+    const { runtime } = createFakeRuntime();
+    const renderer = createEchartsFullDataRenderer({
+      loadEcharts: async () => runtime as EchartsRuntime,
+    });
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={{ markdown: { renderCodeBlock: renderer } }}
+        >
+          <Markdown
+            content={'```echarts-fulldata\n{"series":[{"type":"bar"}'}
+            source="assistant"
+            isStreaming
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(
+      container.querySelector('[data-markdown-chart-loading="true"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('pre code')).toBeNull();
+    expect(runtime.init).not.toHaveBeenCalled();
+  });
+
+  it('matches mixed-case legacy fence languages', async () => {
+    const { runtime } = createFakeRuntime();
+    const renderer = createEchartsFullDataRenderer({
+      loadEcharts: async () => runtime as EchartsRuntime,
+    });
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={{ markdown: { renderCodeBlock: renderer } }}
+        >
+          <Markdown
+            content={'```ECharts-FullData\n{"series":[{"type":"bar"}]}\n```'}
+            source="assistant"
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(
+      container.querySelector('.markdown-chart-placeholder'),
+    ).not.toBeNull();
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
   it('keeps legacy plain ECharts option bodies renderable', async () => {
     const { instance, runtime } = createFakeRuntime();
     const renderer = createEchartsFullDataRenderer({
