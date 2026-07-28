@@ -1257,8 +1257,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(chown).toBeGreaterThan(repin);
     expect(launch).toBeGreaterThan(home);
     // Killing is not enough on its own: surviving build processes must
-    // fail the step rather than race the sweeps that follow.
-    expect(runStep).toContain('pgrep -u node');
+    // fail the step rather than race the sweeps that follow. The check
+    // disregards zombies — see the build-process-guard suite for why.
+    expect(runStep).toContain('live_build_processes');
     expect(runStep).toContain('refusing to start the agent');
     expect(runStep).toContain('"HOME=$AGENT_HOME"');
     // The proxy must require this run's bearer, not just a fixed dummy key.
@@ -2555,7 +2556,9 @@ describe('qwen-triage verify maintainer-review round', () => {
     // A mid-body stall closes the response (curl 18), not a hang until the
     // client's own timeout (curl 28).
     expect(out).toContain('stall_exit=18');
-  });
+    // 20 chunks x 200 ms is 4 s before the stall arm even starts, so this
+    // cannot fit vitest's 5 s default. It was timing out on main.
+  }, 30000);
 
   // GitHub cancels the OLDER pending run in a concurrency group, so the
   // requester's own /verify proceeds — the earlier "queued behind other
@@ -2828,7 +2831,9 @@ describe('qwen-triage tmux lane parity', () => {
     const out = runProxyWatchdogTest(proxy);
     expect(out).toContain('chunks=20');
     expect(out).toContain('stall_exit=18');
-  });
+    // Same reason as its verify-lane twin: the stream alone outlasts the
+    // 5 s default.
+  }, 30000);
 
   // PR lifecycle scripts run before the agent and can plant a
   // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
@@ -2934,7 +2939,7 @@ describe('qwen-triage tmux lane parity', () => {
     const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
     expect(runStep).toContain('pkill -KILL -u node');
     expect(runStep).toContain(
-      'Processes owned by the build user survived; refusing to start the agent.',
+      'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
     );
     // Before the sweep and the proxy: the cleanup must not race a live
     // process, and no leftover child may be alive when the proxy binds.
@@ -3038,4 +3043,123 @@ describe('qwen-triage tmux lane parity', () => {
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
+});
+
+describe('qwen-triage build-process guard', () => {
+  // The guard fired on a real run (job 30267953352) and failed the job with
+  // nothing but "processes survived" — no pid, no state, no command line.
+  // Nobody could tell a genuine leftover from a harmless one, including the
+  // person who wrote it. Both lanes now name what survived.
+  it('names the surviving processes instead of just refusing', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(runStep, `${lane} lost the guard`).toContain(
+        'live_build_processes',
+      );
+      expect(runStep).toContain('surviving process:');
+      expect(runStep).toContain(
+        'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
+      );
+    }
+  });
+
+  // `ps -u node` exits 1 when the user owns zero processes. Under
+  // `set -euo pipefail` the bare assignment would die silently on the
+  // success path — the `|| true` absorbs the no-match status.
+  it('"survivors" assignment tolerates zero processes under pipefail', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(
+        runStep,
+        `${lane}: survivors assignment must survive ps exit 1`,
+      ).toContain('survivors="$(live_build_processes)" || true');
+    }
+  });
+
+  // A zombie cannot be killed and cannot execute anything, so counting one
+  // means this check can never clear.
+  //
+  // PLATFORM NOTE, and the reason this test is split in two: Linux pgrep
+  // reports defunct processes ("Defunct processes are reported." — pgrep(1),
+  // procps-ng), which is why the original `pgrep -u node` guard could hang
+  // on a zombie in CI. macOS pgrep does NOT list them, so the behavioural
+  // arm below cannot discriminate the old implementation from the new one
+  // here — verified directly: ps lists our zombie, pgrep does not. The
+  // structural assertion is therefore the one that holds on every platform.
+  it('excludes zombies from the surviving-process check', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      const body = runStep
+        .match(/live_build_processes\(\) \{\n([\s\S]*?)\n\s*\}/)?.[1]
+        ?.trim();
+      expect(body, `${lane}: no live_build_processes body`).toBeTruthy();
+      // It must read process STATE and drop zombies. `pgrep` alone cannot:
+      // on Linux it reports defunct processes and offers no default filter.
+      expect(body, `${lane}: the filter must inspect process state`).toMatch(
+        /stat=/,
+      );
+      expect(body, `${lane}: the filter must exclude zombies`).toMatch(
+        /\/\^Z\//,
+      );
+      expect(body).not.toMatch(/^pgrep\b/);
+    }
+  });
+
+  // The OS property the exclusion rests on: a zombie survives SIGKILL and
+  // ps still lists it, so an unfiltered check would never clear.
+  it('confirms a zombie survives SIGKILL and stays visible to ps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zombie-'));
+    try {
+      writeFileSync(
+        join(dir, 'mkzombie.py'),
+        [
+          'import os, time',
+          'pid = os.fork()',
+          'if pid == 0:',
+          '    os._exit(0)',
+          'print(pid, flush=True)',
+          'time.sleep(8)',
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        `python3 "$1/mkzombie.py" > "$1/zpid" &`,
+        'PP=$!',
+        'sleep 1',
+        'Z="$(tr -d " \n" < "$1/zpid")"',
+        '[ -n "$Z" ] || { echo "no-zombie"; kill $PP 2>/dev/null; exit 0; }',
+        'kill -9 "$Z" 2>/dev/null',
+        'sleep 0.5',
+        'echo "state=$(ps -o stat= -p "$Z" 2>/dev/null | tr -d " ")"',
+        'echo "unfiltered=$(ps -o pid= -p "$Z" 2>/dev/null | wc -l | tr -d " ")"',
+        `echo "filtered=$(ps -o pid=,stat=,args= -p "$Z" 2>/dev/null | awk '$2 !~ /^Z/' | wc -l | tr -d ' ')"`,
+        'kill $PP 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 30000,
+      }).stdout;
+      if (out.includes('no-zombie')) return;
+      expect(out).toMatch(/state=Z/);
+      expect(out).toContain('unfiltered=1');
+      expect(out).toContain('filtered=0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
 });
