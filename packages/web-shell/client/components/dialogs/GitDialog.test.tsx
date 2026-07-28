@@ -538,7 +538,11 @@ describe('GitDialog', () => {
     });
     await flush();
 
-    expect(document.getElementById('git-dialog-tab-commit')).toBeNull();
+    expect(
+      document
+        .getElementById('git-dialog-tab-commit')
+        ?.getAttribute('aria-selected'),
+    ).toBe('false');
     expect(
       document
         .getElementById('git-dialog-tab-log')

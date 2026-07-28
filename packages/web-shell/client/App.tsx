@@ -3583,6 +3583,14 @@ export function App({
       view: 'diff',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenCommit = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'commit',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -8726,12 +8734,7 @@ export function App({
                           }
                           onOpenCommit={
                             gitDiffWorkspaceCwd
-                              ? () =>
-                                  setGitDialog({
-                                    workspaceCwd: gitDiffWorkspaceCwd,
-                                    gitCwd: sessionWorktree?.path,
-                                    view: 'commit',
-                                  })
+                              ? handleOpenCommit
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

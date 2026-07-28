@@ -34,6 +34,7 @@ function makeRepo(): string {
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
   git(dir, 'commit', '-q', '-m', 'init');
@@ -353,6 +354,23 @@ describe('gitPush', () => {
       `${branch}@{u}`,
     ).trim();
     expect(tracking).toBe(`myfork/${branch}`);
+  });
+
+  it('uses --force-with-lease when force is requested', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '--set-upstream', 'origin', 'HEAD');
+
+    // Amend the commit so local and remote diverge, requiring a force push.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'amended\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '--amend', '-m', 'amended');
+
+    await gitPush(dir, { force: true });
+
+    const remoteLog = git(remote, 'log', '--oneline', '-1');
+    expect(remoteLog).toContain('amended');
   });
 });
 

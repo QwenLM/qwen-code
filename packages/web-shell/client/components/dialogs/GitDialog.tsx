@@ -120,6 +120,7 @@ export function GitDialog({
             true,
           );
           if (fresh && fresh !== sid && !signal.aborted) {
+            sessionIdRef.current = fresh;
             return client.btwSession(fresh, prompt, { signal });
           }
         }
@@ -131,6 +132,7 @@ export function GitDialog({
   const btwWithRetryRef = useRef(btwWithRetry);
   btwWithRetryRef.current = btwWithRetry;
 
+  const startedInCommit = useRef(initialView === 'commit').current;
   const isCommit = view === 'commit';
   const effectiveTab = isCommit ? 'diff' : view;
 
@@ -516,9 +518,7 @@ export function GitDialog({
         .find((name) => trimmedBase.startsWith(`${name}/`));
       const baseBranch = remotePrefix
         ? trimmedBase.slice(remotePrefix.length + 1)
-        : trimmedBase.includes('/')
-          ? trimmedBase.slice(trimmedBase.indexOf('/') + 1)
-          : trimmedBase;
+        : trimmedBase;
       const result = await ws.workspaceGitHubCreatePullRequest(
         {
           title: prTitle.trim(),
@@ -579,16 +579,17 @@ export function GitDialog({
               {t(TITLE_KEYS[name])}
             </button>
           ))}
-          {isCommit && (
+          {startedInCommit && (
             <button
               id="git-dialog-tab-commit"
               type="button"
               role="tab"
-              aria-selected="true"
+              aria-selected={isCommit}
               aria-controls="git-dialog-panel"
-              tabIndex={0}
-              className={`${styles.tab} ${styles.tabActive}`}
+              tabIndex={isCommit ? 0 : -1}
+              className={`${styles.tab}${isCommit ? ` ${styles.tabActive}` : ''}`}
               onKeyDown={onTabKeyDown}
+              onClick={() => selectView('commit')}
             >
               {t('gitCommit.title')}
             </button>
