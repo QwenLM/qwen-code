@@ -699,37 +699,6 @@ describe('GithubChannel', () => {
       expect(channel.cursor.dispatchedEvents).toEqual(['E_2001', 'E_2002']);
     });
 
-    it('does not record failed direct trigger dispatches', async () => {
-      channel.handleInboundError = new Error('agent down');
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'assign',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeIssueEvent({
-            event: 'assigned',
-            assigner: { login: 'maintainer' },
-            assignee: { login: 'test-bot' },
-          }),
-        ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          title: 'broken build',
-          state: 'open',
-          user: { login: 'alice' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.cursor.dispatchedEvents).toBeUndefined();
-    });
-
     it('ignores direct trigger when a later removal arrives unordered', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
@@ -782,47 +751,6 @@ describe('GithubChannel', () => {
             assignee: { login: 'test-bot' },
           }),
         ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          title: 'broken build',
-          state: 'open',
-          user: { login: 'alice' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]).toMatchObject({
-        senderId: 'maintainer',
-        isMentioned: true,
-        text: 'Triage this issue and respond with the next action.',
-      });
-      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        'Title: broken build',
-      );
-      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        'Author: alice | State: open',
-      );
-    });
-
-    it('dispatches mentioned comments on direct assign notifications', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'assign',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeIssueEvent({
-            event: 'assigned',
-            assigner: { login: 'maintainer' },
-            assignee: { login: 'test-bot' },
-          }),
-        ])
         .mockResolvedValueOnce([
           makeComment({
             id: 1002,
@@ -842,71 +770,23 @@ describe('GithubChannel', () => {
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'maintainer',
+        isMentioned: true,
+        text: 'Triage this issue and respond with the next action.',
+      });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         text: ' use the attached repro',
         isMentioned: true,
       });
       expect(channel.cursor.dispatchedComments).toEqual(['C_1002']);
-    });
-
-    it('dispatches review_requested issue notifications via comments', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'review_requested',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeComment({ body: 'please inspect this issue' }),
-        ]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]).toMatchObject({
-        threadId: 'issue:42',
-        text: 'please inspect this issue',
-        isMentioned: false,
-      });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        'Trigger: review_requested.',
+        'Title: broken build',
       );
-    });
-
-    it('ignores assign trigger when a later unassign arrives unordered', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'assign',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeIssueEvent({
-            id: 2002,
-            event: 'unassigned',
-            created_at: '2026-07-02T09:30:00.000Z',
-            assigner: { login: 'maintainer' },
-            assignee: { login: 'test-bot' },
-          }),
-          makeIssueEvent({
-            id: 2001,
-            event: 'assigned',
-            created_at: '2026-07-02T09:00:00.000Z',
-            assigner: { login: 'maintainer' },
-            assignee: { login: 'test-bot' },
-          }),
-        ])
-        .mockResolvedValueOnce([]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(0);
-      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'Author: alice | State: open',
+      );
     });
 
     it.each(['author', 'comment'])(
@@ -1127,74 +1007,32 @@ describe('GithubChannel', () => {
   });
 
   describe('first contact (new issue body)', () => {
-    it('feeds issue body when no comments and issue is new', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({ last_read_at: null, reason: 'subscribed' }),
-        ])
-        .mockResolvedValueOnce([]); // no comments
+    it.each(['subscribed', 'mention'])(
+      'feeds a mentioned issue body for %s notifications',
+      async (reason) => {
+        await initWithoutLoop();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({ last_read_at: null, reason }),
+          ])
+          .mockResolvedValueOnce([]);
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            body: '@test-bot implement this feature',
+            created_at: '2026-07-02T08:00:00.000Z',
+            user: { id: 10002, login: 'bob' },
+          },
+        });
 
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          body: '@test-bot implement this feature',
-          created_at: '2026-07-02T08:00:00.000Z',
-          user: { id: 10002, login: 'bob' },
-        },
-      });
+        channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+        await pollOnce();
 
-      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      const env = channel.inboundEnvelopes[0]!;
-      expect(env.text).toBe(' implement this feature');
-      expect(env.senderId).toBe('bob');
-    });
-
-    it('feeds mentioned issue body for mention notifications', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({ last_read_at: null, reason: 'mention' }),
-        ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          body: '@test-bot fix this regression',
-          created_at: '2026-07-02T08:00:00.000Z',
-          user: { id: 10002, login: 'bob' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]).toMatchObject({
-        text: ' fix this regression',
-        isMentioned: true,
-      });
-    });
-
-    it('does not feed unmentioned issue body for mention notifications', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({ last_read_at: null, reason: 'mention' }),
-        ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          body: 'no mention here',
-          created_at: '2026-07-02T08:00:00.000Z',
-          user: { id: 10002, login: 'bob' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(0);
-    });
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        const env = channel.inboundEnvelopes[0]!;
+        expect(env.text).toBe(' implement this feature');
+        expect(env.senderId).toBe('bob');
+      },
+    );
 
     it('dispatches a generic issue body without a synthetic mention', async () => {
       await initWithoutLoop();

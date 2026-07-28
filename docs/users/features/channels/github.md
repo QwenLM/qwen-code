@@ -76,7 +76,7 @@ Allowlist and pairing entries follow the **username**, not the immutable account
 
 ## Mention Detection
 
-The adapter detects mentions by scanning the **comment body** for `@bot-username` using a case-insensitive regex. It does not trust `reason: "mention"` alone because that value is sticky at the thread level. Other reasons select review, triage, followed-thread, or fallback prompts.
+The adapter detects mentions by scanning comment text and first-contact issue or PR bodies for `@bot-username` using a case-insensitive regex. It does not trust `reason: "mention"` alone because that value is sticky at the thread level. Other reasons select review, triage, followed-thread, or fallback prompts.
 
 ## How It Works
 
@@ -86,7 +86,7 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 2. **Mark read** via `markNotificationsAsRead` (best-effort cleanup, before processing)
 3. **Enumerate** comments via `listComments` within a cursor-based time window
 4. **Dispatch** by notification reason: strict mention matching, pull request review, issue triage, followed-thread comment aggregation, or per-comment fallback
-5. **First-contact fallback**: for non-mention reasons, a brand-new unread issue/PR body can be processed when no comment was dispatched
+5. **First-contact fallback**: a brand-new unread issue/PR body can be processed when no comment was dispatched; mention notifications still require an actual body mention
 
 The comment window is `(previousCursor, currentMaxUpdatedAt]` — comments already eligible in a previous poll cycle are excluded by the cursor, preventing duplicate replies even when the async mark-read has not taken effect. If the process crashes mid-processing, the user can re-mention the bot to retry.
 

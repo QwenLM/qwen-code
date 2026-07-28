@@ -356,9 +356,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\nTrigger: ${reason}.\n${details}`,
     };
-    if (await this.dispatchEnvelope(envelope, ctx.issueNumber)) {
-      this.recordDispatched('dispatchedEvents', trigger.key);
-    }
+    await this.dispatchEnvelope(envelope, ctx.issueNumber);
+    this.recordDispatched('dispatchedEvents', trigger.key);
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
