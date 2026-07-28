@@ -5,10 +5,11 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { TestRig } from '../test-helper.js';
 import {
+  fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
   CONTAINER_SANDBOX_NO_PROXY,
+  TestRig,
 } from '../test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { existsSync } from 'node:fs';
@@ -58,28 +59,21 @@ describe('list_directory', () => {
       ? CONTAINER_SANDBOX_NO_PROXY
       : '127.0.0.1,localhost';
 
-    const fakeServer = await startFakeOpenAIServer(
-      ({ requestIndex }) => {
-        if (requestIndex === 0) {
-          return {
-            toolCalls: [
-              fakeToolCall('list_directory', { path: '.' }, 'list-dir'),
-            ],
-          };
-        }
-        return { content: 'The directory contains file1.txt and subdir.' };
-      },
-      IS_CONTAINER_SANDBOX
-        ? {
-            listenHost: '0.0.0.0' as const,
-            baseUrlHost: 'host.docker.internal',
-          }
-        : undefined,
-    );
-
     for (const key of ENV_KEYS) {
       savedEnv[key] = process.env[key];
     }
+
+    const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+      if (requestIndex === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall('list_directory', { path: '.' }, 'list-dir'),
+          ],
+        };
+      }
+      return { content: 'The directory contains file1.txt and subdir.' };
+    }, fakeServerHostOptions());
+
     process.env['OPENAI_API_KEY'] = 'fake-key';
     process.env['OPENAI_BASE_URL'] = fakeServer.baseUrl;
     process.env['OPENAI_MODEL'] = 'fake-model';
@@ -89,15 +83,15 @@ describe('list_directory', () => {
 
     try {
       const prompt = `Call the list_directory tool on the current directory.`;
-      const result = await rig.run(prompt);
+      await rig.run(prompt);
 
       const foundToolCall = await rig.waitForToolCall('list_directory');
 
-      expect(
-        foundToolCall ||
-          (result.includes('file1.txt') && result.includes('subdir')),
-        'Expected a list_directory tool call or correct directory listing in output',
-      ).toBeTruthy();
+      expect(foundToolCall, 'Expected a list_directory tool call').toBe(true);
+
+      const toolResultRequest = JSON.stringify(fakeServer.requests[1]?.body);
+      expect(toolResultRequest).toContain('file1.txt');
+      expect(toolResultRequest).toContain('subdir');
     } finally {
       await fakeServer.close();
     }

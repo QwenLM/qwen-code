@@ -387,22 +387,26 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const testFilePath = await helper.getPath('test.txt');
       await helper.createFile('test.txt', 'original content');
 
-      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        if (requestIndex === 0) {
-          return { content: 'OK' };
-        }
-        if (requestIndex === 1) {
-          return {
-            toolCalls: [
-              fakeToolCall('write_file', {
-                file_path: testFilePath,
-                content: 'updated',
-              }),
-            ],
-          };
-        }
-        return { content: 'Done.' };
-      }, FAKE_SERVER_OPTIONS);
+      const fakeServer = await startFakeOpenAIServer(
+        ({ body, requestIndex }) => {
+          const transcript = JSON.stringify(body['messages'] ?? []);
+          if (transcript.includes(`Write "updated" to ${testFilePath}`)) {
+            return {
+              toolCalls: [
+                fakeToolCall('write_file', {
+                  file_path: testFilePath,
+                  content: 'updated',
+                }),
+              ],
+            };
+          }
+          if (requestIndex === 0) {
+            return { content: 'OK' };
+          }
+          return { content: 'Done.' };
+        },
+        FAKE_SERVER_OPTIONS,
+      );
 
       // Bounded promise with explicit timer arming and clearing on settle.
       // `startTimer()` lets each phase begin counting only when its phase
