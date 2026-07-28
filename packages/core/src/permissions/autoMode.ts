@@ -62,6 +62,7 @@ const RAW_PROTECTED_WRITE_COMMANDS =
 export const SAFE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set<string>([
   // Read-only file / search
   ToolNames.READ_FILE,
+  ToolNames.ZOOM_IMAGE,
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.LS,

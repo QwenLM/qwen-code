@@ -98,6 +98,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
@@ -168,6 +169,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Inspect bound workspace trust and request local operator action.
   // Remote clients cannot directly write trustedFolders.json.
   workspace_trust: { since: 'v1' },
+  // Workspace trust policy changes rebuild the affected runtime generation
+  // without restarting the daemon. V2 trust status exposes convergence.
+  workspace_trust_hot_reload: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
@@ -181,6 +185,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // explicit consent. The route reuses the interactive `/setup-github`
   // release lookup, workflow download, and `.gitignore` update logic.
   workspace_github_setup: { since: 'v1' },
+  // `GET /workspaces/:workspace/github/prs` lists the open pull requests
+  // of the workspace's GitHub remote via the `gh` CLI (read-only). The
+  // tag means the route contract exists; runtime availability of `gh`
+  // and its auth is reported per-request through the
+  // `github_cli_unavailable` / `github_prs_failed` error codes.
+  workspace_github_prs: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -204,6 +214,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `POST /session/:id/generate` streams a stateless, tool-free model call.
   // The ACP child prefers fastModel and falls back to the main session model.
   session_generation: { since: 'v1' },
+  // `POST /workspace/generate` runs the same stateless, tool-free generation
+  // protocol against the resolved workspace runtime without a live session.
+  workspace_generation: { since: 'v1' },
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
@@ -276,6 +289,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Immediate best-effort channel delivery for prompt/scheduled finals and
+  // direct workspace notifications. Presence describes the route/event
+  // contract; current worker availability is reported per delivery.
+  channel_delivery: { since: 'v1' },
   // Daemon supports reloading its daemon-managed channel worker via
   // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
   // on relaunch it re-reads settings.json (channels / proxy / per-channel
@@ -286,6 +303,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
+  // Sanitized workspace Channel configuration, lifecycle, and pairing.
+  channel_management: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -390,6 +409,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
@@ -398,6 +418,7 @@ export interface AdvertiseFeatureToggles {
    */
   channelReloadAvailable?: boolean;
   channelControlAvailable?: boolean;
+  channelManagementAvailable?: boolean;
   /**
    * Whether the daemon will accept client-hosted MCP servers over the WS
    * (`client_mcp_over_ws`, issue #5626).
@@ -424,6 +445,7 @@ export interface AdvertiseFeatureToggles {
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
    */
   acpHttpEnabled?: boolean;
+  workspaceTrustHotReloadAvailable?: boolean;
 }
 
 /**
@@ -496,10 +518,22 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
+  [
+    'workspace_generation',
+    (toggles) => toggles.workspaceGenerationAvailable === true,
+  ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  [
+    'workspace_trust_hot_reload',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
+  [
+    'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
   [
     'multi_workspace_sessions',
     (toggles) => toggles.multiWorkspaceSessionsEnabled === true,

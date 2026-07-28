@@ -454,7 +454,7 @@ describe('HookSystem', () => {
 
       expect(
         mockHookEventHandler.fireUserPromptSubmitEvent,
-      ).toHaveBeenCalledWith('test prompt', undefined);
+      ).toHaveBeenCalledWith('test prompt', undefined, undefined);
       expect(result).toBeDefined();
     });
 
@@ -476,7 +476,31 @@ describe('HookSystem', () => {
 
       expect(
         mockHookEventHandler.fireUserPromptSubmitEvent,
-      ).toHaveBeenCalledWith('my custom prompt', undefined);
+      ).toHaveBeenCalledWith('my custom prompt', undefined, undefined);
+    });
+
+    it('should pass submitted prompt after the existing signal argument', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+      const signal = new AbortController().signal;
+
+      await hookSystem.fireUserPromptSubmitEvent(
+        'model prompt',
+        signal,
+        'submitted prompt',
+      );
+
+      expect(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).toHaveBeenCalledWith('model prompt', signal, 'submitted prompt');
     });
 
     it('should return undefined when no final output', async () => {

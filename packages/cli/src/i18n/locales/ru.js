@@ -62,6 +62,7 @@ export default {
     'Подключение к MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
   '? for shortcuts': '? — горячие клавиши',
+  'Pasting…': 'Вставка…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -811,8 +812,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with original user prompt text.':
-    'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
@@ -1393,6 +1394,11 @@ export default {
   reviewed: 'проверено',
   'Code Changes:': 'Изменения кода:',
   Performance: 'Производительность',
+  'Generation Metrics': 'Метрики генерации',
+  'Latest Request': 'Последний запрос',
+  'Generation Time': 'Время генерации',
+  'Average TTFT': 'Среднее TTFT',
+  'Session TPS': 'TPS сеанса',
   'Wall Time:': 'Общее время:',
   'Agent Active:': 'Активность агента:',
   'API Time:': 'Время API:',

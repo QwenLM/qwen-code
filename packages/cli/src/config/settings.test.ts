@@ -49,7 +49,7 @@ import {
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import * as commentJsonUtils from '../utils/commentJson.js';
+import * as jsoncEditor from '../utils/jsonc-editor.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
@@ -156,9 +156,9 @@ vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
 
-vi.mock('../utils/commentJson.js', async (importOriginal) => {
+vi.mock('../utils/jsonc-editor.js', async (importOriginal) => {
   const original =
-    await importOriginal<typeof import('../utils/commentJson.js')>();
+    await importOriginal<typeof import('../utils/jsonc-editor.js')>();
   return {
     ...original,
     // Wrap with vi.fn so tests can spy/mock, but default to calling through
@@ -3000,8 +3000,7 @@ describe('Settings Loading and Merging', () => {
         },
       );
       // Simulate the write-back being refused (e.g. validation failure)
-      const mockFn =
-        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValue(false);
 
       // Should not throw — the error is caught and logged internally
@@ -3221,6 +3220,30 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.tools?.sandbox).toBe(false); // User setting
       expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
       expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+    });
+
+    it('should use an explicit runtime trust decision instead of cached folder trust', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({ context: { fileName: 'WORKSPACE.md' } });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      });
+
+      expect(settings.merged.context?.fileName).toBe('WORKSPACE.md');
+      expect(isWorkspaceTrusted).not.toHaveBeenCalled();
     });
   });
 
@@ -3598,8 +3621,7 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      const mockFn =
-        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValueOnce(false);
 
       expect(() =>
@@ -3611,6 +3633,33 @@ describe('Settings Loading and Merging', () => {
           'saveSettings: updateSettingsFilePreservingFormat returned false',
         ),
       );
+    });
+
+    it('does not mutate in-memory state when assertCanCommit throws in setValue', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              theme: 'default',
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.user.settings.theme).toBe('default');
+
+      expect(() =>
+        settings.setValue(SettingScope.User, 'theme', 'dark', () => {
+          throw new Error('generation closed');
+        }),
+      ).toThrow('generation closed');
+
+      expect(settings.user.settings.theme).toBe('default');
+      expect(settings.merged.theme).toBe('default');
     });
 
     it('re-syncs uncommitted scopes from disk when setValues persistence fails', () => {
@@ -3636,8 +3685,7 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      const mockFn =
-        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      const mockFn = jsoncEditor.updateSettingsFilePreservingFormat as Mock;
       mockFn.mockReturnValueOnce(true).mockReturnValueOnce(false);
       const committed: SettingScope[] = [];
 

@@ -58,9 +58,19 @@ const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
 
-const resolveExtensionLocale = (workspaceDir: string): string => {
-  const configuredLanguage = loadSettings(workspaceDir).merged.general
-    ?.language as string | undefined;
+const resolveExtensionLocale = (
+  workspaceDir: string,
+  workspaceTrusted?: boolean,
+): string => {
+  const configuredLanguage = loadSettings(
+    workspaceDir,
+    workspaceTrusted === undefined
+      ? true
+      : {
+          skipWorkspaceSettings: !workspaceTrusted,
+          workspaceTrusted,
+        },
+  ).merged.general?.language as string | undefined;
   const requestedLocale = resolveLanguageSetting(configuredLanguage);
   if (requestedLocale === 'auto') {
     return detectSystemLanguage();
@@ -178,6 +188,8 @@ export interface CreateExtensionsControllerDeps {
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
   maxExtensionOperationHistory?: number;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /** Shared coordinator for the legacy adapter and V2 global operations. */
@@ -235,6 +247,7 @@ export interface ExtensionsController {
         runtime: WorkspaceRuntime,
         generation: number,
       ) => void;
+      assertGenerationOpen?: () => void;
     },
   ): void;
 }
@@ -272,12 +285,13 @@ export function createExtensionsController(
     workspaceDir = boundWorkspace,
     trustedOverride?: boolean,
     interactions?: ExtensionInteractionHandlers,
-  ) =>
-    new ExtensionManager({
+  ) => {
+    const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
+    return new ExtensionManager({
       workspaceDir,
-      locale: resolveExtensionLocale(workspaceDir),
+      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
       isWorkspaceTrusted:
-        trustedOverride ??
+        workspaceTrusted ??
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
@@ -297,6 +311,7 @@ export function createExtensionsController(
           );
         }),
     });
+  };
 
   const validateExtensionMutationClient = (
     req: Request,
@@ -448,8 +463,12 @@ export function createExtensionsController(
         runtime: WorkspaceRuntime,
         generation: number,
       ) => void;
+      assertGenerationOpen?: () => void;
     } = {},
   ): void => {
+    const assertGenerationOpen =
+      options.assertGenerationOpen ?? deps.captureGenerationAssertion?.();
+    assertGenerationOpen?.();
     const releaseOperationSlot = acquireOperationSlot(res);
     if (!releaseOperationSlot) return;
     const operationId = crypto.randomUUID();
@@ -496,6 +515,7 @@ export function createExtensionsController(
         return reservation ? await reservation.run(task) : await task();
       };
       try {
+        assertGenerationOpen?.();
         updateExtensionOperation(operationId, {
           status: 'running',
           phase: 'preparing',
@@ -546,6 +566,7 @@ export function createExtensionsController(
               const prepared = await preparationQueue.run(
                 async () => {
                   try {
+                    assertGenerationOpen?.();
                     return await task(deadlineController.signal);
                   } finally {
                     activePreparations -= 1;
@@ -584,18 +605,21 @@ export function createExtensionsController(
           >(
             task: (onCommitted: (generation: number) => void) => Promise<T>,
           ): Promise<T> => {
+            assertGenerationOpen?.();
             updateExtensionOperation(operationId, {
               status: 'running',
               phase: 'committing',
             });
             const result = await commitQueue.runUntilReleased(
-              async (release) =>
-                await task((generation) => {
+              async (release) => {
+                assertGenerationOpen?.();
+                return await task((generation) => {
                   reconciliationReservation ??=
                     options.reserveRuntimeReconciliation?.();
                   committedGeneration = generation;
                   release();
-                }),
+                });
+              },
             );
             if (committedGeneration === undefined) {
               reconciliationReservation ??=

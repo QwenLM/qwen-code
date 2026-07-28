@@ -547,6 +547,10 @@ export class BackgroundTaskRegistry {
     return true;
   }
 
+  getMaxConcurrentBackgroundAgents(): number {
+    return this.maxConcurrentBackgroundAgents;
+  }
+
   assertCanStartBackgroundAgent(model?: string): void {
     const claimed = this.getClaimedBackgroundSlotCount();
     if (claimed >= this.maxConcurrentBackgroundAgents) {

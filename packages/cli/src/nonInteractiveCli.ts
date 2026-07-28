@@ -78,6 +78,8 @@ import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
+const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
+
 /**
  * Maximum wait, in milliseconds, for in-flight background tasks to emit
  * their terminal `task_notification` after `abortAll()` on the
@@ -454,6 +456,7 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitorId?: string;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -467,6 +470,13 @@ export async function runNonInteractive(
     }
     const localQueue: LocalQueueItem[] = [];
     const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
+    const isCancelledMonitorEvent = (item: LocalQueueItem) =>
+      Boolean(
+        item.monitorId &&
+          item.sdkNotification?.status === 'running' &&
+          config.getMonitorRegistry().get(item.monitorId)?.status ===
+            'cancelled',
+      );
     const emitNotificationToSdk = (item: LocalQueueItem) => {
       if (item.sendMessageType !== SendMessageType.Notification) return;
       adapter.emitUserMessage([{ text: item.displayText }]);
@@ -476,7 +486,10 @@ export async function runNonInteractive(
     };
     const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
       while (queue.length > 0) {
-        emitNotificationToSdk(queue.shift()!);
+        const item = queue.shift()!;
+        if (!isCancelledMonitorEvent(item)) {
+          emitNotificationToSdk(item);
+        }
       }
     };
     let captureMonitorTurnsInLocalQueue = true;
@@ -649,6 +662,17 @@ export async function runNonInteractive(
         permissionMode,
       );
       adapter.emitMessage(systemMessage);
+
+      const resumedSessionData = config.getResumedSessionData();
+      if (resumedSessionData) {
+        const restoredSessions =
+          restoredBackgroundAgentSessions.get(config) ?? new Set<string>();
+        if (!restoredSessions.has(sessionId)) {
+          await config.loadPausedBackgroundAgents(sessionId);
+          restoredSessions.add(sessionId);
+          restoredBackgroundAgentSessions.set(config, restoredSessions);
+        }
+      }
 
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
@@ -832,10 +856,7 @@ export async function runNonInteractive(
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (
-        !options.continueInterrupted &&
-        config.getResumedSessionData()
-      ) {
+      } else if (!options.continueInterrupted && resumedSessionData) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -857,6 +878,16 @@ export async function runNonInteractive(
         } catch (error) {
           debugLogger.warn(`worktree restore failed (non-fatal):`, error);
         }
+      }
+
+      const recoveredAgentsNotice =
+        resumedSessionData &&
+        !options.continueInterrupted &&
+        !isSlashCommand(input)
+          ? config.consumePendingRecoveredAgentsNotice()
+          : null;
+      if (recoveredAgentsNotice) {
+        initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
       const initialParts = normalizePartList(initialPartList);
@@ -915,6 +946,7 @@ export async function runNonInteractive(
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
+              monitorId: meta.monitorId,
               sdkNotification: {
                 task_id: meta.monitorId,
                 tool_use_id: meta.toolUseId,
@@ -1082,7 +1114,7 @@ export async function runNonInteractive(
 
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
-        setModelOverride: (override: string | undefined) => void,
+        setModelOverride: (override: string | undefined) => boolean,
       ): Promise<ToolCallBatchResult> => {
         const responseByRequest = new Map<
           ToolCallRequestInfo,
@@ -1284,6 +1316,10 @@ export async function runNonInteractive(
             abortController.signal,
             {
               recordToolResult: false,
+              onToolResultFullTurnModel: (model) => {
+                if (inlineModelOverrideActive) return false;
+                return setModelOverride(model);
+              },
               outputUpdateHandler,
               onAllToolCallsComplete: async (completedCalls) => {
                 for (const call of completedCalls) {
@@ -1742,9 +1778,12 @@ export async function runNonInteractive(
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
           } = await processToolCallBatch(toolCallRequests, (override) => {
-            if (!inlineModelOverrideActive) {
-              modelOverride = override;
+            if (inlineModelOverrideActive) return false;
+            if (modelOverride?.endsWith('\0') && modelOverride !== override) {
+              return false;
             }
+            modelOverride = override;
+            return true;
           });
 
           if (structuredSubmission !== undefined) {
@@ -1864,7 +1903,9 @@ export async function runNonInteractive(
                 splitIdx++;
               }
             }
-            const batch = localQueue.splice(0, splitIdx);
+            const batch = localQueue
+              .splice(0, splitIdx)
+              .filter((item) => !isCancelledMonitorEvent(item));
 
             if (batch.length === 0) return;
 
@@ -1984,7 +2025,14 @@ export async function runNonInteractive(
                 } = await processToolCallBatch(
                   itemToolCallRequests,
                   (override) => {
+                    if (
+                      itemModelOverride?.endsWith('\0') &&
+                      itemModelOverride !== override
+                    ) {
+                      return false;
+                    }
                     itemModelOverride = override;
+                    return true;
                   },
                 );
 

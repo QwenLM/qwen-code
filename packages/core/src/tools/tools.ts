@@ -493,8 +493,14 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
-   * Producer output artifacts persisted before final aggregation.
-   * Internal runtimes use these paths to avoid writing the same output again.
+   * Internal runtime metadata recording the producer persistence decision
+   * before final aggregation.
+   * `undefined` means no decision was made; `[]` means a decision was made but
+   * no reusable artifact exists; a non-empty array lists reusable producer
+   * artifact paths. Downstream finalization treats any defined value as a
+   * completed decision for this producer output and does not persist it again.
+   * Other artifact channels remain independent and may still be aggregated
+   * later.
    */
   persistedOutputFiles?: string[];
 

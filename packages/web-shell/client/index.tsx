@@ -137,6 +137,7 @@ export type {
   BugReportInfo,
   SessionChangeEvent,
 } from './App';
+export type { WebShellShadowDom, WebShellShadowDomOptions } from './shadowDom';
 export type { ToastTone } from './components/ToastHost';
 export type {
   WebShellSidebarBranding,
@@ -171,6 +172,7 @@ export type {
   UserMessageContentRenderInfo,
   UserMessageContentParser,
   ComposerHeaderRenderer,
+  ComposerFooterRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellAtItemRenderInfo,
@@ -191,6 +193,8 @@ export type {
   WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  ChatHeaderRenderer,
+  ChatHeaderRenderInfo,
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,

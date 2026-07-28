@@ -74,6 +74,7 @@ export default {
   'Type your message or @path/to/file':
     'Escriviu el vostre missatge o @camí/al/fitxer',
   '? for shortcuts': '? per a dreceres',
+  'Pasting…': 'Enganxant…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Premeu 'i' per al mode INSERCIÓ i 'Esc' per al mode NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -852,8 +853,8 @@ export default {
     "L'entrada a l'ordre és JSON amb tool_name, tool_input, tool_use_id, error, error_type, is_interrupt i is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
-  'Input to command is JSON with original user prompt text.':
-    "L'entrada a l'ordre és JSON amb el text original del missatge de l'usuari.",
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text de la TUI interactiva compatible).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
@@ -1505,6 +1506,11 @@ export default {
   reviewed: 'revisades',
   'Code Changes:': 'Canvis de codi:',
   Performance: 'Rendiment',
+  'Generation Metrics': 'Mètriques de generació',
+  'Latest Request': 'Darrera sol·licitud',
+  'Generation Time': 'Temps de generació',
+  'Average TTFT': 'TTFT mitjà',
+  'Session TPS': 'TPS de la sessió',
   'Wall Time:': 'Temps real:',
   'Agent Active:': 'Agent actiu:',
   'API Time:': "Temps de l'API:",
@@ -2381,6 +2387,7 @@ export default {
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
+  'toolDisplayName.ListAgents': "Llista d'agents",
   'toolDisplayName.TaskCreate': 'Crea tasca',
   'toolDisplayName.TaskUpdate': 'Actualitza tasca',
   'toolDisplayName.TaskList': 'Llista tasques',

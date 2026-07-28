@@ -24,8 +24,12 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // SSE event type, the SDK validator + browser consumer — single sources of truth
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
-import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
+import {
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+} from './bridgeTypes.js';
 import type {
+  BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
   MidTurnQueueEntry,
@@ -33,10 +37,15 @@ import type {
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type {
+  ChannelDeliveryErrorCode,
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+  ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
 } from './bridgeOptions.js';
 import {
+  CHANNEL_DELIVERY_ERROR_CODES,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -62,6 +71,9 @@ import type {
 // Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
 // import from core for this hot demux path.
 const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
+const MAX_CHANNEL_DELIVERY_TEXT_CHARS = 100_000;
+const MAX_CHANNEL_DELIVERY_FIELD_CHARS = 2048;
+const MAX_CHANNEL_DELIVERY_ERROR_CHARS = 500;
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
@@ -94,6 +106,43 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBoundedChannelDeliveryString(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_CHANNEL_DELIVERY_FIELD_CHARS
+  );
+}
+
+function isChannelDeliveryTarget(
+  value: unknown,
+): value is ChannelDeliveryInfo['target'] {
+  if (!isRecord(value)) return false;
+  return (
+    isBoundedChannelDeliveryString(value['channelName']) &&
+    (value['type'] === 'user' || value['type'] === 'chat') &&
+    isBoundedChannelDeliveryString(value['id']) &&
+    Object.keys(value).every(
+      (key) => key === 'channelName' || key === 'type' || key === 'id',
+    )
+  );
+}
+
+function normalizeChannelDeliveryHostResult(
+  value: ChannelDeliveryHostResult,
+): ChannelDeliveryHostResult {
+  if (value.status === 'delivered') return { status: 'delivered' };
+  if (value.status === 'skipped') return { status: 'skipped' };
+  const code = CHANNEL_DELIVERY_ERROR_CODES.has(value.code)
+    ? value.code
+    : 'channel_delivery_failed';
+  const error =
+    typeof value.error === 'string' && value.error.length > 0
+      ? value.error.slice(0, MAX_CHANNEL_DELIVERY_ERROR_CHARS)
+      : 'Channel delivery failed.';
+  return { status: 'failed', code: code as ChannelDeliveryErrorCode, error };
 }
 
 function pendingInteractionOptions(
@@ -467,8 +516,8 @@ export interface BridgeClientSessionEntry {
   midTurnMessageQueue: MidTurnQueueEntry[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
-  /** The child reported that its Todo Stop Guard yielded to the FIFO. */
-  todoStopGuardAwaitingQueuedPrompt?: boolean;
+  /** Bridge prompt that owns the child Guard wait for this FIFO. */
+  todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /** True while a prompt is executing for this session. */
   promptActive?: boolean;
   /** Admitted id for the prompt currently executing on this session. */
@@ -630,6 +679,14 @@ export class BridgeClient implements Client {
       sessionId: string,
       event: BridgeGenerationNotificationEvent,
     ) => void,
+    /** Workspace generation events are session-less and routed to a
+     * private bridge queue keyed by requestId. */
+    private readonly onWorkspaceGenerationEvent?: (
+      event: BridgeWorkspaceGenerationNotificationEvent,
+    ) => void,
+    private readonly onChannelDelivery?: ChannelDeliveryHandler,
+    /** Permits pre-registration client-MCP discovery without trusting its id. */
+    private readonly hasSessionSpawnInFlight: () => boolean = () => false,
   ) {}
 
   async requestPermission(
@@ -1016,6 +1073,12 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
     }
+    if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
+      return this.handleChannelDelivery(params);
+    }
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      return this.handleTodoStopGuardContinuationClaim(params);
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -1035,9 +1098,6 @@ export class BridgeClient implements Client {
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
     );
-    if (params['todoStopGuardWatchQueuedPrompt'] === true) {
-      entry.todoStopGuardAwaitingQueuedPrompt = hasQueuedPrompt;
-    }
     if (drained.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
@@ -1072,6 +1132,186 @@ export class BridgeClient implements Client {
       }
     }
     return { messages, hasQueuedPrompt };
+  }
+
+  private handleTodoStopGuardContinuationClaim(
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const sessionId =
+      typeof params['sessionId'] === 'string' && params['sessionId'].length > 0
+        ? params['sessionId']
+        : undefined;
+    if (!sessionId) return { claimed: false, hasQueuedPrompt: false };
+    if (!this.ownsSession(sessionId)) {
+      return { claimed: false, hasQueuedPrompt: false };
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return { claimed: false, hasQueuedPrompt: false };
+
+    const livePrompts = entry.pendingPromptList.filter(
+      (prompt) => !prompt.abortController.signal.aborted,
+    );
+    const promptId =
+      typeof params['promptId'] === 'string' && params['promptId'].length > 0
+        ? params['promptId']
+        : undefined;
+
+    if (promptId) {
+      const ownsRunningPrompt =
+        entry.activePromptId === promptId &&
+        livePrompts.some(
+          (prompt) =>
+            prompt.promptId === promptId && prompt.state === 'running',
+        );
+      const hasCompetingRunningPrompt = livePrompts.some(
+        (prompt) => prompt.promptId !== promptId && prompt.state === 'running',
+      );
+      if (!ownsRunningPrompt || hasCompetingRunningPrompt) {
+        return { claimed: false, hasQueuedPrompt: false };
+      }
+
+      const hasQueuedPrompt = livePrompts.some(
+        (prompt) => prompt.state === 'queued',
+      );
+      if (hasQueuedPrompt) {
+        entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId = promptId;
+        return { claimed: false, hasQueuedPrompt: true };
+      }
+      if (entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId === promptId) {
+        delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+      }
+      return { claimed: true, hasQueuedPrompt: false };
+    }
+
+    if (entry.promptActive || livePrompts.length > 0) {
+      return { claimed: false, hasQueuedPrompt: false };
+    }
+    return { claimed: true, hasQueuedPrompt: false };
+  }
+
+  private async handleChannelDelivery(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onChannelDelivery) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.channelDelivery,
+      );
+    }
+    const sessionId = params['sessionId'];
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      !this.ownsSession(sessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must name a session owned by this connection',
+      );
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      throw RequestError.invalidParams(undefined, 'Unknown `sessionId`');
+    }
+    const deliveryId = params['deliveryId'];
+    const source = params['source'];
+    const text = params['text'];
+    const rawTarget = params['target'];
+    if (
+      !isBoundedChannelDeliveryString(deliveryId) ||
+      (source !== 'prompt' && source !== 'scheduled') ||
+      typeof text !== 'string' ||
+      text.length > MAX_CHANNEL_DELIVERY_TEXT_CHARS ||
+      !isChannelDeliveryTarget(rawTarget)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid channel delivery request',
+      );
+    }
+    const promptId = params['promptId'];
+    const taskId = params['taskId'];
+    const firedAt = params['firedAt'];
+    const allowedKeys =
+      source === 'prompt'
+        ? new Set([
+            'sessionId',
+            'deliveryId',
+            'source',
+            'target',
+            'text',
+            'promptId',
+          ])
+        : new Set([
+            'sessionId',
+            'deliveryId',
+            'source',
+            'target',
+            'text',
+            'taskId',
+            'firedAt',
+          ]);
+    const correlationValid =
+      source === 'prompt'
+        ? isBoundedChannelDeliveryString(promptId) && promptId === deliveryId
+        : isBoundedChannelDeliveryString(taskId) &&
+          typeof firedAt === 'number' &&
+          Number.isFinite(firedAt) &&
+          deliveryId === `${taskId}:${firedAt}`;
+    if (
+      !correlationValid ||
+      !Object.keys(params).every((key) => allowedKeys.has(key))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid channel delivery correlation',
+      );
+    }
+
+    const info: ChannelDeliveryInfo = {
+      sessionId,
+      deliveryId,
+      source,
+      target: rawTarget,
+      text,
+      ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+      ...(source === 'scheduled'
+        ? { taskId: taskId as string, firedAt: firedAt as number }
+        : {}),
+    };
+    let result: ChannelDeliveryHostResult;
+    try {
+      result = normalizeChannelDeliveryHostResult(
+        await this.onChannelDelivery(info),
+      );
+    } catch {
+      result = {
+        status: 'failed',
+        code: 'channel_delivery_failed',
+        error: 'Channel delivery failed.',
+      };
+    }
+    try {
+      entry.events.publish({
+        type: 'channel_delivery_result',
+        ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+        data: {
+          sessionId,
+          deliveryId,
+          source,
+          status: result.status,
+          ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+          ...(source === 'scheduled'
+            ? { taskId: taskId as string, firedAt: firedAt as number }
+            : {}),
+          ...(result.status === 'failed'
+            ? { code: result.code, error: result.error }
+            : {}),
+        },
+      });
+    } catch {
+      // Best-effort: delivery already completed.
+    }
+    return result;
   }
 
   /**
@@ -1120,7 +1360,37 @@ export class BridgeClient implements Client {
         `client-hosted MCP server '${server}' is not currently connected`,
       );
     }
-    const response = await send(payload);
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (typeof sessionId !== 'string' || sessionId.length === 0)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must be a non-empty string when provided',
+      );
+    }
+    const ownsSession =
+      typeof sessionId === 'string' && this.ownsSession(sessionId);
+    if (
+      typeof sessionId === 'string' &&
+      !ownsSession &&
+      !this.hasSessionSpawnInFlight()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session not owned by this channel: ${sessionId}`,
+      );
+    }
+    if (typeof sessionId === 'string' && !ownsSession) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=client_mcp_message action=forwarded_without_session reason=session_registration_pending`,
+      );
+    }
+    const response = await send(
+      payload,
+      typeof sessionId === 'string' && ownsSession ? { sessionId } : undefined,
+    );
     return { payload: response as Record<string, unknown> };
   }
 
@@ -1279,6 +1549,62 @@ export class BridgeClient implements Client {
           return;
         }
         this.onGenerationEvent?.(sessionId, {
+          type: 'delta',
+          requestId,
+          seq,
+          text,
+        });
+        return;
+      }
+      return;
+    }
+    if (method === 'qwen/notify/workspace/generation/event') {
+      const requestId = params['requestId'];
+      const event = params['event'];
+      if (
+        params['v'] !== 1 ||
+        typeof requestId !== 'string' ||
+        !event ||
+        typeof event !== 'object' ||
+        Array.isArray(event)
+      ) {
+        return;
+      }
+      const record = event as Record<string, unknown>;
+      if (record['type'] === 'started') {
+        const model = record['model'];
+        const modelSource = record['modelSource'];
+        if (
+          typeof model !== 'string' ||
+          (modelSource !== 'fast' && modelSource !== 'main')
+        ) {
+          return;
+        }
+        this.onWorkspaceGenerationEvent?.({
+          type: 'started',
+          requestId,
+          model,
+          modelSource,
+        });
+        return;
+      }
+      if (record['type'] === 'thinking') {
+        this.onWorkspaceGenerationEvent?.({ type: 'thinking', requestId });
+        return;
+      }
+      if (record['type'] === 'delta') {
+        const seq = record['seq'];
+        const text = record['text'];
+        if (
+          typeof seq !== 'number' ||
+          !Number.isSafeInteger(seq) ||
+          seq < 0 ||
+          typeof text !== 'string' ||
+          text.length === 0
+        ) {
+          return;
+        }
+        this.onWorkspaceGenerationEvent?.({
           type: 'delta',
           requestId,
           seq,

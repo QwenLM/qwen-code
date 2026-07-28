@@ -23,14 +23,20 @@ owns the model-driven decisions, code changes, and pre-commit verification.
   verification expects the branch to be usable from this checkout.
 - Use additive commits only; do not amend, rebase, reset, or rewrite history.
 - Keep changes minimal and scoped. No drive-by refactors.
-- Run required verification commands before committing. Use only these trusted
-  project commands: `npm run build`, `npm run typecheck`, `npm run lint`,
-  focused Vitest runs for touched packages, integration tests after
+- Run required verification commands before committing — actually run them, do
+  not assert them from reading the diff. Use only these trusted project
+  commands: `npm run build`, `npm run typecheck`, `npm run lint`, focused
+  Vitest runs for touched packages, integration tests after
   `npm run bundle` when the touched behavior is only exercised through the
   bundled CLI or integration harness, and
   `npm run generate:settings-schema` when a settings source changed (see the
   generated-artifact rule below). If a command fails, fix the cause and rerun
-  it. Do not commit while a required runnable check is failing.
+  it. Do not commit while a required runnable check is failing. The
+  deterministic gate re-runs these same commands after you push and discards
+  the round on any failure, so a commit that skips them is not faster — it
+  just moves the rejection later and wastes the round. Record the exact
+  commands you ran and their results in your summary (see the per-mode
+  outcomes); a bare "verified" without them is not acceptable.
 - Regenerate committed generated artifacts when you change their source. If you
   edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated
@@ -154,7 +160,9 @@ Implement the selected issue in the checked-out repository:
    Conventional Commit, e.g. `fix(core): summary (#<issue>)`.
 9. Write all required outputs:
    - `<workdir>/e2e-report.md` (bilingual per Shared Rules — it is posted
-     verbatim as a PR comment)
+     verbatim as a PR comment), ending with a `## Verification` section that
+     lists each command you ran and its result (see Shared Rules), before the
+     collapsed Chinese translation
    - `<workdir>/pr-title.txt`
    - `<workdir>/pr-body.md` using `.qwen/skills/prepare-pr/SKILL.md`
 
@@ -176,6 +184,15 @@ Read `git diff origin/<base>...HEAD` first, then `<workdir>/feedback.md`.
 
 Classify every feedback point:
 
+Address each the way AGENTS.md's Simplicity First and Comments rules demand:
+the smallest change that resolves the point, no error handling for a condition
+that cannot occur, no comment that restates the code. Review rounds ratchet
+code UP — every round tends to add — so on each one also ask what the change
+lets you REMOVE or shrink, not only what to add. A suggestion whose only effect
+is more defense, configurability, or narration a senior engineer would call
+overcomplicated is a Decline (not worth the diff growth), not an automatic
+implement — satisfying a nit is never a reason to bloat the code.
+
 - Required: correctness bug, broken build/test, security issue, or a
   `CHANGES_REQUESTED` item naming a real defect. Verify it, then fix minimally.
 - Optional: suggestion, nit, or hardening — including `**[Suggestion]**`
@@ -185,6 +202,26 @@ Classify every feedback point:
   reason per finding (out of scope, conflicts with the PR's direction, or not
   worth the diff growth) so the deferral is visible in the PR thread — never
   drop one silently.
+- Critical-only mode: when `feedback.md` contains a
+  `Deferred non-Critical feedback` section, the PR has already completed five
+  suggestion-capable, change-producing rounds. That section is an audit record,
+  not work: do not modify code, resolve threads, or write comment replies for
+  those items. Act only on Critical feedback and formally requested changes
+  rendered in the actionable sections, failed checks, and the requested
+  base-conflict resolution.
+- Needs a maintainer's decision: a finding that turns on a judgment that is
+  NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
+  should the PR be split?), two reviewers asking for opposite things, or whether
+  the reported problem is worth solving at all. Do not settle it yourself:
+  neither quietly implement one contested direction nor decline it as "out of
+  scope" (declining IS deciding). Name the decision, lay out the options and
+  your recommendation, and leave the thread UNRESOLVED so the maintainer reads
+  an explicit question, not a verdict you already reached. This is not a
+  failure and not a "could not address" — do everything else this round; the
+  open question simply rides along in the summary until a human answers it (the
+  answer arrives as ordinary new feedback the next round). Distinguish it from
+  Decline: you decline when the CHANGE is not worth doing; you escalate when the
+  CALL is not yours to make.
 
 If `--conflict true`, merge `origin/<base>` and resolve conflicts by
 understanding both sides, never blindly taking one side. If false, do not merge
@@ -192,22 +229,51 @@ unnecessarily.
 
 Finish with exactly one outcome:
 
-- Made a change: re-read the full diff as a skeptical reviewer, run
-  `npm run build`, `npm run typecheck`, `npm run lint`, focused Vitest tests for
-  touched packages, and integration tests after `npm run bundle` when the
-  touched behavior is only exercised through the bundled CLI or integration
-  harness (plus `npm run generate:settings-schema`, staging the regenerated
-  schema, if a settings source changed), commit once only after they pass, then write
-  `<workdir>/address-summary.md` with each feedback point,
-  decision, changes, conflict notes, and verification results (bilingual per
-  Shared Rules). Also write `<workdir>/resolved-comments.txt`: one inline
+- Made a change: re-read the full diff as a skeptical reviewer — confirm each
+  feedback point is actually addressed, that the change introduces no new
+  defect, AND that it added no bloat: no defense for an impossible case, no
+  comment that is not a non-obvious "why", nothing a senior engineer would call
+  overcomplicated (AGENTS.md Simplicity First). Cut it before you commit. Then
+  ACTUALLY RUN `npm run build`, `npm run typecheck`,
+  `npm run lint`, focused Vitest tests for the package(s) you touched, and
+  integration tests after `npm run bundle` when the touched behavior is only
+  exercised through the bundled CLI or integration harness (plus
+  `npm run generate:settings-schema`, staging the regenerated schema, if a
+  settings source changed). The verification gate re-runs these exact commands
+  and rejects the commit if any fails, discarding the whole round — so running
+  them yourself first is how you avoid wasting a round on a defect you could
+  have caught. If any of these commands fails, DO NOT commit: treat the
+  feedback as unresolved and write `<workdir>/failure.md`. Only after they
+  pass, commit once, then write `<workdir>/address-summary.md` with each
+  feedback point, decision, changes, and conflict notes, ending with a
+  `## Verification` section (bilingual per Shared Rules) that lists **each
+  command you ran and its result**, before the collapsed Chinese translation
+  — e.g. `- npm run typecheck — passed`,
+  `- vitest packages/cli (touched) — 42 passed`. Record the commands you truly
+  ran; a bare "verified" is not acceptable, because a claim the gate then
+  contradicts wastes a round and misleads the reviewer. Also write
+  `<workdir>/resolved-comments.txt`: one inline
   comment id per line — the `rc:<id>` handle shown in `feedback.md` — for each
-  finding you IMPLEMENTED. The workflow resolves exactly those review threads
-  after the push, so a human re-reviewing sees only what is still open. List an
-  id ONLY when you actually made the change: a finding you declined or deferred
-  must stay unresolved so its recorded reason gets read. Omit the file (or
-  leave it empty) when you implemented nothing that came from an inline
-  comment.
+  finding that is RESOLVED IN THE CODE. That is the test, not "did I edit a
+  file this round": a finding you implemented now, and one an earlier commit
+  already fixed that you re-verified still holds, are both resolved and both
+  belong here. The workflow resolves exactly those review threads
+  after the push, so a human re-reviewing sees only what is still open — an
+  already-fixed Critical left open reads as an unaddressed Critical. A
+  finding you declined, deferred,
+  or escalated for a maintainer's decision must stay unresolved so its recorded
+  reason or open question gets read. Omit the file (or
+  leave it empty) when nothing from an inline comment is resolved.
+  Also write `<workdir>/comment-replies.json` — a JSON array of
+  `{"id": <inline comment id>, "body": "<markdown>"}` — with one entry for
+  every inline finding you did NOT resolve (declined, deferred, or escalated).
+  The workflow posts each as a reply on that finding's own thread and leaves
+  the thread open. Without it the reason lives only in the round summary, so a
+  reviewer opening the still-open thread sees their finding answered by
+  silence and cannot tell it was read at all. Answer where it was raised: the
+  disposition and the reason in a sentence or two, plus the question you need
+  answered when you escalated. Each body is bilingual per Shared Rules.
+  Omit the file when every inline finding was resolved.
 - No change: write `<workdir>/no-action.md` (bilingual per Shared Rules).
 - The Shared Rules' objective stop condition applies: write
   `<workdir>/failure.md` and do not commit.

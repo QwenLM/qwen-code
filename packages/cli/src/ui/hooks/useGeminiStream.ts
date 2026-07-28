@@ -87,6 +87,7 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import { findLastUserItemIndex } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -384,7 +385,18 @@ export interface CancelSubmitInfo {
    * consecutive-duplicate user message (text alone would wrongly match
    * the older row).
    */
-  lastTurnUserItem: { id: number; text: string } | null;
+  lastTurnUserItem: {
+    id: number;
+    text: string;
+    submittedPrompt?: string;
+  } | null;
+  /**
+   * Whether removing the Logger's latest USER entry can only target
+   * `lastTurnUserItem`. A concurrent BTW command writes a newer USER entry,
+   * so the cancel handler must keep the log intact rather than remove the
+   * side-question by mistake.
+   */
+  canUndoLastLoggedUserMessage: boolean;
   /**
    * True if a content event landed during this turn, including during
    * the pre-cancel flush of throttle-buffered events. Lets the
@@ -453,7 +465,12 @@ export const useGeminiStream = (
   // messages while still returning a freshly-generated id — text alone
   // would let the auto-restore guard wrongly match an older USER row
   // when the user re-submits the same prompt.
-  const lastTurnUserItemRef = useRef<{ id: number; text: string } | null>(null);
+  const lastTurnUserItemRef = useRef<{
+    id: number;
+    text: string;
+    submittedPrompt?: string;
+  } | null>(null);
+  const canUndoLastLoggedUserMessageRef = useRef(false);
   // Set to true the first time a content event lands this turn — even
   // during the pre-cancel flush. AppContainer's auto-restore guard
   // can't otherwise see content that was just addItem'd inside flush
@@ -523,6 +540,13 @@ export const useGeminiStream = (
   // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
   // explicit choice mid-turn, so this takes precedence until the next user turn.
   const inlineModelOverrideActiveRef = useRef<boolean>(false);
+  const canUseToolResultFullTurnModel = useCallback((model: string) => {
+    const current = modelOverrideRef.current;
+    return (
+      !inlineModelOverrideActiveRef.current &&
+      (!current?.endsWith('\0') || current === model)
+    );
+  }, []);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
@@ -574,6 +598,7 @@ export const useGeminiStream = (
       config,
       getPreferredEditor,
       onEditorClose,
+      canUseToolResultFullTurnModel,
     );
 
   const pendingToolCallGroupDisplay = useMemo(
@@ -751,9 +776,7 @@ export const useGeminiStream = (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
     ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
-      );
+      const lastUserMessageIndex = findLastUserItemIndex(history);
 
       const turnCount =
         lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;
@@ -864,6 +887,7 @@ export const useGeminiStream = (
       onCancelSubmit({
         pendingItem: pendingItemAtCancel,
         lastTurnUserItem: lastTurnUserItemRef.current,
+        canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
         turnProducedMeaningfulContent: turnSawContentEventRef.current,
       });
     } finally {
@@ -975,6 +999,8 @@ export const useGeminiStream = (
       abortSignal: AbortSignal,
       prompt_id: string,
       submitType: SendMessageType,
+      submittedPrompt: string | undefined,
+      preserveTurnOwnership: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -990,7 +1016,9 @@ export const useGeminiStream = (
       // this — paths that don't add a USER history item (Cron /
       // Notification / slash submit_prompt) leave it null so cancel
       // never wrongly targets an older user item.
-      lastTurnUserItemRef.current = null;
+      if (!preserveTurnOwnership) {
+        lastTurnUserItemRef.current = null;
+      }
 
       let localQueryToSendToGemini: PartListUnion | null = null;
 
@@ -1025,6 +1053,8 @@ export const useGeminiStream = (
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        canUndoLastLoggedUserMessageRef.current =
+          !preserveTurnOwnership && logger != null;
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
@@ -1129,10 +1159,13 @@ export const useGeminiStream = (
           // skipped insertion (consecutive-duplicate user); the older
           // matching USER in history carries a DIFFERENT id, so the
           // mismatch makes auto-restore bail correctly in that case.
-          lastTurnUserItemRef.current = {
-            id: insertedId,
-            text: trimmedQuery,
-          };
+          if (!preserveTurnOwnership) {
+            lastTurnUserItemRef.current = {
+              id: insertedId,
+              text: trimmedQuery,
+              ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            };
+          }
 
           // Yield via macrotask to let Ink/React flush the user message
           // render before continuing with @-command processing and API
@@ -2549,7 +2582,12 @@ export const useGeminiStream = (
               .getChatRecordingService?.()
               ?.recordMidTurnUserMessage(parts, message);
             addItem(
-              { type: MessageType.NOTIFICATION, text: message },
+              {
+                type: MessageType.USER,
+                text: message,
+                // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
+                sentToModel: false,
+              },
               Date.now(),
             );
           }
@@ -2625,6 +2663,7 @@ export const useGeminiStream = (
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
         steerInput?: SteerInput;
+        submittedPrompt?: string;
       },
     ) => {
       const allowConcurrentBtwDuringResponse =
@@ -2635,6 +2674,10 @@ export const useGeminiStream = (
       const isTurnContinuation =
         submitType === SendMessageType.ToolResult ||
         submitType === SendMessageType.Steer;
+      const submittedPrompt =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.submittedPrompt
+          : undefined;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
@@ -2682,6 +2725,7 @@ export const useGeminiStream = (
       // turn that already owns its own snapshot.
       if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
+        canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
         duplicateProviderToolCallResponseIdsRef.current.clear();
@@ -2771,6 +2815,8 @@ export const useGeminiStream = (
                 abortSignal,
                 prompt_id!,
                 submitType,
+                submittedPrompt,
+                allowConcurrentBtwDuringResponse,
               );
 
         if (!shouldProceed || queryToSend === null) {
@@ -2861,19 +2907,21 @@ export const useGeminiStream = (
             dualOutput.emitUserMessage(userParts);
           }
 
+          const sendOptions = {
+            type: submitType,
+            notificationDisplayText: metadata?.notificationDisplayText,
+            modelOverride: modelOverrideRef.current,
+            steerInput: metadata?.steerInput,
+            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+              ? { getSteerInput: drainSteerAtBoundary }
+              : {}),
+          };
           const stream = geminiClient.sendMessageStream(
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            {
-              type: submitType,
-              notificationDisplayText: metadata?.notificationDisplayText,
-              modelOverride: modelOverrideRef.current,
-              steerInput: metadata?.steerInput,
-              ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
-                ? { getSteerInput: drainSteerAtBoundary }
-                : {}),
-            },
+            sendOptions,
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -2937,6 +2985,15 @@ export const useGeminiStream = (
           // remain visible until the user presses Ctrl+Y to retry or starts
           // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
+            clearRetryCountdown();
+          } else if (
+            pendingRetryErrorItemRef.current &&
+            !lastPromptErroredRef.current
+          ) {
+            // A countdown-originated error item lingers after the timer
+            // expired and the retry succeeded. Clear it so it does not
+            // stay on screen. Terminal errors (handleErrorEvent) set
+            // lastPromptErroredRef and are intentionally left visible.
             clearRetryCountdown();
           }
           const loopDetected = loopDetectedRef.current;
@@ -3573,6 +3630,27 @@ export const useGeminiStream = (
         return;
       }
 
+      const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
+      const backgroundLaunchExhaustedCapacity =
+        backgroundTaskRegistry.getMaxConcurrentBackgroundAgents() === 1 &&
+        !backgroundTaskRegistry.canStartBackgroundAgent() &&
+        geminiTools.some((toolCall) => {
+          const display = toolCall.response.resultDisplay;
+          return (
+            toolCall.request.name === ToolNames.AGENT &&
+            typeof display === 'object' &&
+            display !== null &&
+            'type' in display &&
+            'status' in display &&
+            display.type === 'task_execution' &&
+            display.status === 'background'
+          );
+        });
+      if (backgroundLaunchExhaustedCapacity) {
+        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        return;
+      }
+
       // Drain steerable user messages at this sampling boundary and append
       // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
@@ -3742,6 +3820,7 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitor?: { id: string; status: string };
       onDelivered?: () => void;
       onDeliveryFailed?: () => void;
     }>
@@ -3901,6 +3980,7 @@ export const useGeminiStream = (
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        monitor: { id: meta.monitorId, status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3932,6 +4012,19 @@ export const useGeminiStream = (
       // triggered the commit.
       runOutsideAgentContext(() => {
         const queue = notificationQueueRef.current;
+        const monitorRegistry = config.getMonitorRegistry();
+        for (let i = queue.length - 1; i >= 0; i--) {
+          const monitor = queue[i]!.monitor;
+          if (
+            monitor?.status === 'running' &&
+            monitorRegistry.get(monitor.id)?.status === 'cancelled'
+          ) {
+            queue.splice(i, 1);
+          }
+        }
+        if (queue.length === 0) {
+          return;
+        }
         const targetType = queue[0]!.sendMessageType;
 
         // Cron prompts must run as individual turns — each needs its own
@@ -3976,7 +4069,7 @@ export const useGeminiStream = (
         });
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem, config]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,
@@ -4050,20 +4143,23 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
-      const batch = teammateQueueRef.current.splice(0);
-      // Render one compact `● …` line per teammate report; the full
-      // envelope goes only to the model (the USER bubble is suppressed
-      // for SendMessageType.Teammate in prepareQueryForGemini).
-      for (const entry of batch) {
-        addItem(
-          { type: 'notification' as const, text: entry.display },
-          Date.now(),
-        );
-      }
-      const modelText = batch.map((e) => e.modelText).join('\n\n');
-      const display = batch.map((e) => e.display).join('; ');
-      submitQuery(modelText, SendMessageType.Teammate, undefined, {
-        notificationDisplayText: display,
+      // React can flush this effect after restoring the teammate frame.
+      runOutsideAgentContext(() => {
+        const batch = teammateQueueRef.current.splice(0);
+        // Render one compact `● …` line per teammate report; the full
+        // envelope goes only to the model (the USER bubble is suppressed
+        // for SendMessageType.Teammate in prepareQueryForGemini).
+        for (const entry of batch) {
+          addItem(
+            { type: 'notification' as const, text: entry.display },
+            Date.now(),
+          );
+        }
+        const modelText = batch.map((e) => e.modelText).join('\n\n');
+        const display = batch.map((e) => e.display).join('; ');
+        submitQuery(modelText, SendMessageType.Teammate, undefined, {
+          notificationDisplayText: display,
+        });
       });
     }
   }, [streamingState, submitQuery, teammateTrigger, addItem]);

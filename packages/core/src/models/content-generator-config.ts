@@ -56,6 +56,11 @@ export function buildAgentContentGeneratorConfig(
         authOverrides.baseUrl,
       )
     : undefined;
+  if (resolvedModel?.imageOnly) {
+    throw new Error(
+      `Image-only model '${resolvedModel.id}' cannot be used for content generation`,
+    );
+  }
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,

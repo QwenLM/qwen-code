@@ -305,6 +305,17 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  serve: {
+    type: 'object',
+    label: 'Serve',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as { channels?: string[] },
+    description: 'Persistent qwen serve settings.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   // Model providers configuration grouped by authType
   modelProviders: {
     type: 'object',
@@ -1032,10 +1043,10 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',
         category: 'UI',
-        requiresRestart: false,
-        default: false,
+        requiresRestart: true,
+        default: true,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       showScrollbar: {
@@ -1214,6 +1225,11 @@ const SETTINGS_SCHEMA = {
     jsonSchemaOverride: {
       type: 'object',
       properties: {
+        userId: {
+          description:
+            'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+          type: 'string',
+        },
         includeSensitiveSpanAttributes: {
           description:
             'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
@@ -1296,6 +1312,17 @@ const SETTINGS_SCHEMA = {
     description:
       'Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
     showInDialog: true,
+  },
+
+  imageModel: {
+    type: 'string',
+    label: 'Image Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.',
+    showInDialog: false,
   },
 
   visionBridgeTimeoutMs: {
@@ -1532,6 +1559,30 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as number | undefined,
             description: 'Maximum number of retries for failed requests.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
+          retryInitialDelayMs: {
+            type: 'number',
+            label: 'Retry Initial Delay',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Initial delay in milliseconds for stream rate-limit retries.',
+            minimum: 1,
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
+          retryMaxDelayMs: {
+            type: 'number',
+            label: 'Retry Max Delay',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum delay in milliseconds for stream rate-limit retries.',
+            minimum: 1,
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -1950,6 +2001,51 @@ const SETTINGS_SCHEMA = {
           '/<name> slash commands. UNION-merged across systemDefaults/user/' +
           'workspace/system scopes — workspace cannot remove entries defined ' +
           'in higher scopes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      defaultDisabled: {
+        type: 'array',
+        label: 'Default Disabled Skills',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Skill names disabled by default unless explicitly enabled through ' +
+          'skills.enabled. Matched case-insensitively and UNION-merged across ' +
+          'settings scopes. skills.disabled always wins.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      enabled: {
+        type: 'array',
+        label: 'Enabled Skills',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Explicit opt-ins that override matching skills.defaultDisabled ' +
+          'entries. Matched case-insensitively and UNION-merged across settings ' +
+          'scopes. Cannot override skills.disabled.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      directories: {
+        type: 'array',
+        label: 'Skill Directories',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Additional directories to scan for skills (SKILL.md files). ' +
+          'Entries should be absolute paths or ~-prefixed; relative paths ' +
+          'resolve against the working directory. Each directory is scanned ' +
+          'one level deep for subdirectories containing a SKILL.md file. ' +
+          'Skills from these directories are loaded at user level, after ' +
+          'the default user skill directories; a custom skill with the ' +
+          'same name as one in the default user directories will not ' +
+          'override it. Only point this at trusted locations, since ' +
+          'skills can define hooks and commands.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2856,6 +2952,32 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      modelGrades: {
+        type: 'object',
+        label: 'Model Grades',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as Record<string, string> | undefined,
+        description:
+          'Maps semantic model grade names exposed to the Agent tool to concrete model selectors.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+      },
+      allowedGrades: {
+        type: 'array',
+        label: 'Allowed Model Grades',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Optional whitelist of model grade names the Agent tool may use.',
+        showInDialog: false,
+        items: { type: 'string' },
+      },
       maxParallelAgents: {
         type: 'number',
         label: 'Max Parallel Agents',
@@ -3053,6 +3175,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      StopFailure: {
+        type: 'array',
+        label: 'After Agent Failure Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a turn ends due to an API error or loop detection, instead of the normal Stop hooks. Receives error type and details.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
       MessageDisplay: {
         type: 'array',
         label: 'Message Display Hooks',
@@ -3221,6 +3355,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
         showInDialog: false,
+      },
+      sessionWriterLease: {
+        type: 'boolean',
+        label: 'Enable ACP Session Writer Lease',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.',
+        showInDialog: true,
       },
       cronRecurringMaxAgeDays: {
         type: 'number',

@@ -15,8 +15,9 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
-import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
+import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
@@ -94,6 +95,7 @@ interface WorkspaceSectionProps {
    * fires this on click. Omitted for untrusted workspaces (no git surface).
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  onOpenCommit?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
@@ -123,8 +125,8 @@ export function WorkspaceSection({
   groupActionsDisabled,
   excludePinned = false,
   onOpenGitDiff,
+  onOpenCommit,
 }: WorkspaceSectionProps) {
-  const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -134,6 +136,8 @@ export function WorkspaceSection({
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
@@ -231,7 +235,12 @@ export function WorkspaceSection({
   const loadGitStatus = useCallback(async () => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
     try {
-      const status = await client.workspaceByCwd(gitPollCwd).workspaceGit();
+      // wait: the sidebar chip shows the enriched counters and has no SSE
+      // fill-in path, so it keeps the blocking semantics instead of the
+      // composer's last-known fast path.
+      const status = await client
+        .workspaceByCwd(gitPollCwd)
+        .workspaceGit({ wait: true });
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
@@ -349,18 +358,27 @@ export function WorkspaceSection({
           )}
         </button>
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <button
-            type="button"
-            className={styles.gitPill}
-            aria-label={`${t('gitDiff.title')} — ${gitStatus.branch}`}
-            onClick={() => onOpenGitDiff(workspace.cwd)}
+          <BranchPickerPopover
+            open={branchPickerOpen}
+            onOpenChange={setBranchPickerOpen}
+            workspaceCwd={workspace.cwd}
+            onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
+            onOpenCommit={
+              onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
+            }
           >
-            <GitBranchIndicator
-              branch={gitStatus.branch}
-              status={gitStatus}
-              compact
-            />
-          </button>
+            <button
+              type="button"
+              className={styles.gitPill}
+              aria-label={`${t('branchPicker.label')} — ${gitStatus.branch}`}
+            >
+              <GitBranchIndicator
+                branch={gitStatus.branch}
+                status={gitStatus}
+                compact
+              />
+            </button>
+          </BranchPickerPopover>
         )}
         {headerActions?.(actionsVisible)}
       </div>
@@ -444,7 +462,9 @@ export function WorkspaceSection({
                     role="note"
                     aria-label={`${label}${time ? `, ${time}` : ''}. ${trustToOpenLabel}`}
                   >
-                    <span className={styles.sessionName}>{label}</span>
+                    <span className={styles.sessionName} title={label}>
+                      {label}
+                    </span>
                     {time && <span className={styles.sessionTime}>{time}</span>}
                   </div>
                 );

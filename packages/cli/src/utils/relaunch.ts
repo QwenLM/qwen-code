@@ -14,6 +14,7 @@ import { writeStderrLine } from './stdioHelpers.js';
 
 interface RelaunchOptions {
   afterSpawn?: () => void;
+  childEnv?: Readonly<Record<string, string>>;
   onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
 }
 
@@ -68,6 +69,7 @@ export async function relaunchAppInChildProcess(
     ];
     const newEnv: NodeJS.ProcessEnv = {
       ...process.env,
+      ...options?.childEnv,
       QWEN_CODE_NO_RELAUNCH: 'true',
     };
     if (newEnv['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {

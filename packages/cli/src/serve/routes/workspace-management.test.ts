@@ -13,6 +13,7 @@ import {
   type WorkspaceManagementRouteDeps,
   type WorkspaceRuntimeRemovalController,
 } from './workspace-management.js';
+import { NativeDirectoryPickerUnavailableError } from '../native-directory-picker.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -73,6 +74,16 @@ function createMockRegistry(
       return runtime && !draining.has(runtime) ? runtime : undefined;
     },
     getManagedByWorkspaceId: (id: string) => byId.get(id),
+    syncRuntimeMetadata: vi.fn((runtime: WorkspaceRuntime) => {
+      const current = byCwd.get(runtime.workspaceCwd);
+      if (!current || current === runtime) return;
+      if (runtime.displayName === undefined) {
+        delete current.displayName;
+      } else {
+        current.displayName = runtime.displayName;
+      }
+      current.registrationIds = [...(runtime.registrationIds ?? [])];
+    }),
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
     beginDrain: vi.fn((runtime: WorkspaceRuntime) => {
@@ -81,6 +92,7 @@ function createMockRegistry(
       return true;
     }),
     cancelDrain: vi.fn((runtime: WorkspaceRuntime) => draining.delete(runtime)),
+    commitDrain: vi.fn(),
     completeDrain: vi.fn((runtime: WorkspaceRuntime) => {
       draining.delete(runtime);
       const index = runtimes.indexOf(runtime);
@@ -777,6 +789,41 @@ describe('POST /workspaces', () => {
     expect(runtime.displayName).toBe('Old name');
   });
 
+  it('validates trust under the topology gate before publishing a runtime', async () => {
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const created = makeRuntime(REAL_DIR, { trusted: true });
+    const validated = makeRuntime(REAL_DIR, { trusted: false });
+    const events: string[] = [];
+    const validateWorkspaceRuntimeForPublication = vi.fn(async (runtime) => {
+      expect(runtime).toBe(created);
+      events.push('validated');
+      return validated;
+    });
+    const runWorkspaceTrustOperation = vi.fn(async (operation) => {
+      expect(registry.getByWorkspaceCwd(REAL_DIR)).toBeUndefined();
+      events.push('gate-entered');
+      const result = await operation();
+      events.push('gate-exited');
+      return result;
+    });
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(created),
+      validateWorkspaceRuntimeForPublication,
+      runWorkspaceTrustOperation,
+    });
+    const requestTrustReconcile = vi.fn().mockResolvedValue(undefined);
+    app.locals['requestTrustReconcile'] = requestTrustReconcile;
+
+    const res = await request(app).post('/workspaces').send({ cwd: REAL_DIR });
+
+    expect(res.status).toBe(201);
+    expect(res.body.trusted).toBe(false);
+    expect(registry.getByWorkspaceCwd(REAL_DIR)).toBe(validated);
+    expect(events).toEqual(['gate-entered', 'validated', 'gate-exited']);
+    expect(requestTrustReconcile).toHaveBeenCalledOnce();
+  });
+
   it('does not double-count a runtime while its addition hook is pending', async () => {
     const firstDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-a-'));
     const secondDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-b-'));
@@ -1441,6 +1488,8 @@ describe('DELETE /workspaces/:workspace', () => {
       runtimeRemoval,
       getAcpHandle: () => acpHandle as never,
     });
+    const requestTrustReconcile = vi.fn().mockResolvedValue(undefined);
+    app.locals['requestTrustReconcile'] = requestTrustReconcile;
 
     const res = await request(app).delete(
       `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
@@ -1459,6 +1508,7 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
       runtime,
     );
+    expect(requestTrustReconcile).toHaveBeenCalledOnce();
   });
 
   it('continues rolling gates back when cancel hooks throw', async () => {
@@ -1588,6 +1638,12 @@ describe('DELETE /workspaces/:workspace', () => {
       runtime,
       'workspace_removed',
     );
+    expect(deps.workspaceRegistry.commitDrain).toHaveBeenCalledWith(runtime);
+    expect(
+      vi.mocked(deps.workspaceRegistry.commitDrain).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(runtimeRemoval.disposeRuntime).mock.invocationCallOrder[0]!,
+    );
     expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
     expect(acpHandle.commitWorkspaceRemoval).toHaveBeenCalledWith(
       runtime.workspaceId,
@@ -1651,6 +1707,41 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
     ).toBeUndefined();
+  });
+
+  it('continues cleanup when registry drain commit fails after persistence commits', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([runtime]);
+    vi.mocked(registry.commitDrain).mockImplementationOnce(() => {
+      throw new Error('registry commit failed');
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockResolvedValue(1),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ force: true });
+
+    expect(res.status).toBe(200);
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.cancelDrain).not.toHaveBeenCalled();
+    expect(
+      registry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to commit workspace registry drain: registry commit failed',
+    );
   });
 
   it('accepts a URL-encoded absolute cwd selector', async () => {
@@ -2312,5 +2403,141 @@ describe('GET /workspace-path-suggestions', () => {
       .query({ prefix: '/' + 'x'.repeat(5000) });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_prefix');
+  });
+});
+
+describe('POST /workspace-directory-picker', () => {
+  it('remains available in loopback development without a configured token', async () => {
+    const mutate = vi.fn(
+      (options?: { strict?: boolean }) =>
+        (_req: Request, res: Response, next: () => void) => {
+          if (options?.strict) {
+            res.status(401).json({ code: 'token_required' });
+            return;
+          }
+          next();
+        },
+    );
+    const { app } = createApp({
+      mutate,
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body.selected).toBe(false);
+  });
+
+  it('returns the absolute path selected by the native picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/Users/me/code');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('returns selected=false when the user cancels', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: false,
+    });
+  });
+
+  it('returns 501 when the native picker is unavailable', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi
+        .fn()
+        .mockRejectedValue(new NativeDirectoryPickerUnavailableError()),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('directory_picker_unavailable');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker unavailable'),
+    );
+  });
+
+  it('returns 500 when the picker fails unexpectedly', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('directory_picker_failed');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker failed: boom'),
+    );
+  });
+
+  it('passes an abort signal to the picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/tmp');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    await request(app).post('/workspace-directory-picker');
+
+    expect(pickWorkspaceDirectory).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('does not abort the picker before it can resolve, for the body the Web Shell actually sends', async () => {
+    // A real picker resolves only after the user interacts — model that with a
+    // delay so an already-aborted signal surfaces as a rejection.
+    const pickWorkspaceDirectory = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<string | undefined>((resolve, reject) => {
+          setTimeout(() => {
+            if (signal?.aborted) {
+              reject(new Error('The operation was aborted'));
+              return;
+            }
+            resolve('/Users/me/code');
+          }, 50);
+        }),
+    );
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker').send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('still aborts a picker that is genuinely in flight when the client hangs up', async () => {
+    let observed: AbortSignal | undefined;
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn((signal?: AbortSignal) => {
+        observed = signal;
+        return new Promise<string | undefined>(() => {});
+      }),
+    });
+    const req = request(app).post('/workspace-directory-picker').send({});
+    req.end(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    req.abort();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(observed?.aborted).toBe(true);
   });
 });

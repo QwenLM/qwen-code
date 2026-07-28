@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -11,7 +11,10 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
-import type { SlashMenuState } from '../hooks/useComposerCore';
+import type {
+  MobileComposerBackend,
+  SlashMenuState,
+} from '../hooks/useComposerCore';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -21,13 +24,86 @@ Element.prototype.scrollIntoView = vi.fn();
 
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
+  pastedImages: [] as Array<{ data: string; media_type: string }>,
   removeTopTag: vi.fn(),
 }));
+
+// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      client: {
+        workspaceGitBranches: vi.fn().mockResolvedValue({
+          v: 1,
+          local: [],
+          remote: [],
+          tags: [],
+          recent: [],
+          head: 'main',
+          detached: false,
+        }),
+        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+        workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+        workspaceGitPush: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceGitPull: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceByCwd: () => ({
+          workspaceGit: vi.fn().mockResolvedValue({
+            v: 2,
+            branch: 'main',
+            detached: false,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+            hasUpstream: false,
+            ahead: 0,
+            behind: 0,
+            stashCount: 0,
+            operation: null,
+            computedAt: 0,
+          }),
+          workspaceGitBranches: vi.fn().mockResolvedValue({
+            v: 1,
+            local: [],
+            remote: [],
+            tags: [],
+            recent: [],
+            head: 'main',
+            detached: false,
+          }),
+          workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+          workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+          workspaceGitPush: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          workspaceGitPull: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      capabilities: { features: [] },
+    }),
+  };
+});
 
 const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
+  mobileComposer: null as unknown,
+  openHistorySearch: vi.fn(),
+}));
+
+const voiceButtonState = vi.hoisted(() => ({
+  onActiveChange: undefined as ((active: boolean) => void) | undefined,
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -48,11 +124,15 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
     useComposerCore: () => ({
       containerRef: React.createRef<HTMLDivElement>(),
       viewRef: { current: null },
+      mobileComposer: composerCoreState.mobileComposer,
       focus: composerCoreState.focus,
       submitText: vi.fn(),
       clearText: vi.fn(),
       getText: vi.fn(() => ''),
       hasInput: vi.fn(() => false),
+      hasAttachments:
+        mockComposerCoreState.pastedImages.length > 0 ||
+        mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
       handle: {
         focus: vi.fn(),
@@ -63,8 +143,11 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         addTags: vi.fn(),
         removeInlineTags: vi.fn(),
         submit: vi.fn(),
+        hasAttachments: () =>
+          mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.composerTags.length > 0,
       },
-      pastedImages: [],
+      pastedImages: mockComposerCoreState.pastedImages,
       removeImage: vi.fn(),
       composerTags: mockComposerCoreState.composerTags,
       removeTopTag: mockComposerCoreState.removeTopTag,
@@ -88,7 +171,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         searchActiveIndex: 0,
         searchInputRef: React.createRef<HTMLInputElement>(),
         searchUiRef: React.createRef<HTMLDivElement>(),
-        openHistorySearch: vi.fn(),
+        openHistorySearch: composerCoreState.openHistorySearch,
         closeSearch: vi.fn(),
         submitSearchMatch: vi.fn(),
         handleSearchKeyDown: vi.fn(),
@@ -119,7 +202,14 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
 });
 
 vi.mock('../voice/VoiceButton', () => ({
-  VoiceButton: () => <span data-testid="voice-button" />,
+  VoiceButton: ({
+    onActiveChange,
+  }: {
+    onActiveChange?: (active: boolean) => void;
+  }) => {
+    voiceButtonState.onActiveChange = onActiveChange;
+    return <span data-testid="voice-button" />;
+  },
 }));
 
 const mounted: Array<{
@@ -132,17 +222,22 @@ afterEach(() => {
   composerCoreState.slashMenu = null;
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
+  composerCoreState.mobileComposer = null;
+  composerCoreState.openHistorySearch.mockReset();
+  voiceButtonState.onActiveChange = undefined;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
     portalRoot.remove();
   }
   mockComposerCoreState.composerTags = [];
+  mockComposerCoreState.pastedImages = [];
   mockComposerCoreState.removeTopTag.mockReset();
 });
 
 function renderChatEditor(props: {
   composerTags?: WebShellComposerTag[];
+  pastedImages?: Array<{ data: string; media_type: string }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -154,10 +249,12 @@ function renderChatEditor(props: {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   customization?: WebShellCustomization;
 }) {
   const {
     composerTags,
+    pastedImages,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -165,6 +262,9 @@ function renderChatEditor(props: {
   } = props;
   if (composerTags) {
     mockComposerCoreState.composerTags = composerTags;
+  }
+  if (pastedImages) {
+    mockComposerCoreState.pastedImages = pastedImages;
   }
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
@@ -218,6 +318,36 @@ describe('ChatEditor voice toolbar integration', () => {
         visibleToolbarActions: [],
       }).querySelector('[data-testid="voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor attachment reporting', () => {
+  it('reports whether the composer has tags or pasted images', () => {
+    const onEmptyAttachmentsChange = vi.fn();
+    renderChatEditor({
+      onAttachmentsChange: onEmptyAttachmentsChange,
+    });
+    expect(onEmptyAttachmentsChange).toHaveBeenLastCalledWith(false);
+
+    const onTaggedAttachmentsChange = vi.fn();
+    renderChatEditor({
+      composerTags: [
+        {
+          id: 'file:reference',
+          kind: 'file',
+          value: 'reference',
+        },
+      ],
+      onAttachmentsChange: onTaggedAttachmentsChange,
+    });
+    expect(onTaggedAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const onImageAttachmentsChange = vi.fn();
+    renderChatEditor({
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+      onAttachmentsChange: onImageAttachmentsChange,
+    });
+    expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
   });
 });
 
@@ -725,5 +855,127 @@ describe('ChatEditor slash command popovers', () => {
       detail?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
     expect(composerCoreState.closeSlashMenu).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatEditor mobile composer quick actions', () => {
+  const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(
+    Navigator.prototype,
+    'maxTouchPoints',
+  );
+
+  function withTouchDevice(run: () => void) {
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      value: 5,
+      configurable: true,
+    });
+    try {
+      run();
+    } finally {
+      if (originalMaxTouchPoints) {
+        Object.defineProperty(
+          Navigator.prototype,
+          'maxTouchPoints',
+          originalMaxTouchPoints,
+        );
+      } else {
+        delete (navigator as unknown as Record<string, unknown>)[
+          'maxTouchPoints'
+        ];
+      }
+    }
+  }
+
+  function mobileComposerStub(): MobileComposerBackend {
+    return {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      value: '',
+      onChange: vi.fn(),
+      onPaste: vi.fn(),
+      placeholder: '',
+    };
+  }
+
+  function openQuickActions(container: HTMLElement) {
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="more actions"]',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle!.click());
+  }
+
+  it('maps the history quick action to the search UI on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      openQuickActions(container);
+
+      const historyButton = Array.from(
+        container.querySelectorAll('button'),
+      ).find((button) => button.textContent === 'Question history');
+      expect(historyButton).not.toBeUndefined();
+      act(() => historyButton!.click());
+
+      expect(composerCoreState.openHistorySearch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('hides the keyboard shortcut hints grid on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const mobileContainer = renderChatEditor({});
+      openQuickActions(mobileContainer);
+      expect(
+        Array.from(mobileContainer.querySelectorAll('button')).some(
+          (button) => button.textContent === 'Tab',
+        ),
+      ).toBe(false);
+
+      composerCoreState.mobileComposer = null;
+      const desktopContainer = renderChatEditor({});
+      openQuickActions(desktopContainer);
+      expect(
+        Array.from(desktopContainer.querySelectorAll('button')).some(
+          (button) => button.textContent === 'Tab',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('hides other toolbar actions while mobile voice capture is active', () => {
+    withTouchDevice(() => {
+      const container = renderChatEditor({
+        currentModel: 'qwen-test',
+        availableModels: [{ id: 'qwen-test' }],
+      });
+
+      expect(
+        container.querySelector('[data-web-shell-toolbar-leading]'),
+      ).toBeTruthy();
+      expect(
+        container.querySelector(
+          'button[aria-label="more actions"][data-hide-during-mobile-voice]',
+        ),
+      ).toBeTruthy();
+      expect(
+        container.querySelector('[data-web-shell-composer-submit]'),
+      ).toBeTruthy();
+
+      act(() => {
+        voiceButtonState.onActiveChange?.(true);
+      });
+
+      expect(
+        container.querySelector('[data-mobile-voice-active="true"]'),
+      ).toBeTruthy();
+
+      act(() => {
+        voiceButtonState.onActiveChange?.(false);
+      });
+
+      expect(
+        container.querySelector('[data-mobile-voice-active="true"]'),
+      ).toBeFalsy();
+    });
   });
 });

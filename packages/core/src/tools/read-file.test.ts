@@ -104,6 +104,7 @@ describe('ReadFileTool', () => {
         getProjectDir: () => path.join(tempRootDir, '.project'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
+      getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
       getContentGeneratorConfig: () => ({
@@ -322,6 +323,24 @@ describe('ReadFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should return allow for saved plan files under the plans directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.homedir(), '.qwen', 'plans', 'session-1.md'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should still return ask for ~/.qwen files outside the plans directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.homedir(), '.qwen', 'settings.json'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should return ask for paths directly under the OS temp directory', async () => {
@@ -870,7 +889,7 @@ describe('ReadFileTool', () => {
         );
       });
 
-      it('does not send ordinary images to the read_file bridge path', async () => {
+      it('preserves ordinary images for the shared tool-result bridge', async () => {
         const imagePath = path.join(tempRootDir, 'image.png');
         await fsp.writeFile(
           imagePath,
@@ -882,8 +901,12 @@ describe('ReadFileTool', () => {
 
         const result = await invocation.execute(abortSignal);
 
-        expect(result.llmContent).toContain('Unsupported image file');
-        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(result.llmContent).toMatchObject({
+          inlineData: {
+            mimeType: 'image/png',
+            displayName: 'image.png',
+          },
+        });
         expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
       });
     });

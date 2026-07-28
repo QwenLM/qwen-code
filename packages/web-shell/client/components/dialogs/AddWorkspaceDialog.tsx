@@ -12,6 +12,7 @@ import {
 } from '../ui/field';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
+import { FolderOpenIcon } from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -34,6 +35,7 @@ interface AddWorkspaceDialogProps {
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
+  onPick?: () => Promise<string | undefined>;
   persistenceSupported?: boolean;
 }
 
@@ -52,6 +54,7 @@ export function AddWorkspaceDialog({
   onAdd,
   displayNameEnabled = false,
   onSuggest,
+  onPick,
   persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
@@ -64,6 +67,7 @@ export function AddWorkspaceDialog({
   const [listOpen, setListOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
   const [hostSep, setHostSep] = useState('/');
+  const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
@@ -142,6 +146,25 @@ export function AddWorkspaceDialog({
     },
     [hostSep, closeList],
   );
+
+  const pickDirectory = useCallback(async () => {
+    if (!onPick) return;
+    setBrowsing(true);
+    setError(null);
+    try {
+      const selectedPath = await onPick();
+      if (selectedPath) {
+        ++suggestSeqRef.current;
+        setPath(selectedPath);
+        setSuggestions([]);
+        closeList();
+      }
+    } catch {
+      setError(t('sidebar.addWorkspaceBrowseError'));
+    } finally {
+      setBrowsing(false);
+    }
+  }, [onPick, closeList, t]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -242,40 +265,54 @@ export function AddWorkspaceDialog({
               {t('sidebar.addWorkspacePath')}
             </FieldLabel>
             <div className="relative">
-              <Input
-                ref={inputRef}
-                id="add-workspace-path"
-                type="text"
-                placeholder="/absolute/path/to/project"
-                value={path}
-                onChange={(e) => {
-                  setPath(e.target.value);
-                  if (error) setError(null);
-                }}
-                onKeyDown={handleInputKeyDown}
-                onBlur={() => {
-                  // Delay so a mousedown on a suggestion wins over blur.
-                  setTimeout(() => {
-                    suppressNextFetchOpenRef.current = true;
-                    closeList();
-                  }, 100);
-                }}
-                disabled={submitting}
-                autoCapitalize="off"
-                autoCorrect="off"
-                autoComplete="off"
-                spellCheck={false}
-                role="combobox"
-                aria-expanded={showList}
-                aria-controls={showList ? LISTBOX_ID : undefined}
-                aria-activedescendant={
-                  showList && highlight >= 0
-                    ? `${LISTBOX_ID}-${highlight}`
-                    : undefined
-                }
-                aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
-                aria-invalid={error ? true : undefined}
-              />
+              <div className="flex gap-2">
+                <Input
+                  ref={inputRef}
+                  id="add-workspace-path"
+                  type="text"
+                  placeholder="/absolute/path/to/project"
+                  value={path}
+                  onChange={(e) => {
+                    setPath(e.target.value);
+                    if (error) setError(null);
+                  }}
+                  onKeyDown={handleInputKeyDown}
+                  onBlur={() => {
+                    // Delay so a mousedown on a suggestion wins over blur.
+                    setTimeout(() => {
+                      suppressNextFetchOpenRef.current = true;
+                      closeList();
+                    }, 100);
+                  }}
+                  disabled={submitting || browsing}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  spellCheck={false}
+                  role="combobox"
+                  aria-expanded={showList}
+                  aria-controls={showList ? LISTBOX_ID : undefined}
+                  aria-activedescendant={
+                    showList && highlight >= 0
+                      ? `${LISTBOX_ID}-${highlight}`
+                      : undefined
+                  }
+                  aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
+                  aria-invalid={error ? true : undefined}
+                />
+                {onPick && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => void pickDirectory()}
+                    disabled={submitting || browsing}
+                  >
+                    <FolderOpenIcon aria-hidden="true" />
+                    {t('sidebar.addWorkspaceBrowse')}
+                  </Button>
+                )}
+              </div>
               {showList && (
                 <ul
                   id={LISTBOX_ID}
