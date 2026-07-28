@@ -9,7 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as atomicFileWrite from '../utils/atomicFileWrite.js';
-import { recordAutoSkillUsage, runAutoSkillCurator } from './skill-curator.js';
+import {
+  recordAutoSkillUsage,
+  restoreArchivedAutoSkill,
+  runAutoSkillCurator,
+} from './skill-curator.js';
 
 // Wrap atomicWriteJSON so it delegates to the real implementation by default
 // (seeding and normal writes still persist) but can be forced to fail once,
@@ -100,6 +104,51 @@ describe('auto-skill curator rollback', () => {
     // not left stranded in the archive.
     await expect(fs.access(liveManifest)).resolves.toBeUndefined();
     await expect(fs.access(archivedManifest)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('rolls back a restore move when persisting state fails', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-old', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'old', level: 'project', filePath: manifest },
+      old,
+    );
+    // Archive the skill so there is an archived copy to restore.
+    await runAutoSkillCurator(projectRoot, { now });
+
+    const liveManifest = path.join(
+      projectRoot,
+      '.qwen',
+      'skills',
+      'auto-skill-old',
+      'SKILL.md',
+    );
+    const archivedManifest = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-old',
+      'SKILL.md',
+    );
+    await expect(fs.access(archivedManifest)).resolves.toBeUndefined();
+
+    // Fail the single state write that runs after the restore rename.
+    vi.mocked(atomicFileWrite.atomicWriteJSON).mockRejectedValueOnce(
+      new Error('simulated persistence failure'),
+    );
+
+    await expect(
+      restoreArchivedAutoSkill(projectRoot, 'auto-skill-old', now),
+    ).rejects.toThrow('simulated persistence failure');
+
+    // The rename was rolled back: the skill is back in the archive and is not
+    // left stranded in the live library without a state record.
+    await expect(fs.access(archivedManifest)).resolves.toBeUndefined();
+    await expect(fs.access(liveManifest)).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });
