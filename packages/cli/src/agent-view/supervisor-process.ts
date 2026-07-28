@@ -355,7 +355,7 @@ class AgentViewSupervisorProcessHandler
     const token = randomUUID();
     const now = new Date().toISOString();
     const activeCwd = path.resolve(adoption.activeCwd);
-    const projectCwd = activeCwd;
+    const projectCwd = path.resolve(adoption.projectCwd);
     const createdAt = existingState?.createdAt ?? now;
     const adoptingState = {
       schemaVersion: 1 as const,
@@ -1955,17 +1955,20 @@ async function updateExitedSession(
 ): Promise<void> {
   const state = await readAgentViewSessionState(sessionId, options);
   if (!state) return;
-  if (
-    state.ownership !== 'managed' ||
-    state.sessionState === 'stopped' ||
-    state.processState === 'hibernated'
-  ) {
+  if (state.ownership !== 'managed' || state.processState === 'hibernated') {
     return;
   }
   await writeAgentViewSessionState(
     {
       ...state,
-      sessionState: exitCode === 0 ? 'completed' : 'failed',
+      sessionState:
+        state.sessionState === 'stopped' ||
+        state.sessionState === 'failed' ||
+        state.sessionState === 'completed'
+          ? state.sessionState
+          : exitCode === 0
+            ? 'completed'
+            : 'failed',
       processState: 'exited',
       updatedAt: new Date().toISOString(),
     },
@@ -1981,6 +1984,7 @@ async function markFailedSession(
 ): Promise<void> {
   const state = await readAgentViewSessionState(sessionId, options);
   if (!state) return;
+  if (state.ownership !== 'managed') return;
   const now = new Date().toISOString();
   await writeAgentViewSessionState(
     {
@@ -2058,7 +2062,9 @@ async function applyWorkerEvent(
             ? getDequeuedPromptActivityPatch(existingActivity)
             : {}),
           capabilities:
-            event.type === 'ready' ? (event.capabilities ?? []) : [],
+            event.type === 'ready'
+              ? (event.capabilities ?? [])
+              : (existingActivity?.capabilities ?? []),
         }
       : { capabilities: [] };
   const lastActivityAt = shouldAdvanceActivityTime({
