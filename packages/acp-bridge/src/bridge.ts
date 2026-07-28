@@ -4234,6 +4234,96 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return replayFieldsFor(entry, 'load');
   }
 
+  /**
+   * Read a `qwen.session.recordId` off a transcript-page event. Unlike
+   * `replayRecordId` (which only handles the eventBus-wrapped
+   * `data.update._meta` shape), persisted-transcript events carry the
+   * ACP update flat under `data` with `_meta` at `data._meta`, so this
+   * accepts both shapes.
+   */
+  function transcriptEventRecordId(event: BridgeEvent): string | undefined {
+    if (event.type !== 'session_update') return undefined;
+    const data = event.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data))
+      return undefined;
+    const rec = data as Record<string, unknown>;
+    const update = rec['update'];
+    const meta =
+      update && typeof update === 'object' && !Array.isArray(update)
+        ? (update as Record<string, unknown>)['_meta']
+        : rec['_meta'];
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta))
+      return undefined;
+    const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
+    return typeof recordId === 'string' ? recordId : undefined;
+  }
+
+  /**
+   * Backfill a pagination anchor when the replay snapshot carries a
+   * `history_truncated` marker with no `recordId`.
+   *
+   * Live sessions whose in-flight turn pushed the journal past its cap
+   * before any turn boundary fired have no recordId-bearing
+   * `session_update` in the retained window — `qwen.session.recordId`
+   * is only stamped during replay of the persisted transcript
+   * (HistoryReplayer), never on the live event stream — so the
+   * compaction engine's marker ships without an anchor and the client
+   * has no `beforeRecordId` to page backward with. Read the oldest
+   * recordId from the last persisted transcript page and return it so
+   * the client can still recover the dropped history. The oldest anchor
+   * is deliberately conservative: it cannot re-fetch records the client
+   * already displays, at the cost of leaving records newer than the
+   * anchor in the same page unreachable via backward pagination.
+   * Best-effort: any failure
+   * (missing transcript, workspace timeout, no recordId in the page)
+   * yields `undefined` and the caller simply omits the field.
+   */
+  async function resolveHistoryAnchorRecordId(
+    entry: SessionEntry,
+    replayFields: Pick<
+      BridgeRestoredSession,
+      'compactedReplay' | 'liveJournal'
+    >,
+  ): Promise<string | undefined> {
+    const events = [
+      ...(replayFields.compactedReplay ?? []),
+      ...(replayFields.liveJournal ?? []),
+    ];
+    const hasMarker = events.some((e) => e.type === 'history_truncated');
+    if (!hasMarker) return undefined;
+    // A marker that already carries a recordId (or a retained
+    // session_update that does) needs no backfill — the client can
+    // anchor on it directly. `transcriptEventRecordId` reads both the
+    // eventBus-wrapped (`data.update._meta`) and the flat persisted
+    // (`data._meta`) shapes so this holds for the in-memory snapshot
+    // and the refreshed persisted page alike.
+    const hasRecordId = events.some(
+      (e) =>
+        transcriptEventRecordId(e) !== undefined ||
+        (e.type === 'history_truncated' &&
+          isRecord(e.data) &&
+          typeof e.data['recordId'] === 'string'),
+    );
+    if (hasRecordId) return undefined;
+    try {
+      const page = await requestSessionTranscriptPage({
+        sessionId: entry.sessionId,
+        direction: 'backward',
+        limit: 50,
+      });
+      // The backward page is chronological ascending; the first recordId
+      // we hit is the oldest in the last page — a conservative anchor
+      // that cannot re-fetch displayed records.
+      for (const event of page.events) {
+        const recordId = transcriptEventRecordId(event);
+        if (recordId !== undefined) return recordId;
+      }
+    } catch {
+      // Best-effort: a failed read must not break session load.
+    }
+    return undefined;
+  }
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -4266,6 +4356,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load' && req.historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(existing, req.historyPageSize)
           : replayFieldsFor(existing, action);
+      // Backfill a pagination anchor when the snapshot's truncation
+      // marker carries no recordId (live session, in-flight turn capped
+      // the journal before any turn boundary). Best-effort; omitted on
+      // any failure so load never breaks on its account.
+      const historyAnchorRecordId =
+        action === 'load'
+          ? await resolveHistoryAnchorRecordId(existing, replayFields)
+          : undefined;
       if (byId.get(req.sessionId) !== existing || existing.closing) {
         throw new SessionNotFoundError(req.sessionId);
       }
@@ -4290,6 +4388,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         state: existing.restoreState ?? {},
         hasActivePrompt: existing.promptActive,
         ...replayFields,
+        ...(historyAnchorRecordId !== undefined
+          ? { historyAnchorRecordId }
+          : {}),
       };
     }
 

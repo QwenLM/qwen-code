@@ -1607,6 +1607,17 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('uses the effective session writer lease gate by default', async () => {
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
+      const service = new ChatRecordingService(mockConfig);
+
+      service.recordUserMessage([{ text: 'legacy' }]);
+      await service.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
     it('retries directory setup after a synchronous failure', async () => {
       const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
       mkdirSpy.mockImplementationOnce(() => {

@@ -22,7 +22,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     steps:
-      - name: 'Create autofix-ready issue'
+      - name: 'Create or update autofix-ready issue'
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           REPO: '${{ github.repository }}'
@@ -38,6 +38,7 @@ jobs:
         run: |-
           short_sha="${HEAD_SHA:0:12}"
           marker="qwen-main-ci-failure:${HEAD_SHA}"
+          title_prefix="Main CI failed:"
 
           apply_autofix_route() {
             gh issue edit "$1" \
@@ -46,7 +47,8 @@ jobs:
               --add-assignee "${AUTOFIX_BOT}"
           }
 
-          existing_issue="$(
+          # Check if an issue already exists for this exact commit SHA
+          existing_sha_issue="$(
             gh issue list \
               --repo "${REPO}" \
               --state open \
@@ -55,30 +57,68 @@ jobs:
               --jq '.[0].number // ""'
           )"
 
-          if [[ -n "${existing_issue}" ]]; then
-            echo "Issue #${existing_issue} already tracks CI failure for ${HEAD_SHA}."
-            apply_autofix_route "${existing_issue}"
+          if [[ -n "${existing_sha_issue}" ]]; then
+            echo "Issue #${existing_sha_issue} already tracks CI failure for ${HEAD_SHA}."
+            apply_autofix_route "${existing_sha_issue}"
             exit 0
           fi
 
+          # Search for an existing open issue for the same workflow failure,
+          # restricted to issues created by this bot so a same-shaped issue
+          # from another user cannot enter the autofix route.
+          bot_login="$(gh api user --jq .login)"
+          existing_workflow_issue="$(
+            gh issue list \
+              --repo "${REPO}" \
+              --state open \
+              --search "\"${title_prefix} ${WORKFLOW_NAME}\" in:title" \
+              --json number,title,author \
+              --jq "[.[] | select(.author.login == \"${bot_login}\") | select(.title | startswith(\"${title_prefix} ${WORKFLOW_NAME} on \"))] | .[0].number // \"\""
+          )"
+
+          if [[ -n "${existing_workflow_issue}" ]]; then
+            echo "Found existing issue #${existing_workflow_issue} for ${WORKFLOW_NAME} failure. Adding comment instead of creating new issue."
+
+            # Add a comment with the new failure details
+            comment_file="$(mktemp)"
+            {
+              echo "## Additional CI Failure"
+              echo ""
+              echo "- Workflow: ${WORKFLOW_NAME}"
+              echo "- Run: ${WORKFLOW_RUN_URL}"
+              echo "- Run ID: ${WORKFLOW_RUN_ID}"
+              echo "- Commit: ${HEAD_SHA}"
+              echo ""
+              echo "<!-- ${marker} -->"
+            } > "${comment_file}"
+
+            gh issue comment "${existing_workflow_issue}" \
+              --repo "${REPO}" \
+              --body-file "${comment_file}"
+
+            apply_autofix_route "${existing_workflow_issue}"
+            exit 0
+          fi
+
+          # No existing issue found, create a new one
           body_file="$(mktemp)"
           {
             echo "<!-- ${marker} -->"
-            echo
+            echo ""
             echo "A main-branch CI run failed on \`${HEAD_BRANCH}\`."
-            echo
+            echo ""
             echo "- Workflow: ${WORKFLOW_NAME}"
             echo "- Run: ${WORKFLOW_RUN_URL}"
             echo "- Run ID: ${WORKFLOW_RUN_ID}"
             echo "- Commit: ${HEAD_SHA}"
-            echo
+            echo ""
             echo "This issue is labeled for autofix so the existing agent can create a repair PR."
           } > "${body_file}"
 
           issue_url="$(
             gh issue create \
               --repo "${REPO}" \
-              --title "Main CI failed: ${WORKFLOW_NAME} on ${short_sha}" \
+              --title "${title_prefix} ${WORKFLOW_NAME} on ${short_sha}" \
               --body-file "${body_file}"
           )"
 

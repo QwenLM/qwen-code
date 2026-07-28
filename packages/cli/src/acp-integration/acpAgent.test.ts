@@ -2439,6 +2439,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    ['disabled', false, true],
+    ['enabled', true, false],
+  ])(
+    'keeps the session writer lease %s until the ACP process restarts',
+    async (_label, startupEnabled, requestEnabled) => {
+      await setupSessionMocks(`session-writer-lease-${startupEnabled}`);
+      mockConfig.isSessionWriterLeaseEnabled = vi
+        .fn()
+        .mockReturnValue(startupEnabled);
+
+      const startupSettings = makeSessionSettings();
+      startupSettings.merged.experimental = {
+        sessionWriterLease: startupEnabled,
+      };
+      const requestSettings = makeSessionSettings();
+      requestSettings.merged.experimental = {
+        sessionWriterLease: requestEnabled,
+      };
+      vi.mocked(loadSettings).mockReturnValue(requestSettings);
+
+      const agentPromise = runAcpAgent(mockConfig, startupSettings, mockArgv);
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+      expect(sessionSettings?.experimental?.sessionWriterLease).toBe(
+        startupEnabled,
+      );
+      expect(requestSettings.merged.experimental?.sessionWriterLease).toBe(
+        requestEnabled,
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
   it('profiles newSession stages under the daemon trace context', async () => {
     const parentContext = { trace: 'parent' };
     mockExtractDaemonTraceContext.mockReturnValue(parentContext);
