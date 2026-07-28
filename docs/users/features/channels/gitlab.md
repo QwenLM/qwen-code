@@ -141,19 +141,20 @@ The adapter always sets `isMentioned = true` on dispatched envelopes, because Gi
 The adapter uses GitLab's Todos API as the message source:
 
 1. **Poll** `GET /todos?state=pending` for new todos
-2. **Clean up stale todos**: todos with `id <= cursor` are marked done (best-effort) to prevent them from being re-fetched on every poll
-3. **Filter** by `id > cursor` and configured `action_prompt_template`
-4. **Detect mention type** via `target_url` anchor:
+2. **First-poll drain**: if the cursor has never been initialized (`initialized: false`), all pending todos are marked done without dispatch and the cursor advances to the max todo ID. This prevents a backlog flood on first start.
+3. **Clean up stale todos**: todos with `id <= cursor` are marked done (best-effort) to prevent them from being re-fetched on every poll
+4. **Filter** by `id > cursor` and configured `action_prompt_template`
+5. **Detect mention type** via `target_url` anchor:
    - `#note_123` present → comment mention → text is `todo.body` (the comment)
    - No anchor → description mention → text is the issue/MR description
-5. **Dispatch** the envelope through `handleInbound` (GroupGate applies mention policy)
-6. **Advance cursor** and **mark todo done** (best-effort)
+6. **Dispatch** the envelope through `handleInbound` (GroupGate runs but always passes since `isMentioned` is forced true)
+7. **Advance cursor** and **mark todo done** (best-effort)
 
 The cursor (`lastProcessedId`) advances regardless of dispatch success or failure. Failed dispatches post a ⚠️ error comment on the issue/MR and are not retried — the user can re-mention the bot to trigger a new todo.
 
 ## Known Limitations
 
-- **First start skips existing pending todos.** The cursor initializes to `0` on first launch. Pre-existing pending todos are marked done on the first poll cycle to avoid perpetual re-fetching.
+- **First start skips existing pending todos.** The cursor initializes to `{ lastProcessedId: 0, initialized: false }` on first launch. On the first poll cycle, all pre-existing pending todos are marked done without dispatch (the `initialized` flag gates this one-time drain), preventing a backlog flood.
 - The bot does not read prior conversation history — only the triggering content is processed.
 - **Confidential (internal) notes:** If someone @mentions the bot in a confidential note, the todo body contains that internal text and the agent will process it. The bot's reply is always posted as a **public** note, potentially exposing internal discussion. GitLab's todo API does not expose note visibility, so the adapter cannot filter this. Avoid @mentioning the bot in confidential notes.
 - Requires `read_api` + `api` PAT scopes. Group-level or project-level tokens work if they have these scopes.
