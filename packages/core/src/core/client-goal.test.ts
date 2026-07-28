@@ -813,7 +813,7 @@ describe('GeminiClient Goal admission', () => {
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
   });
 
-  it('keeps one recursive budget and loop detector across Goal-owned Hook segments', async () => {
+  it('resets the loop detector before each Goal-owned Hook continuation', async () => {
     const { client, config } = setupGoalClient();
     const reset = vi.spyOn(client['loopDetector'], 'reset');
     const messageBus = {
@@ -848,7 +848,8 @@ describe('GeminiClient Goal admission', () => {
 
     expect(turnMocks.run).toHaveBeenCalledTimes(2);
     expect(messageBus.request).toHaveBeenCalledTimes(2);
-    expect(reset).not.toHaveBeenCalled();
+    expect(reset).toHaveBeenCalledTimes(2);
+    expect(reset).toHaveBeenCalledWith('goal-prompt');
   });
 
   it('does not recurse with a stale permit when Goal preemption lands while draining steer input', async () => {

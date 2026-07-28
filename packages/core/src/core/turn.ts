@@ -471,28 +471,17 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      const responseStream = this.goalContext
-        ? await this.chat.sendMessageStream(
-            model,
-            {
-              message: req,
-              config: {
-                abortSignal: signal,
-              },
-            },
-            this.prompt_id,
-            { ...this.goalContext },
-          )
-        : await this.chat.sendMessageStream(
-            model,
-            {
-              message: req,
-              config: {
-                abortSignal: signal,
-              },
-            },
-            this.prompt_id,
-          );
+      const responseStream = await this.chat.sendMessageStream(
+        model,
+        {
+          message: req,
+          config: {
+            abortSignal: signal,
+          },
+        },
+        this.prompt_id,
+        this.goalContext,
+      );
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {

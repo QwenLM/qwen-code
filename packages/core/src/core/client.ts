@@ -3264,6 +3264,7 @@ export class GeminiClient {
               },
             };
 
+            this.loopDetector.reset(prompt_id);
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
