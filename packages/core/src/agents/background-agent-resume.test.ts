@@ -63,6 +63,16 @@ describe('BackgroundAgentResumeService', () => {
         advertisedTools: FunctionDeclaration[];
         registeredTools?: FunctionDeclaration[];
       };
+      // Optional capability context used to exercise the non-empty branches of
+      // buildForkResumeCapabilityReminder (MCP instructions, skills, and
+      // deferred tools). Defaults keep the reminder minimal for other tests.
+      mcpServerInstructions?: Map<string, string>;
+      deferredToolSummary?: Array<{
+        name: string;
+        description: string;
+        serverName?: string;
+      }>;
+      skillManager?: unknown;
       hookSystem?:
         | {
             fireSubagentStartEvent: ReturnType<typeof vi.fn>;
@@ -101,9 +111,13 @@ describe('BackgroundAgentResumeService', () => {
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
-      getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      getDeferredToolSummary: vi
+        .fn()
+        .mockReturnValue(options.deferredToolSummary ?? []),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
-      getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getMcpServerInstructions: vi
+        .fn()
+        .mockReturnValue(options.mcpServerInstructions ?? new Map()),
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
         (
           options.currentForkRuntime?.registeredTools ??
@@ -161,7 +175,9 @@ describe('BackgroundAgentResumeService', () => {
               }),
             }
           : undefined,
-      getSkillManager: () => undefined,
+      getSkillManager: () => options.skillManager,
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
       getToolRegistry: () => stubToolRegistry,
@@ -2434,6 +2450,84 @@ describe('BackgroundAgentResumeService', () => {
     );
     expect(registry.get(agentId)?.error).toBeUndefined();
     expect(createSpy).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
+
+  it('injects live MCP, skill, and deferred-tool reminders into the resumed fork prompt', async () => {
+    const sessionId = 'session-fork-cap-reminders';
+    const agentId = 'agent-fork-cap-reminders';
+    seedResumableForkTask(sessionId, agentId);
+
+    const execute = vi.fn(async (_context: unknown) => undefined);
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockResolvedValue(subagent as unknown as AgentHeadless);
+
+    const { service } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        // SKILL must be in the resolved tool surface so the skills branch of
+        // buildForkResumeCapabilityReminder runs.
+        advertisedTools: [{ name: ToolNames.SKILL }, { name: 'Read' }],
+        registeredTools: [{ name: ToolNames.SKILL }, { name: 'Read' }],
+      },
+      mcpServerInstructions: new Map([
+        ['docs-server', 'Use ISO-8601 dates when calling docs tools.'],
+      ]),
+      deferredToolSummary: [
+        { name: 'web_search', description: 'Search the web.' },
+      ],
+      skillManager: {
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'auto-skill-demo',
+            description: 'Demo project skill',
+            level: 'project',
+            disableModelInvocation: false,
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const contextArg = execute.mock.calls[0]?.[0] as
+      | { get(key: string): unknown }
+      | undefined;
+    if (!contextArg) {
+      throw new Error('Expected resume execute context');
+    }
+    const taskPrompt = String(contextArg.get('task_prompt'));
+
+    // MCP server-instructions reminder branch.
+    expect(taskPrompt).toContain('The text below was supplied by the MCP');
+    expect(taskPrompt).toContain('docs-server');
+    expect(taskPrompt).toContain('Use ISO-8601 dates when calling docs tools.');
+    // Skills reminder branch (gated on ToolNames.SKILL being present).
+    expect(taskPrompt).toContain(
+      'The following skills are available for use with the Skill tool',
+    );
+    expect(taskPrompt).toContain('auto-skill-demo');
+    // Deferred-tools reminder branch.
+    expect(taskPrompt).toContain('web_search');
+    expect(taskPrompt).toContain(ToolNames.TOOL_SEARCH);
+
     createSpy.mockRestore();
   });
 

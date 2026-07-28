@@ -1588,11 +1588,17 @@ export class BackgroundAgentResumeService {
       const geminiClient = this.config.getGeminiClient();
       const generationConfig = geminiClient?.getChat().getGenerationConfig();
       if (!generationConfig?.systemInstruction) {
+        debugLogger.debug(
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent Gemini client or system instruction is missing.',
+        );
         return undefined;
       }
 
       const advertisedNames = extractParentToolNames(generationConfig);
       if (advertisedNames.length === 0) {
+        debugLogger.debug(
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_advertised_tools): parent advertises no inheritable tools after subagent exclusions.',
+        );
         return undefined;
       }
 
@@ -1608,6 +1614,9 @@ export class BackgroundAgentResumeService {
         registeredNames.has(name),
       );
       if (toolNames.length === 0) {
+        debugLogger.debug(
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_registered_tools): none of the parent advertised tools are present in the live registry.',
+        );
         return undefined;
       }
 
