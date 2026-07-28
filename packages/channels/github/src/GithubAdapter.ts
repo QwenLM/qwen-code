@@ -250,12 +250,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           case 'review_requested':
             if (threadId.startsWith('pr:')) {
               await this.processDirectLane(ctx, 'review_requested');
+              await this.processCommentLane(ctx, true);
             } else {
               await this.processCommentLane(ctx, false);
             }
             break;
           case 'assign':
             await this.processDirectLane(ctx, 'assign');
+            await this.processCommentLane(ctx, true);
             break;
           case 'author':
           case 'comment':
@@ -317,8 +319,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
 
-    if (!onlyMentioned && !dispatched && !ctx.lastReadAt) {
-      await this.tryFirstContactBody(ctx);
+    if (!dispatched && !ctx.lastReadAt) {
+      await this.tryFirstContactBody(ctx, onlyMentioned);
     }
   }
 
@@ -354,8 +356,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\nTrigger: ${reason}.\n${details}`,
     };
-    await this.dispatchEnvelope(envelope, ctx.issueNumber);
-    this.recordDispatched('dispatchedEvents', trigger.key);
+    if (await this.dispatchEnvelope(envelope, ctx.issueNumber)) {
+      this.recordDispatched('dispatchedEvents', trigger.key);
+    }
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
@@ -511,7 +514,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return data;
   }
 
-  private async tryFirstContactBody(ctx: NotificationContext): Promise<void> {
+  private async tryFirstContactBody(
+    ctx: NotificationContext,
+    requireMention = false,
+  ): Promise<void> {
     // First contact is gated by `last_read_at` in the caller, but a thread can
     // be re-fetched with `last_read_at` still null if marking it read failed
     // (its updated_at was bumped past the cutoff). Dedup on an explicit record
@@ -530,6 +536,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
         : false;
+      if (requireMention && !isMentioned) return;
 
       const text = this.botUsername
         ? stripBotMention(body, this.botUsername)
