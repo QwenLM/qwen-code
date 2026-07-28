@@ -853,10 +853,18 @@ export class ToolRegistry {
       candidates.push(tool.name);
       totalChars += JSON.stringify(tool.schema).length;
     }
-    if (
-      candidates.length === 0 ||
-      Math.ceil(totalChars / CHARS_PER_TOKEN) > budgetTokens
-    ) {
+    const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
+    if (candidates.length === 0) {
+      debugLogger.debug(
+        `preloadDeferredToolsWithinBudget: no deferrable tools to preload (budget=${budgetTokens} tokens).`,
+      );
+      return 0;
+    }
+    if (estimatedTokens > budgetTokens) {
+      debugLogger.debug(
+        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch ` +
+          `(estimated ${estimatedTokens} tokens > budget ${budgetTokens} tokens).`,
+      );
       return 0;
     }
     let revealed = 0;
@@ -866,6 +874,10 @@ export class ToolRegistry {
         revealed++;
       }
     }
+    debugLogger.debug(
+      `preloadDeferredToolsWithinBudget: preloading ${candidates.length} deferred tool(s) ` +
+        `(estimated ${estimatedTokens} tokens <= budget ${budgetTokens} tokens); ${revealed} newly revealed.`,
+    );
     return revealed;
   }
 
