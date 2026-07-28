@@ -1267,6 +1267,7 @@ const EN: Messages = {
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
+  'fork.siderUnavailable': 'Side tasks are not available in this session.',
   'fork.started': (v) =>
     `Started background agent: "${v?.name ?? ''}". Track it in background tasks.`,
   'command.hidden': 'This command is not available.',
@@ -3738,6 +3739,7 @@ const ZH: Messages = {
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',
+  'fork.siderUnavailable': '当前会话不支持侧边任务。',
   'fork.started': (v) =>
     `已启动后台智能体："${v?.name ?? ''}"，可在后台任务中查看。`,
   'command.hidden': '该命令不可用。',

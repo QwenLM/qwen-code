@@ -358,7 +358,6 @@ const MAX_TOASTS = 4;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
-const ENVIRONMENT_PANEL_OCCUPIED_WIDTH = 332;
 const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
@@ -2191,12 +2190,9 @@ export function App({
   );
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
-  const [environmentPanelSuppressed, setEnvironmentPanelSuppressed] =
-    useState(false);
   const preserveEnvironmentPanelOnArtifactOpenRef = useRef(false);
   useLayoutEffect(() => {
     setEnvironmentPanelOpen(false);
-    setEnvironmentPanelSuppressed(false);
   }, [connection.sessionId]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
@@ -2865,7 +2861,6 @@ export function App({
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
-    setEnvironmentPanelSuppressed(false);
     setSideTaskCatalog((catalog) =>
       catalog.items.length === 0 ? { ...catalog, loaded: false } : catalog,
     );
@@ -2898,7 +2893,7 @@ export function App({
     setArtifactPanelTabs((tabs) => {
       const nextTabs = tabs.filter((tab) => tab.id !== tabId);
       if (nextTabs.length === 0) {
-        setEnvironmentPanelSuppressed(false);
+        setArtifactPanelOpen(false);
         setActiveArtifactPanelTabId(null);
         setReviewChanges([]);
         setSelectedReviewPath(null);
@@ -6313,7 +6308,6 @@ export function App({
   }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
-    setEnvironmentPanelSuppressed(false);
     setEnvironmentPanelOpen(true);
     setBackgroundTasksRefreshTrigger((value) => value + 1);
   }, [requireActiveSessionForLocalCommand]);
@@ -6323,7 +6317,6 @@ export function App({
         if (!artifactPanelOpenRef.current) {
           preserveEnvironmentPanelOnArtifactOpenRef.current = true;
         }
-        setEnvironmentPanelSuppressed(false);
         if (task.kind === 'monitor') {
           handleOpenMonitorDetails(task);
         } else {
@@ -6727,7 +6720,9 @@ export function App({
               return true;
             }
             if (directive.toLowerCase() === 'sider') {
-              createSideTask();
+              if (!createSideTask()) {
+                pushToast('warning', t('fork.siderUnavailable'));
+              }
               return true;
             }
             sessionActions
@@ -8069,7 +8064,6 @@ export function App({
     chatWidthMode !== 'wide' && environmentPanelCanDock;
   const environmentPanelVisible =
     environmentPanelOpen &&
-    !environmentPanelSuppressed &&
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
@@ -8078,7 +8072,6 @@ export function App({
       setEnvironmentPanelOpen(false);
       return;
     }
-    setEnvironmentPanelSuppressed(false);
     setEnvironmentPanelOpen(true);
   }, []);
   const dismissEnvironmentPanel = useCallback(
@@ -8101,11 +8094,7 @@ export function App({
     const updateWidth = () => {
       const paneWidth = pane.getBoundingClientRect().width;
       if (paneWidth <= 0) return;
-      const availableWidth =
-        paneWidth -
-        (environmentPanelVisible && environmentPanelFits
-          ? 0
-          : ENVIRONMENT_PANEL_OCCUPIED_WIDTH);
+      const availableWidth = paneWidth;
       setMessageAreaWidth((current) =>
         current === availableWidth ? current : availableWidth,
       );
@@ -8118,7 +8107,7 @@ export function App({
       window.removeEventListener('resize', updateWidth);
       observer.disconnect();
     };
-  }, [environmentPanelFits, environmentPanelVisible]);
+  }, []);
   const previousEnvironmentCanDockRef = useRef(environmentPanelCanDock);
   useLayoutEffect(() => {
     const crossedDockBreakpoint =

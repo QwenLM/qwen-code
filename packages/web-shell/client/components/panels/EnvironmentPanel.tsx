@@ -272,12 +272,14 @@ export function EnvironmentPanel({
                         <span className={styles.agentTag}>fork</span>
                       )}
                       <span className={styles.agentName}>
-                        {agentDisplayName(task).trim() &&
-                        agentDisplayName(task).trim().toLowerCase() !== 'agent'
-                          ? agentDisplayName(task)
-                          : t('environment.unnamedAgent', {
-                              index: index + 1,
-                            })}
+                        {(() => {
+                          const name = agentDisplayName(task).trim();
+                          return name && name.toLowerCase() !== 'agent'
+                            ? name
+                            : t('environment.unnamedAgent', {
+                                index: index + 1,
+                              });
+                        })()}
                       </span>
                     </span>
                     <span
