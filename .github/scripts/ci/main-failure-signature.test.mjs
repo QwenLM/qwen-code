@@ -451,6 +451,29 @@ test('a test that joined then got fixed drops out of "Also failing"', () => {
   assert.equal(merged.split(`- \`${VITEST_TEST_ID}\``).length - 1, 1);
 });
 
+test('the capped-summary line is not listed as a fake "Also failing" bullet', () => {
+  const makeLog = (count) =>
+    Array.from(
+      { length: count },
+      (_unused, index) => ` FAIL  cli/suite.test.ts > case ${index}`,
+    ).join('\n');
+
+  const first = analyzeLogs('E2E Tests', [makeLog(MAX_BODY_TESTS + 5)]);
+  const second = analyzeLogs('E2E Tests', [makeLog(MAX_BODY_TESTS + 3)]);
+
+  const body = renderIssueBody({ analysis: first, occurrence: OCCURRENCE });
+  const merged = renderIssueBody({
+    analysis: second,
+    existingBody: body,
+    occurrence: { ...OCCURRENCE, runId: '303', runUrl: '.../runs/303' },
+  });
+
+  assert.ok(
+    !merged.includes('- …and 3 more'),
+    'summary line must not appear as a test bullet',
+  );
+});
+
 test('the recurrence list is bounded and the trim note never re-enters it', () => {
   const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
   let body = renderIssueBody({ analysis, occurrence: OCCURRENCE });

@@ -19,8 +19,9 @@ describe('e2e workflow', () => {
     // superseded runs. A future simplification back to `event_name == 'push'`
     // would silently reintroduce the starvation, so the guard is asserted.
     const cancel = yml.concurrency['cancel-in-progress'];
-    expect(cancel).toContain("github.event_name == 'push'");
-    expect(cancel).toContain("github.ref_name != 'main'");
+    expect(cancel).toContain(
+      "github.event_name == 'push' && github.ref_name != 'main'",
+    );
   });
 
   it('scopes the concurrency group by event and ref', () => {

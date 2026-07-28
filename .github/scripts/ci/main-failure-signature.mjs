@@ -285,7 +285,7 @@ export function renderIssueBody({
     (marker) => !strippedProse.includes(marker),
   );
   const missingTests = testLines.filter(
-    (line) => !strippedProse.includes(line),
+    (line) => line.startsWith('- `') && !strippedProse.includes(line),
   );
   const withMarkers = missingMarkers.length
     ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
