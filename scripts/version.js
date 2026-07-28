@@ -7,6 +7,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { bumpWorkspaceVersions } from './bump-workspace-versions.js';
 
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
@@ -33,55 +34,23 @@ if (!versionType) {
   process.exit(1);
 }
 
-// 2. Bump the version in the root and all workspace package.json files.
+// 2. Bump the version in the root package.json file.
 run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
 
-// 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk and mobile-mcp versions independently.
-const workspacesToExclude = ['@qwen-code/sdk', '@qwen-code/mobile-mcp'];
-let lsOutput;
-try {
-  lsOutput = JSON.parse(
-    execSync('npm ls --workspaces --json --depth=0').toString(),
-  );
-} catch (e) {
-  // `npm ls` can exit with a non-zero status code if there are issues
-  // with dependencies, but it will still produce the JSON output we need.
-  // We'll try to parse the stdout from the error object.
-  if (e.stdout) {
-    console.warn(
-      'Warning: `npm ls` exited with a non-zero status code. Attempting to proceed with the output.',
-    );
-    try {
-      lsOutput = JSON.parse(e.stdout.toString());
-    } catch (parseError) {
-      console.error(
-        'Error: Failed to parse JSON from `npm ls` output even after `npm ls` failed.',
-      );
-      console.error('npm ls stderr:', e.stderr.toString());
-      console.error('Parse error:', parseError);
-      process.exit(1);
-    }
-  } else {
-    console.error('Error: `npm ls` failed with no output.');
-    console.error(e.stderr?.toString() || e);
-    process.exit(1);
-  }
-}
-const allWorkspaces = Object.keys(lsOutput.dependencies || {});
-const workspacesToVersion = allWorkspaces.filter(
-  (wsName) => !workspacesToExclude.includes(wsName),
-);
-
-for (const workspaceName of workspacesToVersion) {
-  run(
-    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
-  );
-}
-
-// 4. Get the new version number from the root package.json
+// 3. Get the new version number from the root package.json
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
+
+// 4. Bump every workspace (except sdk and mobile-mcp, which are versioned
+// independently) and rewrite inter-workspace ^/~ dependency ranges to the new
+// version, so the bumped workspaces keep satisfying their dependents and npm
+// never backfills stale registry copies into packages/*/node_modules.
+const workspacesToExclude = ['@qwen-code/sdk', '@qwen-code/mobile-mcp'];
+for (const name of bumpWorkspaceVersions(process.cwd(), newVersion, {
+  exclude: workspacesToExclude,
+})) {
+  console.log(`Updated ${name}`);
+}
 
 // 5. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
@@ -104,12 +73,12 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 7. Run `npm install` to update package-lock.json.
+// 7. Run `npm install` to update package-lock.json with the new versions and
+// inter-workspace ranges in one pass, so npm never sees an inconsistent
+// tree that it would "fix" with stale registry copies.
 // --ignore-scripts prevents the root `prepare` lifecycle from triggering a
 // redundant full build that fails with TS5055 when dist/ already exists from
 // the initial `npm ci` install.
-run(
-  'npm install --workspace packages/cli --workspace packages/core --workspace packages/channels/base --workspace packages/channels/plugin-example --package-lock-only --ignore-scripts',
-);
+run('npm install --package-lock-only --ignore-scripts');
 
 console.log(`Successfully bumped versions to v${newVersion}.`);
