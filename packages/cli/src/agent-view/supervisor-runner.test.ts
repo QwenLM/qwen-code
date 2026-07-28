@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { callAgentViewSupervisor } from './supervisor-client.js';
 import { getAgentViewSupervisorSocketPath } from './supervisor-process.js';
 import {
+  connectExistingAgentViewSupervisor,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
   ensureAgentViewSupervisor,
   runAgentViewSupervisor,
@@ -42,6 +43,33 @@ afterEach(async () => {
 });
 
 describe('Agent View supervisor runner', () => {
+  it('returns undefined when no existing supervisor is reachable', async () => {
+    const { globalDir } = await makeSupervisorPath();
+
+    await expect(
+      connectExistingAgentViewSupervisor({ globalDir }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('connects to an existing supervisor handle', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const server = createFakeSupervisor(socketPath, {
+      status: () => ({ state: 'ready' }),
+      list: () => [],
+      shutdown: () => ({ shuttingDown: true }),
+    });
+    await server.listen();
+    cleanupServers.push(server);
+
+    const handle = await connectExistingAgentViewSupervisor({ globalDir });
+
+    expect(handle).toBeDefined();
+    if (!handle) throw new Error('Expected existing supervisor handle.');
+    expect(handle.socketPath).toBe(socketPath);
+    expect(handle.startedProcess).toBeUndefined();
+    await expect(handle.status()).resolves.toEqual({ state: 'ready' });
+  });
+
   it('connects to an existing supervisor without spawning a process', async () => {
     const { globalDir, socketPath } = await makeSupervisorPath();
     const server = createFakeSupervisor(socketPath, {

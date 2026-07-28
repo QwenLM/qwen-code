@@ -307,6 +307,75 @@ describe('Agent View supervisor server', () => {
     }
   });
 
+  it('reports rejected subscribe handshakes to the caller', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      subscribe: vi.fn(),
+    };
+    const server = createAgentViewSupervisorServer(handler, {
+      socketPath,
+      authToken: 'secret-token',
+    });
+    await server.listen();
+    try {
+      const errors: unknown[] = [];
+      const subscription = subscribeAgentViewSupervisor(socketPath, () => {}, {
+        onError: (error) => errors.push(error),
+      });
+
+      await waitFor(() => errors.length === 1);
+      expect(errors[0]).toMatchObject({ code: 'unauthorized' });
+      expect(handler.subscribe).not.toHaveBeenCalled();
+      subscription.dispose();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('keeps reading subscription events when a callback throws', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const subscribers = new Set<import('node:net').Socket>();
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      subscribe: vi.fn((_params, socket: import('node:net').Socket) => {
+        socket.write(
+          `${JSON.stringify({
+            id: 'subscribe-request',
+            ok: true,
+            result: { subscribed: true },
+          })}\n`,
+        );
+        subscribers.add(socket);
+      }),
+    };
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+    await server.listen();
+    try {
+      const onEvent = vi.fn(() => {
+        throw new Error('subscriber failed');
+      });
+      const subscription = subscribeAgentViewSupervisor(socketPath, onEvent);
+      await waitFor(() => subscribers.size === 1);
+
+      for (const socket of subscribers) {
+        socket.write(`${JSON.stringify({ type: 'changed', at: 'one' })}\n`);
+        socket.write(`${JSON.stringify({ type: 'changed', at: 'two' })}\n`);
+      }
+
+      await waitFor(() => onEvent.mock.calls.length === 2);
+      subscription.dispose();
+    } finally {
+      await server.close();
+    }
+  });
+
   it('forwards attach bytes that arrive with the attachStream request', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);

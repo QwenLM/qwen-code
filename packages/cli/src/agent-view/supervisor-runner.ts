@@ -49,6 +49,7 @@ export interface AgentViewSupervisorClientHandle {
   list(cwd?: string): Promise<unknown>;
   subscribe(
     onEvent: (event: AgentViewSupervisorEvent) => void,
+    onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
   dispatch(prompt: string, cwd: string): Promise<unknown>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
@@ -216,8 +217,11 @@ function createSupervisorHandle(
         cwd ? { cwd } : undefined,
         authOptions,
       ),
-    subscribe: (onEvent) =>
-      subscribeAgentViewSupervisor(socketPath, onEvent, authOptions),
+    subscribe: (onEvent, onError) =>
+      subscribeAgentViewSupervisor(socketPath, onEvent, {
+        ...authOptions,
+        ...(onError ? { onError } : {}),
+      }),
     dispatch: (prompt: string, cwd: string) =>
       callAgentViewSupervisor(
         socketPath,

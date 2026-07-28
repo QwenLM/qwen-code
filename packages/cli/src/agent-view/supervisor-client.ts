@@ -65,6 +65,11 @@ export interface AgentViewSupervisorClientOptions {
   authToken?: string;
 }
 
+export interface AgentViewSupervisorSubscriptionOptions
+  extends AgentViewSupervisorClientOptions {
+  onError?: (error: Error) => void;
+}
+
 export interface AgentViewSupervisorAdoptParams
   extends Record<string, unknown> {
   sessionId: string;
@@ -342,11 +347,13 @@ export async function attachAgentViewSupervisorTerminal(
 export function subscribeAgentViewSupervisor(
   socketPath: string,
   onEvent: (event: AgentViewSupervisorEvent) => void,
-  options: AgentViewSupervisorClientOptions = {},
+  options: AgentViewSupervisorSubscriptionOptions = {},
 ): AgentViewSupervisorSubscription {
   const socket = net.createConnection(socketPath);
   let buffer = '';
   let subscribed = false;
+  let disposed = false;
+  let errorNotified = false;
   const request: AgentViewSupervisorRequest = {
     id: createRequestId(),
     protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
@@ -368,11 +375,23 @@ export function subscribeAgentViewSupervisor(
       if (!line) continue;
 
       if (!subscribed) {
+        let response: AgentViewSupervisorResponse;
         try {
-          subscribed = parseSupervisorResponse(line).ok;
+          response = parseSupervisorResponse(line);
         } catch {
           continue;
         }
+        if (!response.ok) {
+          notifySubscriptionError(
+            new AgentViewSupervisorClientError(
+              response.error.message,
+              response.error.code,
+            ),
+          );
+          socket.destroy();
+          return;
+        }
+        subscribed = true;
         continue;
       }
 
@@ -382,16 +401,37 @@ export function subscribeAgentViewSupervisor(
       } catch {
         continue;
       }
-      if (event) onEvent(event);
+      if (event) {
+        try {
+          onEvent(event);
+        } catch {
+          // Keep malformed subscribers from crashing the socket reader.
+        }
+      }
     }
   });
-  socket.on('error', () => {});
+  socket.on('error', (error) => notifySubscriptionError(error));
+  socket.on('close', () =>
+    notifySubscriptionError(
+      new AgentViewSupervisorClientError(
+        'Agent View supervisor subscription closed.',
+        'closed',
+      ),
+    ),
+  );
 
   return {
     dispose() {
+      disposed = true;
       socket.destroy();
     },
   };
+
+  function notifySubscriptionError(error: Error): void {
+    if (disposed || errorNotified) return;
+    errorNotified = true;
+    options.onError?.(error);
+  }
 }
 
 function createRequestId(): string {

@@ -16,6 +16,7 @@ import {
   readAgentViewRoster,
   readAgentViewSessionState,
   removeAgentViewRosterEntry,
+  updateAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
   writeAgentViewActivity,
   writeAgentViewLaunch,
@@ -134,6 +135,52 @@ describe('agent view supervisor store', () => {
     expect(next.sessions.map((entry) => entry.sessionId)).toEqual([
       'three',
       'one',
+    ]);
+  });
+
+  it('updates roster entries and keeps pinned entries first', async () => {
+    await upsertAgentViewRosterEntry(
+      rosterEntry('one', {
+        updatedAt: '2026-07-16T00:00:00.000Z',
+      }),
+      { globalDir: tempDir },
+    );
+    await upsertAgentViewRosterEntry(
+      rosterEntry('two', {
+        updatedAt: '2026-07-16T00:00:01.000Z',
+      }),
+      { globalDir: tempDir },
+    );
+
+    await expect(
+      updateAgentViewRosterEntry(
+        'missing',
+        (entry) => ({ ...entry, displayName: 'Missing' }),
+        { globalDir: tempDir },
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      updateAgentViewRosterEntry(
+        'one',
+        (entry) => ({
+          ...entry,
+          pinned: true,
+          displayName: 'Pinned',
+          updatedAt: '2026-07-16T00:00:02.000Z',
+        }),
+        { globalDir: tempDir },
+      ),
+    ).resolves.toMatchObject({
+      sessionId: 'one',
+      displayName: 'Pinned',
+      pinned: true,
+    });
+
+    const roster = await readAgentViewRoster({ globalDir: tempDir });
+    expect(roster.sessions.map((entry) => entry.sessionId)).toEqual([
+      'one',
+      'two',
     ]);
   });
 
