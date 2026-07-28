@@ -3324,6 +3324,127 @@ describe('qwen-autofix workflow', () => {
     expect(countInline(false)).toBe(5);
     expect(countInline(true)).toBe(3);
 
+    // Actionable reviews and issue-level comments filters: extract and
+    // execute against fixture data with critical_only both ways, mirroring
+    // the inline filter test above.
+    const actionableReviewsFilter = prepareBranchAndFeedbackStep.match(
+      /echo "## Reviews"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+    )?.[1];
+    expect(actionableReviewsFilter).toBeTruthy();
+    const actionableReviews = [
+      {
+        id: 20,
+        state: 'CHANGES_REQUESTED',
+        submitted_at: '2026-01-02T00:00:00Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'The null branch still crashes.',
+      },
+      {
+        id: 21,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'Looks good overall',
+      },
+      {
+        id: 22,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:02Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** memory leak in the owner route',
+      },
+    ];
+    const countActionableReviews = (criticalOnly) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'critical_only',
+            String(criticalOnly),
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            `[${actionableReviewsFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
+        ),
+      );
+    // All three are actionable while suggestions are in scope; in
+    // Critical-only mode the non-Critical COMMENTED review is excluded.
+    expect(countActionableReviews(false)).toBe(3);
+    expect(countActionableReviews(true)).toBe(2);
+
+    const actionableIssueFilter = prepareBranchAndFeedbackStep.match(
+      /echo "## Issue-level comments"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+    )?.[1];
+    expect(actionableIssueFilter).toBeTruthy();
+    const actionableIssueComments = [
+      {
+        id: 30,
+        created_at: '2026-01-02T00:00:00Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'Please also update the docs.',
+      },
+      {
+        id: 31,
+        created_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** data loss on concurrent writes',
+      },
+      {
+        id: 32,
+        created_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: '@qwen-code /review',
+      },
+    ];
+    const countActionableIssue = (criticalOnly) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'critical_only',
+            String(criticalOnly),
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            `[${actionableIssueFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(actionableIssueComments) },
+        ),
+      );
+    // Normal and Critical comments are actionable while suggestions are in
+    // scope; the command-style comment is always excluded. In Critical-only
+    // mode, only the Critical comment remains.
+    expect(countActionableIssue(false)).toBe(2);
+    expect(countActionableIssue(true)).toBe(1);
+
     // Deferred queries: extract and execute against fixture data,
     // mirroring the actionable inline filter test above.
     const deferredReviewsFilter = prepareBranchAndFeedbackStep.match(
