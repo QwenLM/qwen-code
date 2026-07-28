@@ -598,6 +598,47 @@ describe('GithubChannel', () => {
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
     });
 
+    it('persists skipped terminal notifications when another failure blocks the cursor', async () => {
+      const bad = makeNotification({
+        id: '7',
+        updated_at: '2026-07-02T09:00:00.000Z',
+        last_read_at: '2026-07-01T12:00:00.000Z',
+        subject: {
+          title: 'Deleted issue',
+          url: 'https://api.github.com/repos/owner/repo/issues/7',
+          type: 'Issue',
+        },
+      });
+      const good = makeNotification({
+        id: '42',
+        updated_at: '2026-07-02T10:00:00.000Z',
+        last_read_at: '2026-07-01T12:00:00.000Z',
+      });
+      const notFound = Object.assign(new Error('Not Found'), { status: 404 });
+
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([bad, good])
+        .mockRejectedValueOnce(notFound)
+        .mockResolvedValueOnce([makeComment({ id: 2001 })]);
+
+      await expect(pollOnce()).rejects.toThrow('agent down');
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+      expect(channel.cursor.skippedNotifications).toContain('7');
+
+      channel.handleInboundError = null;
+      mockOctokit.paginate.mockClear();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([bad, good])
+        .mockResolvedValueOnce([makeComment({ id: 2001 })]);
+
+      await pollOnce();
+
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(2);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
     it('excludes comments created after the batch maxUpdatedAt', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
@@ -733,6 +774,45 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'feature-divide → main',
       );
+    });
+
+    it('records but does not dispatch bot-authored meta bodies', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'review_requested',
+          subject: {
+            title: 'feat: add divide',
+            url: 'https://api.github.com/repos/owner/repo/pulls/99',
+            type: 'PullRequest',
+          },
+        }),
+      ]);
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 7,
+            node_id: 'E_review',
+            created_at: '2026-07-01T09:00:00.000Z',
+          }),
+        ],
+        headers: {},
+      });
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: {
+          body: 'already handled',
+          state: 'open',
+          draft: false,
+          user: { login: 'test-bot' },
+          head: { ref: 'feature-divide' },
+          base: { ref: 'main' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.dispatchedEvents).toContain('E_review');
     });
 
     it('finds meta triggers on the page before a full last page', async () => {
@@ -1334,6 +1414,32 @@ describe('GithubChannel', () => {
       expect(text).not.toContain('x'.repeat(1001));
     });
 
+    it('keeps multiline aggregate comments on one summary line', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ groups: { '*': { requireMention: false } } }),
+        makeBridge(),
+      );
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'line one\nline two\n\nline three' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '- @alice: line one line two line three',
+      );
+    });
+
     it('keeps unmentioned aggregate comments behind the group gate', async () => {
       await initWithoutLoop();
       channel.usePreflight = true;
@@ -1858,6 +1964,7 @@ describe('GithubChannel', () => {
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).toHaveBeenCalled();
+      expect(channel.cursor.skippedNotifications).toContain('100');
     });
 
     it('increments failedAttempts on transient failure without posting a comment', async () => {
@@ -2059,6 +2166,7 @@ describe('GithubChannel', () => {
             dispatchedBodies?: string[];
             dispatchedComments?: string[];
             dispatchedEvents?: string[];
+            skippedNotifications?: string[];
           } | null;
         }
       ).validateCursor(parsed);
@@ -2068,6 +2176,7 @@ describe('GithubChannel', () => {
       'dispatchedBodies',
       'dispatchedComments',
       'dispatchedEvents',
+      'skippedNotifications',
     ] as const)('normalizes invalid %s values', (field) => {
       for (const bad of [false, 0, '', null]) {
         const result = validate({
@@ -2196,6 +2305,24 @@ describe('GithubChannel', () => {
       await expect(githubApi(fn)).resolves.toBe('ok');
       expect(sleep).toHaveBeenCalledWith(6000); // 5000 until reset + 1000 buffer
       dateSpy.mockRestore();
+    });
+
+    it('treats 403 retry-after as a secondary rate limit', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          httpError(403, {
+            'retry-after': '2',
+            'x-ratelimit-remaining': '42',
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+
+      await expect(githubApi(fn)).resolves.toBe('ok');
+
+      expect(fn).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledWith(2000);
     });
 
     it('falls back to exponential backoff without rate-limit headers', async () => {

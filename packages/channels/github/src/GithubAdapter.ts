@@ -26,6 +26,7 @@ interface GithubCursor {
   dispatchedBodies?: string[];
   dispatchedComments?: string[];
   dispatchedEvents?: string[];
+  skippedNotifications?: string[];
   failedAttempts?: Record<string, number>;
 }
 
@@ -106,6 +107,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       'dispatchedBodies',
       'dispatchedComments',
       'dispatchedEvents',
+      'skippedNotifications',
     ] as const) {
       if (base[key] !== undefined && !Array.isArray(base[key])) base[key] = [];
     }
@@ -218,6 +220,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     let firstError: unknown;
     for (const notification of notifications) {
+      const nKey = String(notification.id);
+      if (this.cursor.skippedNotifications?.includes(nKey)) continue;
       try {
         const url = notification.subject.url;
         const extracted = url ? this.extractFromSubjectUrl(url) : null;
@@ -281,10 +285,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           process.stderr.write(
             `[Channel:${this.name}] skipping notification ${notification.id} (${notification.reason}): permanent GitHub error ${err.status}: ${err.message}\n`,
           );
+          this.recordDispatched('skippedNotifications', [nKey]);
           continue;
         }
         const attempts = (this.cursor.failedAttempts ??= {});
-        const nKey = String(notification.id);
         attempts[nKey] = (attempts[nKey] ?? 0) + 1;
         this.saveCursor();
         if (attempts[nKey] >= MAX_FAILED_ATTEMPTS) {
@@ -300,7 +304,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               extracted.issueNumber,
             );
           }
+          this.recordDispatched('skippedNotifications', [nKey]);
           delete attempts[nKey];
+          this.saveCursor();
           continue;
         }
         process.stderr.write(
@@ -319,6 +325,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       'dispatchedBodies',
       'dispatchedComments',
       'dispatchedEvents',
+      'skippedNotifications',
     ] as const) {
       this.cursor[field] = this.cursor[field]?.slice(-MAX_DISPATCHED);
     }
@@ -773,7 +780,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const shown = comments.slice(-MAX_AGGREGATE_COMMENTS);
     const lines = shown.map((c) => {
       const who = c.user?.login || 'unknown';
-      const body = Array.from((c.body || '').trim())
+      const body = Array.from((c.body || '').trim().replace(/\s+/g, ' '))
         .slice(0, MAX_COMMENT_CHARS)
         .join('');
       return `- @${who}: ${body}`;
@@ -794,7 +801,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private recordDispatched(
-    field: 'dispatchedBodies' | 'dispatchedComments' | 'dispatchedEvents',
+    field:
+      | 'dispatchedBodies'
+      | 'dispatchedComments'
+      | 'dispatchedEvents'
+      | 'skippedNotifications',
     keys: string[],
   ): void {
     const list = this.cursor[field] ?? [];
@@ -855,6 +866,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // limit and stays retryable via the cooldown branch below.
         if (
           e.status === 403 &&
+          !headers['retry-after'] &&
           !(
             Number(headers['x-ratelimit-remaining']) === 0 &&
             Number(headers['x-ratelimit-reset']) > 0
