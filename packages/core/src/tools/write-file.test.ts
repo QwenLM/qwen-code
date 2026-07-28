@@ -498,6 +498,7 @@ describe('WriteFileTool', () => {
     });
 
     it.each([
+      ['page.htm', 'html'],
       ['notebook.ipynb', 'notebook'],
       ['paper.pdf', 'pdf'],
       ['photo.png', 'image'],
