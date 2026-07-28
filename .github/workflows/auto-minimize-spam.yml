@@ -1,15 +1,14 @@
-name: 'Auto-minimize blocked user comments'
+name: 'Auto-minimize spam comments'
 
 # Periodically scan recent issue/PR comments and minimize any from
-# users blocked at the org level. This cleans up comments that were
-# posted before the block was applied, and catches any that slip
-# through during the window between a spam comment and the manual
-# block action.
+# users listed in .github/spam-blocklist.txt. This cleans up spam
+# comments that were posted before a block was applied, and catches
+# any that slip through during the window between a spam comment
+# and the manual block action.
 #
-# The workflow reads the org's blocked-user list via the REST API,
-# then paginates recent comments across all open issues and PRs.
-# Comments from blocked users that are not already minimized are
-# collapsed with the OFF_TOPIC classifier via GraphQL.
+# The blocklist is a plain-text file in the repo — one username per
+# line, case-insensitive, # for comments. No special API scopes
+# needed beyond issues:write + pull-requests:write.
 
 on:
   schedule:
@@ -23,6 +22,7 @@ on:
         type: 'string'
 
 permissions:
+  contents: 'read'
   issues: 'write'
   pull-requests: 'write'
 
@@ -36,81 +36,46 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
-      - name: 'Minimize comments from blocked users'
+      - name: 'Checkout blocklist'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          sparse-checkout: '.github/spam-blocklist.txt'
+          persist-credentials: false
+
+      - name: 'Minimize comments from blocklisted users'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           LOOKBACK_HOURS: '${{ inputs.hours || ''2'' }}'
         run: |-
           set -euo pipefail
 
-          ORG="${GITHUB_REPOSITORY%%/*}"
           REPO="$GITHUB_REPOSITORY"
           SINCE="$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          BLOCKLIST=".github/spam-blocklist.txt"
 
           echo "Scanning comments since $SINCE in $REPO"
 
-          # ── 1. Fetch org-level blocked users ──────────────────────────
+          # ── 1. Parse blocklist ────────────────────────────────────────
+          if [ ! -f "$BLOCKLIST" ]; then
+            echo "::notice::No blocklist file found at $BLOCKLIST; nothing to do."
+            exit 0
+          fi
+          # Strip comments, blank lines, whitespace; lowercase for matching.
           BLOCKED_USERS="$(
-            gh api "orgs/${ORG}/blocks" --paginate --jq '.[].login' 2>/dev/null \
+            grep -v '^\s*#' "$BLOCKLIST" \
+              | grep -v '^\s*$' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
               | tr '[:upper:]' '[:lower:]' \
               | sort -u
           )"
           BLOCKED_COUNT="$(printf '%s\n' "$BLOCKED_USERS" | grep -c . || true)"
-          echo "Org blocked users: ${BLOCKED_COUNT}"
+          echo "Blocklisted users: ${BLOCKED_COUNT}"
           if [ "$BLOCKED_COUNT" -eq 0 ]; then
-            echo "No blocked users; nothing to do."
+            echo "Blocklist is empty; nothing to do."
             exit 0
           fi
 
-          # ── 2. Fetch recent comments from open issues and PRs ─────────
-          # Use the search API to find comments updated since $SINCE.
-          # The issues endpoint returns both issue and PR comments when
-          # we paginate /issues/{n}/comments, but the search API is more
-          # efficient for a time-windowed scan across all issues.
-          COMMENT_IDS="$(
-            gh api graphql -f query="
-              query {
-                repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") {
-                  issues(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}, filterBy: {since: \"${SINCE}\"}) {
-                    nodes {
-                      number
-                      comments(last: 30) {
-                        nodes {
-                          id
-                          author { login }
-                          isMinimized
-                        }
-                      }
-                    }
-                  }
-                  pullRequests(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
-                    nodes {
-                      number
-                      comments(last: 30) {
-                        nodes {
-                          id
-                          author { login }
-                          isMinimized
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            " --jq '
-              [
-                .data.repository.issues.nodes[].comments.nodes[],
-                .data.repository.pullRequests.nodes[].comments.nodes[]
-              ]
-              | map(select(.isMinimized == false and .author != null))
-              | map(select((.author.login | ascii_downcase) as $login
-                  | $login | inside("'"$(printf '%s' "$BLOCKED_USERS" | tr '\n' '|')"' | rtrimstr("|"))"))
-              | .[].id
-            ' 2>/dev/null
-          )"
-
-          # The jq `inside` trick above is fragile for multi-user matching.
-          # Fall back to a simpler shell-level filter.
+          # ── 2. Fetch recent unminimized comments via GraphQL ──────────
           ALL_UNMINIMIZED="$(
             gh api graphql -f query="
               query {
@@ -151,12 +116,17 @@ jobs:
             if printf '%s\n' "$BLOCKED_USERS" | grep -qxF "$login_lc"; then
               MATCHED_IDS="${MATCHED_IDS}${node_id}"$'\n'
               MATCHED_COUNT=$((MATCHED_COUNT + 1))
+              echo "  matched: @${login} → ${node_id}"
             fi
           done <<< "$ALL_UNMINIMIZED"
 
-          echo "Unminimized comments from blocked users: ${MATCHED_COUNT}"
+          echo "Unminimized comments from blocklisted users: ${MATCHED_COUNT}"
           if [ "$MATCHED_COUNT" -eq 0 ]; then
             echo "Nothing to minimize."
+            echo "## Summary" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Scanned comments since: ${SINCE}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Blocklisted users: ${BLOCKED_COUNT}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Comments minimized: 0" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -185,7 +155,7 @@ jobs:
           echo "Minimized ${SUCCESS} comments, ${FAIL} failed."
           echo "## Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "- Scanned comments since: ${SINCE}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Org blocked users: ${BLOCKED_COUNT}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Blocklisted users: ${BLOCKED_COUNT}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Comments minimized: ${SUCCESS}" >> "$GITHUB_STEP_SUMMARY"
           if [ "$FAIL" -gt 0 ]; then
             echo "- Failures: ${FAIL}" >> "$GITHUB_STEP_SUMMARY"
