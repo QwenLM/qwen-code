@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   minimize:
-    if: github.repository == 'QwenLM/qwen-code'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
@@ -54,7 +54,7 @@ jobs:
       - name: 'Minimize comments from blocklisted users'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          LOOKBACK_HOURS: '${{ inputs.hours || ''2'' }}'
+          LOOKBACK_HOURS: "${{ inputs.hours || '2' }}"
         run: |-
           set -euo pipefail
 
