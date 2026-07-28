@@ -15071,11 +15071,14 @@ describe('Session', () => {
         async ({
           responseParts,
           onFullTurnModel: selectFullTurnModel,
+          onVisionBridgeNotice,
         }: {
           responseParts: Part[];
           onFullTurnModel?: (model: string) => boolean;
+          onVisionBridgeNotice?: (notice: string) => void;
         }) => {
           expect(selectFullTurnModel?.('qwen3-vl-plus\0')).toBe(true);
+          onVisionBridgeNotice?.('Routing this image turn to qwen3-vl-plus.');
           return responseParts;
         },
       );
@@ -15121,6 +15124,9 @@ describe('Session', () => {
       );
       expect(onFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
       expect(result.parts[0].functionResponse?.parts).toHaveLength(1);
+      expect(agentMessageChunks()).toContain(
+        'Routing this image turn to qwen3-vl-plus.',
+      );
     });
 
     it('keeps a full-turn model selected across parallel tool images', async () => {

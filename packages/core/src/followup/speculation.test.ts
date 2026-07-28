@@ -10,17 +10,13 @@ import {
   ensureToolResultPairing,
   startSpeculation,
 } from './speculation.js';
-import type { Content, Part } from '@google/genai';
+import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   runForkedAgent: vi.fn(),
   sendMessageStream: vi.fn(),
 }));
-
-const toolResultVisionBridgeMock = vi.hoisted(() =>
-  vi.fn(async ({ responseParts }: { responseParts: Part[] }) => responseParts),
-);
 
 vi.mock('../utils/forkedAgent.js', () => ({
   getCacheSafeParams: vi.fn(() => ({
@@ -40,10 +36,6 @@ vi.mock('../utils/forkedAgent.js', () => ({
       callback: (model: string) => Promise<unknown>,
     ) => callback(model),
   ),
-}));
-
-vi.mock('../services/visionBridge/tool-result-vision-bridge.js', () => ({
-  bridgeToolResultImages: toolResultVisionBridgeMock,
 }));
 
 afterEach(() => {
@@ -236,7 +228,7 @@ describe('startSpeculation', () => {
     await abortSpeculation(state);
   });
 
-  it('routes speculative tool images through the shared bridge', async () => {
+  it('strips speculative tool images without a vision side query', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: {
         inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
@@ -254,20 +246,6 @@ describe('startSpeculation', () => {
       getFastModel: vi.fn().mockReturnValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
-    toolResultVisionBridgeMock.mockImplementationOnce(
-      async ({ responseParts }: { responseParts: Part[] }) => {
-        const functionResponse = responseParts[0].functionResponse!;
-        return [
-          {
-            functionResponse: {
-              id: functionResponse.id,
-              name: functionResponse.name,
-              response: { output: '[transcribed speculative image]' },
-            },
-          },
-        ];
-      },
-    );
     forkedAgentMocks.runForkedAgent.mockResolvedValue({
       jsonResult: { suggestion: '' },
     });
@@ -299,28 +277,11 @@ describe('startSpeculation', () => {
     const state = await startSpeculation(config, 'inspect image.png');
     await vi.waitFor(() => expect(state.status).toBe('completed'));
 
-    expect(toolResultVisionBridgeMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        config,
-        responseParts: [
-          expect.objectContaining({
-            functionResponse: expect.objectContaining({
-              id: 'call-image',
-              parts: [
-                expect.objectContaining({
-                  inlineData: expect.objectContaining({
-                    mimeType: 'image/png',
-                  }),
-                }),
-              ],
-            }),
-          }),
-        ],
-      }),
+    const speculativeResponse = state.messages[2].parts?.[0].functionResponse;
+    expect(speculativeResponse?.response?.['output']).toMatch(
+      /omitted during speculative execution/i,
     );
-    expect(
-      state.messages[2].parts?.[0].functionResponse?.response?.['output'],
-    ).toBe('[transcribed speculative image]');
+    expect(speculativeResponse).not.toHaveProperty('parts');
 
     await abortSpeculation(state);
   });

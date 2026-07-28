@@ -3747,6 +3747,7 @@ describe('CoreToolScheduler', () => {
     expect(completed.response.contentLength).toBe(
       String(functionResponse?.response?.['output']).length,
     );
+    expect(completed.response.visionBridgeNotice).toContain('qwen3-vl-plus');
     expect(functionResponse).not.toHaveProperty('parts');
     expect(runSideQueryMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -3809,6 +3810,9 @@ describe('CoreToolScheduler', () => {
     }
     expect(onToolResultFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
     expect(completed.response.modelOverride).toBe('qwen3-vl-plus\0');
+    expect(completed.response.visionBridgeNotice).toContain(
+      'Routing this image turn to qwen3-vl-plus',
+    );
     expect(completed.response.responseParts[0].functionResponse?.parts).toEqual(
       [
         {

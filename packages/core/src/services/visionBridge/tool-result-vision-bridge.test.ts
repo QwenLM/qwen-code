@@ -7,9 +7,19 @@
 import type { Part } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../config/config.js';
-import { bridgeToolResultImages } from './tool-result-vision-bridge.js';
+import {
+  bridgeToolResultImages,
+  stripToolResultImages,
+} from './tool-result-vision-bridge.js';
 
 const bridgeMocks = vi.hoisted(() => ({
+  formatFullTurnVisionNotice: vi.fn(
+    (selection: { id: string }) => `Routing to ${selection.id}`,
+  ),
+  formatVisionBridgeNotice: vi.fn(
+    (result: { modelId?: string }) =>
+      `Converted via ${result.modelId ?? 'vision model'}`,
+  ),
   getFullTurnVisionModelSelector: vi.fn(
     (selection: { id: string }) => `${selection.id}\0`,
   ),
@@ -63,6 +73,7 @@ describe('bridgeToolResultImages', () => {
       agentCapable: true,
     });
     const onFullTurnModel = vi.fn().mockReturnValue(true);
+    const onVisionBridgeNotice = vi.fn();
     const audio: Part = {
       inlineData: { mimeType: 'audio/wav', data: 'YXVkaW8=' },
     };
@@ -80,11 +91,15 @@ describe('bridgeToolResultImages', () => {
       responseParts: [original],
       signal: signal(),
       onFullTurnModel,
+      onVisionBridgeNotice,
     });
 
     expect(onFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
     expect(result[0].functionResponse?.parts).toEqual([image(), audio]);
     expect(bridgeMocks.runVisionBridge).not.toHaveBeenCalled();
+    expect(onVisionBridgeNotice).toHaveBeenCalledWith(
+      'Routing to qwen3-vl-plus',
+    );
   });
 
   it('falls back to transcription when the caller rejects full-turn takeover', async () => {
@@ -98,18 +113,24 @@ describe('bridgeToolResultImages', () => {
       parts: [{ text: 'fallback transcription' }],
       convertedCount: 1,
       omittedCount: 0,
+      modelId: 'qwen3-vl-plus',
     });
+    const onVisionBridgeNotice = vi.fn();
 
     const [result] = await bridgeToolResultImages({
       config,
       responseParts: [toolResponse()],
       signal: signal(),
       onFullTurnModel: () => false,
+      onVisionBridgeNotice,
     });
 
     expect(result.functionResponse).not.toHaveProperty('parts');
     expect(result.functionResponse?.response?.['output']).toContain(
       'fallback transcription',
+    );
+    expect(onVisionBridgeNotice).toHaveBeenCalledWith(
+      'Converted via qwen3-vl-plus',
     );
   });
 
@@ -304,17 +325,22 @@ describe('bridgeToolResultImages', () => {
     bridgeMocks.runVisionBridge.mockRejectedValue(
       new Error('https://signed.example/?token=secret'),
     );
+    const onVisionBridgeNotice = vi.fn();
 
     const [result] = await bridgeToolResultImages({
       config,
       responseParts: [toolResponse()],
       signal: signal(),
+      onVisionBridgeNotice,
     });
 
     const output = result.functionResponse?.response?.['output'];
     expect(output).toMatch(/image content is unavailable/i);
     expect(output).not.toContain('token=secret');
     expect(result.functionResponse).not.toHaveProperty('parts');
+    expect(onVisionBridgeNotice).toHaveBeenCalledWith(
+      expect.not.stringContaining('token=secret'),
+    );
   });
 
   it('removes tool images when cancellation prevents a replacement', async () => {
@@ -359,5 +385,27 @@ describe('bridgeToolResultImages', () => {
     const nested = result.functionResponse?.parts ?? [];
     expect(nested.some((part) => part.inlineData !== undefined)).toBe(false);
     expect(JSON.stringify(nested)).toContain('Media omitted:');
+  });
+
+  it('strips images without invoking the vision bridge', () => {
+    const audio: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'YXVkaW8=' },
+    };
+    const [result] = stripToolResultImages([
+      toolResponse({
+        functionResponse: {
+          id: 'call-1',
+          name: 'screenshot_tool',
+          response: { output: 'captured screen' },
+          parts: [image(), audio],
+        },
+      }),
+    ]);
+
+    expect(result.functionResponse?.parts).toEqual([audio]);
+    expect(result.functionResponse?.response?.['output']).toMatch(
+      /omitted during speculative execution/i,
+    );
+    expect(bridgeMocks.runVisionBridge).not.toHaveBeenCalled();
   });
 });

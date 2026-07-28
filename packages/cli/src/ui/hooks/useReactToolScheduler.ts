@@ -393,6 +393,11 @@ export function mapToDisplay(
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
             // Full detail for the Ctrl+O transcript (§4.9): derived from the
             // already-persisted functionResponse parts; NOT char-capped (the
             // bound is whatever core already applied). Consumed ONLY by the
@@ -414,6 +419,11 @@ export function mapToDisplay(
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
         case 'cancelled':
@@ -423,6 +433,11 @@ export function mapToDisplay(
             resultDisplay: compactToolResultDisplayForHistory(
               trackedCall.response.resultDisplay,
             ),
+            ...(trackedCall.response.visionBridgeNotice !== undefined
+              ? {
+                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
         case 'awaiting_approval':

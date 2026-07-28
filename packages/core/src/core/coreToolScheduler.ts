@@ -964,6 +964,9 @@ function serializeToolResponse(
     error: response.error?.message,
     error_type: response.errorType,
     content_length: response.contentLength,
+    ...(response.visionBridgeNotice !== undefined
+      ? { vision_bridge_notice: response.visionBridgeNotice }
+      : {}),
   };
 }
 
@@ -1363,8 +1366,13 @@ export class CoreToolScheduler {
   private async processToolResultImages(
     responseParts: Part[],
     signal: AbortSignal,
-  ): Promise<{ responseParts: Part[]; modelOverride?: string }> {
+  ): Promise<{
+    responseParts: Part[];
+    modelOverride?: string;
+    visionBridgeNotice?: string;
+  }> {
     let modelOverride: string | undefined;
+    const notices: string[] = [];
     const processedParts = await bridgeToolResultImages({
       config: this.config,
       responseParts,
@@ -1374,10 +1382,12 @@ export class CoreToolScheduler {
         modelOverride = model;
         return true;
       },
+      onVisionBridgeNotice: (notice) => notices.push(notice),
     });
     return {
       responseParts: processedParts,
       ...(modelOverride !== undefined ? { modelOverride } : {}),
+      ...(notices.length > 0 ? { visionBridgeNotice: notices.join('\n') } : {}),
     };
   }
 
@@ -4659,6 +4669,9 @@ export class CoreToolScheduler {
             : 'modelOverride' in toolResult
               ? { modelOverride: toolResult.modelOverride }
               : {}),
+          ...(processedImages.visionBridgeNotice !== undefined
+            ? { visionBridgeNotice: processedImages.visionBridgeNotice }
+            : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
         // After an APPROVED exit_plan_mode, swap the large `plan` argument
@@ -4834,6 +4847,9 @@ export class CoreToolScheduler {
             ...(processedImages.modelOverride !== undefined
               ? { modelOverride: processedImages.modelOverride }
               : {}),
+            ...(processedImages.visionBridgeNotice !== undefined
+              ? { visionBridgeNotice: processedImages.visionBridgeNotice }
+              : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
           });
           setToolSpanFailure(
@@ -4924,6 +4940,9 @@ export class CoreToolScheduler {
               }, 0),
               ...(processedImages.modelOverride !== undefined
                 ? { modelOverride: processedImages.modelOverride }
+                : {}),
+              ...(processedImages.visionBridgeNotice !== undefined
+                ? { visionBridgeNotice: processedImages.visionBridgeNotice }
                 : {}),
             };
           }
@@ -5272,6 +5291,9 @@ export class CoreToolScheduler {
         callId: call.request.callId,
         status: call.status,
         resultDisplay: call.response.resultDisplay,
+        ...(call.response.visionBridgeNotice !== undefined
+          ? { visionBridgeNotice: call.response.visionBridgeNotice }
+          : {}),
         error: call.response.error,
         errorType: call.response.errorType,
       });

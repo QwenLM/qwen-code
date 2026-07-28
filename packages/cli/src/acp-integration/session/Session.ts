@@ -7658,12 +7658,21 @@ export class Session implements SessionContext {
             });
           }
 
+          const visionBridgeNotices: string[] = [];
           responseParts = await bridgeToolResultImages({
             config: this.config,
             responseParts,
             signal: activeToolAbortSignal,
             onFullTurnModel,
+            onVisionBridgeNotice: (notice) => visionBridgeNotices.push(notice),
           });
+          const visionBridgeNotice =
+            visionBridgeNotices.length > 0
+              ? visionBridgeNotices.join('\n')
+              : undefined;
+          if (visionBridgeNotice) {
+            await this.messageEmitter.emitAgentMessage(visionBridgeNotice);
+          }
 
           // Handle TodoWriteTool: extract todos and send plan update
           if (isTodoWriteTool) {
@@ -7720,6 +7729,9 @@ export class Session implements SessionContext {
               callId,
               status,
               resultDisplay: toolResult.returnDisplay,
+              ...(visionBridgeNotice !== undefined
+                ? { visionBridgeNotice }
+                : {}),
               error: toolResult.error
                 ? new Error(toolResult.error.message)
                 : undefined,

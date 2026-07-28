@@ -14,6 +14,8 @@ import {
   normalizeParts,
 } from './image-part-utils.js';
 import {
+  formatFullTurnVisionNotice,
+  formatVisionBridgeNotice,
   getFullTurnVisionModelSelector,
   runVisionBridge,
   shouldRunVisionBridge,
@@ -26,6 +28,7 @@ export interface BridgeToolResultImagesParams {
   responseParts: Part[];
   signal: AbortSignal;
   onFullTurnModel?: (model: string) => boolean;
+  onVisionBridgeNotice?: (notice: string) => void;
 }
 
 function getNestedParts(part: Part): Part[] | undefined {
@@ -78,6 +81,23 @@ function unavailableNote(part: Part, cancelled: boolean): string {
     : `[Vision bridge could not interpret the image content returned by tool ${JSON.stringify(toolName)}. The image content is unavailable; do not assume or invent what it shows.]`;
 }
 
+function replaceNestedImages(part: Part, replacement: string): Part {
+  const nestedParts = getNestedParts(part);
+  if (!nestedParts?.some(isImagePart)) return part;
+
+  const retainedParts = nestedParts.filter((nested) => !isImagePart(nested));
+  const functionResponse = part.functionResponse!;
+  const { parts: _parts, ...functionResponseWithoutParts } = functionResponse;
+  return {
+    ...part,
+    functionResponse: {
+      ...functionResponseWithoutParts,
+      response: appendResponseText(functionResponse.response, replacement),
+      ...(retainedParts.length > 0 ? { parts: retainedParts } : {}),
+    },
+  };
+}
+
 function clampNestedImages(part: Part): Part {
   const nestedParts = getNestedParts(part);
   if (!nestedParts?.some(isImagePart)) return part;
@@ -97,6 +117,7 @@ async function bridgeFunctionResponse(
   part: Part,
   config: Config,
   signal: AbortSignal,
+  onVisionBridgeNotice?: (notice: string) => void,
 ): Promise<Part> {
   const nestedParts = getNestedParts(part);
   if (!nestedParts) return part;
@@ -112,6 +133,9 @@ async function bridgeFunctionResponse(
       signal,
       intentText: buildToolIntent(part),
     });
+    if (result.status !== 'skipped' || result.egressOccurred) {
+      onVisionBridgeNotice?.(formatVisionBridgeNotice(result));
+    }
     replacement = collectText(normalizeParts(result.parts ?? []));
     if (!result.applied || replacement.length === 0) {
       replacement = unavailableNote(part, signal.aborted);
@@ -122,21 +146,25 @@ async function bridgeFunctionResponse(
         error instanceof Error ? error.message : String(error)
       }`,
     );
+    onVisionBridgeNotice?.(
+      'Vision bridge failed unexpectedly. The image may have been sent to the configured vision model and was not interpreted.',
+    );
     replacement = unavailableNote(part, signal.aborted);
   }
 
-  const retainedParts = nestedParts.filter((nested) => !isImagePart(nested));
-  const functionResponse = part.functionResponse!;
-  const { parts: _parts, ...functionResponseWithoutParts } = functionResponse;
+  return replaceNestedImages(part, replacement);
+}
 
-  return {
-    ...part,
-    functionResponse: {
-      ...functionResponseWithoutParts,
-      response: appendResponseText(functionResponse.response, replacement),
-      ...(retainedParts.length > 0 ? { parts: retainedParts } : {}),
-    },
-  };
+/** Remove tool-result images from speculative work without making a side query. */
+export function stripToolResultImages(responseParts: Part[]): Part[] {
+  return responseParts.map((part) => {
+    const nestedParts = getNestedParts(part);
+    if (!nestedParts?.some(isImagePart)) return part;
+
+    const toolName = part.functionResponse?.name ?? 'unknown tool';
+    const replacement = `[Image content returned by tool ${JSON.stringify(toolName)} was omitted during speculative execution. Do not assume or invent what it shows.]`;
+    return replaceNestedImages(part, replacement);
+  });
 }
 
 /**
@@ -149,6 +177,7 @@ export async function bridgeToolResultImages({
   responseParts,
   signal,
   onFullTurnModel,
+  onVisionBridgeNotice,
 }: BridgeToolResultImagesParams): Promise<Part[]> {
   if (
     !responseParts.some((part) => getNestedParts(part)?.some(isImagePart)) ||
@@ -165,13 +194,16 @@ export async function bridgeToolResultImages({
     );
     if (!hasUsableImage) return fullTurnParts;
     if (onFullTurnModel(getFullTurnVisionModelSelector(fullTurnModel))) {
+      onVisionBridgeNotice?.(formatFullTurnVisionNotice(fullTurnModel));
       return fullTurnParts;
     }
   }
 
   const bridged: Part[] = [];
   for (const part of responseParts) {
-    bridged.push(await bridgeFunctionResponse(part, config, signal));
+    bridged.push(
+      await bridgeFunctionResponse(part, config, signal, onVisionBridgeNotice),
+    );
   }
   return bridged;
 }

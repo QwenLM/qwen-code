@@ -23,7 +23,7 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
-import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
+import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
@@ -346,11 +346,9 @@ async function runSpeculativeLoop(
                 result.error.message,
               )
             : convertToFunctionResponse(name, id ?? '', result.llmContent);
-          const bridgedResponseParts = await bridgeToolResultImages({
-            config,
-            responseParts: convertedResponseParts,
-            signal: state.abortController!.signal,
-          });
+          const bridgedResponseParts = stripToolResultImages(
+            convertedResponseParts,
+          );
           const responseParts = id
             ? bridgedResponseParts
             : bridgedResponseParts.map((responsePart) => {
