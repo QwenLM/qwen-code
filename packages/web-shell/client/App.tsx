@@ -4619,14 +4619,12 @@ export function App({
       lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
-    // With no active session (deferred or just cleared) the connection's
-    // workspaceCwd is a leftover from the previous session — routing the host
-    // by it would send a "new chat in workspace A" back to the old workspace
-    // (e.g. one with a running task). The workspace picked for the next
-    // session is the source of truth in that state.
-    const reportedWorkspaceCwd = connection.sessionId
-      ? connection.workspaceCwd
-      : (selectedWorkspaceCwd ?? connection.workspaceCwd);
+    // After a session is cleared the connection's workspaceCwd is a leftover
+    // from the previous session; reporting it would misroute the host back to
+    // the old workspace. activeWorkspaceCwd resolves the workspace picked for
+    // the next session (locked / selected / primary) and is what the composer
+    // chip reports, so the host and the chip stay in agreement.
+    const reportedWorkspaceCwd = activeWorkspaceCwd ?? connection.workspaceCwd;
     const activeWorkspace = workspaces.find(
       (entry) => entry.cwd === reportedWorkspaceCwd,
     );
@@ -4655,7 +4653,7 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
     onSessionIdChange,
-    selectedWorkspaceCwd,
+    activeWorkspaceCwd,
     workspace.capabilities,
     workspaces,
   ]);
