@@ -165,11 +165,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
-  // ASK_USER_QUESTION is excluded because background subagents (fork,
-  // general-purpose) have no mechanism to deliver questions to the user
-  // and answer them — the subagent hangs indefinitely waiting for input
-  // that can never arrive. #7835.
-  ToolNames.ASK_USER_QUESTION,
+  // ASK_USER_QUESTION is NOT in the global exclusion set because foreground
+  // subagents with explicit tool lists (e.g. statusline-setup) legitimately
+  // use it. It is instead excluded below in the wildcard tool-list path,
+  // which is what background fork/general-purpose agents use. #7835.
 ]);
 
 /**
@@ -572,10 +571,18 @@ export class AgentCore {
         // (MCP, low-frequency built-ins). Subagents are one-shot and don't
         // have the same "save tokens" lifecycle as the main chat, so hiding
         // schemas would silently break existing `tools: ['*']` configs.
+        //
+        // ASK_USER_QUESTION is excluded from the wildcard path because
+        // background fork/general-purpose subagents use this path and have
+        // no mechanism to deliver questions to the user — they hang
+        // indefinitely. Foreground subagents with explicit tool lists
+        // (e.g. statusline-setup) go through the else branch below and
+        // are unaffected. See #7835.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
-            .filter((t) => !isExcluded(t.name)),
+            .filter((t) => !isExcluded(t.name))
+            .filter((t) => t.name !== ToolNames.ASK_USER_QUESTION),
         );
       } else {
         // Explicit tool list: apply the full subagent exclusion set (not just

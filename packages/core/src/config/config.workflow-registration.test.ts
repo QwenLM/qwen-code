@@ -180,12 +180,16 @@ describe('Workflow anti-recursion guard', () => {
     );
   });
 
-  it('ASK_USER_QUESTION is in EXCLUDED_TOOLS_FOR_SUBAGENTS (#7835)', async () => {
+  it('ASK_USER_QUESTION is excluded from wildcard tool lists, not from explicit lists (#7835)', async () => {
+    // ASK_USER_QUESTION is NOT in EXCLUDED_TOOLS_FOR_SUBAGENTS because
+    // foreground subagents with explicit tool lists (statusline-setup)
+    // legitimately use it. The exclusion is applied in prepareTools()'s
+    // wildcard filter path instead. See agent-core.ts.
     const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
       '../agents/runtime/agent-core.js'
     );
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.ASK_USER_QUESTION)).toBe(
-      true,
+      false,
     );
   });
 });

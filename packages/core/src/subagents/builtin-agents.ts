@@ -97,10 +97,11 @@ Notes:
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,
-        // ASK_USER_QUESTION is in EXCLUDED_TOOLS_FOR_SUBAGENTS (see
-        // agent-core.ts), so it is excluded globally for all subagents.
-        // The comment is kept here to document why it's not in the
-        // explicit tool list.
+        // ASK_USER_QUESTION is excluded from wildcard tool lists in
+        // agent-core.ts's prepareTools() (the path background fork/
+        // general-purpose subagents use), so it is not needed in the
+        // explicit tool list here. Foreground subagents with explicit
+        // tool lists (e.g. statusline-setup) are unaffected.
       ],
     },
     {
