@@ -41,8 +41,18 @@ import {
   DEFAULT_RANGE_READ_BYTES,
   TEXT_RANGE_FAST_PATH_MAX_SIZE,
 } from './text-range-constants.js';
+import {
+  IMAGE_MAX_SOURCE_BYTES,
+  ImageViewError,
+  renderImageOverview,
+} from './image-view.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
+const CANONICAL_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
@@ -1093,6 +1103,12 @@ export async function processSingleFileContent(
     }
 
     const fileType = await detectFileType(filePath);
+    const mediaMimeType =
+      mime.getType(filePath) ??
+      MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
+      'application/octet-stream';
+    const shouldRenderImageOverview =
+      fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
     const relativePathForDisplay = path
       .relative(rootDirectory, filePath)
       .replace(/\\/g, '/');
@@ -1229,7 +1245,20 @@ export async function processSingleFileContent(
         };
       }
     }
-    if (fileSizeInMB > 9.9 && !willExtractPdfText && fileType !== 'text') {
+    if (shouldRenderImageOverview && stats.size > IMAGE_MAX_SOURCE_BYTES) {
+      return {
+        llmContent: 'Image file exceeds the 100 MB source limit.',
+        returnDisplay: 'Image file exceeds the 100 MB source limit.',
+        error: `Image file exceeds the 100 MB source limit: ${filePath}`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
+    if (
+      fileSizeInMB > 9.9 &&
+      !willExtractPdfText &&
+      fileType !== 'text' &&
+      !shouldRenderImageOverview
+    ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
         returnDisplay: 'File size exceeds the 10MB limit.',
@@ -1416,7 +1445,71 @@ export async function processSingleFileContent(
           stats,
         };
       }
-      case 'image':
+      case 'image': {
+        if (shouldRenderImageOverview) {
+          try {
+            const view = await renderImageOverview(
+              filePath,
+              signal ?? new AbortController().signal,
+            );
+            return {
+              llmContent: [
+                {
+                  text:
+                    `Image overview: ${view.outputWidth}x${view.outputHeight}; ` +
+                    `oriented source: ${view.sourceWidth}x${view.sourceHeight}. ` +
+                    `If details are too small, use tool_search for "zoom image", then ` +
+                    `call zoom_image with coordinates normalized from 0 to 1000.`,
+                },
+                {
+                  inlineData: {
+                    data: view.bytes.toString('base64'),
+                    mimeType: view.mimeType,
+                    displayName,
+                  },
+                },
+              ],
+              returnDisplay: `Read image file: ${relativePathForDisplay}`,
+            };
+          } catch (error) {
+            signal?.throwIfAborted();
+            if (
+              error instanceof ImageViewError &&
+              (error.code === 'source_too_large' ||
+                error.code === 'output_too_large')
+            ) {
+              return {
+                llmContent: error.message,
+                returnDisplay: error.message,
+                error: error.message,
+                errorType: ToolErrorType.FILE_TOO_LARGE,
+              };
+            }
+            throw error;
+          }
+        }
+        const contentBuffer = await fs.promises.readFile(filePath);
+        const base64Data = contentBuffer.toString('base64');
+        const base64SizeInMB = base64Data.length / (1024 * 1024);
+        if (base64SizeInMB > 9.9) {
+          return {
+            llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
+            returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            errorType: ToolErrorType.FILE_TOO_LARGE,
+          };
+        }
+        return {
+          llmContent: {
+            inlineData: {
+              data: base64Data,
+              mimeType: mediaMimeType,
+              displayName,
+            },
+          },
+          returnDisplay: `Read image file: ${relativePathForDisplay}`,
+        };
+      }
       case 'audio':
       case 'video': {
         const contentBuffer = await fs.promises.readFile(filePath);
@@ -1435,12 +1528,7 @@ export async function processSingleFileContent(
           llmContent: {
             inlineData: {
               data: base64Data,
-              mimeType:
-                mime.getType(filePath) ??
-                MIME_LITE_MISSING_VIDEO_TYPES.get(
-                  path.extname(filePath).toLowerCase(),
-                ) ??
-                'application/octet-stream',
+              mimeType: mediaMimeType,
               displayName,
             },
           },
