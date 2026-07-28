@@ -40,7 +40,7 @@ import {
 } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -986,6 +986,43 @@ export class GeminiClient {
   }
 
   /**
+   * Preloads (reveals) every deferred tool — bundled built-ins and MCP
+   * alike — at session start when the combined estimated size of their
+   * schemas fits within `tools.toolSearch.threshold` percent of the
+   * context window. A small deferred set is cheaper to declare upfront
+   * than to load on demand: with nothing left for ToolSearch to reveal,
+   * the declaration list stays stable for the whole session and no
+   * reveal ever invalidates the prompt-cache prefix.
+   *
+   * Deliberately NOT called from setTools(): revealing a tool the startup
+   * reminder already announced would make queueAddedMcpToolsReminder flag
+   * it as removed, and a mid-session declaration change busts the very
+   * cache this preload exists to protect. Tools from servers that connect
+   * later stay deferred until the next session start.
+   */
+  private preloadDeferredToolsWithinBudget(): void {
+    const toolRegistry = this.config.getToolRegistry();
+    // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
+    // reveals everything — there is no budget decision to make.
+    if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
+      return;
+    }
+    const thresholdPercent = this.config.getToolSearchThreshold();
+    if (thresholdPercent <= 0) {
+      return;
+    }
+    const contextWindow =
+      this.config.getContentGeneratorConfig()?.contextWindowSize ??
+      tokenLimit(this.config.getModel(), 'input');
+    if (!contextWindow || contextWindow <= 0) {
+      return;
+    }
+    toolRegistry.preloadDeferredToolsWithinBudget(
+      Math.floor((contextWindow * thresholdPercent) / 100),
+    );
+  }
+
+  /**
    * Computes the deferred-tools list that should be announced through
    * user-role system reminders.
    *
@@ -1373,6 +1410,12 @@ export class GeminiClient {
             }
           }
         }
+      });
+      // Budget-based deferred-tool preload runs BEFORE the deferred
+      // reminder is resolved so preloaded tools are filtered out of the
+      // startup reminder and never enter the announced set.
+      profiler.timeSync('deferred_tool_preload', () => {
+        this.preloadDeferredToolsWithinBudget();
       });
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder();
