@@ -261,3 +261,123 @@ describe('workspace qualified Git branch routes (generation guard)', () => {
     expect(response.body.code).toBe('workspace_runtime_unavailable');
   });
 });
+
+describe('workspace qualified Git branch routes (trust guard)', () => {
+  function qualifiedRuntime(
+    workspaceId: string,
+    workspaceCwd: string,
+    trusted: boolean,
+  ): WorkspaceRuntime {
+    return {
+      workspaceId,
+      workspaceCwd,
+      primary: workspaceId === 'primary',
+      trusted,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
+    } as unknown as WorkspaceRuntime;
+  }
+
+  it('rejects all six qualified endpoints when the workspace is untrusted', async () => {
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([
+        qualifiedRuntime('primary', '/work/main', false),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const get = await request(app).get('/workspaces/primary/git/branches');
+    expect(get.status).toBe(403);
+    expect(get.body.code).toBe('untrusted_workspace');
+
+    for (const [method, path, body] of [
+      ['post', '/workspaces/primary/git/checkout', { ref: 'main' }],
+      ['post', '/workspaces/primary/git/branch', { name: 'feat' }],
+      ['post', '/workspaces/primary/git/push', {}],
+      ['post', '/workspaces/primary/git/pull', {}],
+      ['post', '/workspaces/primary/git/commit', { message: 'x' }],
+    ] as const) {
+      const res = await request(app)[method](path).send(body);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    }
+  });
+});
+
+describe('workspace qualified Git branch routes (input validation)', () => {
+  function trustedRuntime(workspaceCwd: string): WorkspaceRuntime {
+    return {
+      workspaceId: 'primary',
+      workspaceCwd,
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
+    } as unknown as WorkspaceRuntime;
+  }
+
+  it('rejects a dash-prefixed branch name on the qualified route', async () => {
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([
+        trustedRuntime('/work/main'),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/branch')
+      .send({ name: '-evil' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_branch_name');
+  });
+
+  it('rejects a cwd that escapes the workspace on mutation endpoints', async () => {
+    const dir = makeRepo();
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([trustedRuntime(dir)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    for (const [method, path, body] of [
+      ['post', '/workspaces/primary/git/checkout', { ref: 'main' }],
+      ['post', '/workspaces/primary/git/branch', { name: 'feat' }],
+      ['post', '/workspaces/primary/git/push', {}],
+      ['post', '/workspaces/primary/git/pull', {}],
+      ['post', '/workspaces/primary/git/commit', { message: 'x' }],
+    ] as const) {
+      const res = await request(app)[method](`${path}?cwd=/etc`).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_cwd');
+    }
+  });
+
+  it('lists branches from a real repo via the qualified route', async () => {
+    const dir = makeRepo();
+    git(dir, 'branch', 'feature-x');
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([trustedRuntime(dir)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get('/workspaces/primary/git/branches');
+
+    expect(response.status).toBe(200);
+    expect(response.body.available).toBe(true);
+    const names = response.body.local.map((b: { name: string }) => b.name);
+    expect(names).toContain(response.body.head);
+    expect(names).toContain('feature-x');
+  });
+});

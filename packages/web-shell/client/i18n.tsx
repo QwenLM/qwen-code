@@ -58,6 +58,8 @@ const EN: Messages = {
   'gitCommit.genFailed': 'Auto-generation failed — write your message',
   'gitCommit.prLogUnavailable':
     'Could not load commits for the selected base branch.',
+  'gitCommit.prPushFirst':
+    'Push your branch to a remote before creating a pull request.',
   'gitCommit.commit': 'Commit',
   'gitCommit.commitAndPush': 'Commit and Push',
   'gitCommit.createPr': 'Create Pull Request',
@@ -2435,6 +2437,7 @@ const ZH: Messages = {
   'gitCommit.generating': '正在生成提交信息…',
   'gitCommit.genFailed': '自动生成失败 — 请手动输入提交信息',
   'gitCommit.prLogUnavailable': '无法加载所选目标分支的提交记录。',
+  'gitCommit.prPushFirst': '请先将分支推送到远程仓库，再创建合并请求。',
   'gitCommit.commit': '提交',
   'gitCommit.commitAndPush': '提交并推送',
   'gitCommit.createPr': '创建合并请求',

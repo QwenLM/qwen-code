@@ -86,6 +86,7 @@ export function GitDialog({
     remotes: [string, string[]][];
   } | null>(null);
   const [prBranchesError, setPrBranchesError] = useState(false);
+  const prHeadInfoRef = useRef<{ hasUpstream: boolean } | null>(null);
   const [prStatus, setPrStatus] = useState<{
     msg: string;
     type: 'error' | 'success';
@@ -329,10 +330,15 @@ export function GitDialog({
           list.push(b.name);
         }
         setPrBranches({ local, remotes: Array.from(remoteMap.entries()) });
+        const head = branches.local.find((b) => b.isHead);
+        prHeadInfoRef.current = head
+          ? { hasUpstream: Boolean(head.upstream) }
+          : null;
       })
       .catch(() => {
         setPrBranches(null);
         setPrBranchesError(true);
+        prHeadInfoRef.current = null;
       });
   }, [client, workspaceCwd, gitCwd]);
 
@@ -398,16 +404,29 @@ export function GitDialog({
                   .map((e) => `- ${e.shortSha} ${e.subject}`)
                   .join('\n')
               : '(no commits ahead of base)';
-          const uncommitted = diff.files
-            .map((f: DaemonWorkspaceGitDiffFile) => {
+          const uncommittedLines = diff.files.map(
+            (f: DaemonWorkspaceGitDiffFile) => {
               const status = f.isUntracked
                 ? 'new'
                 : f.isDeleted
                   ? 'deleted'
                   : 'modified';
               return `${status}: ${f.path}`;
-            })
-            .join('\n');
+            },
+          );
+          let uncommitted = uncommittedLines.join('\n');
+          if (uncommitted.length > MAX_SUMMARY_CHARS) {
+            let truncated = '';
+            let included = 0;
+            for (const line of uncommittedLines) {
+              if (truncated.length + line.length + 1 > MAX_SUMMARY_CHARS) break;
+              truncated += (truncated ? '\n' : '') + line;
+              included++;
+            }
+            uncommitted =
+              truncated +
+              `\n(…and ${uncommittedLines.length - included} more files)`;
+          }
           const prompt =
             `Generate a GitHub pull request title and body for the changes on this branch compared to ${base}. ` +
             `Use the commit history and conversation context to understand what was done and why.\n\n` +
@@ -480,6 +499,11 @@ export function GitDialog({
     if (!prTitle.trim() || prGenerating) return;
     setPrBusy(true);
     setPrStatus(null);
+    if (prHeadInfoRef.current && !prHeadInfoRef.current.hasUpstream) {
+      setPrStatus({ msg: t('gitCommit.prPushFirst'), type: 'error' });
+      setPrBusy(false);
+      return;
+    }
     try {
       const ws = client.workspaceByCwd(workspaceCwd);
       // Strip a known remote prefix for `gh pr create --base`
@@ -492,7 +516,9 @@ export function GitDialog({
         .find((name) => trimmedBase.startsWith(`${name}/`));
       const baseBranch = remotePrefix
         ? trimmedBase.slice(remotePrefix.length + 1)
-        : trimmedBase;
+        : trimmedBase.includes('/')
+          ? trimmedBase.slice(trimmedBase.indexOf('/') + 1)
+          : trimmedBase;
       const result = await ws.workspaceGitHubCreatePullRequest(
         {
           title: prTitle.trim(),

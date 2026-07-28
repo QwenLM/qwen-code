@@ -176,13 +176,14 @@ export function BranchPickerPopover({
     try {
       const result = await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
       showStatus(result.output || t('branchPicker.pushSuccess'), 'success');
+      await fetchBranches();
       onBranchChanged?.();
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setBusyAction(null);
     }
-  }, [ws, busyAction, gitCwd, onBranchChanged, showStatus, t]);
+  }, [ws, busyAction, gitCwd, fetchBranches, onBranchChanged, showStatus, t]);
 
   const handlePull = useCallback(async () => {
     if (busyAction) return;
@@ -190,13 +191,14 @@ export function BranchPickerPopover({
     try {
       const result = await ws.workspaceGitPull(undefined, gitCwd);
       showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
+      await fetchBranches();
       onBranchChanged?.();
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setBusyAction(null);
     }
-  }, [ws, busyAction, gitCwd, onBranchChanged, showStatus, t]);
+  }, [ws, busyAction, gitCwd, fetchBranches, onBranchChanged, showStatus, t]);
 
   const q = search.toLowerCase().trim();
 
