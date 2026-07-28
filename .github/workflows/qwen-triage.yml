@@ -1036,12 +1036,26 @@ jobs:
 
           set +e
           {
-            printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
-            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-              npm ci --prefer-offline --no-audit --progress=false
-            install_status=$?
+            # Retried once for the same reason as the verify lane: npm can
+            # exec a dependency's binary before its own write is closed and
+            # take an ETXTBSY that has nothing to do with the PR, and this
+            # lane blames the PR for any install failure. Unconditional, so
+            # nothing the PR can print decides whether it gets a retry. The
+            # build stays single-shot: compile errors are deterministic.
+            install_attempt=1
+            while :; do
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                npm ci --prefer-offline --no-audit --progress=false
+              install_status=$?
+              if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
+                break
+              fi
+              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              install_attempt=$((install_attempt + 1))
+            done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}."
+              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -1654,8 +1668,17 @@ jobs:
             } > "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
             PREPARE_LOG="$(find tmux-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
+            # Initialised, not merely defaulted at use: an inherited value
+            # would otherwise tell a reader that a single-shot `npm run
+            # build` had "failed twice in a row" — the same false
+            # accusation, from the other direction.
+            PREPARE_ATTEMPTS=''
             case "$PREPARE_FAILURE_PHASE" in
-              install) PREPARE_COMMAND='npm ci' ;;
+              install)
+                PREPARE_COMMAND='npm ci'
+                # Retried once in the prepare step; see the verify lane.
+                PREPARE_ATTEMPTS=' twice in a row'
+                ;;
               build) PREPARE_COMMAND='npm run build' ;;
               *)
                 PREPARE_COMMAND='install/build'
@@ -1672,7 +1695,7 @@ jobs:
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              printf 'The PR app could not be launched because `%s` failed%s before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND" "${PREPARE_ATTEMPTS:-}"
               if [ -n "${PREPARE_LOG_NOTE:-}" ]; then
                 printf '%s\n\n' "$PREPARE_LOG_NOTE"
               fi
@@ -2199,12 +2222,37 @@ jobs:
 
           set +e
           {
-            printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
-            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-              npm ci --prefer-offline --no-audit --progress=false
-            install_status=$?
+            # `npm ci` can die on a race that has nothing to do with the PR:
+            # npm writes a dependency's binary and that package's install
+            # script execs it before the write is closed, so Linux answers
+            # ETXTBSY. Observed on esbuild in run 30319209722, which turned
+            # it into a `fail` verdict against a PR that never touched the
+            # dependency. One clean retry absorbs that class — `npm ci`
+            # removes node_modules before installing, so the second attempt
+            # cannot inherit the half-written file.
+            #
+            # Unconditional by design. Gating the retry on the log would
+            # read text the PR's own lifecycle scripts can write, which is
+            # exactly the forgeable-signal mistake the verdict logic below
+            # was rewritten to avoid. A deterministically broken tree just
+            # fails twice and still earns `fail`; the second attempt is only
+            # ever paid on a path that is already failing. The build is not
+            # retried: a compile error is deterministic, so a second run
+            # would only double the cost of an honest failure.
+            install_attempt=1
+            while :; do
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                npm ci --prefer-offline --no-audit --progress=false
+              install_status=$?
+              if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
+                break
+              fi
+              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              install_attempt=$((install_attempt + 1))
+            done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}."
+              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -3092,8 +3140,20 @@ jobs:
             # so it must not overwrite a previous round's real report.
             [ "${VERDICT:-}" = 'infra-error' ] && WEAK_BODY=true
             PREPARE_LOG="$(find verify-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
+            # Initialised, not merely defaulted at use: an inherited value
+            # would otherwise tell a reader that a single-shot `npm run
+            # build` had "failed twice in a row" — the same false
+            # accusation, from the other direction.
+            PREPARE_ATTEMPTS=''
             case "$PREPARE_FAILURE_PHASE" in
-              install) PREPARE_COMMAND='npm ci' ;;
+              install)
+                PREPARE_COMMAND='npm ci'
+                # The prepare step retries the install once, so reaching
+                # this phase means two consecutive failures. Say so: the
+                # sentence below blames the PR for it, and "failed twice in
+                # a row" is the part that earns the accusation.
+                PREPARE_ATTEMPTS=' twice in a row'
+                ;;
               build) PREPARE_COMMAND='npm run build' ;;
               *)
                 PREPARE_COMMAND='install/build'
@@ -3121,7 +3181,7 @@ jobs:
               else
                 printf '%s\n\n' '<!-- qwen-triage:verify-substantive -->'
                 printf '**Sandboxed verification: fail** - [workflow run](%s)\n\n' "$RUN_URL"
-                printf 'The PR could not be built because `%s` failed before any verification started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+                printf 'The PR could not be built because `%s` failed%s before any verification started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND" "${PREPARE_ATTEMPTS:-}"
               fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · sandboxed verification_'

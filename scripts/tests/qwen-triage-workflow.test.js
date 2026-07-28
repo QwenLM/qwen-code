@@ -651,6 +651,32 @@ describe('qwen-triage tmux workflow', () => {
       expect(noHead.comment).toContain('could not be read');
     },
   );
+
+  it('includes high-risk path detection in the triage skill', () => {
+    expect(prSkill).toContain('1e. High-risk path');
+    expect(prSkill).toContain('openaiContentGenerator');
+    expect(prSkill).toContain('streamingToolCallParser');
+    expect(prSkill).toContain('geminiChat');
+    expect(prSkill).toContain('acpConnection');
+    expect(prSkill).toContain('(^|/)shell\\.ts$');
+    expect(prSkill).toContain('shellExecutionService');
+    expect(prSkill).toContain('mcp-client');
+    expect(prSkill).toContain('mcp-pool');
+    expect(prSkill).toContain('LspServer');
+    expect(prSkill).toContain('acp-integration');
+    expect(prSkill).toContain('(^|/)relaunch\\.ts$');
+    expect(prSkill).toContain('(^|/)sandbox\\.ts$');
+    expect(prSkill).toContain('electron-run-as-node');
+    expect(prSkill).toContain('p = 0.006');
+    expect(prSkill).toContain('do not skip any Stage 2 enrichment');
+    expect(prSkill).toContain('gh api --paginate');
+    expect(prSkill).toContain('|| true');
+    expect(prSkill).toContain('WARNING: could not fetch PR files');
+  });
+
+  it('includes Risk field in the Stage 1 comment template', () => {
+    expect(prSkill).toContain('Risk: <if Stage 1e matched');
+  });
 });
 
 describe('qwen-triage verify workflow', () => {
@@ -1560,6 +1586,11 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(real).toContain('treated as a PR failure');
       expect(real).toContain('npm ci');
+      // The install is retried, so this sentence is blaming the PR for two
+      // consecutive failures and has to say which. Without the count a
+      // reader cannot tell this verdict from the single-shot one that
+      // mis-blamed a PR for an ETXTBSY race.
+      expect(real).toContain('failed twice in a row');
 
       // The build arm of the phase mapping was never rendered by any test,
       // so a typo in that command name would have shipped unnoticed.
@@ -1570,6 +1601,23 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(buildPhase).toContain('npm run build');
       expect(buildPhase).not.toContain('`npm ci` failed');
+      // The build is single-shot, so the retry clause must not leak onto it.
+      expect(buildPhase).not.toContain('twice in a row');
+
+      // Same arm, but with the clause pre-seeded in the environment. This
+      // is what makes the explicit `PREPARE_ATTEMPTS=''` load-bearing
+      // rather than decorative: defaulting it at the point of use (
+      // `${PREPARE_ATTEMPTS:-}`) does nothing against an inherited value,
+      // and the result would be a report claiming a single-shot build had
+      // failed twice.
+      const seededBuild = render(dir, {
+        NAME: 'buildfail-seeded',
+        VERDICT: 'fail',
+        PREPARE_FAILURE_PHASE: 'build',
+        PREPARE_ATTEMPTS: ' twice in a row',
+      });
+      expect(seededBuild).toContain('npm run build');
+      expect(seededBuild).not.toContain('twice in a row');
 
       // An unrecognized phase must degrade, not mislabel.
       const unknownPhase = render(dir, {
@@ -2040,6 +2088,164 @@ describe('qwen-triage verify round-3 hardening', () => {
     const infra = prepare.indexOf('verdict=infra-error');
     if (infra > -1) {
       expect(prepare.slice(0, infra)).toContain('registry_unreachable');
+    }
+  });
+
+  // Run 30319209722 reported `fail` against a PR whose only crime was that
+  // npm exec'd esbuild's binary before its own write was closed (ETXTBSY),
+  // so the install is now retried once.
+  //
+  // Asserting that structurally — "the step contains a loop" — would pass
+  // on a loop that never retries and equally on one that never stops, which
+  // are the two ways this can actually be wrong. So run the real step text:
+  // `runuser` is stubbed to drop its own arguments and exec the rest (which
+  // keeps the genuine `env -u ...` stripping in the path under test),
+  // `chown` and `curl` are no-ops, and `npm` fails a set number of times.
+  const runPrepare = (jobName, { failures, resultsDir }) => {
+    const script = stepIn(jobName, 'Install and build PR app')
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(script).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'prepare-retry-'));
+    try {
+      const work = join(dir, 'work');
+      mkdirSync(work, { recursive: true });
+      const calls = join(dir, 'npm-ci-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'runuser'),
+        [
+          '#!/usr/bin/env bash',
+          'while [ "$#" -gt 0 ] && [ "$1" != \'--\' ]; do shift; done',
+          'shift || true',
+          'exec "$@"',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(dir, 'npm'),
+        [
+          '#!/usr/bin/env bash',
+          // Only `ci` is counted/failed: `run build` shares this stub and
+          // must stay a success, or an install-phase assertion could pass
+          // because the BUILD failed instead.
+          'if [ "$1" = ci ]; then',
+          '  printf "ci\\n" >> "$NPM_CI_CALLS"',
+          '  n=$(wc -l < "$NPM_CI_CALLS" | tr -d " ")',
+          '  if [ "$n" -le "$NPM_CI_FAILURES" ]; then',
+          '    echo "npm error ETXTBSY" >&2',
+          '    exit 1',
+          '  fi',
+          'fi',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      for (const noop of ['chown', 'curl']) {
+        writeFileSync(join(dir, noop), '#!/usr/bin/env bash\nexit 0\n', {
+          mode: 0o755,
+        });
+      }
+      const out = join(dir, 'step-output');
+      writeFileSync(out, '');
+      const res = spawnSync('bash', ['-c', script], {
+        cwd: work,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          NPM_CI_CALLS: calls,
+          NPM_CI_FAILURES: String(failures),
+          RUNNER_TEMP: dir,
+          GITHUB_WORKSPACE: work,
+          GITHUB_OUTPUT: out,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+        },
+      });
+      return {
+        status: res.status,
+        stderr: res.stderr,
+        output: readFileSync(out, 'utf8'),
+        attempts: readFileSync(calls, 'utf8').trim()
+          ? readFileSync(calls, 'utf8').trim().split('\n').length
+          : 0,
+        log: readFileSync(join(dir, resultsDir, 'prepare.log'), 'utf8'),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  for (const [jobName, resultsDir] of [
+    ['verify', 'verify-results'],
+    ['tmux-testing', 'tmux-results'],
+  ]) {
+    it(`retries a transient npm ci once in the ${jobName} lane`, () => {
+      // One ETXTBSY-style failure then success: the run must continue to
+      // the build with no verdict at all. This is the arm the bug lives in
+      // — before the retry it emitted verdict=fail here.
+      const flaky = runPrepare(jobName, { failures: 1, resultsDir });
+      expect(flaky.attempts).toBe(2);
+      expect(flaky.output).not.toContain('verdict=');
+      expect(flaky.log).toContain('retrying once');
+      expect(flaky.log).toContain('$ npm run build');
+
+      // A tree that is genuinely broken still fails, and the retry is
+      // bounded: exactly two attempts, not an unbounded loop.
+      const broken = runPrepare(jobName, { failures: 99, resultsDir });
+      expect(broken.attempts).toBe(2);
+      expect(broken.output).toContain('verdict=fail');
+      expect(broken.output).toContain('failure_phase=install');
+      expect(broken.log).toContain('after 2 attempts');
+      // The build must not have run once the install gave up.
+      expect(broken.log).not.toContain('$ npm run build');
+
+      // Control: a healthy install must not pay for the retry at all.
+      const clean = runPrepare(jobName, { failures: 0, resultsDir });
+      expect(clean.attempts).toBe(1);
+      expect(clean.output).not.toContain('verdict=');
+      expect(clean.log).not.toContain('retrying once');
+    });
+  }
+
+  // The build is deliberately NOT retried — a compile error is
+  // deterministic, so a second run would only double the cost of an honest
+  // failure. Pin that asymmetry so a future "retry everything" edit is a
+  // decision rather than an accident.
+  it('does not retry the build in either lane', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const prepare = stepIn(jobName, 'Install and build PR app');
+      const build = prepare.slice(prepare.indexOf('$ npm run build'));
+      expect(build).not.toContain('while :;');
+      expect(build).not.toContain('build_attempt');
+    }
+  });
+
+  // The verify comment's retry clause is rendered for real by the publish
+  // fidelity suite. There is no equivalent render harness for the tmux
+  // comment, so its copy of the same wiring is pinned structurally: the
+  // clause must be set ONLY on the install arm (the build is single-shot)
+  // and must actually reach the sentence that blames the PR.
+  it('threads the retry count into both lanes fail copy', () => {
+    for (const [jobName, stepName] of [
+      ['publish-verify', 'Post verification report comment'],
+      ['publish-tmux', 'Post tmux result comment'],
+    ]) {
+      const publish = stepIn(jobName, stepName);
+      const install = publish.indexOf("PREPARE_COMMAND='npm ci'");
+      const build = publish.indexOf("PREPARE_COMMAND='npm run build'");
+      expect(install).toBeGreaterThan(-1);
+      expect(build).toBeGreaterThan(install);
+      // Assigned between the install arm and the build arm — i.e. inside
+      // the install arm and nowhere else.
+      const attempts = publish.indexOf("PREPARE_ATTEMPTS=' twice in a row'");
+      expect(attempts).toBeGreaterThan(install);
+      expect(attempts).toBeLessThan(build);
+      expect(publish.slice(build)).not.toContain('PREPARE_ATTEMPTS=');
+      // ...and consumed by the PR-blaming sentence, not left dangling.
+      expect(publish).toMatch(
+        /failed%s[\s\S]*?treated as a PR failure verdict[\s\S]*?"\$\{PREPARE_ATTEMPTS:-\}"/,
+      );
     }
   });
 
