@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { fork, type ChildProcess } from 'node:child_process';
-import { chmodSync, unlinkSync } from 'node:fs';
+import { execFileSync, fork, type ChildProcess } from 'node:child_process';
+import {
+  appendFileSync,
+  constants as fsConstants,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import type { Mode, PathLike } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -42,6 +52,12 @@ const lstatFault = vi.hoisted(() => ({
   calls: 0,
 }));
 
+const fsOpenTestHook = vi.hoisted(() => ({
+  beforeOpen: undefined as
+    | ((filePath: PathLike, flags: string | number) => void | Promise<void>)
+    | undefined,
+}));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -57,6 +73,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         }
       }
       return actual.lstat(filePath);
+    },
+    open: async (filePath: PathLike, flags: string | number, mode?: Mode) => {
+      await fsOpenTestHook.beforeOpen?.(filePath, flags);
+      return actual.open(filePath, flags, mode);
     },
   };
 });
@@ -158,10 +178,16 @@ function record(
   };
 }
 
+function positionalReadLength(args: unknown): number | undefined {
+  const values = args as readonly unknown[];
+  return typeof values[2] === 'number' ? values[2] : undefined;
+}
+
 afterEach(async () => {
   lstatFault.path = undefined;
   lstatFault.remainingFailures = 0;
   lstatFault.calls = 0;
+  fsOpenTestHook.beforeOpen = undefined;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -420,42 +446,88 @@ describe('SessionWriterLease', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'exposes the owned lease when transcript inspection cleanup must be retried',
-    async () => {
-      const fixture = await createFixture();
-      await fs.mkdir(fixture.transcriptPath, { recursive: true });
-      const lockPath = getSessionWriterLockPath(
-        fixture.runtimeBaseDir,
-        fixture.options.sessionId,
-      );
-      const lockDir = path.dirname(lockPath);
-      let recoveryLease: SessionWriterLease | undefined;
+  it('keeps failed acquisition cleanup terminal without retrying the primary lock', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(fixture.transcriptPath, { recursive: true });
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    let recoveryLease: SessionWriterLease | undefined;
+    let retiredPath: string | undefined;
 
-      try {
-        await expect(
-          SessionWriterLease.acquire({
-            ...fixture.options,
-            onOwnershipAcquired: (lease) => {
-              recoveryLease = lease;
-              chmodSync(lockDir, 0o500);
-            },
-          }),
-        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
-        expect(recoveryLease).toBeDefined();
-        await expect(fs.readFile(lockPath, 'utf8')).resolves.toContain(
-          fixture.options.sessionId,
-        );
-      } finally {
-        chmodSync(lockDir, 0o700);
-      }
+    const failure = await SessionWriterLease.acquire({
+      ...fixture.options,
+      onOwnershipAcquired: (lease) => {
+        recoveryLease = lease;
+        retiredPath = `${lockPath}.released.${encodeURIComponent(lease.ownerId)}`;
+        mkdirSync(retiredPath);
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: 'SessionWriterUnavailableError',
+      cause: expect.any(AggregateError),
+    });
+    expect(
+      (failure as Error & { cause: AggregateError }).cause.errors,
+    ).toHaveLength(2);
+    const releaseFailure = (failure as Error & { cause: AggregateError }).cause
+      .errors[1];
+    expect(recoveryLease).toBeDefined();
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toContain(
+      fixture.options.sessionId,
+    );
 
-      await recoveryLease?.release();
-      await expect(fs.lstat(lockPath)).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
-    },
-  );
+    const firstRetry = recoveryLease!.release();
+    const secondRetry = recoveryLease!.release();
+    expect(secondRetry).toBe(firstRetry);
+    await expect(firstRetry).rejects.toBe(releaseFailure);
+    await fs.rmdir(retiredPath!);
+    await fs.unlink(lockPath);
+  });
+
+  it('does not retry failed cleanup after reclaiming a stale lock', async () => {
+    const fixture = await createFixture();
+    const deadOwner = startLeaseProcess();
+    expect(
+      await requestChild(deadOwner, {
+        type: 'acquire',
+        options: fixture.options,
+      }),
+    ).toMatchObject({ ok: true });
+    deadOwner.kill('SIGKILL');
+    await waitForClose(deadOwner);
+    await fs.mkdir(fixture.transcriptPath, { recursive: true });
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    let recoveryLease: SessionWriterLease | undefined;
+    let retiredPath: string | undefined;
+
+    const failure = await SessionWriterLease.acquire({
+      ...fixture.options,
+      onOwnershipAcquired: (lease) => {
+        recoveryLease = lease;
+        retiredPath = `${lockPath}.released.${encodeURIComponent(lease.ownerId)}`;
+        mkdirSync(retiredPath);
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: 'SessionWriterUnavailableError',
+      cause: expect.any(AggregateError),
+    });
+    const releaseFailure = (failure as Error & { cause: AggregateError }).cause
+      .errors[1];
+    expect(recoveryLease).toBeDefined();
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toContain(
+      fixture.options.sessionId,
+    );
+
+    await expect(recoveryLease!.release()).rejects.toBe(releaseFailure);
+    await fs.rmdir(retiredPath!);
+    await fs.unlink(lockPath);
+  });
 
   it.runIf(process.platform === 'linux')(
     'uses a clock-independent Linux process identity',
@@ -719,6 +791,822 @@ describe('SessionWriterLease', () => {
     );
     await lease.release();
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'reconciles timestamp-only metadata changes before appending',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+
+      await fs.chmod(fixture.transcriptPath, initial.mode);
+      const afterChmod = await fs.stat(fixture.transcriptPath);
+      expect(afterChmod.ctimeMs).not.toBe(initial.ctimeMs);
+      await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
+
+      await fs.utimes(
+        fixture.transcriptPath,
+        afterChmod.atime,
+        afterChmod.mtime,
+      );
+      await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
+      await expect(
+        lease.appendJsonLine({ afterMetadataChange: true }),
+      ).resolves.toBeUndefined();
+      await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+        '{"seed":true}\n{"afterMetadataChange":true}\n',
+      );
+      await lease.release();
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'reconciles a same-owner chown',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+
+      await fs.chown(fixture.transcriptPath, initial.uid, initial.gid);
+      const afterChown = await fs.stat(fixture.transcriptPath);
+      expect(afterChown.ctimeMs).not.toBe(initial.ctimeMs);
+      await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
+      await lease.release();
+    },
+  );
+
+  it('detects an equal-length in-place overwrite with restored mtime', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const anchoredTime = new Date('2024-01-02T03:04:05.000Z');
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    await fs.utimes(fixture.transcriptPath, anchoredTime, anchoredTime);
+    const lease = await SessionWriterLease.acquire(fixture.options);
+
+    await fs.writeFile(fixture.transcriptPath, '{"sEEd":true}\n');
+    await fs.utimes(fixture.transcriptPath, anchoredTime, anchoredTime);
+    await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+      SessionTranscriptChangedError,
+    );
+    await lease.release();
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects actual permission and hard-link changes',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const permissionLease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+
+      await fs.chmod(fixture.transcriptPath, initial.mode ^ 0o040);
+      await expect(
+        permissionLease.assertOwnedAndUnchanged(),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      await fs.chmod(fixture.transcriptPath, initial.mode);
+      await permissionLease.release();
+
+      const linkLease = await SessionWriterLease.acquire(fixture.options);
+      const linkPath = `${fixture.transcriptPath}.link`;
+      await fs.link(fixture.transcriptPath, linkPath);
+      await expect(linkLease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      await fs.unlink(linkPath);
+      await linkLease.release();
+    },
+  );
+
+  it.runIf(process.getuid?.() === 0)(
+    'rejects an actual owner change',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+      const changedUid = initial.uid === 0 ? 1 : 0;
+
+      try {
+        await fs.chown(fixture.transcriptPath, changedUid, initial.gid);
+        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+          SessionTranscriptChangedError,
+        );
+      } finally {
+        await fs.chown(fixture.transcriptPath, initial.uid, initial.gid);
+        await lease.release();
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'classifies an unreadable transcript symlink replacement as changed',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const originalPath = `${fixture.transcriptPath}.original`;
+      const initialMode = (await fs.stat(fixture.transcriptPath)).mode;
+      await fs.rename(fixture.transcriptPath, originalPath);
+      await fs.chmod(originalPath, 0);
+      await fs.symlink(originalPath, fixture.transcriptPath);
+
+      try {
+        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+          SessionTranscriptChangedError,
+        );
+      } finally {
+        await fs.unlink(fixture.transcriptPath);
+        await fs.chmod(originalPath, initialMode);
+        await fs.rename(originalPath, fixture.transcriptPath);
+        await lease.release();
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'does not follow a symlink installed between transcript inspection and open',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const originalPath = `${fixture.transcriptPath}.original`;
+      let replaced = false;
+      let transcriptOpenFlags: number | undefined;
+      fsOpenTestHook.beforeOpen = async (filePath, flags) => {
+        if (!replaced && filePath === fixture.transcriptPath) {
+          replaced = true;
+          transcriptOpenFlags = typeof flags === 'number' ? flags : undefined;
+          await fs.rename(fixture.transcriptPath, originalPath);
+          await fs.symlink(originalPath, fixture.transcriptPath);
+        }
+      };
+
+      try {
+        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+          SessionTranscriptChangedError,
+        );
+        expect(replaced).toBe(true);
+        expect(transcriptOpenFlags! & fsConstants.O_NOFOLLOW).not.toBe(0);
+        expect(transcriptOpenFlags! & fsConstants.O_NONBLOCK).not.toBe(0);
+      } finally {
+        fsOpenTestHook.beforeOpen = undefined;
+        await fs.unlink(fixture.transcriptPath);
+        await fs.rename(originalPath, fixture.transcriptPath);
+        await lease.release();
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'classifies a transcript FIFO replacement as changed without a peer',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const originalPath = `${fixture.transcriptPath}.original`;
+      await fs.rename(fixture.transcriptPath, originalPath);
+      execFileSync('mkfifo', [fixture.transcriptPath]);
+
+      try {
+        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+          SessionTranscriptChangedError,
+        );
+      } finally {
+        await fs.unlink(fixture.transcriptPath);
+        await fs.rename(originalPath, fixture.transcriptPath);
+        await lease.release();
+      }
+    },
+  );
+
+  it('classifies transcript deletion as changed', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    await fs.unlink(fixture.transcriptPath);
+
+    await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+      SessionTranscriptChangedError,
+    );
+    await lease.release();
+  });
+
+  it('detects a size change between handle and path stat', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      stat: typeof probe.stat;
+    };
+    await probe.close();
+    const originalStat = fileHandlePrototype.stat;
+    let injected = false;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        if (!injected) {
+          injected = true;
+          appendFileSync(fixture.transcriptPath, '{"external":true}\n');
+          return initial;
+        }
+        return originalStat.apply(this, args);
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(injected).toBe(true);
+    } finally {
+      stat.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('detects an equal-length overwrite between handle and path stat', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      stat: typeof probe.stat;
+    };
+    await probe.close();
+    const originalStat = fileHandlePrototype.stat;
+    let injected = false;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        if (!injected) {
+          injected = true;
+          writeFileSync(fixture.transcriptPath, '{"sEEd":true}\n');
+          utimesSync(
+            fixture.transcriptPath,
+            initial.atime,
+            new Date(initial.mtimeMs + 10_000),
+          );
+          return initial;
+        }
+        return originalStat.apply(this, args);
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(injected).toBe(true);
+    } finally {
+      stat.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('does not rescan the transcript on ordinary appends', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const read = vi.spyOn(fileHandlePrototype, 'read');
+
+    try {
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const baselineReads = read.mock.calls.filter(
+        (call) => (positionalReadLength(call) ?? 0) > 1,
+      ).length;
+      expect(baselineReads).toBeGreaterThan(0);
+
+      await lease.appendJsonLine({ first: true });
+      await lease.appendJsonLine({ second: true });
+      expect(
+        read.mock.calls.filter((call) => (positionalReadLength(call) ?? 0) > 1),
+      ).toHaveLength(baselineReads);
+      await lease.release();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('continues hashing after a short regular-file read', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const transcript = Buffer.alloc(2 * 1024 * 1024, 0x20);
+    transcript[transcript.byteLength - 1] = 0x0a;
+    await fs.writeFile(fixture.transcriptPath, transcript);
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let shortened = false;
+    let hashReads = 0;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const requestedLength = positionalReadLength(args);
+        if ((requestedLength ?? 0) > 1) hashReads++;
+        if (!shortened && requestedLength === 1024 * 1024) {
+          shortened = true;
+          const [buffer, offset, length, position] = args as unknown as [
+            Buffer,
+            number,
+            number,
+            number,
+          ];
+          return (
+            originalRead as unknown as (
+              buffer: Buffer,
+              offset: number,
+              length: number,
+              position: number,
+            ) => Promise<{ bytesRead: number; buffer: Buffer }>
+          ).call(this, buffer, offset, Math.floor(length / 2), position);
+        }
+        return originalRead.apply(this, args);
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
+      expect(shortened).toBe(true);
+      expect(hashReads).toBe(3);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('retries a timestamp change during content verification', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let fullReads = 0;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1 && ++fullReads === 1) {
+          await fs.utimes(
+            fixture.transcriptPath,
+            initial.atime,
+            new Date(initial.mtimeMs + 1_000),
+          );
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
+      expect(fullReads).toBe(2);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('fails bounded when transcript timestamps never stabilize', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let fullReads = 0;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1) {
+          fullReads++;
+          await fs.utimes(
+            fixture.transcriptPath,
+            initial.atime,
+            new Date(initial.mtimeMs + fullReads * 1_000),
+          );
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      expect(fullReads).toBe(3);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('detects an atomic replacement during content verification', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const replacement = `${fixture.transcriptPath}.replacement`;
+    await fs.writeFile(replacement, '{"sEEd":true}\n');
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let replaced = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
+          replaced = true;
+          await fs.rename(replacement, fixture.transcriptPath);
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(replaced).toBe(true);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('detects truncation during content verification', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let truncated = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1 && !truncated) {
+          truncated = true;
+          await fs.truncate(fixture.transcriptPath, 0);
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(truncated).toBe(true);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('detects deletion during content verification', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let deleted = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1 && !deleted) {
+          deleted = true;
+          await fs.unlink(fixture.transcriptPath);
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(deleted).toBe(true);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('detects owner loss during content verification', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.chmod(fixture.transcriptPath, initial.mode);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let replacedOwner = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1 && !replacedOwner) {
+          replacedOwner = true;
+          await fs.writeFile(lockPath, '{"successor":true}\n');
+        }
+        return result;
+      });
+
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      expect(replacedOwner).toBe(true);
+    } finally {
+      read.mockRestore();
+      await fs.unlink(lockPath);
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'reconciles metadata touched between the barrier and append handle stat',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+      const probe = await fs.open(fixture.transcriptPath, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        stat: typeof probe.stat;
+      };
+      await probe.close();
+      const originalStat = fileHandlePrototype.stat;
+      let statCalls = 0;
+      const stat = vi
+        .spyOn(fileHandlePrototype, 'stat')
+        .mockImplementation(async function (this: fs.FileHandle, ...args) {
+          statCalls++;
+          if (statCalls === 2) {
+            await fs.chmod(fixture.transcriptPath, initial.mode);
+          }
+          return originalStat.apply(this, args);
+        });
+
+      try {
+        await expect(
+          lease.appendJsonLine({ afterMetadataRace: true }),
+        ).resolves.toBeUndefined();
+        expect((await fs.stat(fixture.transcriptPath)).ctimeMs).not.toBe(
+          initial.ctimeMs,
+        );
+      } finally {
+        stat.mockRestore();
+        await lease.release();
+      }
+    },
+  );
+
+  it('does not commit a candidate digest after post-write validation fails', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const seed = '{"seed":true}\n';
+    await fs.writeFile(fixture.transcriptPath, seed);
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      stat: typeof probe.stat;
+    };
+    await probe.close();
+    const originalStat = fileHandlePrototype.stat;
+    let invalidated = false;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalStat.apply(this, args);
+        if (
+          !invalidated &&
+          typeof result.size === 'number' &&
+          result.size > Buffer.byteLength(seed)
+        ) {
+          invalidated = true;
+          Object.defineProperty(result, 'size', {
+            value: result.size + 1,
+          });
+        }
+        return result;
+      });
+
+    try {
+      await expect(
+        lease.appendJsonLine({ rejected: true }),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      expect(invalidated).toBe(true);
+    } finally {
+      stat.mockRestore();
+    }
+
+    await fs.writeFile(fixture.transcriptPath, seed);
+    await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
+    await expect(
+      lease.appendJsonLine({ accepted: true }),
+    ).resolves.toBeUndefined();
+    await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+      `${seed}{"accepted":true}\n`,
+    );
+    await lease.release();
+  });
+
+  it('detects an equal-length overwrite after the post-write handle stat', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const seed = '{"seed":true}\n';
+    await fs.writeFile(fixture.transcriptPath, seed);
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      stat: typeof probe.stat;
+    };
+    await probe.close();
+    const originalStat = fileHandlePrototype.stat;
+    let overwritten = false;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalStat.apply(this, args);
+        if (!overwritten && result.size > Buffer.byteLength(seed)) {
+          overwritten = true;
+          const transcript = readFileSync(fixture.transcriptPath, 'utf8');
+          writeFileSync(
+            fixture.transcriptPath,
+            transcript.replace('"seed"', '"sEEd"'),
+          );
+          utimesSync(
+            fixture.transcriptPath,
+            result.atime,
+            new Date(Number(result.mtimeMs) + 10_000),
+          );
+        }
+        return result;
+      });
+
+    try {
+      await expect(
+        lease.appendJsonLine({ afterPostWrite: true }),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      expect(overwritten).toBe(true);
+    } finally {
+      stat.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it('detects an equal-length overwrite during the post-write tail read', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const seed = '{"seed":true}\n';
+    await fs.writeFile(fixture.transcriptPath, seed);
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const probe = await fs.open(fixture.transcriptPath, 'r');
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      read: typeof probe.read;
+    };
+    await probe.close();
+    const originalRead = fileHandlePrototype.read;
+    let overwritten = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if (
+          !overwritten &&
+          positionalReadLength(args) === 1 &&
+          readFileSync(fixture.transcriptPath).byteLength >
+            Buffer.byteLength(seed)
+        ) {
+          overwritten = true;
+          const transcript = readFileSync(fixture.transcriptPath, 'utf8');
+          writeFileSync(
+            fixture.transcriptPath,
+            transcript.replace('"seed"', '"sEEd"'),
+          );
+          const current = statSync(fixture.transcriptPath);
+          utimesSync(
+            fixture.transcriptPath,
+            current.atime,
+            new Date(current.mtimeMs + 10_000),
+          );
+        }
+        return result;
+      });
+
+    try {
+      await expect(
+        lease.appendJsonLine({ afterPostWrite: true }),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      expect(overwritten).toBe(true);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'reconciles metadata touched after the post-write handle stat',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      const seed = '{"seed":true}\n';
+      await fs.writeFile(fixture.transcriptPath, seed);
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const probe = await fs.open(fixture.transcriptPath, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        stat: typeof probe.stat;
+      };
+      await probe.close();
+      const originalStat = fileHandlePrototype.stat;
+      let touched = false;
+      const stat = vi
+        .spyOn(fileHandlePrototype, 'stat')
+        .mockImplementation(async function (this: fs.FileHandle, ...args) {
+          const result = await originalStat.apply(this, args);
+          if (!touched && result.size > Buffer.byteLength(seed)) {
+            touched = true;
+            await fs.chmod(fixture.transcriptPath, Number(result.mode));
+          }
+          return result;
+        });
+
+      try {
+        await expect(
+          lease.appendJsonLine({ afterPostWrite: true }),
+        ).resolves.toBeUndefined();
+        expect(touched).toBe(true);
+        await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+          `${seed}{"afterPostWrite":true}\n`,
+        );
+      } finally {
+        stat.mockRestore();
+        await lease.release();
+      }
+    },
+  );
 
   it('accounts for UTF-8 bytes and releases concurrently without losing ownership', async () => {
     const fixture = await createFixture();

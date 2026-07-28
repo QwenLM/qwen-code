@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -88,8 +88,10 @@ import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
 import {
+  getSessionWriterLockPath,
   SessionTranscriptChangedError,
   SessionWriterLease,
+  SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
@@ -2666,6 +2668,92 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('releases a pending lease while a real baseline read is gated', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
+      const runtimeBaseDir = path.join(root, 'runtime');
+      const projectDir = path.join(root, 'project');
+      await mkdir(projectDir, { recursive: true });
+      Storage.setRuntimeBaseDir(runtimeBaseDir);
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'pending-baseline',
+        cwd: projectDir,
+        targetDir: projectDir,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const transcriptPath = config.getTranscriptPath();
+      await mkdir(path.dirname(transcriptPath), { recursive: true });
+      const transcript = Buffer.alloc(2 * 1024 * 1024, 0x20);
+      transcript[transcript.byteLength - 1] = 0x0a;
+      await writeFile(transcriptPath, transcript);
+      const lockPath = getSessionWriterLockPath(
+        runtimeBaseDir,
+        'pending-baseline',
+      );
+      const probe = await open(transcriptPath, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        read: typeof probe.read;
+      };
+      await probe.close();
+      const originalRead = fileHandlePrototype.read;
+      let releaseRead!: () => void;
+      const readGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      let notifyReadStarted!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        notifyReadStarted = resolve;
+      });
+      let gated = false;
+      const read = vi
+        .spyOn(fileHandlePrototype, 'read')
+        .mockImplementation(async function (
+          this: fs.promises.FileHandle,
+          ...args
+        ) {
+          const result = await originalRead.apply(this, args);
+          const values = args as readonly unknown[];
+          if (!gated && values[2] === 1024 * 1024) {
+            gated = true;
+            notifyReadStarted();
+            await readGate;
+          }
+          return result;
+        });
+
+      try {
+        const initialize = config.initialize();
+        await readStarted;
+        await expect(stat(lockPath)).resolves.toBeDefined();
+        const close = config.closeSessionWriter();
+
+        await vi.waitFor(
+          () =>
+            expect(stat(lockPath)).rejects.toMatchObject({
+              code: 'ENOENT',
+            }),
+          { timeout: 1_000 },
+        );
+        expect(gated).toBe(true);
+        releaseRead();
+        await expect(close).resolves.toBeUndefined();
+        await expect(initialize).rejects.toMatchObject({
+          name: 'SessionWriterUnavailableError',
+        });
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        expect(config.getChatRecordingService()?.hasWriteOwnership()).toBe(
+          false,
+        );
+      } finally {
+        releaseRead();
+        read.mockRestore();
+        Storage.setRuntimeBaseDir(null);
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('treats managed shutdown during writer acquisition as a clean terminal', async () => {
       const config = new Config({
         ...baseParams,
@@ -2728,11 +2816,7 @@ describe('Server Config (config.ts)', () => {
         'getSessionLocation',
       ).mockRejectedValue(activationError);
 
-      const result = await (
-        config as unknown as { activateChatRecording(): Promise<void> }
-      )
-        .activateChatRecording()
-        .catch((error: unknown) => error);
+      const result = await config.initialize().catch((error: unknown) => error);
 
       expect(result).toMatchObject({
         name: 'SessionWriterUnavailableError',
@@ -2744,6 +2828,37 @@ describe('Server Config (config.ts)', () => {
       expect(
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([activationError, releaseError]);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('does not report the same acquisition release failure twice', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const acquisitionFailure = new SessionWriterUnavailableError({
+        cause: new AggregateError([activationError, releaseError]),
+      });
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const lease = {
+        release,
+        isReleased: false,
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async (options) => {
+          options.onOwnershipAcquired?.(lease);
+          throw acquisitionFailure;
+        });
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toBe(acquisitionFailure);
       expect(release).toHaveBeenCalledOnce();
       acquire.mockRestore();
     });

@@ -28,7 +28,7 @@ The protocol is gated by `experimental.sessionWriterLease` and is disabled by de
 1. At most one cooperating ACP process owns a session writer lease under a runtime base.
 2. A leased ACP recorder is inactive until it owns the lease and has reloaded the transcript while holding it.
 3. Preview data loaded before the lease is never the recorder's authoritative tail.
-4. Every leased ACP append verifies the owner token and the expected transcript file identity, metadata, and byte length.
+4. Every leased ACP append verifies the owner token, hard transcript state, and byte length. Timestamp-only drift is accepted only after stable content verification.
 5. An ownership or transcript-integrity failure permanently rejects later top-level turns in that leased ACP Config.
 6. A daemon never constructs a second writable Config for a session already live in that daemon.
 7. A live entry is removed only after its recorder has drained and released the lease.
@@ -46,7 +46,9 @@ Its immutable record contains a random owner token, PID, host, process kind, acq
 
 Acquisition creates a fully written temporary record and links it into the lock name atomically. A valid live owner returns `session_writer_conflict`. A valid dead local owner can be renamed, rechecked, and reclaimed. Reclaim guards form bounded owner generations so another process can recover if a reclaimer itself crashes. A malformed, symlink, or non-regular lock returns `session_writer_unavailable` rather than being guessed stale.
 
-The lease snapshots whether the transcript exists, its file identity and metadata, and its byte length. `appendJsonLine` checks the immutable owner record and snapshot immediately before writing through the same file handle, then advances the expected state only after a successful durable append and post-write path verification. New transcript creation uses exclusive creation.
+The lease snapshots whether the transcript exists, its file identity, security metadata, byte length, and an in-memory incremental SHA-256 state. Existence, length, device/inode, mode, owner/group, and link-count changes fail closed. Birth, change, and modification timestamps are advisory: timestamp-only drift triggers a stable full-content check through one file handle and is accepted only when the digest is unchanged. `appendJsonLine` applies the same check after opening its append handle, advances a candidate digest with the known bytes, and commits the digest and expected state only after a successful durable append, post-write path verification, and final owner check. New transcript creation uses exclusive creation.
+
+The incremental digest is a live-process compatibility check, not a persisted proof for certified handoff. A non-cooperating writer can still overwrite an equal-length prefix during an append without leaving a timestamp difference visible at one of this process's state observations. Closing that existing boundary would require an unconditional O(n) post-write scan, make repeated appends quadratic, and is outside P0a.
 
 ## Activation and close
 
@@ -75,7 +77,7 @@ Existing branched transcripts are not automatically repaired. P0a prevents a new
 
 ## Verification
 
-Unit coverage exercises the default-off and explicit-opt-in gates, lock contention, dead-owner and crashed-reclaimer recovery, malformed and non-regular locks, concurrent and retryable owner-token release, truncated and externally changed transcripts, equal-length file replacement, UTF-8 byte accounting, recorder activation/fencing/close, authoritative reload, initialization cleanup, runtime-root pinning, turn admission, same-daemon replay reuse, disabled-recording compatibility, legacy interactive recorder behavior, and error sanitization. Darwin coverage also verifies that processes with different time zones derive the same owner identity. PID-reuse handling is implemented but is not claimed as test evidence because process-start probing is platform dependent.
+Unit coverage exercises the default-off and explicit-opt-in gates, lock contention, dead-owner and crashed-reclaimer recovery, malformed and non-regular locks, concurrent and retryable owner-token release, truncated and externally changed transcripts, timestamp-only reconciliation, equal-length in-place and atomic replacement, security-metadata changes, UTF-8 byte accounting, recorder activation/fencing/close, authoritative reload, initialization cleanup, runtime-root pinning, turn admission, same-daemon replay reuse, disabled-recording compatibility, legacy interactive recorder behavior, and error sanitization. Darwin coverage also verifies that processes with different time zones derive the same owner identity. PID-reuse handling is implemented but is not claimed as test evidence because process-start probing is platform dependent.
 
 With the feature gate enabled, a real two-process regression recreates the incident timing: process A holds the writer after a tool-result tail, process B is rejected before loading as a writer, A appends its final answer and closes, and B then acquires, reloads that final answer, and appends the next user record with the final answer as its parent.
 

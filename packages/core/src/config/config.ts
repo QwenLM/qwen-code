@@ -1640,6 +1640,9 @@ export class Config {
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  private pendingSessionWriterRelease:
+    | { lease: SessionWriterLease; promise: Promise<void> }
+    | undefined;
   private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
   private sessionWriterShutdownRequested = false;
   private sessionWriterActivationPromise: Promise<void> | undefined;
@@ -2461,6 +2464,13 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
+        if (
+          error instanceof Error &&
+          error.cause instanceof AggregateError &&
+          error.cause.errors.includes(closeError)
+        ) {
+          throw error;
+        }
         throw new SessionWriterUnavailableError({
           cause: new AggregateError(
             [error, closeError],
@@ -2964,6 +2974,9 @@ export class Config {
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
+          if (this.sessionWriterShutdownRequested) {
+            this.startPendingSessionWriterRelease(acquiredLease);
+          }
         },
       });
       if (this.sessionWriterShutdownRequested) {
@@ -3010,12 +3023,19 @@ export class Config {
       }
       try {
         const ownedLease = lease ?? this.pendingSessionWriterLease;
-        await ownedLease?.release();
+        await this.startPendingSessionWriterRelease(ownedLease);
         if (
           this.pendingSessionWriterLease === ownedLease &&
           (ownedLease?.isReleased ?? true)
         ) {
           this.pendingSessionWriterLease = undefined;
+        }
+        if (
+          this.sessionWriterShutdownRequested &&
+          failure instanceof SessionWriterLostError &&
+          ownedLease?.isReleased
+        ) {
+          failure = new SessionWriterShutdownError();
         }
       } catch (releaseError) {
         if (
@@ -3023,7 +3043,13 @@ export class Config {
           (lease ?? this.pendingSessionWriterLease)?.isReleased
         ) {
           this.pendingSessionWriterLease = undefined;
-        } else {
+        } else if (
+          !(
+            failure instanceof Error &&
+            failure.cause instanceof AggregateError &&
+            failure.cause.errors.includes(releaseError)
+          )
+        ) {
           failure = new SessionWriterUnavailableError({
             cause: new AggregateError(
               [failure, releaseError],
@@ -6907,14 +6933,16 @@ export class Config {
   closeSessionWriter(): Promise<void> {
     this.sessionWriterShutdownRequested = true;
     this.chatRecordingService?.beginClose();
+    this.startPendingSessionWriterRelease();
     this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
     return this.sessionWriterClosePromise;
   }
 
   private async closeSessionWriterOnce(): Promise<void> {
     const failures: unknown[] = [];
+    const activation = this.sessionWriterActivationPromise;
     try {
-      await this.sessionWriterActivationPromise;
+      await activation;
     } catch (error) {
       if (!(error instanceof SessionWriterShutdownError)) {
         failures.push(error);
@@ -6925,10 +6953,12 @@ export class Config {
     } catch (error) {
       failures.push(error);
     }
-    const pendingLease = this.pendingSessionWriterLease;
+    const pendingLease = activation
+      ? undefined
+      : this.pendingSessionWriterLease;
     if (pendingLease) {
       try {
-        await pendingLease.release();
+        await this.startPendingSessionWriterRelease(pendingLease);
         if (
           this.pendingSessionWriterLease === pendingLease &&
           pendingLease.isReleased
@@ -6951,6 +6981,18 @@ export class Config {
     if (failures.length > 1) {
       throw new AggregateError(failures, 'Session writer shutdown failed');
     }
+  }
+
+  private startPendingSessionWriterRelease(
+    lease = this.pendingSessionWriterLease,
+  ): Promise<void> | undefined {
+    if (!lease) return undefined;
+    const existing = this.pendingSessionWriterRelease;
+    if (existing?.lease === lease) return existing.promise;
+    const promise = lease.release();
+    this.pendingSessionWriterRelease = { lease, promise };
+    void promise.catch(() => undefined);
+    return promise;
   }
 
   getSessionRuntimeBaseDir(): string {
