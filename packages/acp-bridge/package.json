@@ -67,6 +67,10 @@
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
     },
+    "./processRegistry": {
+      "types": "./dist/process-registry.d.ts",
+      "import": "./dist/process-registry.js"
+    },
     "./ndJsonStream": {
       "types": "./dist/ndJsonStream.d.ts",
       "import": "./dist/ndJsonStream.js"
