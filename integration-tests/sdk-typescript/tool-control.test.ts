@@ -1621,7 +1621,7 @@ describe('Tool Control Parameters (E2E)', () => {
           // Verify file was actually modified (content changed from original).
           // Don't assert on specific wording — the model may paraphrase.
           const content = await helper.readFile('test.txt');
-          expect(content).not.toBe('original content');
+          expect(content.toLowerCase()).toContain('update');
         } finally {
           await q.close();
         }
