@@ -3,6 +3,24 @@ import type { ChannelOutputSegmentContext } from '@qwen-code/channel-base';
 import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
 import { StatusCardController } from './status-card-controller.js';
 
+type ExpectedCallbackResult =
+  | { kind: 'accepted'; execute: () => Promise<void> }
+  | { kind: 'forbidden'; actorId: string }
+  | { kind: 'ignored'; actorId?: string };
+
+function callbackResult(value: unknown): ExpectedCallbackResult {
+  return value as ExpectedCallbackResult;
+}
+
+function acceptedExecution(value: unknown): () => Promise<void> {
+  const result = callbackResult(value);
+  expect(result.kind).toBe('accepted');
+  if (result.kind !== 'accepted') {
+    throw new Error(`Expected accepted callback, received ${result.kind}`);
+  }
+  return result.execute;
+}
+
 function segment(
   segmentId = 'segment-1',
   overrides: Partial<ChannelOutputSegmentContext> = {},
@@ -369,10 +387,20 @@ describe('StatusCardController', () => {
     const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
       .outTrackId;
 
-    expect(controller.claimStop(outTrackId, 'other')).toBeUndefined();
-    const action = controller.claimStop(outTrackId, 'owner-1');
-    expect(action).toBeDefined();
-    await action?.();
+    expect(callbackResult(controller.claimStop(outTrackId, 'other'))).toEqual({
+      kind: 'forbidden',
+      actorId: 'other',
+    });
+    const execute = acceptedExecution(
+      controller.claimStop(outTrackId, 'owner-1'),
+    );
+    expect(callbackResult(controller.claimStop(outTrackId, 'owner-1'))).toEqual(
+      {
+        kind: 'ignored',
+        actorId: 'owner-1',
+      },
+    );
+    await execute();
 
     expect(cancelRun).toHaveBeenCalledWith('session-1', 'run-1');
   });
@@ -387,7 +415,12 @@ describe('StatusCardController', () => {
       .outTrackId;
     await controller.complete('segment-1', 'answer');
 
-    expect(controller.claimStop(outTrackId, 'owner-1')).toBeUndefined();
+    expect(callbackResult(controller.claimStop(outTrackId, 'owner-1'))).toEqual(
+      {
+        kind: 'ignored',
+        actorId: 'owner-1',
+      },
+    );
     expect(cancelRun).not.toHaveBeenCalled();
   });
 });

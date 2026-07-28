@@ -8,7 +8,10 @@ import {
   QUESTION_CARD_TEMPLATE_ID,
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
-import type { DingtalkCardCallback } from './interactive-card-types.js';
+import type {
+  DingtalkCardCallback,
+  DingtalkCardCallbackResult,
+} from './interactive-card-types.js';
 
 type QuestionState = 'reserved' | 'pending' | 'claimed' | 'terminal';
 type QuestionTerminalState =
@@ -146,32 +149,39 @@ export class QuestionCardController {
     return { kind: 'presented' };
   }
 
-  claim(callback: DingtalkCardCallback): (() => Promise<void>) | undefined {
+  claim(callback: DingtalkCardCallback): DingtalkCardCallbackResult {
     const record = this.byOutTrack.get(callback.outTrackId);
-    if (
-      !record ||
-      record.state !== 'pending' ||
-      record.context.owner.id !== callback.ownerId ||
-      callback.hasBusinessPayload === false
-    ) {
-      return undefined;
+    if (!record || record.state !== 'pending') {
+      return { kind: 'ignored', actorId: callback.actorId };
+    }
+    if (record.context.owner.id !== callback.actorId) {
+      return { kind: 'forbidden', actorId: callback.actorId };
+    }
+    if (callback.hasBusinessPayload === false) {
+      return { kind: 'ignored', actorId: callback.actorId };
     }
     if (callback.isCancel || callback.actionId === 'cancel') {
       this.reserveTerminalProjection(record);
       record.state = 'claimed';
-      return () => this.respond(record, 'cancelled');
+      return {
+        kind: 'accepted',
+        execute: () => this.respond(record, 'cancelled'),
+      };
     }
     if (
       callback.actionId !== 'submit' &&
       callback.actionId !== record.context.requestId
     ) {
-      return undefined;
+      return { kind: 'ignored', actorId: callback.actorId };
     }
     const answers = this.parseAnswers(record, callback.formData);
-    if (!answers) return undefined;
+    if (!answers) return { kind: 'ignored', actorId: callback.actorId };
     this.reserveTerminalProjection(record);
     record.state = 'claimed';
-    return () => this.respond(record, 'submitted', answers);
+    return {
+      kind: 'accepted',
+      execute: () => this.respond(record, 'submitted', answers),
+    };
   }
 
   cancelRun(

@@ -7,6 +7,7 @@ import {
   STATUS_CARD_TEMPLATE_ID,
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
+import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const FLUSH_INTERVAL_MS = 500;
@@ -126,36 +127,34 @@ export class StatusCardController {
     }
   }
 
-  claimStop(
-    outTrackId: string,
-    ownerId: string,
-  ): (() => Promise<void>) | undefined {
+  claimStop(outTrackId: string, actorId: string): DingtalkCardCallbackResult {
     const record = this.recordsByOutTrack.get(outTrackId);
-    if (
-      !record ||
-      record.terminal ||
-      record.stopClaimed ||
-      record.ownerId !== ownerId
-    ) {
-      return undefined;
+    if (!record || record.terminal || record.stopClaimed) {
+      return { kind: 'ignored', actorId };
+    }
+    if (record.ownerId !== actorId) {
+      return { kind: 'forbidden', actorId };
     }
     record.stopClaimed = true;
-    return async () => {
-      const cancelled = await this.options.cancelRun(
-        record.sessionId,
-        record.runId,
-      );
-      if (
-        this.recordsByOutTrack.get(outTrackId) !== record ||
-        record.terminal
-      ) {
-        return;
-      }
-      if (!cancelled) {
-        record.stopClaimed = false;
-        return;
-      }
-      this.cancelRun(record.runId, 'cancel_command');
+    return {
+      kind: 'accepted',
+      execute: async () => {
+        const cancelled = await this.options.cancelRun(
+          record.sessionId,
+          record.runId,
+        );
+        if (
+          this.recordsByOutTrack.get(outTrackId) !== record ||
+          record.terminal
+        ) {
+          return;
+        }
+        if (!cancelled) {
+          record.stopClaimed = false;
+          return;
+        }
+        this.cancelRun(record.runId, 'cancel_command');
+      },
     };
   }
 

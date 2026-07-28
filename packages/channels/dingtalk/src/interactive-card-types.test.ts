@@ -3,6 +3,7 @@ import {
   parseDingtalkCardCallback,
   parseDingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
+import * as interactiveCardTypes from './interactive-card-types.js';
 
 describe('interactive card config', () => {
   it('keeps omitted cards disabled while treating an object as opt-in', () => {
@@ -45,6 +46,22 @@ describe('interactive card config', () => {
 });
 
 describe('card callback parser', () => {
+  it('extracts a trusted actor from an otherwise incomplete callback', () => {
+    const parseActorId = (
+      interactiveCardTypes as unknown as {
+        parseDingtalkCardActorId?: (value: unknown) => string | undefined;
+      }
+    ).parseDingtalkCardActorId;
+
+    expect(parseActorId).toBeTypeOf('function');
+    expect(
+      parseActorId?.({
+        userId: ' actor-1 ',
+        value: JSON.stringify({ outTrackId: 'missing-action' }),
+      }),
+    ).toBe('actor-1');
+  });
+
   it('normalizes embedded payloads, owner, action, and form data', () => {
     expect(
       parseDingtalkCardCallback({
@@ -58,7 +75,7 @@ describe('card callback parser', () => {
     ).toEqual({
       outTrackId: 'question-1',
       actionId: 'submit',
-      ownerId: 'owner-1',
+      actorId: 'owner-1',
       formData: { '0': 'Beijing' },
       hasBusinessPayload: true,
       isCancel: false,
@@ -80,7 +97,7 @@ describe('card callback parser', () => {
     ).toEqual({
       outTrackId: 'question-1',
       actionId: 'request-1',
-      ownerId: 'owner-1',
+      actorId: 'owner-1',
       formData: { '0': 'Beijing' },
       hasBusinessPayload: true,
       isCancel: false,
@@ -140,7 +157,7 @@ describe('card callback parser', () => {
           actionValue: 'stop',
         }),
       }),
-    ).toMatchObject({ ownerId: 'real-owner' });
+    ).toMatchObject({ actorId: 'real-owner' });
     expect(
       parseDingtalkCardCallback({
         value: JSON.stringify({

@@ -13,6 +13,24 @@ import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { StatusCardController } from './status-card-controller.js';
 
+type ExpectedCallbackResult =
+  | { kind: 'accepted'; execute: () => Promise<void> }
+  | { kind: 'forbidden'; actorId: string }
+  | { kind: 'ignored'; actorId?: string };
+
+function callbackResult(value: unknown): ExpectedCallbackResult {
+  return value as ExpectedCallbackResult;
+}
+
+function acceptedExecution(value: unknown): () => Promise<void> {
+  const result = callbackResult(value);
+  expect(result.kind).toBe('accepted');
+  if (result.kind !== 'accepted') {
+    throw new Error(`Expected accepted callback, received ${result.kind}`);
+  }
+  return result.execute;
+}
+
 const target = { chatId: 'cid-1', isGroup: true };
 
 function deferred<T>() {
@@ -367,14 +385,15 @@ describe('DingtalkInteractionPresenter', () => {
     expect(client.updateInstance).not.toHaveBeenCalledWith(
       expect.objectContaining({ outTrackId: secondOutTrackId }),
     );
-    const secondAction = questionCards.claim({
-      outTrackId: secondOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Shanghai' },
-    });
-    expect(secondAction).toBeDefined();
-    await secondAction?.();
+    const executeSecond = acceptedExecution(
+      questionCards.claim({
+        outTrackId: secondOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Shanghai' },
+      }),
+    );
+    await executeSecond();
     expect(second.respond).toHaveBeenCalledOnce();
   });
 
@@ -390,12 +409,14 @@ describe('DingtalkInteractionPresenter', () => {
         ([request]) => request.templateId === QUESTION_CARD_TEMPLATE_ID,
       )![0].outTrackId;
 
-    await questionCards.claim({
-      outTrackId: questionOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Beijing' },
-    })?.();
+    await acceptedExecution(
+      questionCards.claim({
+        outTrackId: questionOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Beijing' },
+      }),
+    )();
     presenter.appendOutput(segment('segment-2'), 'Continuation');
 
     await vi.waitFor(() => {
@@ -431,12 +452,14 @@ describe('DingtalkInteractionPresenter', () => {
       }
     });
 
-    const response = questionCards.claim({
-      outTrackId: questionOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Beijing' },
-    })?.();
+    const response = acceptedExecution(
+      questionCards.claim({
+        outTrackId: questionOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Beijing' },
+      }),
+    )();
     await vi.waitFor(() =>
       expect(projectionOrder).toContain('update:question:submitted'),
     );
@@ -479,12 +502,14 @@ describe('DingtalkInteractionPresenter', () => {
       }
     });
 
-    const firstResponse = questionCards.claim({
-      outTrackId: firstQuestionOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Beijing' },
-    })?.();
+    const firstResponse = acceptedExecution(
+      questionCards.claim({
+        outTrackId: firstQuestionOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Beijing' },
+      }),
+    )();
     await vi.waitFor(() =>
       expect(client.updateInstance).toHaveBeenCalledWith(
         expect.objectContaining({

@@ -6,6 +6,24 @@ import type {
 import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
 import { QuestionCardController } from './question-card-controller.js';
 
+type ExpectedCallbackResult =
+  | { kind: 'accepted'; execute: () => Promise<void> }
+  | { kind: 'forbidden'; actorId: string }
+  | { kind: 'ignored'; actorId?: string };
+
+function callbackResult(value: unknown): ExpectedCallbackResult {
+  return value as ExpectedCallbackResult;
+}
+
+function acceptedExecution(value: unknown): () => Promise<void> {
+  const result = callbackResult(value);
+  expect(result.kind).toBe('accepted');
+  if (result.kind !== 'accepted') {
+    throw new Error(`Expected accepted callback, received ${result.kind}`);
+  }
+  return result.execute;
+}
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -197,38 +215,45 @@ describe('QuestionCardController', () => {
       .outTrackId;
 
     expect(
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'submit',
+          actorId: 'other',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'forbidden', actorId: 'other' });
+    const execute = acceptedExecution(
       controller.claim({
         outTrackId,
         actionId: 'submit',
-        ownerId: 'other',
-        formData: { '0': 'Beijing', '1': ['Logs'] },
+        actorId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs', 'Metrics'] },
       }),
-    ).toBeUndefined();
-    const action = controller.claim({
-      outTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Beijing', '1': ['Logs', 'Metrics'] },
-    });
-    expect(action).toBeDefined();
+    );
     expect(
-      controller.claim({
-        outTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Shanghai', '1': ['Logs'] },
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Shanghai', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
     expect(
-      controller.claim({
-        outTrackId,
-        actionId: 'cancel',
-        ownerId: 'owner-1',
-        formData: {},
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'cancel',
+          actorId: 'owner-1',
+          formData: {},
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
 
-    await action?.();
+    await execute();
     expect(respond).toHaveBeenCalledOnce();
     expect(respond).toHaveBeenCalledWith({
       outcome: { outcome: 'selected', optionId: 'proceed_once' },
@@ -252,13 +277,15 @@ describe('QuestionCardController', () => {
       .outTrackId;
 
     expect(
-      controller.claim({
-        outTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Beijing', unexpected: 'secret' },
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', unexpected: 'secret' },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
     expect(respond).not.toHaveBeenCalled();
   });
 
@@ -269,14 +296,16 @@ describe('QuestionCardController', () => {
     const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
       .outTrackId;
 
-    await controller.claim({
-      outTrackId,
-      actionId: 'request-1',
-      ownerId: 'owner-1',
-      formData: {},
-      hasBusinessPayload: true,
-      isCancel: true,
-    })?.();
+    await acceptedExecution(
+      controller.claim({
+        outTrackId,
+        actionId: 'request-1',
+        actorId: 'owner-1',
+        formData: {},
+        hasBusinessPayload: true,
+        isCancel: true,
+      }),
+    )();
 
     expect(respond).toHaveBeenCalledWith({
       outcome: { outcome: 'cancelled' },
@@ -299,28 +328,32 @@ describe('QuestionCardController', () => {
       .outTrackId;
 
     expect(
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'request-1',
+          actorId: 'owner-1',
+          formData: {},
+          hasBusinessPayload: false,
+          isCancel: false,
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
+    await acceptedExecution(
       controller.claim({
         outTrackId,
         actionId: 'request-1',
-        ownerId: 'owner-1',
-        formData: {},
-        hasBusinessPayload: false,
+        actorId: 'owner-1',
+        formData: {
+          '0': '__qwen_other__',
+          '0_other': 'Shenzhen',
+          '1': ['Logs'],
+          '1_other': '',
+        },
+        hasBusinessPayload: true,
         isCancel: false,
       }),
-    ).toBeUndefined();
-    await controller.claim({
-      outTrackId,
-      actionId: 'request-1',
-      ownerId: 'owner-1',
-      formData: {
-        '0': '__qwen_other__',
-        '0_other': 'Shenzhen',
-        '1': ['Logs'],
-        '1_other': '',
-      },
-      hasBusinessPayload: true,
-      isCancel: false,
-    })?.();
+    )();
 
     expect(respond).toHaveBeenCalledWith({
       outcome: { outcome: 'selected', optionId: 'proceed_once' },
@@ -336,12 +369,14 @@ describe('QuestionCardController', () => {
     const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
       .outTrackId;
 
-    await controller.claim({
-      outTrackId,
-      actionId: 'cancel',
-      ownerId: 'owner-1',
-      formData: {},
-    })?.();
+    await acceptedExecution(
+      controller.claim({
+        outTrackId,
+        actionId: 'cancel',
+        actorId: 'owner-1',
+        formData: {},
+      }),
+    )();
 
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -352,13 +387,15 @@ describe('QuestionCardController', () => {
       }),
     );
     expect(
-      controller.claim({
-        outTrackId,
-        actionId: 'cancel',
-        ownerId: 'owner-1',
-        formData: {},
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId,
+          actionId: 'cancel',
+          actorId: 'owner-1',
+          formData: {},
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
   });
 
   it('expires before cancelling the original request', async () => {
@@ -422,23 +459,26 @@ describe('QuestionCardController', () => {
       .mocked(client.createAndDeliver)
       .mock.calls.map(([request]) => request.outTrackId);
 
-    await controller.claim({
-      outTrackId: firstOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Beijing', '1': ['Logs'] },
-    })?.();
+    await acceptedExecution(
+      controller.claim({
+        outTrackId: firstOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs'] },
+      }),
+    )();
 
     expect(first.respond).toHaveBeenCalledOnce();
     expect(second.respond).not.toHaveBeenCalled();
-    const secondAction = controller.claim({
-      outTrackId: secondOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Shanghai', '1': ['Metrics'] },
-    });
-    expect(secondAction).toBeDefined();
-    await secondAction?.();
+    const executeSecond = acceptedExecution(
+      controller.claim({
+        outTrackId: secondOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Shanghai', '1': ['Metrics'] },
+      }),
+    );
+    await executeSecond();
     expect(second.respond).toHaveBeenCalledOnce();
   });
 
@@ -464,25 +504,28 @@ describe('QuestionCardController', () => {
     first.settle('resolved_outside_presenter');
 
     expect(
-      controller.claim({
-        outTrackId: firstOutTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Beijing', '1': ['Logs'] },
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId: firstOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
     expect(client.updateInstance).not.toHaveBeenCalledWith(
       expect.objectContaining({ outTrackId: secondOutTrackId }),
     );
 
-    const secondAction = controller.claim({
-      outTrackId: secondOutTrackId,
-      actionId: 'submit',
-      ownerId: 'owner-1',
-      formData: { '0': 'Shanghai', '1': ['Metrics'] },
-    });
-    expect(secondAction).toBeDefined();
-    await secondAction?.();
+    const executeSecond = acceptedExecution(
+      controller.claim({
+        outTrackId: secondOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Shanghai', '1': ['Metrics'] },
+      }),
+    );
+    await executeSecond();
     expect(second.respond).toHaveBeenCalledOnce();
   });
 
@@ -514,13 +557,15 @@ describe('QuestionCardController', () => {
     );
     expect(first.respond).not.toHaveBeenCalled();
     expect(
-      controller.claim({
-        outTrackId: firstOutTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Beijing', '1': ['Logs'] },
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId: firstOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
   });
 
   it('keeps the newer card active when deliveries finish out of order', async () => {
@@ -547,21 +592,25 @@ describe('QuestionCardController', () => {
       .mock.calls.map(([request]) => request.outTrackId);
 
     expect(
-      controller.claim({
-        outTrackId: firstOutTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Beijing', '1': ['Logs'] },
-      }),
-    ).toBeUndefined();
+      callbackResult(
+        controller.claim({
+          outTrackId: firstOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
     expect(
-      controller.claim({
-        outTrackId: secondOutTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Shanghai', '1': ['Metrics'] },
-      }),
-    ).toBeDefined();
+      callbackResult(
+        controller.claim({
+          outTrackId: secondOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Shanghai', '1': ['Metrics'] },
+        }),
+      ).kind,
+    ).toBe('accepted');
   });
 
   it('keeps pending cards isolated between users', async () => {
@@ -587,21 +636,25 @@ describe('QuestionCardController', () => {
 
     expect(client.updateInstance).not.toHaveBeenCalled();
     expect(
-      controller.claim({
-        outTrackId: firstOutTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Beijing', '1': ['Logs'] },
-      }),
-    ).toBeDefined();
+      callbackResult(
+        controller.claim({
+          outTrackId: firstOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ).kind,
+    ).toBe('accepted');
     expect(
-      controller.claim({
-        outTrackId: secondOutTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-2',
-        formData: { '0': 'Shanghai', '1': ['Metrics'] },
-      }),
-    ).toBeDefined();
+      callbackResult(
+        controller.claim({
+          outTrackId: secondOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-2',
+          formData: { '0': 'Shanghai', '1': ['Metrics'] },
+        }),
+      ).kind,
+    ).toBe('accepted');
   });
 
   it('does not roll back an accepted answer when terminal projection fails', async () => {
@@ -615,12 +668,14 @@ describe('QuestionCardController', () => {
     );
 
     await expect(
-      controller.claim({
-        outTrackId,
-        actionId: 'submit',
-        ownerId: 'owner-1',
-        formData: { '0': 'Beijing', '1': ['Logs'] },
-      })?.(),
+      acceptedExecution(
+        controller.claim({
+          outTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      )(),
     ).resolves.toBeUndefined();
 
     expect(respond).toHaveBeenCalledOnce();

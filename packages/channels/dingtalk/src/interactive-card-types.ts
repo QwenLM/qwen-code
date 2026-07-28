@@ -7,11 +7,16 @@ export interface DingtalkInteractiveCardConfig {
 export interface DingtalkCardCallback {
   outTrackId: string;
   actionId: string;
-  ownerId: string;
+  actorId: string;
   formData: Record<string, unknown>;
   hasBusinessPayload?: boolean;
   isCancel?: boolean;
 }
+
+export type DingtalkCardCallbackResult =
+  | { kind: 'accepted'; execute: () => Promise<void> }
+  | { kind: 'forbidden'; actorId: string }
+  | { kind: 'ignored'; actorId?: string };
 
 const DEFAULT_QUESTION_TIMEOUT_MS = 300_000;
 
@@ -135,14 +140,8 @@ export function parseDingtalkCardCallback(
       ? actionIds[0].trim()
       : undefined) ?? pickString('actionValue', 'eventKey', 'actionId');
   const outTrackId = pickString('outTrackId');
-  const ownerId = ['userId', 'senderStaffId', 'senderId']
-    .map((key) => root[key])
-    .find(
-      (candidate): candidate is string =>
-        typeof candidate === 'string' && candidate.trim().length > 0,
-    )
-    ?.trim();
-  if (!outTrackId || !actionId || !ownerId) return undefined;
+  const actorId = parseDingtalkCardActorId(root);
+  if (!outTrackId || !actionId || !actorId) return undefined;
   const params = sources
     .map((source) => parseEmbeddedRecord(source['params']))
     .find((source) => source !== undefined);
@@ -158,9 +157,21 @@ export function parseDingtalkCardCallback(
   return {
     outTrackId,
     actionId,
-    ownerId,
+    actorId,
     formData: formData ?? {},
     hasBusinessPayload: formData !== undefined || hasCancelField,
     isCancel: hasCancelField && parseBooleanLike(params['user_cancel']),
   };
+}
+
+export function parseDingtalkCardActorId(value: unknown): string | undefined {
+  const root = parseEmbeddedRecord(value);
+  if (!root) return undefined;
+  return ['userId', 'senderStaffId', 'senderId']
+    .map((key) => root[key])
+    .find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.trim().length > 0,
+    )
+    ?.trim();
 }
