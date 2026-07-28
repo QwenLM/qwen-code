@@ -36,11 +36,7 @@ export async function recordAutoSkillCommandUsage(
   command: SlashCommand,
 ): Promise<void> {
   const detail = command.skillDetail;
-  if (
-    !config?.getAutoSkillEnabled() ||
-    detail?.level !== 'project' ||
-    !detail.filePath
-  ) {
+  if (!config || detail?.level !== 'project' || !detail.filePath) {
     return;
   }
   try {

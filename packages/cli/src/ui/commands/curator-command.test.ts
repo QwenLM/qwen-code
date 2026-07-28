@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
   run: vi.fn(),
   restore: vi.fn(),
+  setPinned: vi.fn(),
   refreshCache: vi.fn(),
 }));
 
@@ -19,6 +20,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   getAutoSkillCuratorStatus: mocks.getStatus,
   runAutoSkillCurator: mocks.run,
   restoreArchivedAutoSkill: mocks.restore,
+  setAutoSkillPinned: mocks.setPinned,
 }));
 
 import { curatorCommand } from './curator-command.js';
@@ -46,6 +48,7 @@ describe('curator command', () => {
           state: 'stale',
           lastActivityAt: '2026-01-01T00:00:00.000Z',
           useCount: 0,
+          pinned: false,
         },
       ],
       archived: [],
@@ -67,9 +70,11 @@ describe('curator command', () => {
     mocks.run.mockResolvedValue({
       dryRun: true,
       checked: 1,
+      seeded: [],
       markedStale: [],
       reactivated: [],
       archived: ['auto-skill-old'],
+      skippedCollisions: ['auto-skill-collision'],
     });
     const runCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'run',
@@ -79,16 +84,23 @@ describe('curator command', () => {
 
     expect(mocks.run).toHaveBeenCalledWith('/project', { dryRun: true });
     expect(mocks.refreshCache).not.toHaveBeenCalled();
-    expect((result as { content: string }).content).toContain('auto-skill-old');
+    expect((result as { content: string }).content).toContain(
+      'Archive candidates:\n  auto-skill-old',
+    );
+    expect((result as { content: string }).content).toContain(
+      'Skipped archive collisions:\n  auto-skill-collision',
+    );
   });
 
   it('refreshes skill discovery after a live archive', async () => {
     mocks.run.mockResolvedValue({
       dryRun: false,
       checked: 1,
+      seeded: [],
       markedStale: [],
       reactivated: [],
       archived: ['auto-skill-old'],
+      skippedCollisions: [],
     });
     const runCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'run',
@@ -109,6 +121,31 @@ describe('curator command', () => {
     expect(mocks.restore).toHaveBeenCalledWith('/project', 'auto-skill-old');
     expect(mocks.refreshCache).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+  });
+
+  it('pins and unpins a managed auto-skill', async () => {
+    const pinCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'pin',
+    )!;
+    const unpinCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'unpin',
+    )!;
+
+    await pinCommand.action!(context, 'auto-skill-old');
+    await unpinCommand.action!(context, 'auto-skill-old');
+
+    expect(mocks.setPinned).toHaveBeenNthCalledWith(
+      1,
+      '/project',
+      'auto-skill-old',
+      true,
+    );
+    expect(mocks.setPinned).toHaveBeenNthCalledWith(
+      2,
+      '/project',
+      'auto-skill-old',
+      false,
+    );
   });
 
   it('rejects unsupported run arguments', async () => {

@@ -2268,7 +2268,6 @@ describe('useSlashCommandProcessor', () => {
       vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValueOnce(
         '/test/project',
       );
-      vi.spyOn(mockConfig, 'getAutoSkillEnabled').mockReturnValueOnce(true);
       const skillCmd = createTestCommand(
         {
           name: 'review-skill',

@@ -18,6 +18,7 @@ import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   assertRealProjectSkillPath,
+  getArchivedSkillsRoot,
   getProjectSkillsRoot,
   isProjectSkillPath,
   SKILL_FILE_NAME,
@@ -282,41 +283,48 @@ function buildAgentHistory(history: Content[]): Content[] {
 }
 
 /**
- * Enumerate directories under the project skills root that contain a
- * SKILL.md. Returned names are the directory basenames (the same identifier
- * the agent uses when picking `.qwen/skills/<name>/SKILL.md`).
+ * Enumerate directory names already used by active or archived project skills.
+ * Archived names stay reserved so a new auto-skill cannot collide with a
+ * recoverable older package.
  *
- * Best-effort: any read error (ENOENT, EACCES, ...) returns `[]` so a
- * temporarily-unreadable skills dir downgrades to "no enumeration" rather
- * than aborting the task. Exported for tests.
+ * Best-effort: an unreadable root contributes no names, so a temporary read
+ * failure downgrades enumeration rather than aborting the task. Exported for
+ * tests.
  */
 export async function listExistingSkillDirNames(
   projectRoot: string,
 ): Promise<string[]> {
-  const skillsRoot = getProjectSkillsRoot(projectRoot);
-  let entries: Array<import('node:fs').Dirent>;
-  try {
-    entries = await fs.readdir(skillsRoot, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const names: string[] = [];
-  for (const entry of entries) {
-    // Skill dirs can be symlinked — `skill-load.ts` and `skill-manager.ts`
-    // both treat `isDirectory() || isSymbolicLink()` as "consider this a
-    // skill candidate". Mirror that here so symlinked skills appear in
-    // the enumeration and the agent steers clear of their names.
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+  const names = new Set<string>();
+  for (const [root, requireManifest] of [
+    [getProjectSkillsRoot(projectRoot), true],
+    [getArchivedSkillsRoot(projectRoot), false],
+  ] as const) {
+    let entries: Array<import('node:fs').Dirent>;
     try {
-      await fs.stat(path.join(skillsRoot, entry.name, SKILL_FILE_NAME));
-      names.push(entry.name);
+      entries = await fs.readdir(root, { withFileTypes: true });
     } catch {
-      // No SKILL.md (or unreadable) — skip; half-built directories
-      // shouldn't reserve a name.
+      continue;
+    }
+    for (const entry of entries) {
+      // Skill dirs can be symlinked — `skill-load.ts` and `skill-manager.ts`
+      // both treat `isDirectory() || isSymbolicLink()` as "consider this a
+      // skill candidate". Mirror that here so symlinked skills appear in
+      // the enumeration and the agent steers clear of their names.
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      if (!requireManifest) {
+        names.add(entry.name);
+        continue;
+      }
+      try {
+        await fs.stat(path.join(root, entry.name, SKILL_FILE_NAME));
+        names.add(entry.name);
+      } catch {
+        // No SKILL.md (or unreadable) — skip; half-built directories
+        // shouldn't reserve a name.
+      }
     }
   }
-  names.sort();
-  return names;
+  return [...names].sort();
 }
 
 /**
@@ -334,7 +342,7 @@ export async function buildTaskPrompt(projectRoot: string): Promise<string> {
   const existingLine =
     existing.length === 0
       ? '(no skills exist yet — any name is available)'
-      : `Existing skill names (do NOT reuse for write_file; use \`edit\` if you want to update one of these): ${existing.join(', ')}`;
+      : `Existing or archived skill directory names (do NOT reuse for write_file; use \`edit\` only to update an active skill): ${existing.join(', ')}`;
   return [
     `Project skills directory: \`${skillsRoot}\``,
     '',

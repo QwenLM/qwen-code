@@ -2542,11 +2542,17 @@ export default {
   'Stale: {{count}}': '陈旧：{{count}}',
   'Archived: {{count}}': '已归档：{{count}}',
   'Stale skills:': '陈旧技能：',
+  'Pinned skills:': '固定技能：',
   'Archived skills:': '已归档技能：',
   'Dry run complete.': '试运行完成。',
   'Curator run complete.': '维护运行完成。',
   'Checked: {{count}}': '已检查：{{count}}',
+  'First observed: {{count}}': '首次发现：{{count}}',
   'Marked stale: {{count}}': '已标记为陈旧：{{count}}',
+  'Reactivated: {{count}}': '已重新激活：{{count}}',
+  'Skipped archive collisions: {{count}}': '已跳过归档冲突：{{count}}',
+  'Archive candidates:': '待归档技能：',
+  'Skipped archive collisions:': '已跳过的归档冲突：',
   '{{verb}}: {{count}}': '{{verb}}：{{count}}',
   'Would archive': '将归档',
   Archived: '已归档',
@@ -2558,4 +2564,14 @@ export default {
   'Usage: /curator restore <directory>': '用法：/curator restore <directory>',
   'Restored auto-skill: {{name}}': '已恢复自动技能：{{name}}',
   'Failed to restore auto-skill: {{message}}': '恢复自动技能失败：{{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    '将自动技能排除在自动维护之外。',
+  'Return a pinned auto-skill to automatic maintenance.':
+    '恢复对固定自动技能的自动维护。',
+  'Usage: /curator pin <directory>': '用法：/curator pin <directory>',
+  'Usage: /curator unpin <directory>': '用法：/curator unpin <directory>',
+  'Pinned auto-skill: {{name}}': '已固定自动技能：{{name}}',
+  'Unpinned auto-skill: {{name}}': '已取消固定自动技能：{{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    '更新自动技能固定状态失败：{{message}}',
 };

@@ -549,14 +549,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
-      if (this.config.getAutoSkillEnabled()) {
-        try {
-          await recordAutoSkillUsage(this.config.getProjectRoot(), skill);
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to record auto-skill usage: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+      try {
+        await recordAutoSkillUsage(this.config.getProjectRoot(), skill);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to record auto-skill usage: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,

@@ -70,13 +70,15 @@ Project Skills can be checked into git and automatically become available to tea
 
 ### Maintain auto-generated project Skills
 
-When **Auto Skill** is enabled, Qwen Code tracks successful uses of generated project Skills and periodically moves inactive ones out of the active library. Only directories named `.qwen/skills/auto-skill-*` whose `SKILL.md` frontmatter contains `source: auto-skill` are managed; personal, extension, bundled, and hand-authored Skills are never selected.
+Qwen Code tracks successful uses of generated project Skills locally, including while new Auto Skill generation is disabled, so re-enabling maintenance cannot mistake a recently used skill for an inactive one. When **Auto Skill** is enabled, it periodically moves inactive generated Skills out of the active library. Only directories named `.qwen/skills/auto-skill-*` whose `SKILL.md` frontmatter contains `source: auto-skill` are managed; personal, extension, bundled, and hand-authored Skills are never selected.
 
 - After 30 days without a successful use or `SKILL.md` edit, an auto-skill is marked stale.
 - After 90 days, its complete directory is moved to `.qwen/archived-skills/`. Nothing is permanently deleted.
-- Automatic maintenance runs at most once every 7 days. A newly observed library gets a full grace period before maintenance begins.
+- Automatic maintenance runs at most once every 7 days. Each newly observed auto-skill gets a full grace period before maintenance begins.
+- A pinned auto-skill is excluded from automatic stale and archive transitions until it is unpinned.
+- Archived directory names remain reserved, and an existing archive destination skips only that collision rather than stopping maintenance for other skills.
 
-Use `/curator` to see active, stale, and archived auto-skills. Run `/curator run --dry-run` to preview a maintenance pass, `/curator run` to apply it immediately, or `/curator restore <directory>` to move an archived auto-skill back into the active library.
+Use `/curator` to see active, stale, archived, and pinned auto-skills. Run `/curator run --dry-run` to preview a maintenance pass, `/curator run` to apply it immediately, `/curator pin <directory>` or `/curator unpin <directory>` to control per-skill maintenance, or `/curator restore <directory>` to move an archived auto-skill back into the active library.
 
 ## Write `SKILL.md`
 

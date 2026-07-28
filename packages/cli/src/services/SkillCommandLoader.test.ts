@@ -202,7 +202,7 @@ describe('SkillCommandLoader', () => {
     });
   });
 
-  it('does not record curator usage when Auto Skill is disabled', async () => {
+  it('records curator usage while Auto Skill generation is disabled', async () => {
     vi.mocked(mockConfig.getAutoSkillEnabled).mockReturnValue(false);
 
     await recordAutoSkillCommandUsage(mockConfig, {
@@ -216,7 +216,11 @@ describe('SkillCommandLoader', () => {
       },
     });
 
-    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'my-skill',
+      level: 'project',
+      filePath: '/test/project/.qwen/skills/auto-skill-test/SKILL.md',
+    });
   });
 
   it('should submit skill body as prompt', async () => {

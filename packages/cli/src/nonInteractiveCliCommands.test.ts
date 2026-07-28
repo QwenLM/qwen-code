@@ -70,7 +70,6 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
-      getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(true),

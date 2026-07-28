@@ -10,7 +10,11 @@ import lockfile from 'proper-lockfile';
 import { QWEN_DIR } from '../config/storage.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import { getProjectSkillsRoot, SKILL_FILE_NAME } from './skill-paths.js';
+import {
+  getArchivedSkillsRoot,
+  getProjectSkillsRoot,
+  SKILL_FILE_NAME,
+} from './skill-paths.js';
 import type { SkillConfig } from './types.js';
 import { validateSkillName } from './types.js';
 
@@ -22,7 +26,6 @@ const AUTO_SKILL_PREFIX = 'auto-skill-';
 const CURATOR_STATE_VERSION = 1;
 const CURATOR_STATE_FILE = 'skill-curator.json';
 const CURATOR_LOCK_FILE = 'skill-curator.lock';
-const ARCHIVED_SKILLS_DIR = 'archived-skills';
 
 type AutoSkillState = 'active' | 'stale' | 'archived';
 
@@ -33,6 +36,7 @@ interface AutoSkillRecord {
   lastUsedAt?: string;
   useCount: number;
   state: AutoSkillState;
+  pinned: boolean;
   archivedAt?: string;
 }
 
@@ -56,6 +60,7 @@ export interface AutoSkillCuratorEntry {
   state: AutoSkillState;
   lastActivityAt: string;
   useCount: number;
+  pinned: boolean;
 }
 
 export interface AutoSkillCuratorStatus {
@@ -68,9 +73,11 @@ export interface AutoSkillCuratorStatus {
 export interface AutoSkillCuratorRunResult {
   dryRun: boolean;
   checked: number;
+  seeded: string[];
   markedStale: string[];
   reactivated: string[];
   archived: string[];
+  skippedCollisions: string[];
 }
 
 export type AutoSkillCuratorAutomaticResult =
@@ -103,7 +110,7 @@ function getCuratorPaths(projectRoot: string): CuratorPaths {
   return {
     qwenRoot,
     skillsRoot: getProjectSkillsRoot(projectRoot),
-    archiveRoot: path.join(qwenRoot, ARCHIVED_SKILLS_DIR),
+    archiveRoot: getArchivedSkillsRoot(projectRoot),
     statePath: path.join(qwenRoot, CURATOR_STATE_FILE),
     lockPath: path.join(qwenRoot, CURATOR_LOCK_FILE),
   };
@@ -161,10 +168,12 @@ function parseState(raw: unknown, statePath: string): AutoSkillCuratorState {
     }
     const skillName = record['skillName'];
     const useCount = record['useCount'];
+    const pinned = record['pinned'];
     if (
       typeof skillName !== 'string' ||
       !Number.isInteger(useCount) ||
-      (useCount as number) < 0
+      (useCount as number) < 0 ||
+      (pinned !== undefined && typeof pinned !== 'boolean')
     ) {
       throw new Error(
         `Invalid auto-skill curator record for ${directoryName}.`,
@@ -182,6 +191,7 @@ function parseState(raw: unknown, statePath: string): AutoSkillCuratorState {
       ),
       useCount: useCount as number,
       state,
+      pinned: pinned ?? false,
       ...(record['lastUsedAt'] !== undefined
         ? {
             lastUsedAt: requireTimestamp(
@@ -365,6 +375,7 @@ async function withCuratorLock<T>(
 function recordForSkill(
   state: AutoSkillCuratorState,
   skill: ManagedAutoSkill,
+  firstSeenAt: string = skill.modifiedAt,
 ): AutoSkillRecord {
   const existing = state.skills[skill.directoryName];
   if (existing) {
@@ -373,10 +384,11 @@ function recordForSkill(
   }
   const record: AutoSkillRecord = {
     skillName: skill.skillName,
-    firstSeenAt: skill.modifiedAt,
-    lastActivityAt: skill.modifiedAt,
+    firstSeenAt,
+    lastActivityAt: firstSeenAt,
     useCount: 0,
     state: 'active',
+    pinned: false,
   };
   state.skills[skill.directoryName] = record;
   return record;
@@ -405,6 +417,7 @@ function entryFor(
     state,
     lastActivityAt: new Date(lastActivityMs(skill, record)).toISOString(),
     useCount: record.useCount,
+    pinned: record.pinned,
   };
 }
 
@@ -433,15 +446,23 @@ async function runLocked(
   const result: AutoSkillCuratorRunResult = {
     dryRun: false,
     checked: skills.length,
+    seeded: [],
     markedStale: [],
     reactivated: [],
     archived: [],
+    skippedCollisions: [],
   };
   const moved: Array<{ source: string; destination: string }> = [];
 
   try {
     for (const scanned of skills) {
-      const record = recordForSkill(state, scanned);
+      const existing = state.skills[scanned.directoryName];
+      const record = recordForSkill(state, scanned, nowIso);
+      if (!existing) {
+        result.seeded.push(scanned.directoryName);
+        continue;
+      }
+      if (record.pinned) continue;
       const inactivityMs = nowMs - lastActivityMs(scanned, record);
       if (inactivityMs >= AUTO_SKILL_ARCHIVE_AFTER_MS) {
         const current = await readManagedSkill(
@@ -468,9 +489,8 @@ async function runLocked(
         const destination = path.join(paths.archiveRoot, scanned.directoryName);
         try {
           await fs.lstat(destination);
-          throw new Error(
-            `Cannot archive ${scanned.directoryName}: archive destination already exists.`,
-          );
+          result.skippedCollisions.push(scanned.directoryName);
+          continue;
         } catch (error) {
           if (!isMissing(error)) throw error;
         }
@@ -520,15 +540,29 @@ async function previewRun(
   const result: AutoSkillCuratorRunResult = {
     dryRun: true,
     checked: skills.length,
+    seeded: [],
     markedStale: [],
     reactivated: [],
     archived: [],
+    skippedCollisions: [],
   };
   for (const skill of skills) {
+    const existing = state.skills[skill.directoryName];
+    if (!existing) {
+      result.seeded.push(skill.directoryName);
+      continue;
+    }
     const record = recordForSkill(state, skill);
+    if (record.pinned) continue;
     const inactivityMs = now.getTime() - lastActivityMs(skill, record);
     if (inactivityMs >= AUTO_SKILL_ARCHIVE_AFTER_MS) {
-      result.archived.push(skill.directoryName);
+      try {
+        await fs.lstat(path.join(paths.archiveRoot, skill.directoryName));
+        result.skippedCollisions.push(skill.directoryName);
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        result.archived.push(skill.directoryName);
+      }
     } else if (
       inactivityMs >= AUTO_SKILL_STALE_AFTER_MS &&
       record.state !== 'stale'
@@ -572,6 +606,7 @@ export async function maybeRunAutoSkillCurator(
           lastActivityAt: nowIso,
           useCount: existing?.useCount ?? 0,
           state: 'active',
+          pinned: existing?.pinned ?? false,
           ...(existing?.lastUsedAt ? { lastUsedAt: existing.lastUsedAt } : {}),
         };
       }
@@ -616,8 +651,8 @@ export async function recordAutoSkillUsage(
       return false;
     }
     const state = await readState(lockedPaths.statePath);
-    const record = recordForSkill(state, managed);
     const nowIso = now.toISOString();
+    const record = recordForSkill(state, managed, nowIso);
     record.lastActivityAt = nowIso;
     record.lastUsedAt = nowIso;
     record.useCount += 1;
@@ -628,6 +663,27 @@ export async function recordAutoSkillUsage(
       noFollow: true,
     });
     return true;
+  });
+}
+
+export async function setAutoSkillPinned(
+  projectRoot: string,
+  directoryName: string,
+  pinned: boolean,
+  now: Date = new Date(),
+): Promise<void> {
+  await withCuratorLock(projectRoot, async (paths) => {
+    const managed = await readManagedSkill(paths.skillsRoot, directoryName);
+    if (!managed) {
+      throw new Error(`Managed auto-skill not found: ${directoryName}.`);
+    }
+    const state = await readState(paths.statePath);
+    const record = recordForSkill(state, managed, now.toISOString());
+    record.pinned = pinned;
+    await atomicWriteJSON(paths.statePath, state, {
+      mode: 0o600,
+      noFollow: true,
+    });
   });
 }
 
@@ -648,10 +704,15 @@ export async function getAutoSkillCuratorStatus(
     archived: [],
   };
   for (const skill of liveSkills) {
-    const record = recordForSkill(state, skill);
+    const record = recordForSkill(state, skill, now.toISOString());
     const inactivityMs = now.getTime() - lastActivityMs(skill, record);
-    const effectiveState: AutoSkillState =
-      inactivityMs >= AUTO_SKILL_STALE_AFTER_MS ? 'stale' : 'active';
+    const effectiveState: AutoSkillState = record.pinned
+      ? record.state === 'stale'
+        ? 'stale'
+        : 'active'
+      : inactivityMs >= AUTO_SKILL_STALE_AFTER_MS
+        ? 'stale'
+        : 'active';
     status[effectiveState].push(entryFor(skill, record, effectiveState));
   }
   for (const skill of archivedSkills) {

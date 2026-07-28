@@ -631,6 +631,20 @@ describe('SkillTool', () => {
       );
     });
 
+    it('records usage while Auto Skill generation is disabled', async () => {
+      vi.mocked(config.getAutoSkillEnabled).mockReturnValue(false);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
+    });
+
     it('should include allowedTools in result when present', async () => {
       const skillWithTools: SkillConfig = {
         ...mockSkills[1],

@@ -17,15 +17,16 @@ Add a small, deterministic lifecycle manager for project auto-skills:
 - Mark a managed skill stale after 30 days without activity.
 - Archive it after 90 days without activity by moving its whole directory out
   of `.qwen/skills/` into `.qwen/archived-skills/`.
+- Allow individual managed skills to be pinned out of automatic transitions.
 - Run the deterministic pass at most once every 7 days during configuration
   initialization when Auto Skill is enabled.
 - Expose `/curator`, `/curator status`, `/curator run [--dry-run]`, and
-  `/curator restore <directory>` in interactive, non-interactive, and ACP
-  command surfaces.
+  `/curator pin|unpin|restore <directory>` in interactive, non-interactive,
+  and ACP command surfaces.
 
 This first version does not use an LLM, consolidate overlapping skills, manage
 personal/bundled/extension/learned/hand-authored skills, permanently delete
-anything, or introduce additional settings.
+anything, or introduce configurable thresholds.
 
 ## Ownership and persistence
 
@@ -37,9 +38,9 @@ daemon and multi-workspace sessions isolated.
 
 State is keyed by the auto-skill directory name because that is the unit moved
 to and from the archive. Each record stores the frontmatter skill name,
-first-seen time, last successful use, use count, lifecycle state, and optional
-archive time. Writes are serialized with a cross-process lock and committed
-atomically.
+first-seen time, last successful use, use count, lifecycle state, pin state,
+and optional archive time. Writes are serialized with a cross-process lock and
+committed atomically.
 
 Corrupt state is a hard, non-mutating failure. The curator must not infer that
 missing usage means inactivity when its persisted evidence cannot be read.
@@ -55,14 +56,18 @@ A directory is curator-managed only when every condition holds:
 
 This double marker prevents the curator from moving hand-authored, learned,
 extension, bundled, personal, malformed, or symlinked content. Archive and
-restore refuse destination collisions and never overwrite an existing skill.
+restore never overwrite an existing skill. A destination collision skips only
+that package so unrelated maintenance can continue, and archived directory
+names are reserved when the review agent chooses a name for a new auto-skill.
 If state persistence fails after moves, the pass attempts to move every package
 back before surfacing the error.
 
 ## Activity and transitions
 
-When Auto Skill is enabled, a successful Skill tool or direct skill
-slash-command invocation updates the record best-effort. Failed, disabled, or
+A successful Skill tool or direct skill slash-command invocation updates an
+eligible auto-skill record best-effort, even while automatic skill generation
+is disabled. This keeps observed activity independent from the switch that
+controls generation and scheduled maintenance. Failed, skill-disabled, or
 hook-blocked invocations do not count.
 
 For a live skill, activity is the newest of:
@@ -75,10 +80,13 @@ For a live skill, activity is the newest of:
 Including modification time prevents a recently improved skill from being
 archived merely because it has not yet been invoked again.
 
-The first automatic observation seeds `lastRunAt` and all current eligible
-skills with `firstSeenAt = now`, then waits a full 7-day interval. Explicit
-`/curator run` bypasses the interval; `--dry-run` reports candidates without
-moving directories or changing state.
+The first observation of each eligible skill seeds `firstSeenAt = now` rather
+than inferring inactivity from an old filesystem timestamp. The first automatic
+observation also seeds `lastRunAt`, then waits a full 7-day interval. Explicit
+`/curator run` bypasses the interval but preserves per-skill first-sight grace;
+`--dry-run` reports the same seeding and transition candidates without moving
+directories or changing state. Pinned records bypass stale and archive
+transitions until explicitly unpinned.
 
 ## Integration points
 

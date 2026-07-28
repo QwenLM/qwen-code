@@ -2756,11 +2756,18 @@ export default {
   'Stale: {{count}}': 'Stale: {{count}}',
   'Archived: {{count}}': 'Archived: {{count}}',
   'Stale skills:': 'Stale skills:',
+  'Pinned skills:': 'Pinned skills:',
   'Archived skills:': 'Archived skills:',
   'Dry run complete.': 'Dry run complete.',
   'Curator run complete.': 'Curator run complete.',
   'Checked: {{count}}': 'Checked: {{count}}',
+  'First observed: {{count}}': 'First observed: {{count}}',
   'Marked stale: {{count}}': 'Marked stale: {{count}}',
+  'Reactivated: {{count}}': 'Reactivated: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Skipped archive collisions: {{count}}',
+  'Archive candidates:': 'Archive candidates:',
+  'Skipped archive collisions:': 'Skipped archive collisions:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': 'Would archive',
   Archived: 'Archived',
@@ -2773,4 +2780,14 @@ export default {
   'Restored auto-skill: {{name}}': 'Restored auto-skill: {{name}}',
   'Failed to restore auto-skill: {{message}}':
     'Failed to restore auto-skill: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Exclude an auto-skill from automatic maintenance.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Return a pinned auto-skill to automatic maintenance.',
+  'Usage: /curator pin <directory>': 'Usage: /curator pin <directory>',
+  'Usage: /curator unpin <directory>': 'Usage: /curator unpin <directory>',
+  'Pinned auto-skill: {{name}}': 'Pinned auto-skill: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Unpinned auto-skill: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Failed to update auto-skill pin: {{message}}',
 };

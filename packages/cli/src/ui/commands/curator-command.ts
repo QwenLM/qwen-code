@@ -8,6 +8,7 @@ import {
   getAutoSkillCuratorStatus,
   restoreArchivedAutoSkill,
   runAutoSkillCurator,
+  setAutoSkillPinned,
   type AutoSkillCuratorEntry,
   type AutoSkillCuratorRunResult,
   type AutoSkillCuratorStatus,
@@ -45,6 +46,13 @@ function formatStatus(status: AutoSkillCuratorStatus): string {
     lines.push('', t('Stale skills:'));
     lines.push(...status.stale.map((entry) => `  ${displayName(entry)}`));
   }
+  const pinned = [...status.active, ...status.stale].filter(
+    (entry) => entry.pinned,
+  );
+  if (pinned.length > 0) {
+    lines.push('', t('Pinned skills:'));
+    lines.push(...pinned.map((entry) => `  ${displayName(entry)}`));
+  }
   if (status.archived.length > 0) {
     lines.push('', t('Archived skills:'));
     lines.push(...status.archived.map((entry) => `  ${displayName(entry)}`));
@@ -59,16 +67,31 @@ function formatRun(result: AutoSkillCuratorRunResult): string {
   const lines = [
     prefix,
     t('Checked: {{count}}', { count: String(result.checked) }),
+    t('First observed: {{count}}', { count: String(result.seeded.length) }),
     t('Marked stale: {{count}}', {
       count: String(result.markedStale.length),
+    }),
+    t('Reactivated: {{count}}', {
+      count: String(result.reactivated.length),
     }),
     t('{{verb}}: {{count}}', {
       verb: result.dryRun ? t('Would archive') : t('Archived'),
       count: String(result.archived.length),
     }),
+    t('Skipped archive collisions: {{count}}', {
+      count: String(result.skippedCollisions.length),
+    }),
   ];
   if (result.archived.length > 0) {
+    lines.push(
+      '',
+      result.dryRun ? t('Archive candidates:') : t('Archived skills:'),
+    );
     lines.push(...result.archived.map((name) => `  ${name}`));
+  }
+  if (result.skippedCollisions.length > 0) {
+    lines.push('', t('Skipped archive collisions:'));
+    lines.push(...result.skippedCollisions.map((name) => `  ${name}`));
   }
   return lines.join('\n');
 }
@@ -180,14 +203,83 @@ const restoreCommand: SlashCommand = {
   },
 };
 
+function pinCommand(name: 'pin' | 'unpin', pinned: boolean): SlashCommand {
+  return {
+    name,
+    get description() {
+      return pinned
+        ? t('Exclude an auto-skill from automatic maintenance.')
+        : t('Return a pinned auto-skill to automatic maintenance.');
+    },
+    argumentHint: '<directory>',
+    kind: CommandKind.BUILT_IN,
+    supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+    action: async (context, args) => {
+      const config = context.services.config;
+      if (!config) return message(t('Config not loaded.'), 'error');
+      const directoryName = args.trim();
+      if (!directoryName) {
+        return message(
+          pinned
+            ? t('Usage: /curator pin <directory>')
+            : t('Usage: /curator unpin <directory>'),
+          'error',
+        );
+      }
+      try {
+        await setAutoSkillPinned(
+          config.getProjectRoot(),
+          directoryName,
+          pinned,
+        );
+        return message(
+          pinned
+            ? t('Pinned auto-skill: {{name}}', { name: directoryName })
+            : t('Unpinned auto-skill: {{name}}', { name: directoryName }),
+        );
+      } catch (error) {
+        return message(
+          t('Failed to update auto-skill pin: {{message}}', {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+          'error',
+        );
+      }
+    },
+    completion: async (context, partialArg) => {
+      const config = context.services.config;
+      if (!config) return [];
+      try {
+        const status = await getAutoSkillCuratorStatus(config.getProjectRoot());
+        return [...status.active, ...status.stale]
+          .filter((entry) => entry.pinned !== pinned)
+          .map((entry) => entry.directoryName)
+          .filter((directoryName) => directoryName.startsWith(partialArg));
+      } catch {
+        return [];
+      }
+    },
+  };
+}
+
+const pinAutoSkillCommand = pinCommand('pin', true);
+const unpinAutoSkillCommand = pinCommand('unpin', false);
+
 export const curatorCommand: SlashCommand = {
   name: 'curator',
   get description() {
     return t('Maintain project auto-skills based on recent use.');
   },
-  argumentHint: '[status|run [--dry-run]|restore <directory>]',
+  argumentHint:
+    '[status|run [--dry-run]|pin <directory>|unpin <directory>|restore <directory>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: statusAction,
-  subCommands: [statusCommand, runCommand, restoreCommand],
+  subCommands: [
+    statusCommand,
+    runCommand,
+    pinAutoSkillCommand,
+    unpinAutoSkillCommand,
+    restoreCommand,
+  ],
 };

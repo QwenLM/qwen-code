@@ -292,6 +292,22 @@ describe('listExistingSkillDirNames', () => {
     ]);
   });
 
+  it('reserves archived skill directory names', async () => {
+    const archived = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-retired',
+    );
+    await fs.mkdir(archived, { recursive: true });
+    await writeSkillFile(projectRoot, 'auto-skill-live', AUTO_SKILL);
+
+    expect(await listExistingSkillDirNames(projectRoot)).toEqual([
+      'auto-skill-live',
+      'auto-skill-retired',
+    ]);
+  });
+
   it('skips directories without SKILL.md so half-built dirs do not reserve names', async () => {
     await writeSkillFile(projectRoot, 'real', AUTO_SKILL);
     await fs.mkdir(path.join(projectRoot, '.qwen', 'skills', 'empty'), {
