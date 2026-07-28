@@ -1,0 +1,165 @@
+# GitLab
+
+This guide covers setting up a Qwen Code channel that monitors GitLab todos and responds to mentions on issues and merge requests.
+
+## Prerequisites
+
+- A GitLab account (or a dedicated bot account)
+- A GitLab Personal Access Token with `read_api` and `api` scopes
+
+## Creating a Token
+
+1. Go to **Preferences → Access Tokens**
+2. Create a token with these scopes:
+   - **read_api** — read todos and project data
+   - **api** — post notes (comments) on issues/MRs
+3. Save the token securely as an environment variable
+
+## Configuration
+
+Add the channel to `~/.qwen/settings.json`:
+
+```json
+{
+  "channels": {
+    "my-gitlab": {
+      "type": "gitlab",
+      "token": "$GITLAB_TOKEN",
+      "pollInterval": 60000,
+      "senderPolicy": "open",
+      "sessionScope": "chat_thread",
+      "cwd": "/path/to/your/project",
+      "groupPolicy": "open",
+      "action_prompt_template": {
+        "mentioned": "Project: %project% | URL: %project_url% | Author: %author% | Type: %target_type% | IID: %iid% | Title: %title% | Description: %description% | TodoID: %todo_id%"
+      }
+    }
+  }
+}
+```
+
+Set the token as an environment variable:
+
+```bash
+export GITLAB_TOKEN="glpat-your_token_here"
+```
+
+### Self-hosted GitLab
+
+For self-hosted instances, set `baseUrl`:
+
+```json
+{
+  "baseUrl": "https://gitlab.example.com"
+}
+```
+
+## Configuration Options
+
+| Option                   | Default                   | Description                                    |
+| ------------------------ | ------------------------- | ---------------------------------------------- |
+| `token`                  | (required)                | PAT with `read_api` + `api` scopes             |
+| `pollInterval`           | `60000`                   | Poll interval in ms                            |
+| `baseUrl`                | `https://gitlab.com`      | GitLab instance URL                            |
+| `action_prompt_template` | (required for processing) | Maps GitLab action names to metadata templates |
+| `groupPolicy`            | `"disabled"`              | Must be `"open"` for todos to flow             |
+| `senderPolicy`           | `"allowlist"`             | Who can trigger the bot                        |
+
+## action_prompt_template
+
+This field controls which todo actions are processed and how metadata is rendered. Only actions with a configured template are dispatched; all others are skipped and marked done.
+
+```json
+{
+  "action_prompt_template": {
+    "mentioned": "Project: %project% | Author: %author% | Title: %title%"
+  }
+}
+```
+
+The `directly_addressed` action (comment starting with `@bot`) automatically falls back to the `mentioned` template if not explicitly configured.
+
+### Available Action Keys
+
+| Key                   | Trigger                                                                  |
+| --------------------- | ------------------------------------------------------------------------ |
+| `mentioned`           | Someone @mentions the bot in a comment or description (not at the start) |
+| `directly_addressed`  | A comment **starts with** `@bot` (falls back to `mentioned` template)    |
+| `assigned`            | Someone assigns the bot to an issue/MR                                   |
+| `review_requested`    | Someone requests the bot as a reviewer on an MR                          |
+| `approval_required`   | An MR requires the bot's approval (approval rules)                       |
+| `marked`              | Someone marks the bot's comment/issue/MR (star)                          |
+| `build_failed`        | A CI/CD pipeline fails on the bot's branch/MR                            |
+| `unmergeable`         | An MR the bot is involved with becomes unmergeable (conflicts)           |
+| `merge_train_removed` | An MR is removed from the merge train                                    |
+
+Only keys present in `action_prompt_template` are processed. Unconfigured actions are skipped and marked done silently.
+
+### Template Variables
+
+| Variable        | Value                             |
+| --------------- | --------------------------------- |
+| `%project%`     | Project path (e.g., `owner/repo`) |
+| `%project_url%` | Full project URL                  |
+| `%author%`      | Todo author username              |
+| `%target_type%` | `Issue` or `MergeRequest`         |
+| `%iid%`         | Issue/MR internal ID              |
+| `%title%`       | Issue/MR title                    |
+| `%description%` | Issue/MR description body         |
+| `%todo_id%`     | GitLab todo ID                    |
+| `%%`            | Literal `%` (escape)              |
+
+Unknown variables are preserved as-is in the output.
+
+### Prompt Assembly
+
+The template renders into `envelope.metadata` (structured context). The triggering text (`todo.body` or description) goes into `envelope.text` (primary prompt). The base class assembles the final prompt sent to the agent:
+
+```
+[alice] please fix this bug
+
+Project: owner/repo | URL: https://gitlab.com/owner/repo | Author: alice | Type: Issue | IID: 42 | Title: Test Issue | Description: ... | TodoID: 100
+```
+
+- Line 1: `[sender]` prefix + `envelope.text` (with `@bot` stripped)
+- Line 3: `envelope.metadata` (rendered template, sanitized)
+
+You do **not** need a `%body%` variable — the comment/description text is always the primary prompt content, and the template provides supplementary context below it.
+
+## ⚠️ Security
+
+On a **public project**, setting `senderPolicy: "open"` allows **any GitLab user** who @mentions the bot to submit prompts that drive the agent in your `cwd`.
+
+Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public projects.
+
+## Mention Detection
+
+The adapter detects mentions by scanning the text for `@bot-username` using a case-insensitive regex with word-boundary checks. The `isMentioned` flag is set on the envelope; the `GroupGate` (`requireMention` config) decides whether to process it.
+
+## How It Works
+
+The adapter uses GitLab's Todos API as the message source:
+
+1. **Poll** `GET /todos?state=pending` for new todos
+2. **Filter** by `updated_at > cursor` and configured `action_prompt_template`
+3. **Detect mention type** via `target_url` anchor:
+   - `#note_123` present → comment mention → text is `todo.body` (the comment)
+   - No anchor → description mention → text is the issue/MR description
+4. **Dispatch** the envelope through `handleInbound` (GroupGate applies mention policy)
+5. **Advance cursor** and **mark todo done** (best-effort)
+
+The cursor (`lastProcessedAt`) advances regardless of dispatch success or failure. Failed dispatches are logged but not retried — the user can re-mention the bot to trigger a new todo.
+
+## Known Limitations
+
+- **First start skips existing pending todos.** The cursor initializes to "now" on first launch.
+- The bot does not read prior conversation history — only the triggering content is processed.
+- Confidential (internal) notes are not filtered at the todo level; the todo body may contain internal comment text if the mention occurred in a confidential note.
+- Requires `read_api` + `api` PAT scopes. Group-level or project-level tokens work if they have these scopes.
+- Todos for Epics, Designs, and Alerts are skipped (only Issues and MRs are processed).
+
+## Starting the Channel
+
+```bash
+qwen channel start my-gitlab
+```
