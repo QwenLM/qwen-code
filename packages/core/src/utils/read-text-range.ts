@@ -27,17 +27,10 @@ export interface ReadTextRangeRequest {
   stats?: Stats;
   /**
    * Optional caller-owned handle. When present, every read is bound to this
-   * already-open inode; this function never closes the handle.
+   * already-open inode and uses the streaming path; this function never closes
+   * the handle.
    */
   fileHandle?: FileHandle;
-  /**
-   * Upper bound on bytes read off disk while locating the requested window.
-   * Line offsets address a byte stream, so a deep `offset` costs a scan from
-   * byte 0 — this is what keeps that scan from being unbounded. Defaults to
-   * `Infinity` so non-boundary callers (the `read_file` tool) are unchanged;
-   * security boundaries must pass a finite value.
-   */
-  maxScanBytes?: number;
 }
 
 export interface ReadTextRangeResult {
@@ -64,23 +57,6 @@ export class LargeNonUtf8TextError extends Error {
   }
 }
 
-/**
- * Raised when locating the requested line window would require reading more
- * than `maxScanBytes`. Distinct from `LargeNonUtf8TextError`: the file is
- * readable, the *offset* is what cannot be reached affordably.
- */
-export class TextScanBudgetExceededError extends Error {
-  constructor(
-    readonly scannedBytes: number,
-    readonly maxScanBytes: number,
-  ) {
-    super(
-      `Locating the requested line window would read more than ${maxScanBytes} bytes (line offsets are resolved by scanning from the start of the file). Use a byte-offset read to reach this part of the file.`,
-    );
-    this.name = 'TextScanBudgetExceededError';
-  }
-}
-
 export async function readTextRange(
   request: ReadTextRangeRequest,
 ): Promise<ReadTextRangeResult> {
@@ -91,17 +67,10 @@ export async function readTextRange(
       ? await request.fileHandle.stat()
       : await stat(request.path));
   const maxOutputBytes = normalizeMaxBytes(request.maxOutputBytes);
-  const maxScanBytes = request.maxScanBytes ?? Number.POSITIVE_INFINITY;
 
-  // The fast path buffers the whole file, so it reads `stats.size` bytes no
-  // matter how small the window is — a budget that only constrained the
-  // streaming path would not be a budget. Falling through to streaming lets
-  // the same bound apply, and raises `TextScanBudgetExceededError` if the
-  // window really is out of reach.
   if (
     request.fileHandle === undefined &&
-    stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE &&
-    stats.size <= maxScanBytes
+    stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE
   ) {
     const { content, encoding, bom } = await readFileWithEncodingInfo(
       request.path,
@@ -122,7 +91,7 @@ export async function readTextRange(
     };
   }
 
-  return readLargeUtf8Range(request, maxOutputBytes, maxScanBytes, stats.size);
+  return readLargeUtf8Range(request, maxOutputBytes, stats.size);
 }
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
@@ -168,13 +137,16 @@ function sliceDecodedContent(
 async function readLargeUtf8Range(
   request: ReadTextRangeRequest,
   maxOutputBytes: number,
-  maxScanBytes: number,
-  snapshotSize: number,
+  sourceSize: number,
 ): Promise<ReadTextRangeResult> {
   const encoding =
     request.fileHandle === undefined
       ? await detectFileEncoding(request.path)
-      : await detectFileHandleEncoding(request.fileHandle, request.signal);
+      : await detectFileHandleEncoding(
+          request.fileHandle,
+          sourceSize,
+          request.signal,
+        );
   if (!isUtf8CompatibleEncoding(encoding)) {
     throw new LargeNonUtf8TextError(encoding);
   }
@@ -192,8 +164,6 @@ async function readLargeUtf8Range(
   let previousChunkEndedWithCR = false;
   let originalLineCountExact = true;
   let stoppedEarly = false;
-  let scannedBytes = 0;
-  let budgetExhausted = false;
   const decoder = new TextDecoder('utf-8', {
     fatal: true,
     ignoreBOM: true,
@@ -208,7 +178,7 @@ async function readLargeUtf8Range(
       : undefined;
   const chunks =
     pathStream ??
-    readFileHandleChunks(request.fileHandle!, snapshotSize, request.signal);
+    readFileHandleChunks(request.fileHandle!, sourceSize, request.signal);
 
   function appendSelected(fragment: string): void {
     if (fragment.length === 0 || truncatedByBytes) {
@@ -247,15 +217,6 @@ async function readLargeUtf8Range(
   try {
     for await (const rawChunk of chunks) {
       request.signal?.throwIfAborted();
-      // Checked on arrival of the *next* chunk rather than after consuming
-      // the current one: reaching here at all proves there was more file to
-      // read, which is what separates "budget ran out mid-file" from "the
-      // file happened to end on the budget". Costs one chunk of overshoot.
-      if (scannedBytes >= maxScanBytes) {
-        budgetExhausted = true;
-        break;
-      }
-      scannedBytes += (rawChunk as Buffer).length;
       let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
       if (firstChunk) {
         firstChunk = false;
@@ -307,10 +268,6 @@ async function readLargeUtf8Range(
     }
   }
 
-  if (budgetExhausted) {
-    throw new TextScanBudgetExceededError(scannedBytes, maxScanBytes);
-  }
-
   if (!stoppedEarly) {
     decodeUtf8Chunk();
   }
@@ -328,16 +285,21 @@ async function readLargeUtf8Range(
 
 async function* readFileHandleChunks(
   fileHandle: FileHandle,
-  snapshotSize: number,
+  sourceSize: number,
   signal?: AbortSignal,
 ): AsyncGenerator<Buffer> {
   const highWaterMark = 512 * 1024;
   const buffer = Buffer.allocUnsafe(highWaterMark);
   let position = 0;
-  while (position < snapshotSize) {
+  while (position < sourceSize) {
     signal?.throwIfAborted();
-    const length = Math.min(highWaterMark, snapshotSize - position);
-    const { bytesRead } = await fileHandle.read(buffer, 0, length, position);
+    const bytesToRead = Math.min(highWaterMark, sourceSize - position);
+    const { bytesRead } = await fileHandle.read(
+      buffer,
+      0,
+      bytesToRead,
+      position,
+    );
     signal?.throwIfAborted();
     if (bytesRead === 0) return;
     position += bytesRead;
@@ -347,13 +309,13 @@ async function* readFileHandleChunks(
 
 async function detectFileHandleEncoding(
   fileHandle: FileHandle,
+  sourceSize: number,
   signal?: AbortSignal,
 ): Promise<string> {
   signal?.throwIfAborted();
-  const stats = await fileHandle.stat();
-  if (stats.size === 0) return 'utf-8';
+  if (sourceSize === 0) return 'utf-8';
 
-  const sample = Buffer.alloc(Math.min(8192, stats.size));
+  const sample = Buffer.alloc(Math.min(8192, sourceSize));
   const { bytesRead } = await fileHandle.read(sample, 0, sample.length, 0);
   signal?.throwIfAborted();
   if (bytesRead === 0) return 'utf-8';

@@ -11,6 +11,10 @@ import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
+import {
+  readTextRange,
+  type ReadTextRangeResult,
+} from '../utils/read-text-range.js';
 import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
 import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
@@ -51,22 +55,16 @@ export type CoreReadTextFileRequest = Omit<
 /**
  * Handle-bound range read used by filesystem security boundaries. The caller
  * owns the handle lifecycle and must pass the Stats captured from that handle.
- *
- * Both bounds are required rather than optional: what makes a large-file read
- * safe at a boundary is that the *returned* bytes and the *scanned* bytes are
- * each capped. A finite `limit` is not one of those bounds — `limit: 20` at
- * `line: 900_000_000` still walks the whole file — so it stays optional and
- * `maxScanBytes` is what actually keeps the read affordable.
  */
 export type CoreReadTextFileHandleRequest = Omit<
   CoreReadTextFileRequest,
-  'limit' | 'stats' | 'maxOutputBytes'
+  'limit' | 'line' | 'maxOutputBytes' | 'stats'
 > & {
   fileHandle: FileHandle;
   stats: Stats;
-  limit?: number;
+  line?: number;
+  limit: number;
   maxOutputBytes: number;
-  maxScanBytes: number;
 };
 
 /**
@@ -322,35 +320,49 @@ export class StandardFileSystemService implements FileSystemService {
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    return readTextFileStandard(params);
+    const { path, limit, line, maxOutputBytes, signal, stats } = params;
+    const readResult = await readFileWithLineAndLimit({
+      path,
+      limit: limit ?? Number.POSITIVE_INFINITY,
+      ...(line !== undefined && line !== null ? { line } : {}),
+      ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+      ...(stats !== undefined ? { stats } : {}),
+    });
+    return toReadTextFileResponse(readResult);
   }
 
   async readTextFileFromHandle(
     params: CoreReadTextFileHandleRequest,
   ): Promise<ReadTextFileResponse> {
+    if (!isPositiveSafeInteger(params.limit)) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite limit, got ${params.limit}`,
+      );
+    }
     if (!isPositiveSafeInteger(params.maxOutputBytes)) {
       throw new RangeError(
         `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
       );
     }
-    if (!isPositiveSafeInteger(params.maxScanBytes)) {
-      throw new RangeError(
-        `handle-bound text reads require a positive finite maxScanBytes, got ${params.maxScanBytes}`,
-      );
-    }
     if (
-      params.limit !== undefined &&
-      params.limit !== Number.POSITIVE_INFINITY &&
-      !isPositiveSafeInteger(params.limit)
+      params.line !== undefined &&
+      (!Number.isSafeInteger(params.line) || params.line < 0)
     ) {
       throw new RangeError(
-        `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
+        `handle-bound text reads require a non-negative integer line, got ${params.line}`,
       );
     }
-    return readTextFileStandard(params, {
+    const readResult = await readTextRange({
+      path: params.path,
       fileHandle: params.fileHandle,
-      maxScanBytes: params.maxScanBytes,
+      stats: params.stats,
+      limit: params.limit,
+      maxOutputBytes: params.maxOutputBytes,
+      ...(params.line !== undefined ? { offset: params.line } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
+    return toReadTextFileResponse(readResult);
   }
 
   async writeTextFile(
@@ -387,23 +399,11 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
-async function readTextFileStandard(
-  params: CoreReadTextFileRequest,
-  source?: {
-    fileHandle: FileHandle;
-    maxScanBytes: number;
-  },
-): Promise<ReadTextFileResponse> {
-  const { path, limit, line, maxOutputBytes, signal, stats } = params;
-  const readResult = await readFileWithLineAndLimit({
-    path,
-    limit: limit ?? Number.POSITIVE_INFINITY,
-    ...(line !== undefined && line !== null ? { line } : {}),
-    ...(maxOutputBytes !== undefined ? { maxOutputBytes } : {}),
-    ...(signal !== undefined ? { signal } : {}),
-    ...(stats !== undefined ? { stats } : {}),
-    ...(source !== undefined ? source : {}),
-  });
+function toReadTextFileResponse(
+  readResult:
+    | Awaited<ReturnType<typeof readFileWithLineAndLimit>>
+    | ReadTextRangeResult,
+): ReadTextFileResponse {
   const detectedLineEnding =
     readResult.lineEnding ?? detectLineEnding(readResult.content);
   return {

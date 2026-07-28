@@ -9,11 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { iconvEncode } from './iconvHelper.js';
-import {
-  LargeNonUtf8TextError,
-  TextScanBudgetExceededError,
-  readTextRange,
-} from './read-text-range.js';
+import { LargeNonUtf8TextError, readTextRange } from './read-text-range.js';
 
 describe('readTextRange', () => {
   let tempDir: string;
@@ -198,6 +194,114 @@ describe('readTextRange', () => {
     ).toBe(true);
   });
 
+  it('reads a handle-bound range beyond 10 MiB with a byte cap', async () => {
+    const content = largeUtf8Lines(65_000);
+    const marker = 'line-60001';
+    expect(
+      Buffer.byteLength(content.slice(0, content.indexOf(marker))),
+    ).toBeGreaterThan(10 * 1024 * 1024);
+    const filePath = await writeFile('deep-handle.log', content);
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        offset: 60_000,
+        limit: 3,
+        maxOutputBytes: 256,
+      });
+
+      expect(result.content).toMatch(/^line-60001 /);
+      expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(256);
+      expect(result.content).not.toContain('\uFFFD');
+      expect(result.truncatedByBytes).toBe(true);
+      expect(result.originalLineCountExact).toBe(false);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('accepts handle-bound UTF-8 when the encoding sample splits an emoji', async () => {
+    const firstLine = `${'a'.repeat(8191)}🙂`;
+    const filePath = await writeFile(
+      'split-encoding-sample.log',
+      `${firstLine}\n${'b'.repeat(300_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        offset: 0,
+        limit: 1,
+        maxOutputBytes: 16_384,
+      });
+
+      expect(result.content).toBe(firstLine);
+      expect(result.encoding).toBe('utf-8');
+      expect(result.content).not.toContain('\uFFFD');
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('does not read bytes appended past the supplied handle stats', async () => {
+    const filePath = await writeFile(
+      'growing.log',
+      `${'a'.repeat(500_000)}\n${'b'.repeat(50_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    const stats = await fileHandle.stat();
+    let appended = false;
+    const boundedHandle = {
+      read: async (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        const result = await fileHandle.read(buffer, offset, length, position);
+        if (!appended && length === 512 * 1024 && position === 0) {
+          appended = true;
+          await fs.appendFile(filePath, '\nAPPENDED');
+        }
+        return result;
+      },
+    } as unknown as import('node:fs/promises').FileHandle;
+
+    try {
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle: boundedHandle,
+        stats,
+        offset: 1,
+        limit: 2,
+        maxOutputBytes: 100_000,
+      });
+
+      expect(appended).toBe(true);
+      expect(result.content).toBe('b'.repeat(50_000));
+      expect(result.content).not.toContain('APPENDED');
+      expect(result.originalLineCount).toBe(2);
+      expect(result.originalLineCountExact).toBe(true);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size + 9,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
   it('uses only the supplied file handle when the path names another file', async () => {
     const originalPath = await writeFile(
       'original.log',
@@ -220,67 +324,6 @@ describe('readTextRange', () => {
 
       expect(result.content).toBe('safe-one\nsafe-two');
       expect(result.content).not.toContain('secret');
-    } finally {
-      await fileHandle.close();
-    }
-  });
-
-  it('refuses a line offset that cannot be reached within maxScanBytes', async () => {
-    const filePath = await writeFile('budget.log', largeUtf8Lines(5_000));
-
-    await expect(
-      readTextRange({
-        path: filePath,
-        offset: 4_000,
-        limit: 20,
-        maxOutputBytes: 262_144,
-        maxScanBytes: 100_000,
-      }),
-    ).rejects.toBeInstanceOf(TextScanBudgetExceededError);
-  });
-
-  it('serves a shallow window from a file far larger than maxScanBytes', async () => {
-    const filePath = await writeFile('budget-head.log', largeUtf8Lines(5_000));
-
-    const result = await readTextRange({
-      path: filePath,
-      offset: 0,
-      limit: 3,
-      maxOutputBytes: 262_144,
-      maxScanBytes: 100_000,
-    });
-
-    expect(result.content.split('\n')).toEqual([
-      expect.stringContaining('line-1 '),
-      expect.stringContaining('line-2 '),
-      expect.stringContaining('line-3 '),
-    ]);
-  });
-
-  it('does not charge a budget failure to a file that ends within it', async () => {
-    // The scan reaches EOF on the same chunk that exhausts the budget; the
-    // window was fully satisfied, so there is nothing to refuse.
-    const body = largeUtf8Lines(100);
-    const filePath = await writeFile('budget-exact.log', body);
-    const fileHandle = await fs.open(filePath, 'r');
-
-    try {
-      const result = await readTextRange({
-        path: filePath,
-        fileHandle,
-        stats: await fileHandle.stat(),
-        offset: 98,
-        limit: 10,
-        maxOutputBytes: 262_144,
-        maxScanBytes: Buffer.byteLength(body),
-      });
-
-      expect(result.content.split('\n')).toEqual([
-        expect.stringContaining('line-99 '),
-        expect.stringContaining('line-100 '),
-      ]);
-      expect(result.originalLineCount).toBe(100);
-      expect(result.originalLineCountExact).toBe(true);
     } finally {
       await fileHandle.close();
     }

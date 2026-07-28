@@ -320,8 +320,6 @@ export async function readFileWithLineAndLimit(params: {
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: import('node:fs').Stats;
-  fileHandle?: fs.promises.FileHandle;
-  maxScanBytes?: number;
 }): Promise<{
   content: string;
   bom?: boolean;
@@ -331,20 +329,8 @@ export async function readFileWithLineAndLimit(params: {
   lineEnding?: 'crlf' | 'lf';
   truncatedByBytes?: boolean;
 }> {
-  const {
-    path: filePath,
-    limit,
-    line,
-    maxOutputBytes,
-    signal,
-    fileHandle,
-    maxScanBytes,
-  } = params;
-  const stats =
-    params.stats ??
-    (fileHandle !== undefined
-      ? await fileHandle.stat()
-      : await fs.promises.stat(filePath));
+  const { path: filePath, limit, line, maxOutputBytes, signal } = params;
+  const stats = params.stats ?? (await fs.promises.stat(filePath));
   if (
     (line !== undefined && line > 0) ||
     Number.isFinite(limit) ||
@@ -357,18 +343,7 @@ export async function readFileWithLineAndLimit(params: {
       maxOutputBytes: normalizeRangeReadByteLimit(maxOutputBytes),
       stats,
       ...(signal !== undefined ? { signal } : {}),
-      ...(fileHandle !== undefined ? { fileHandle } : {}),
-      ...(maxScanBytes !== undefined ? { maxScanBytes } : {}),
     });
-  }
-
-  // Below this point the read is satisfied by path, not by descriptor. A
-  // caller that pinned an inode would silently get bytes from whatever the
-  // path resolves to now, defeating the reason it opened a handle.
-  if (fileHandle !== undefined) {
-    throw new RangeError(
-      'readFileWithLineAndLimit cannot honor fileHandle for an unbounded read: pass a finite limit or maxOutputBytes',
-    );
   }
 
   signal?.throwIfAborted();

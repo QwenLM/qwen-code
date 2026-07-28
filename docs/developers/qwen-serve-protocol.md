@@ -1574,16 +1574,11 @@ Filesystem errors use this JSON shape:
 
 Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
 `limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
-cap require at least one explicit window argument (`line`, `limit`, or
-`maxBytes`); a request with none of them remains `file_too_large`. Such a
-window is streamed, and its returned UTF-8 content stays capped at 256 KiB.
-
-Line offsets are resolved by scanning from the start of the file, so a window
-is also refused with `file_too_large` when reaching it would read more than
-8 MiB (`MAX_TEXT_SCAN_BYTES`). Use `GET /file/bytes` to reach a deeper offset
-directly. Large text in an encoding the route cannot decode returns
-`binary_file`, not `file_too_large` — retrying with a smaller window cannot
-help, and `readBytes` is the same remedy that already applies to binary.
+cap require a finite `limit`; no-limit, line-only, and maxBytes-only requests
+remain `file_too_large`. A finite large-file window is streamed and its returned
+UTF-8 content remains capped at 256 KiB. `maxBytes` always applies to the UTF-8
+response bytes after decoding, including when the source uses another supported
+encoding within the full-snapshot cap.
 
 For files within the full-snapshot cap, the response includes `hash`, a SHA-256
 digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,
@@ -1591,9 +1586,10 @@ or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
 complete `sizeBytes`, set `truncated: true`, and return
 `originalLineCount: null` when the stream stops before EOF. A streamed result
 is returned only when the file remains stable. Concurrent changes detected by
-the post-read inode, size, and modification-time checks return `hash_mismatch`,
-while content validation can fail earlier with `binary_file` and path
-replacement retains the existing `symlink_escape` protection.
+the post-read device/inode, size, modification-time, and change-time checks
+return `hash_mismatch`, including when the same mutation also causes decoding
+to fail. Stable binary content remains `binary_file`, and path replacement
+retains the existing `symlink_escape` protection.
 
 ```json
 {
