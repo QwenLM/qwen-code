@@ -186,7 +186,9 @@ Card-action authorization is stricter than shared-session message authorization.
 
 At inbound-message time, DingTalk already prefers `senderStaffId` and falls back to `senderId` for the envelope sender. Before handing a real inbound turn to `ChannelBase`, the adapter records `messageId -> DingTalkOwnerKey`. The map follows the existing inbound-message cap of 1,000 entries. A matching `started` lifecycle event consumes and removes that mapping, creates a DingTalk-local run/status record, and binds the same Channel-generated `runId` to the typed owner. Loop and webhook message IDs never enter the map. Terminal run cleanup removes the run/status record after finalizing its questions. The callback router normalizes the callback's `userId`, `senderStaffId`, or `senderId` into the same typed domain and requires an exact match. If no comparable identity is available, the action fails closed.
 
-A foreign-user callback is acknowledged and logged but cannot mutate a run, permission request, or card.
+A foreign-user callback is acknowledged but cannot mutate a run, permission request, or card. When the live card belongs to a group, the controller returns the original group target with the `forbidden` result and the adapter sends a generic “only the task owner can operate this card” notice to that group after the callback ACK. This notice uses the outbound group-message path directly: it is not converted into an inbound message and never enters Agent context. A failed notice is logged and does not fall back to permission settlement, card mutation, or Agent delivery. Direct-card forbidden feedback retains the existing direct-message path.
+
+`ignored` remains distinct from `forbidden`. Duplicate, stale, malformed, and unrecognized callbacks are acknowledged and safely discarded without group feedback, preventing repeated or forged callbacks from flooding a group. The distinction is an adapter-internal callback disposition, not a visible DingTalk card state.
 
 ## DingTalk-local implementation — DingTalk-only change
 
@@ -339,7 +341,7 @@ The capability configuration is local to DingTalk. It is parsed by the DingTalk 
     },
     "questionCard": {
       "enabled": true,
-      "timeoutMs": 300000
+      "timeoutMs": 270000
     }
   }
 }
