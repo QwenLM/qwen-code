@@ -855,7 +855,13 @@ function BranchSelect({
           className={styles.branchSelectTrigger}
           aria-label={t('branchSelect.baseBranch')}
         >
-          <span className={styles.branchSelectValue}>{value || 'main'}</span>
+          <span className={styles.branchSelectValue}>
+            {value
+              ? value.includes('/')
+                ? value.slice(value.indexOf('/') + 1)
+                : value
+              : 'main'}
+          </span>
           <ChevronDownIcon size={12} />
         </button>
       </PopoverTrigger>

@@ -50,9 +50,11 @@ function sendGitError(
   sendBridgeError: SendBridgeError,
   cwd: string,
 ): void {
-  // Classify on the actual git output (stdout + stderr), not err.message,
-  // which embeds the full command line and would false-positive on flags
-  // like --set-upstream present in every push invocation.
+  // Classify on the path-redacted message (derived from stdout + stderr),
+  // not err.message, which embeds the full command line and would
+  // false-positive on flags like --set-upstream present in every push
+  // invocation. Testing the redacted form also avoids false positives
+  // when the workspace path itself contains a keyword (e.g. "dirty").
   let detail: string;
   if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
     const e = err as { stdout?: string; stderr?: string };
@@ -74,29 +76,29 @@ function sendGitError(
   message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
 
   if (
-    /not a git repository/i.test(detail) ||
-    /invalid reference/i.test(detail)
+    /not a git repository/i.test(message) ||
+    /invalid reference/i.test(message)
   ) {
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(detail)) {
+  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
-  if (/already exists/i.test(detail)) {
+  if (/already exists/i.test(message)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;
   }
-  if (/nothing to commit/i.test(detail)) {
+  if (/nothing to commit/i.test(message)) {
     res.status(400).json({ error: 'nothing_to_commit', message });
     return;
   }
-  if (/detached HEAD/i.test(detail)) {
+  if (/detached HEAD/i.test(message)) {
     res.status(409).json({ error: 'detached_head', message });
     return;
   }
-  if (/no upstream|no tracking information/i.test(detail)) {
+  if (/no upstream|no tracking information/i.test(message)) {
     res.status(400).json({ error: 'no_upstream', message });
     return;
   }

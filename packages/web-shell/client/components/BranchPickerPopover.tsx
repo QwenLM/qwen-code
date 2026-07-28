@@ -261,6 +261,13 @@ export function BranchPickerPopover({
     t('branchPicker.action.checkoutRef').toLowerCase().includes(q) ||
     t('branchPicker.action.viewChanges').toLowerCase().includes(q);
 
+  useEffect(() => {
+    if (!actionsVisible) {
+      setNewBranchMode(false);
+      setCheckoutRefMode(false);
+    }
+  }, [actionsVisible]);
+
   const toggleSection = useCallback(
     (key: SectionKey) =>
       setCollapsed((prev) => ({ ...prev, [key]: !prev[key] })),

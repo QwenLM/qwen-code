@@ -244,6 +244,31 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('no_upstream');
   });
+
+  it('does not misclassify a non-dirty error when the workspace path contains "dirty"', async () => {
+    const parent = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-dirty-utils-')),
+    );
+    tmpRoots.push(parent);
+    const dir = path.join(parent, 'dirty-project');
+    fs.mkdirSync(dir);
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 'test@example.com');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'init');
+    // Wedge the index lock so write-tree fails (a 500, not a dirty-tree 409).
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: x', all: true });
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).not.toBe('dirty_working_tree');
+  });
 });
 
 describe('workspace qualified Git branch routes (generation guard)', () => {
