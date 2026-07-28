@@ -33,7 +33,8 @@ PR #7584.
   archive.
 - A score is written only after all 500 instances reach a unique terminal
   state, no task is canceled, and `EXECUTION_ERROR + INFRA_FAILED < 10`.
-  The score denominator remains all 500 expected instances.
+  The score is `RESOLVED / (RESOLVED + UNRESOLVED)`, using only valid grader
+  results as the denominator.
 - Ten or more terminal errors, a canceled task, a missing result, or a missing
   trajectory for a scoreable case makes the run `QUARANTINED`; status and
   counts are written without a score.
