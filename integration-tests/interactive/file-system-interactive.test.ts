@@ -81,7 +81,7 @@ describe('Interactive file system', () => {
         200,
       );
 
-      if (!toolCall && !updated) {
+      if (!updated) {
         printDebugInfo(rig, rig._interactiveOutput, { toolCall, updated });
       }
 
