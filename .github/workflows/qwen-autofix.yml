@@ -3468,7 +3468,7 @@ jobs:
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
               if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
                 echo
-                cat "${WORKDIR}/deferred-feedback.md"
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
               fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
@@ -3491,7 +3491,7 @@ jobs:
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
               if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
                 echo
-                cat "${WORKDIR}/deferred-feedback.md"
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
               fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"

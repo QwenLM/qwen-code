@@ -5039,10 +5039,12 @@ describe('qwen-autofix workflow', () => {
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL SIX agent-derived publish sites
+    // Token-breaking neutralization at ALL EIGHT agent-derived publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
-    // gate-rejection body, and the comment-reply body, whose content is
-    // agent stdout that can echo external comment text), and it
+    // gate-rejection body, the comment-reply body whose content is agent
+    // stdout that can echo external comment text, and the two
+    // deferred-feedback report sections, which render untrusted
+    // review-comment paths into a bot-authored comment), and it
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
@@ -5051,7 +5053,7 @@ describe('qwen-autofix workflow', () => {
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(6);
+    expect(escapeSites).toHaveLength(8);
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }
