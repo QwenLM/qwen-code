@@ -164,8 +164,9 @@ type ChannelOutputSegmentEndReason =
   | 'cancelled';
 ```
 
-The response hooks gain an optional final context argument for source
-compatibility:
+The chunk and completion hooks gain an optional final context argument for
+source compatibility. Segment termination uses a dedicated hook so adapters
+can distinguish response boundaries from input requests and terminal causes:
 
 ```ts
 protected onResponseChunk(
@@ -175,11 +176,16 @@ protected onResponseChunk(
   segment?: ChannelOutputSegmentContext,
 ): void;
 
+protected onOutputSegmentEnd(
+  chatId: string,
+  sessionId: string,
+  segment: ChannelOutputSegmentContext,
+  reason: ChannelOutputSegmentEndReason,
+): void | Promise<void>;
+
 protected onResponseBoundary(
   chatId: string,
   sessionId: string,
-  segment?: ChannelOutputSegmentContext,
-  reason?: ChannelOutputSegmentEndReason,
 ): void | Promise<void>;
 
 protected onResponseComplete(
@@ -191,9 +197,11 @@ protected onResponseComplete(
 ```
 
 Existing overrides that accept fewer arguments remain valid and unchanged.
-`ChannelBase` always supplies the segment context for an attended
-Channel-owned run. Loop, webhook, and legacy synthetic paths remain
-ineligible for native interaction presentation.
+`ChannelBase` always supplies the segment context to the response hooks for an
+attended Channel-owned run and calls `onOutputSegmentEnd` whenever that segment
+closes. Its default implementation delegates only `response_boundary` to the
+legacy `onResponseBoundary` hook. Loop, webhook, and legacy synthetic paths
+remain ineligible for native interaction presentation.
 
 `ChannelUserInputRequestContext` retains its existing request responder and
 settlement subscription. It additionally carries the captured interaction
