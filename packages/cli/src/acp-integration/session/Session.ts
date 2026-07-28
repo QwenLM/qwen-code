@@ -1898,10 +1898,8 @@ export class Session implements SessionContext {
       );
       if (pending.length > 0) {
         await Promise.allSettled(pending);
-        await Promise.resolve();
-      } else {
-        await new Promise<void>((resolve) => setImmediate(resolve));
       }
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
 
@@ -3461,6 +3459,10 @@ export class Session implements SessionContext {
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
         } else {
+          // Bounded: the guard's TODO_STOP_GUARD_MAX_ATTEMPTS caps total guard
+          // continuations, and after exhaustion a non-blocking allow exits the
+          // loop (!externalReason && !guardContinuation), so the reset cannot
+          // remove the ceiling on consecutive Stop-hook blocks.
           stopHookIterationCount = 0;
           stopHookReasons = [];
           stopHookCount = 1;
