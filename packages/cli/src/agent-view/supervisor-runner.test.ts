@@ -5,6 +5,7 @@
  */
 
 import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -88,6 +89,41 @@ describe('Agent View supervisor runner', () => {
     expect(handle.socketPath).toBe(socketPath);
     expect(handle.startedProcess).toBe(startedProcess);
     await expect(handle.status()).resolves.toEqual({ state: 'spawned' });
+  });
+
+  it('rejects promptly when the spawned supervisor emits an error', async () => {
+    const { globalDir } = await makeSupervisorPath();
+    const startedProcess = createFakeProcess();
+    const spawnError = new Error('spawn failed');
+
+    const result = ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => {
+        setImmediate(() => startedProcess.emit('error', spawnError));
+        return startedProcess;
+      }),
+    });
+
+    await expect(result).rejects.toThrow('spawn failed');
+    expect(startedProcess.unref).toHaveBeenCalledOnce();
+  });
+
+  it('rejects promptly when the spawned supervisor exits before readiness', async () => {
+    const { globalDir } = await makeSupervisorPath();
+    const startedProcess = createFakeProcess();
+
+    const result = ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => {
+        setImmediate(() => startedProcess.emit('exit', 1, null));
+        return startedProcess;
+      }),
+    });
+
+    await expect(result).rejects.toThrow(
+      'Agent View supervisor exited before becoming ready with code 1.',
+    );
+    expect(startedProcess.unref).toHaveBeenCalledOnce();
   });
 
   it('routes handle status/list/dispatch/shutdown calls through IPC', async () => {
@@ -221,6 +257,11 @@ describe('Agent View supervisor runner', () => {
       shuttingDown: true,
     });
     expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: true });
+
+    await expect(handle.shutdown(false)).resolves.toEqual({
+      shuttingDown: true,
+    });
+    expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: false });
   });
 
   it('closes the supervisor server when shutdown is requested', async () => {
@@ -273,9 +314,9 @@ function createFakeSupervisor(
 }
 
 function createFakeProcess(): ChildProcess {
-  return {
+  return Object.assign(new EventEmitter(), {
     unref: vi.fn(),
-  } as unknown as ChildProcess;
+  }) as unknown as ChildProcess;
 }
 
 async function makeSupervisorPath(): Promise<{

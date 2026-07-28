@@ -102,9 +102,8 @@ export async function ensureAgentViewSupervisor(
     const startedProcess = (options.spawnProcess ?? defaultSpawnSupervisor)([
       INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
     ]);
-    startedProcess.on?.('error', () => {});
     startedProcess.unref?.();
-    await waitForSupervisor(socketPath, options);
+    await waitForSpawnedSupervisorReady(startedProcess, socketPath, options);
     return createSupervisorHandle(
       socketPath,
       startedProcess,
@@ -291,10 +290,52 @@ function createSupervisorHandle(
       callAgentViewSupervisor(
         socketPath,
         'shutdown',
-        keepWorkers ? { keepWorkers } : undefined,
+        keepWorkers === undefined ? undefined : { keepWorkers },
         authOptions,
       ),
   };
+}
+
+async function waitForSpawnedSupervisorReady(
+  startedProcess: ChildProcess,
+  socketPath: string,
+  options: EnsureAgentViewSupervisorOptions,
+): Promise<void> {
+  let cleanup = () => {};
+  const startupFailure = new Promise<never>((_, reject) => {
+    const fail = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      fail(new Error(formatSupervisorStartupExit(code, signal)));
+    };
+    cleanup = () => {
+      startedProcess.off?.('error', fail);
+      startedProcess.off?.('exit', onExit);
+    };
+    startedProcess.once?.('error', fail);
+    startedProcess.once?.('exit', onExit);
+  });
+
+  try {
+    await Promise.race([
+      waitForSupervisor(socketPath, options),
+      startupFailure,
+    ]);
+  } finally {
+    cleanup();
+  }
+}
+
+function formatSupervisorStartupExit(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): string {
+  if (signal) {
+    return `Agent View supervisor exited before becoming ready with signal ${signal}.`;
+  }
+  return `Agent View supervisor exited before becoming ready with code ${code ?? 'unknown'}.`;
 }
 
 async function withSupervisorStartLock(

@@ -92,7 +92,11 @@ export async function bridgeAgentViewTerminal(
     options.detachSignal?.removeEventListener('abort', onDetach);
     options.stdout.removeListener('error', onStdoutError);
     for (const disposable of disposables.splice(0)) {
-      disposable.dispose();
+      try {
+        disposable.dispose();
+      } catch {
+        // Keep tearing down the rest of the bridge.
+      }
     }
   }
 }
@@ -119,10 +123,11 @@ async function pumpInputToPty(
     }
     return 'detached';
   } finally {
+    const returned = iterator.return?.();
     if (detached) {
-      void iterator.return?.();
+      void returned?.catch(() => {});
     } else {
-      await iterator.return?.();
+      await returned;
     }
   }
 }

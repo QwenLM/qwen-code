@@ -140,6 +140,57 @@ describe('bridgeAgentViewTerminal', () => {
     expect(stdin.destroyed).toBe(false);
     stdin.destroy();
   });
+
+  it('continues disposing listeners after one dispose throws', async () => {
+    const disposed: string[] = [];
+    const pty: AgentViewTerminalPty = {
+      write: () => {},
+      onData: () => ({
+        dispose: () => {
+          disposed.push('data');
+          throw new Error('dispose failed');
+        },
+      }),
+      resize: () => {},
+    };
+
+    await expect(
+      bridgeAgentViewTerminal({
+        stdin: bytes([]),
+        stdout: new MemoryWritable(),
+        pty,
+        onResize: () => ({
+          dispose: () => {
+            disposed.push('resize');
+          },
+        }),
+      }),
+    ).resolves.toEqual({ reason: 'stdin-ended' });
+
+    expect(disposed).toEqual(['data', 'resize']);
+  });
+
+  it('ignores iterator return rejections on detach', async () => {
+    const pty = new FakeTerminalPty();
+    const controller = new AbortController();
+    const stdin: AsyncIterable<AgentViewTerminalBytes> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () =>
+          new Promise<IteratorResult<AgentViewTerminalBytes>>(() => {}),
+        return: () => Promise.reject(new Error('return failed')),
+      }),
+    };
+    const done = bridgeAgentViewTerminal({
+      stdin,
+      stdout: new MemoryWritable(),
+      pty,
+      detachSignal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(done).resolves.toEqual({ reason: 'detached' });
+  });
 });
 
 async function* bytes(
