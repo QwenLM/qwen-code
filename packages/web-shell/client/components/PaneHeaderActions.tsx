@@ -162,7 +162,11 @@ export function PaneHeaderActions({
       const trailingWidth = trailingRef.current?.offsetWidth ?? 0;
       const style = getComputedStyle(header);
       const headerGap = parseFloat(style.gap) || 0;
-      const actionsGap = trailingWidth > 0 ? 4 : 0; // matches `.headerActions`
+      const actionsStyle = rootRef.current
+        ? getComputedStyle(rootRef.current)
+        : null;
+      const actionsGap =
+        trailingWidth > 0 ? parseFloat(actionsStyle?.gap ?? '') || 0 : 0;
       const padding =
         (parseFloat(style.paddingLeft) || 0) +
         (parseFloat(style.paddingRight) || 0);
@@ -189,7 +193,7 @@ export function PaneHeaderActions({
     if (hostRef.current) observer.observe(hostRef.current);
     if (trailingRef.current) observer.observe(trailingRef.current);
     return () => observer.disconnect();
-  }, [hasHostActions, collapsed]);
+  }, [hasHostActions]);
 
   return (
     <div

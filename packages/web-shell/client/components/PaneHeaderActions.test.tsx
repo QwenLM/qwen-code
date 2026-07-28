@@ -239,7 +239,10 @@ describe('PaneHeaderActions', () => {
     const menu = document.querySelector(
       '[data-testid="pane-header-overflow-menu"]',
     );
-    expect(menu!.querySelectorAll('[role="menuitem"]')).toHaveLength(2);
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(2);
+    expect(items[0]?.textContent).toBe('Env');
+    expect(items[1]?.textContent).toBe('Share');
   });
 
   it('activates opaque custom host components from the overflow menu', async () => {
@@ -290,6 +293,76 @@ describe('PaneHeaderActions', () => {
       );
     });
     expect(onShare).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the title attribute as overflow label when no text children', async () => {
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <button type="button" title="Export">
+            <span aria-hidden="true">⤓</span>
+          </button>
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    const overflow = container!.querySelector(
+      '[data-testid="pane-header-overflow"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      overflow.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const menu = document.querySelector(
+      '[data-testid="pane-header-overflow-menu"]',
+    );
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toBe('Export');
+  });
+
+  it('falls back to the default label when no label source exists', async () => {
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <button type="button" />
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    const overflow = container!.querySelector(
+      '[data-testid="pane-header-overflow"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      overflow.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const menu = document.querySelector(
+      '[data-testid="pane-header-overflow-menu"]',
+    );
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toBe('Action');
   });
 
   it('keeps host action instances mounted across collapse', () => {
