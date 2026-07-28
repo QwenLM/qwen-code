@@ -378,8 +378,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-    ...planEffortField(args.effort),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
