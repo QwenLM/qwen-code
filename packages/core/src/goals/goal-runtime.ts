@@ -64,8 +64,11 @@ export interface GoalEvidenceSource {
 }
 
 export class GoalPersistenceUnavailableError extends Error {
-  constructor(message = 'Goal persistence is unavailable for this session') {
-    super(message);
+  constructor(
+    message = 'Goal persistence is unavailable for this session',
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
     this.name = 'GoalPersistenceUnavailableError';
   }
 }
@@ -606,6 +609,7 @@ export function createGoalRuntime(
             } catch (error) {
               throw new GoalPersistenceUnavailableError(
                 error instanceof Error ? error.message : String(error),
+                { cause: error },
               );
             }
             assertAvailable();

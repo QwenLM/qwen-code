@@ -2025,6 +2025,7 @@ describe('goal runtime', () => {
       expect.objectContaining({
         name: 'GoalPersistenceUnavailableError',
         message: 'migration write failed',
+        cause: expect.objectContaining({ message: 'migration write failed' }),
       }),
     );
     await expect(
