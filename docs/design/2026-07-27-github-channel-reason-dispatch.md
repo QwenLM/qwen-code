@@ -32,17 +32,20 @@ review requests fail closed because a notification does not prove that the bot
 belongs to the requested team.
 
 PR and issue bodies are labeled as untrusted data before they enter the prompt.
-Aggregated comments are filtered by sender policy before joining and remain
-behind the normal mention gate; an ordinary comment is not presented as a
-mention.
+Aggregated comments are filtered by sender policy before joining (except for
+`pairing` policy, where the envelope must reach `preflightInbound` so the
+pairing flow can trigger) and remain behind the normal mention gate. The
+envelope's `isMentioned` is computed from comment content: it is true when any
+shown comment mentions the bot, matching the per-comment lane's behavior.
 
 ## Cursor and retries
 
-The cursor keeps three bounded lists:
+The cursor keeps three bounded lists and a failure counter:
 
 - `dispatchedBodies` for first-contact issue or PR bodies
 - `dispatchedComments` for comment node IDs
 - `dispatchedEvents` for issue event node IDs
+- `failedAttempts` mapping notification IDs to consecutive failure counts
 
 New keys are saved immediately, so a process crash or a later mark-read failure
 does not repeat work already accepted by the channel. The lists are trimmed to
@@ -55,10 +58,17 @@ advances `lastProcessedAt` only when the whole batch succeeds; this timestamped
 mark avoids swallowing activity that arrives during the poll.
 
 A notification that fails with a permanent GitHub error (a deleted or
-transferred subject returning 404/410) is logged and skipped instead of being
-treated as a batch failure, so one dead thread cannot wedge the cursor and be
-re-fetched every poll. Transient failures still hold the batch open for
-at-least-once retry.
+transferred subject returning 404/410, or a 403 permission error without
+rate-limit headers) is logged and skipped instead of being treated as a batch
+failure, so one dead thread cannot wedge the cursor and be re-fetched every
+poll. A 403 with `x-ratelimit-remaining: 0` is a rate limit and stays
+retryable via the cooldown branch.
+
+Transient failures hold the batch open for at-least-once retry, bounded by a
+per-notification attempt counter persisted in the cursor. After 5 consecutive
+failures across polls, the notification is treated as terminal: an error
+comment is posted on the thread so the user has a visible signal, and the
+batch advances.
 
 ## Bounds
 

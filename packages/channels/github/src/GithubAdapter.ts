@@ -26,12 +26,14 @@ interface GithubCursor {
   dispatchedBodies?: string[];
   dispatchedComments?: string[];
   dispatchedEvents?: string[];
+  failedAttempts?: Record<string, number>;
 }
 
 const MAX_DISPATCHED = 500;
 const MAX_AGGREGATE_COMMENTS = 20;
 const MAX_COMMENT_CHARS = 1000;
 const MAX_META_BODY_CHARS = 6000;
+const MAX_FAILED_ATTEMPTS = 5;
 
 interface GithubComment {
   id: number;
@@ -106,6 +108,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       'dispatchedEvents',
     ] as const) {
       if (base[key] !== undefined && !Array.isArray(base[key])) base[key] = [];
+    }
+    if (
+      base.failedAttempts !== undefined &&
+      (typeof base.failedAttempts !== 'object' ||
+        base.failedAttempts === null ||
+        Array.isArray(base.failedAttempts))
+    ) {
+      base.failedAttempts = {};
     }
     return base;
   }
@@ -273,6 +283,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           );
           continue;
         }
+        const attempts = (this.cursor.failedAttempts ??= {});
+        const nKey = String(notification.id);
+        attempts[nKey] = (attempts[nKey] ?? 0) + 1;
+        this.saveCursor();
+        if (attempts[nKey] >= MAX_FAILED_ATTEMPTS) {
+          process.stderr.write(
+            `[Channel:${this.name}] giving up on notification ${notification.id} (${notification.reason}) after ${MAX_FAILED_ATTEMPTS} failed attempts: ${err}\n`,
+          );
+          const extracted = notification.subject.url
+            ? this.extractFromSubjectUrl(notification.subject.url)
+            : null;
+          if (extracted) {
+            await this.postErrorComment(
+              extracted.chatId,
+              extracted.issueNumber,
+            );
+          }
+          delete attempts[nKey];
+          continue;
+        }
         process.stderr.write(
           `[Channel:${this.name}] failed to process notification ${notification.id} (${notification.reason}): ${err}\n`,
         );
@@ -291,6 +321,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       'dispatchedEvents',
     ] as const) {
       this.cursor[field] = this.cursor[field]?.slice(-MAX_DISPATCHED);
+    }
+    if (this.cursor.failedAttempts) {
+      const entries = Object.entries(this.cursor.failedAttempts);
+      if (entries.length > MAX_DISPATCHED) {
+        this.cursor.failedAttempts = Object.fromEntries(
+          entries.slice(-MAX_DISPATCHED),
+        );
+      }
     }
     this.saveCursor();
   }
@@ -534,11 +572,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       windowSince,
       maxUpdatedAt,
     );
+    // For 'pairing', skip the isAllowed pre-filter so the envelope reaches
+    // preflightInbound where gate.check() triggers the pairing flow. The
+    // pre-filter stays for 'allowlist' (correct since round 1) and is a no-op
+    // for 'open'.
+    const skipSenderFilter = this.config.senderPolicy === 'pairing';
     const newComments = comments.filter((c) => {
       const key = this.eventKey(c);
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        this.gate.isAllowed((c.user?.login || 'unknown').toLowerCase())
+        (skipSenderFilter ||
+          this.gate.isAllowed((c.user?.login || 'unknown').toLowerCase()))
       );
     });
     if (newComments.length === 0) return;
@@ -550,6 +594,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.buildMetadata(chatId, threadId, subjectTitle),
       framing,
     );
+    const isMentioned = this.botUsername
+      ? shownComments.some((c) =>
+          testBotMention(c.body || '', this.botUsername!),
+        )
+      : false;
     const envelope: Envelope = {
       channelName: this.name,
       senderId: (first.user?.login || 'unknown').toLowerCase(),
@@ -569,7 +618,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         summary,
       ].join('\n'),
       isGroup: true,
-      isMentioned: false,
+      isMentioned,
       isReplyToBot: false,
       metadata,
     };
@@ -799,8 +848,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         if (e.status === 404 || e.status === 410) {
           throw new TerminalGithubError(e.status, e.message ?? String(err));
         }
-        if (attempt === retries) throw err;
         const headers = e.response?.headers ?? {};
+        // A 403 without rate-limit headers is a permission error (repo access
+        // or token scope revoked), not a transient failure — it will never
+        // succeed on retry. A 403 WITH x-ratelimit-remaining: 0 is a rate
+        // limit and stays retryable via the cooldown branch below.
+        if (
+          e.status === 403 &&
+          !(
+            Number(headers['x-ratelimit-remaining']) === 0 &&
+            Number(headers['x-ratelimit-reset']) > 0
+          )
+        ) {
+          throw new TerminalGithubError(e.status, e.message ?? String(err));
+        }
+        if (attempt === retries) throw err;
 
         let cooldown: number;
         if (headers['retry-after']) {
@@ -840,5 +902,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       'markNotificationsAsRead',
     );
+  }
+
+  private async postErrorComment(
+    chatId: string,
+    issueNumber: number,
+  ): Promise<void> {
+    try {
+      await this.githubApi(
+        () =>
+          this.octokit.rest.issues.createComment({
+            owner: chatId.split('/')[0],
+            repo: chatId.split('/')[1],
+            issue_number: issueNumber,
+            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+          }),
+        `postErrorComment(${chatId}#${issueNumber})`,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,
+      );
+    }
   }
 }
