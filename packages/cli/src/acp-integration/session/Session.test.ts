@@ -573,6 +573,8 @@ describe('Session', () => {
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getProjectRoot: vi.fn().mockReturnValue('/repo'),
@@ -796,7 +798,83 @@ describe('Session', () => {
     );
   });
 
+  it('includes active Todo context on the first retry request', async () => {
+    const reminder =
+      '<system-reminder>unfinished todo: run tests</system-reminder>';
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+      retry: true,
+    } as PromptRequest);
+
+    const retryCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as {
+      message: Part[];
+    };
+    expect(textParts(retryCall.message)).toContain(reminder);
+  });
+
   it('continues active Todo context for related automatic turns', async () => {
+    mockChat.sendMessageStream = vi
+      .fn()
+      .mockImplementation(async () => createEmptyStream());
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+    });
+    vi.mocked(mockConfig.startAutomaticActiveTodoWorkChain).mockClear();
+    const reminder =
+      '<system-reminder>unfinished todo: wait for agent</system-reminder>';
+    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+    const internals = session as unknown as {
+      relatedAgentIds: Set<string>;
+    };
+    internals.relatedAgentIds.add('related-agent');
+    const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+      .calls[0][0] as (
+      displayText: string,
+      modelText: string,
+      meta: {
+        agentId: string;
+        status: string;
+        todoWorkChainId?: string;
+      },
+    ) => void;
+
+    callback('Background task completed.', '<task-notification/>', {
+      agentId: 'related-agent',
+      status: 'completed',
+      todoWorkChainId: 'test-session-id########1',
+    });
+
+    await vi.waitFor(() =>
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        expect.stringContaining('########notification'),
+        'test-session-id########1',
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        expect.stringContaining('########notification'),
+      ),
+    );
+    const notificationCall = vi
+      .mocked(mockChat.sendMessageStream)
+      .mock.calls.at(-1)?.[1] as { message: Part[] };
+    expect(textParts(notificationCall.message)).toContain(reminder);
+  });
+
+  it('does not infer Todo ownership from Todo Stop Guard lineage', async () => {
     mockChat.sendMessageStream = vi
       .fn()
       .mockImplementation(async () => createEmptyStream());
@@ -808,7 +886,7 @@ describe('Session', () => {
     const internals = session as unknown as {
       relatedAgentIds: Set<string>;
     };
-    internals.relatedAgentIds.add('related-agent');
+    internals.relatedAgentIds.add('guard-related-agent');
     const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
       .calls[0][0] as (
       displayText: string,
@@ -817,15 +895,25 @@ describe('Session', () => {
     ) => void;
 
     callback('Background task completed.', '<task-notification/>', {
-      agentId: 'related-agent',
+      agentId: 'guard-related-agent',
       status: 'completed',
     });
 
     await vi.waitFor(() =>
       expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
         expect.stringContaining('########notification'),
-        'test-session-id########1',
+        undefined,
       ),
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'start work' }],
+      retry: true,
+    } as PromptRequest);
+    expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+      'test-session-id########2',
+      'test-session-id########1',
     );
   });
 

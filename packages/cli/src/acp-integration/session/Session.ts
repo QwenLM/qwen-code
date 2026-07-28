@@ -144,6 +144,7 @@ import {
   setGoalTerminalObserver,
   sessionIdContext,
   promptIdContext,
+  todoWorkChainContext,
   dedupeToolCallsById,
   getProviderToolCallId,
   parsePositiveIntegerEnv,
@@ -820,6 +821,7 @@ interface BackgroundNotificationQueueItem {
   kind: 'agent' | 'monitor' | 'shell';
   continuesTodoStopGuardWorkChain: boolean;
   toolUseId?: string;
+  todoWorkChainId?: string;
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -834,6 +836,7 @@ interface CronFire {
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
   delivery?: CronTaskDelivery;
+  todoWorkChainId?: string;
 }
 
 interface CronQueueItem {
@@ -842,6 +845,7 @@ interface CronQueueItem {
   taskId?: string;
   firedAt?: number;
   delivery?: CronTaskDelivery;
+  todoWorkChainId?: string;
 }
 
 interface PromptChannelDelivery {
@@ -2943,6 +2947,17 @@ export class Session implements SessionContext {
               this.pendingRecoveredAgentsNotice = null;
             }
 
+            const activeTodoReminder =
+              this.config.getActiveTodoReminder(promptId);
+            if (
+              activeTodoReminder &&
+              !parts.some((part) => part.text === activeTodoReminder)
+            ) {
+              parts = insertAfterFunctionResponses(parts, [
+                { text: activeTodoReminder },
+              ]);
+            }
+
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState();
@@ -4967,6 +4982,9 @@ export class Session implements SessionContext {
         ...(job.id ? { taskId: job.id } : {}),
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
         ...(job.delivery ? { delivery: job.delivery } : {}),
+        ...(job.todoWorkChainId
+          ? { todoWorkChainId: job.todoWorkChainId }
+          : {}),
       });
       void this.#drainCronQueue();
     });
@@ -5183,13 +5201,8 @@ export class Session implements SessionContext {
               if (ac.signal.aborted) return;
               this.config.startAutomaticActiveTodoWorkChain(
                 promptId,
-                continuesCurrentWorkChain
-                  ? this.activeTodoWorkChainPromptId
-                  : undefined,
+                item.todoWorkChainId,
               );
-              if (continuesCurrentWorkChain) {
-                this.activeTodoWorkChainPromptId = promptId;
-              }
               // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
               // fire time into the loop.md task block — full on the first or a
               // changed fire, a short reminder when unchanged. Non-sentinel
@@ -5322,9 +5335,15 @@ export class Session implements SessionContext {
               // Prepend session-level system reminders (same rationale as the
               // user-query path in #executePrompt).
               const cronReminders = await this.#buildInitialSystemReminders();
+              const activeTodoReminder =
+                this.config.getActiveTodoReminder(promptId);
               let nextMessage: Content | null = {
                 role: 'user',
-                parts: [...cronReminders, { text: modelText }],
+                parts: [
+                  ...cronReminders,
+                  ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+                  { text: modelText },
+                ],
               };
               const toolLoopState = createDaemonToolLoopState();
 
@@ -5533,6 +5552,7 @@ export class Session implements SessionContext {
                 `[${item.source} error] ${msg}`,
               );
             } finally {
+              this.config.endAutomaticActiveTodoWorkChain(promptId);
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
               }
@@ -5601,6 +5621,7 @@ export class Session implements SessionContext {
           continuesTodoStopGuardWorkChain:
             this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
           toolUseId: meta.toolUseId,
+          todoWorkChainId: meta.todoWorkChainId,
         });
       },
     );
@@ -5623,6 +5644,7 @@ export class Session implements SessionContext {
             meta.ownerAgentId,
           ),
         toolUseId: meta.toolUseId,
+        todoWorkChainId: meta.todoWorkChainId,
       });
     });
 
@@ -5636,6 +5658,7 @@ export class Session implements SessionContext {
         kind: 'shell',
         continuesTodoStopGuardWorkChain:
           !this.todoStopGuardBackgroundBaseline.shells.has(meta.shellId),
+        todoWorkChainId: meta.todoWorkChainId,
       });
     });
 
@@ -5821,13 +5844,8 @@ export class Session implements SessionContext {
           if (ac.signal.aborted) return;
           this.config.startAutomaticActiveTodoWorkChain(
             promptId,
-            continuesCurrentWorkChain
-              ? this.activeTodoWorkChainPromptId
-              : undefined,
+            item.todoWorkChainId,
           );
-          if (continuesCurrentWorkChain) {
-            this.activeTodoWorkChainPromptId = promptId;
-          }
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
@@ -5842,9 +5860,15 @@ export class Session implements SessionContext {
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();
+          const activeTodoReminder =
+            this.config.getActiveTodoReminder(promptId);
           let nextMessage: Content | null = {
             role: 'user',
-            parts: [...notificationReminders, ...notificationParts],
+            parts: [
+              ...notificationReminders,
+              ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+              ...notificationParts,
+            ],
           };
           const toolLoopState = createDaemonToolLoopState();
 
@@ -6055,6 +6079,7 @@ export class Session implements SessionContext {
             await this.#emitBackgroundNotificationEndTurn('end_turn');
           }
         } finally {
+          this.config.endAutomaticActiveTodoWorkChain(promptId);
           if (this.notificationAbortController === ac) {
             this.notificationAbortController = null;
           }
@@ -6426,6 +6451,9 @@ export class Session implements SessionContext {
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
     promptIdContext.enterWith(promptId);
+    todoWorkChainContext.enterWith(
+      this.config.getActiveTodoWorkChainOwner(promptId),
+    );
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     const generatedCallIdBase = randomUUID();
     const executionCallIds = new Map(

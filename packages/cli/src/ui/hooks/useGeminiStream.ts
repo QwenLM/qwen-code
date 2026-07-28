@@ -2660,6 +2660,7 @@ export const useGeminiStream = (
       prompt_id?: string,
       metadata?: {
         notificationDisplayText?: string;
+        todoWorkChainId?: string;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
         steerInput?: SteerInput;
@@ -2910,6 +2911,7 @@ export const useGeminiStream = (
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
+            todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
@@ -3821,6 +3823,7 @@ export const useGeminiStream = (
       modelText: string;
       sendMessageType: SendMessageType;
       monitor?: { id: string; status: string };
+      todoWorkChainId?: string;
       onDelivered?: () => void;
       onDeliveryFailed?: () => void;
     }>
@@ -3896,6 +3899,7 @@ export const useGeminiStream = (
           prompt: string;
           cronExpr?: string;
           missed?: boolean;
+          todoWorkChainId?: string;
         }) => {
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
           const autonomousMode = detectAutonomousSentinel(job.prompt);
@@ -3911,6 +3915,7 @@ export const useGeminiStream = (
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
               modelText,
               sendMessageType: SendMessageType.Cron,
+              todoWorkChainId: job.todoWorkChainId,
               onDelivered: () => resolver.markDelivered(),
             });
             setNotificationTrigger((n) => n + 1);
@@ -3920,6 +3925,7 @@ export const useGeminiStream = (
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
             modelText,
             sendMessageType: SendMessageType.Cron,
+            todoWorkChainId: job.todoWorkChainId,
           });
           setNotificationTrigger((n) => n + 1);
         },
@@ -3939,11 +3945,12 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta?.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3955,11 +3962,12 @@ export const useGeminiStream = (
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundShellRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta?.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3981,6 +3989,7 @@ export const useGeminiStream = (
         modelText,
         sendMessageType: SendMessageType.Notification,
         monitor: { id: meta.monitorId, status: meta.status },
+        todoWorkChainId: meta.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -4038,6 +4047,7 @@ export const useGeminiStream = (
           );
           submitQuery(item.modelText, item.sendMessageType, undefined, {
             notificationDisplayText: item.displayText,
+            todoWorkChainId: item.todoWorkChainId,
             onDelivered: item.onDelivered,
             onDeliveryFailed: item.onDeliveryFailed,
           });
@@ -4048,7 +4058,8 @@ export const useGeminiStream = (
         let splitIdx = 0;
         while (
           splitIdx < queue.length &&
-          queue[splitIdx]!.sendMessageType === targetType
+          queue[splitIdx]!.sendMessageType === targetType &&
+          queue[splitIdx]!.todoWorkChainId === queue[0]!.todoWorkChainId
         ) {
           splitIdx++;
         }
@@ -4066,6 +4077,7 @@ export const useGeminiStream = (
         const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
         submitQuery(combinedModelText, targetType, undefined, {
           notificationDisplayText: combinedDisplayText,
+          todoWorkChainId: batch[0]?.todoWorkChainId,
         });
       });
     }

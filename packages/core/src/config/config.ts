@@ -1808,6 +1808,7 @@ export class Config {
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
   private activeTodoReminders = new Map<string, string>();
+  private activeTodoWorkChainOwners = new Map<string, string>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -3540,6 +3541,7 @@ export class Config {
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
     this.getOwnActiveTodoReminders().clear();
+    this.getOwnActiveTodoWorkChainOwners().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -5856,24 +5858,51 @@ export class Config {
     return this.activeTodoReminders;
   }
 
+  private getOwnActiveTodoWorkChainOwners(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoWorkChainOwners')
+    ) {
+      this.activeTodoWorkChainOwners = new Map();
+    }
+    return this.activeTodoWorkChainOwners;
+  }
+
+  getActiveTodoWorkChainOwner(promptId: string): string {
+    return this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? promptId;
+  }
+
   getActiveTodoReminder(promptId: string): string | undefined {
-    return this.getOwnActiveTodoReminders().get(promptId);
+    return this.getOwnActiveTodoReminders().get(
+      this.getActiveTodoWorkChainOwner(promptId),
+    );
   }
 
   setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
     const reminders = this.getOwnActiveTodoReminders();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
     if (reminder) {
-      reminders.set(promptId, reminder);
+      reminders.set(owner, reminder);
     } else {
-      reminders.delete(promptId);
+      reminders.delete(owner);
     }
   }
 
   startActiveTodoWorkChain(promptId: string, continuedFrom?: string): void {
     const reminders = this.getOwnActiveTodoReminders();
-    const reminder = continuedFrom ? reminders.get(continuedFrom) : undefined;
-    reminders.clear();
-    if (reminder) reminders.set(promptId, reminder);
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    if (!continuedFrom) {
+      reminders.clear();
+      owners.clear();
+      owners.set(promptId, promptId);
+      return;
+    }
+
+    const owner = this.getActiveTodoWorkChainOwner(continuedFrom);
+    for (const reminderOwner of reminders.keys()) {
+      if (reminderOwner !== owner) reminders.delete(reminderOwner);
+    }
+    owners.clear();
+    owners.set(promptId, owner);
   }
 
   startAutomaticActiveTodoWorkChain(
@@ -5881,10 +5910,21 @@ export class Config {
     continuedFrom?: string,
   ): void {
     const reminders = this.getOwnActiveTodoReminders();
-    const reminder = continuedFrom ? reminders.get(continuedFrom) : undefined;
-    if (continuedFrom) reminders.delete(continuedFrom);
-    reminders.delete(promptId);
-    if (reminder) reminders.set(promptId, reminder);
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = continuedFrom
+      ? this.getActiveTodoWorkChainOwner(continuedFrom)
+      : promptId;
+    owners.set(promptId, owner);
+    if (owner === promptId) reminders.delete(owner);
+  }
+
+  endAutomaticActiveTodoWorkChain(promptId: string): void {
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    owners.delete(promptId);
+    if (![...owners.values()].includes(owner)) {
+      this.getOwnActiveTodoReminders().delete(owner);
+    }
   }
 
   /**

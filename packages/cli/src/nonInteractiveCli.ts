@@ -456,6 +456,7 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      todoWorkChainId?: string;
       monitorId?: string;
       sdkNotification?: {
         task_id: string;
@@ -901,6 +902,7 @@ export async function runNonInteractive(
           displayText,
           modelText,
           sendMessageType: SendMessageType.Notification,
+          todoWorkChainId: meta.todoWorkChainId,
           sdkNotification: {
             task_id: meta.agentId,
             tool_use_id: meta.toolUseId,
@@ -946,6 +948,7 @@ export async function runNonInteractive(
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
+              todoWorkChainId: meta.todoWorkChainId,
               monitorId: meta.monitorId,
               sdkNotification: {
                 task_id: meta.monitorId,
@@ -1902,7 +1905,9 @@ export async function runNonInteractive(
             if (splitIdx === 0) {
               while (
                 splitIdx < localQueue.length &&
-                localQueue[splitIdx]!.sendMessageType === targetType
+                localQueue[splitIdx]!.sendMessageType === targetType &&
+                localQueue[splitIdx]!.todoWorkChainId ===
+                  localQueue[0]!.todoWorkChainId
               ) {
                 splitIdx++;
               }
@@ -1921,6 +1926,7 @@ export async function runNonInteractive(
               displayText: batch.map((i) => i.displayText).join('; '),
               modelText: batch.map((i) => i.modelText).join('\n\n'),
               sendMessageType: targetType,
+              todoWorkChainId: batch[0]?.todoWorkChainId,
             };
 
             turnCount++;
@@ -1953,6 +1959,7 @@ export async function runNonInteractive(
                   modelOverride: itemModelOverride,
                   ...(itemIsFirstTurn && {
                     notificationDisplayText: item.displayText,
+                    todoWorkChainId: item.todoWorkChainId,
                   }),
                 },
               );
@@ -2188,6 +2195,7 @@ export async function runNonInteractive(
                   displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
+                  todoWorkChainId: job.todoWorkChainId,
                 });
                 drainLocalQueue().then(checkCronDone, onDrainError);
               });

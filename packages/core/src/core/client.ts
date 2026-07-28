@@ -188,6 +188,8 @@ export interface SendMessageOptions {
   };
   /** Display text for notification messages (persisted for session resume). */
   notificationDisplayText?: string;
+  /** Todo work chain that owns this automatic turn, when it is related. */
+  todoWorkChainId?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
 }
@@ -257,6 +259,7 @@ export class GeminiClient {
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
+  private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private recentCompletedToolNames: string[] = [];
@@ -2087,6 +2090,7 @@ export class GeminiClient {
     // detector must reset — otherwise a prior turn's count can trip
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
+      this.activeAutomaticTodoWorkChainPromptIds.clear();
       this.config.startActiveTodoWorkChain(prompt_id);
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
@@ -2100,8 +2104,14 @@ export class GeminiClient {
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate
     ) {
-      this.config.startActiveTodoWorkChain(prompt_id);
-      this.activeTodoWorkChainPromptId = prompt_id;
+      this.config.startAutomaticActiveTodoWorkChain(
+        prompt_id,
+        options?.todoWorkChainId ??
+          (messageType === SendMessageType.Teammate
+            ? this.activeTodoWorkChainPromptId
+            : undefined),
+      );
+      this.activeAutomaticTodoWorkChainPromptIds.add(prompt_id);
     }
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
@@ -2138,6 +2148,7 @@ export class GeminiClient {
     // early-return) leaves this `false`, and the `finally` block aborts the
     // prefetch as a safety net.
     let normalCompletion = false;
+    let hasToolCalls = false;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
@@ -2528,6 +2539,36 @@ export class GeminiClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      if (
+        messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.Cron ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
+      ) {
+        const activeTodoReminder = this.config.getActiveTodoReminder(prompt_id);
+        const alreadyHasActiveTodoReminder = requestToSend.some(
+          (part) =>
+            part === activeTodoReminder ||
+            (typeof part === 'object' &&
+              part !== null &&
+              'text' in part &&
+              part.text === activeTodoReminder),
+        );
+        if (activeTodoReminder && !alreadyHasActiveTodoReminder) {
+          const insertAt = requestToSend.findIndex(
+            (part) =>
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part),
+          );
+          requestToSend.splice(
+            insertAt < 0 ? requestToSend.length : insertAt,
+            0,
+            activeTodoReminder,
+          );
+        }
+      }
+
       if (messageType === SendMessageType.ToolResult) {
         const toolResultMemory =
           await this.tryConsumeMemoryPrefetch('tool_result');
@@ -2602,7 +2643,6 @@ export class GeminiClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
-      let hasToolCalls = false;
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -2796,6 +2836,7 @@ export class GeminiClient {
           }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          hasToolCalls = steeredTurn.pendingToolCalls.length > 0;
           normalCompletion = true;
           return steeredTurn;
         }
@@ -3032,6 +3073,7 @@ export class GeminiClient {
           }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          hasToolCalls = hookTurn.pendingToolCalls.length > 0;
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
           // ToolResult turn still needs to consume the recall result.
@@ -3122,6 +3164,7 @@ export class GeminiClient {
           }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          hasToolCalls = continueTurn.pendingToolCalls.length > 0;
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -3157,6 +3200,13 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } finally {
+      if (
+        this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&
+        (!normalCompletion || !hasToolCalls)
+      ) {
+        this.activeAutomaticTodoWorkChainPromptIds.delete(prompt_id);
+        this.config.endAutomaticActiveTodoWorkChain(prompt_id);
+      }
       settleSteerInput(attachedSteerInput, attachedSteerPushCount);
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any

@@ -560,8 +560,10 @@ describe('Gemini Client (client.ts)', () => {
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
       getProxy: vi.fn().mockReturnValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
@@ -1751,17 +1753,79 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-userQuery',
       );
 
+      await runTurn(SendMessageType.Cron);
+
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-cron',
+        undefined,
+      );
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-cron',
+      );
+
       await runTurn(SendMessageType.Retry);
 
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-retry',
         'prompt-userQuery',
       );
+    });
 
-      await runTurn(SendMessageType.Cron);
+    it('includes active Todo context on the first retry request', async () => {
+      const reminder =
+        '<system-reminder>unfinished todo: run tests</system-reminder>';
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
 
-      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
-        'prompt-cron',
+      await runTurn(SendMessageType.UserQuery);
+      await runTurn(SendMessageType.Retry);
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      expect(request).toContain(reminder);
+    });
+
+    it('keeps automatic Todo ownership through its tool-result turns', async () => {
+      const reminder =
+        '<system-reminder>unfinished todo: finish automatic work</system-reminder>';
+      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      mockTurnRunFn
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: { callId: 'call-1', name: 'read_file', args: {} },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+      for await (const _ of client.sendMessageStream(
+        [{ text: 'automatic work' }],
+        new AbortController().signal,
+        'prompt-automatic',
+        { type: SendMessageType.Notification },
+      )) {
+        // drain
+      }
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).not.toHaveBeenCalled();
+
+      for await (const _ of client.sendMessageStream(
+        [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-automatic',
+        { type: SendMessageType.ToolResult },
+      )) {
+        // drain
+      }
+
+      expect(mockConfig.getActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-automatic',
+      );
+      expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-automatic',
       );
     });
 
