@@ -2937,4 +2937,11 @@ describe('qwen-triage tmux lane parity', () => {
       expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
     }
   });
+
+  it('points npm ci at the restored cache directory in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const prepare = stepIn(jobName, 'Install and build PR app');
+      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+    }
+  });
 });
