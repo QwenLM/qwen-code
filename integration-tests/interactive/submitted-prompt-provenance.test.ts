@@ -13,6 +13,10 @@ import {
 } from '../fake-openai-server.js';
 import { TestRig, type } from '../test-helper.js';
 
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+
 interface CapturedHookInput {
   hook_event_name?: unknown;
   prompt?: unknown;
@@ -24,11 +28,20 @@ describe('submitted prompt provenance', () => {
   let rig: TestRig;
   let savedQwenHome: string | undefined;
   let savedTrustedFoldersPath: string | undefined;
+  let savedNoProxy: string | undefined;
+  let savedNoProxyLower: string | undefined;
 
   beforeEach(() => {
     rig = new TestRig();
     savedQwenHome = process.env['QWEN_HOME'];
     savedTrustedFoldersPath = process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    if (IS_CONTAINER_SANDBOX) {
+      savedNoProxy = process.env['NO_PROXY'];
+      savedNoProxyLower = process.env['no_proxy'];
+      const noProxy = '127.0.0.1,localhost,host.docker.internal';
+      process.env['NO_PROXY'] = noProxy;
+      process.env['no_proxy'] = noProxy;
+    }
   });
 
   afterEach(async () => {
@@ -44,6 +57,18 @@ describe('submitted prompt provenance', () => {
       delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
     } else {
       process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = savedTrustedFoldersPath;
+    }
+    if (IS_CONTAINER_SANDBOX) {
+      if (savedNoProxy !== undefined) {
+        process.env['NO_PROXY'] = savedNoProxy;
+      } else {
+        delete process.env['NO_PROXY'];
+      }
+      if (savedNoProxyLower !== undefined) {
+        process.env['no_proxy'] = savedNoProxyLower;
+      } else {
+        delete process.env['no_proxy'];
+      }
     }
   });
 
@@ -104,18 +129,25 @@ describe('submitted prompt provenance', () => {
       ].join('\n'),
     );
 
-    fakeServer = await startFakeOpenAIServer(({ requestIndex }) =>
-      requestIndex === 0
+    fakeServer = await startFakeOpenAIServer(
+      ({ requestIndex }) =>
+        requestIndex === 0
+          ? {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: toolFile },
+                  'call_submitted_prompt_e2e',
+                ),
+              ],
+            }
+          : { content: 'PROVENANCE_E2E_DONE' },
+      IS_CONTAINER_SANDBOX
         ? {
-            toolCalls: [
-              fakeToolCall(
-                'read_file',
-                { file_path: toolFile },
-                'call_submitted_prompt_e2e',
-              ),
-            ],
+            listenHost: '0.0.0.0',
+            baseUrlHost: 'host.docker.internal',
           }
-        : { content: 'PROVENANCE_E2E_DONE' },
+        : undefined,
     );
 
     const { ptyProcess, promise } = rig.runInteractive(
