@@ -29,19 +29,22 @@ into hashed CSS-module DOM.
 
 ### Layout
 
-Header row: truncating title | host actions | close. Host actions render before
-close. There is no maximize control today; the slot sits where the issue
-described (before built-in header buttons).
+Header row: optional workspace tag | truncating title | host actions |
+maximize | close. Host actions render before the built-in maximize/close
+controls, which always stay visible outside the overflow menu.
 
 ### Overflow
 
-Web-shell owns measurement: a hidden measure row holds a second render of the
-host actions; a `ResizeObserver` on the header compares that natural width plus
-close (and the overflow trigger when collapsed) against remaining space after a
-minimum title width. When it no longer fits, host actions move into a `…`
-dropdown (Radix `DropdownMenu` via the shared UI wrapper / portal root). Close
-stays visible outside the menu so panes remain dismissible without opening the
-overflow.
+Web-shell owns measurement. Host actions render once into a single host slot; a
+`ResizeObserver` on the header compares that slot's natural width against the
+remaining space after a minimum title width (reserving room for the workspace
+tag and the built-in trailing controls). When the actions no longer fit, the
+host slot is hidden in place (`visibility: hidden`, absolutely positioned) so
+stateful actions stay mounted across collapse, and the actions are listed in a
+`…` dropdown (Radix `DropdownMenu` via the shared UI wrapper / portal root)
+that proxies a click to the interactive element inside each hidden slot. The
+built-in maximize/close controls stay visible outside the menu so panes remain
+dismissible without opening the overflow.
 
 ### Scope
 

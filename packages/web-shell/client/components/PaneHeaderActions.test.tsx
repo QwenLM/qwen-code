@@ -497,4 +497,91 @@ describe('PaneHeaderActions', () => {
       container!.querySelector('[data-testid="pane-header-overflow"]'),
     ).toBeNull();
   });
+
+  it('ignores aria-hidden glyphs when labelling overflow items', async () => {
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <button type="button">
+            <span aria-hidden="true">◆</span>
+          </button>
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    const overflow = container!.querySelector(
+      '[data-testid="pane-header-overflow"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      overflow.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const menu = document.querySelector(
+      '[data-testid="pane-header-overflow-menu"]',
+    );
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toBe('Action');
+  });
+
+  it('omits non-interactive children from the overflow menu', async () => {
+    const onEnv = vi.fn();
+    const onShare = vi.fn();
+    render(
+      <header>
+        <span>Title</span>
+        <PaneHeaderActions
+          trailing={
+            <button type="button" data-testid="pane-close">
+              x
+            </button>
+          }
+        >
+          <button type="button" aria-label="Env" onClick={onEnv}>
+            Env
+          </button>
+          <span aria-hidden="true">|</span>
+          <button type="button" aria-label="Share" onClick={onShare}>
+            Share
+          </button>
+        </PaneHeaderActions>
+      </header>,
+    );
+
+    collapse();
+    const overflow = container!.querySelector(
+      '[data-testid="pane-header-overflow"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      overflow.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const menu = document.querySelector(
+      '[data-testid="pane-header-overflow-menu"]',
+    );
+    const items = menu!.querySelectorAll('[role="menuitem"]');
+    expect(items).toHaveLength(2);
+    expect(items[0]?.textContent).toBe('Env');
+    expect(items[1]?.textContent).toBe('Share');
+
+    await act(async () => {
+      items[1]!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(onShare).toHaveBeenCalledTimes(1);
+    expect(onEnv).not.toHaveBeenCalled();
+  });
 });

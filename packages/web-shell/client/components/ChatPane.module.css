@@ -125,10 +125,12 @@
   white-space: nowrap;
 }
 
+/* The built-in maximize/close controls used to be direct children of `.header`
+   (gap 8px); keep that spacing now that they are grouped here. */
 .headerTrailing {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex: 0 0 auto;
 }
 

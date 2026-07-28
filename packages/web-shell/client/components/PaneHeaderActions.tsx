@@ -88,6 +88,27 @@ function interactiveInSlot(slot: HTMLElement): HTMLElement {
   return slot.querySelector<HTMLElement>(INTERACTIVE_SELECTOR) ?? slot;
 }
 
+/**
+ * Text content of an element, ignoring `aria-hidden` subtrees so a decorative
+ * glyph never becomes an action's accessible name.
+ */
+function visibleText(element: HTMLElement): string {
+  let text = '';
+  const walk = (node: Node): void => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const child = node as HTMLElement;
+      if (child.getAttribute('aria-hidden') === 'true') return;
+      for (const grandchild of Array.from(child.childNodes)) walk(grandchild);
+      return;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.nodeValue ?? '';
+    }
+  };
+  for (const child of Array.from(element.childNodes)) walk(child);
+  return text.trim();
+}
+
 /** Prefer the mounted DOM label so opaque custom components still get a name. */
 function resolveActionLabel(
   host: HTMLElement | null,
@@ -102,7 +123,7 @@ function resolveActionLabel(
     if (ariaLabel) return ariaLabel;
     const title = target.getAttribute('title');
     if (title) return title;
-    const text = target.textContent?.trim();
+    const text = visibleText(target);
     if (text) return text;
   }
   return actionMenuLabelFromProps(element, defaultLabel);
@@ -112,6 +133,18 @@ function activateHostAction(host: HTMLElement | null, index: number): void {
   const slot = actionSlot(host, index);
   if (!slot) return;
   interactiveInSlot(slot).click();
+}
+
+/**
+ * Whether a slot holds an interactive element the overflow menu can proxy a
+ * click to. A non-interactive child (e.g. an `aria-hidden` separator) would
+ * show as a dead menu item, so it is left out. An absent slot is treated as
+ * activatable so a real action is never dropped before its host renders.
+ */
+function slotIsActivatable(host: HTMLElement | null, index: number): boolean {
+  const slot = actionSlot(host, index);
+  if (!slot) return true;
+  return slot.querySelector(INTERACTIVE_SELECTOR) !== null;
 }
 
 /**
@@ -247,21 +280,24 @@ export function PaneHeaderActions({
             data-testid="pane-header-overflow-menu"
           >
             <div className={styles.headerOverflowPanel}>
-              {actionElements.map((element, index) => (
-                <DropdownMenuItem
-                  key={element.key ?? `pane-header-menu-${index}`}
-                  onSelect={() => {
-                    activateHostAction(hostRef.current, index);
-                  }}
-                >
-                  {resolveActionLabel(
-                    hostRef.current,
-                    index,
-                    element,
-                    defaultActionLabel,
-                  )}
-                </DropdownMenuItem>
-              ))}
+              {actionElements.map((element, index) => {
+                if (!slotIsActivatable(hostRef.current, index)) return null;
+                return (
+                  <DropdownMenuItem
+                    key={element.key ?? `pane-header-menu-${index}`}
+                    onSelect={() => {
+                      activateHostAction(hostRef.current, index);
+                    }}
+                  >
+                    {resolveActionLabel(
+                      hostRef.current,
+                      index,
+                      element,
+                      defaultActionLabel,
+                    )}
+                  </DropdownMenuItem>
+                );
+              })}
             </div>
           </DropdownMenuContent>
         </DropdownMenu>

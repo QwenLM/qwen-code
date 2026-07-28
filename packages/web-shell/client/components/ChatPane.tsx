@@ -114,6 +114,16 @@ export interface ChatPaneProps {
    * when known) so the host can scope each control to the right session. When
    * the actions no longer fit beside the title they collapse into a `…`
    * overflow menu.
+   *
+   * Each child should be a single interactive element (button or link). When
+   * collapsed, the overflow menu lists the actions and proxies a click to that
+   * element, labelling each item from its accessible name (decorative
+   * `aria-hidden` glyphs are ignored). The action instance stays mounted in a
+   * hidden, off-pane slot across collapse so its state survives; because that
+   * slot is `visibility: hidden`, an action that opens a popover anchored to
+   * itself must render the popover through a portal — one rendered as a
+   * descendant of the action (or anchored to its bounding box) would be
+   * invisible or mispositioned while collapsed.
    */
   renderHeaderActions?: PaneHeaderActionsRenderer;
   onClose?: () => void;
