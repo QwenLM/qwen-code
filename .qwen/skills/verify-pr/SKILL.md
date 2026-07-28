@@ -353,7 +353,7 @@ central claim from being tested — say why.
    the end, because the whole report is already inside a `<details>` on the
    PR — burying the Chinese summary under it made a Chinese reader expand a
    fold and scroll the entire report to reach the one section written for
-   them. Cite the tables above by name instead of restating their numbers in
+   them. Cite the tables below by name instead of restating their numbers in
    prose: a number written twice is a number that can disagree with itself.
 3. **Central claim + A/B table** (cells, oracles, head vs control counts).
 4. **Corrections**, when an earlier review round or bot comment described

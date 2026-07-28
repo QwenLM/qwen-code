@@ -1690,6 +1690,12 @@ describe('qwen-triage verify publish fidelity', () => {
           'timeout — partial evidence',
           '超时——证据不完整',
         ],
+        [
+          { VERDICT: 'infra-error' },
+          'infra-error (crash, OOM, or unwritable results)',
+          '基础设施故障（崩溃、OOM 或结果不可写）',
+        ],
+        [{ VERDICT: 'bogus' }, 'unknown', '未知'],
       ];
       const seenZh = new Set();
       ARMS.forEach(([env, en, zh], i) => {
