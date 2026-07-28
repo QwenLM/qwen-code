@@ -662,6 +662,7 @@ describe('GithubChannel', () => {
         makeNotification({
           reason: 'review_requested',
           updated_at,
+          last_read_at: '2026-07-03T12:00:00.000Z',
           subject: {
             title: 'Review me',
             url: 'https://api.github.com/repos/owner/repo/pulls/99',

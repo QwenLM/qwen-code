@@ -423,14 +423,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       (a.created_at || '').localeCompare(b.created_at || ''),
     );
     const bot = this.botUsername?.toLowerCase();
-    const lowerBound =
-      ctx.lastReadAt && ctx.lastReadAt > ctx.metaFloor
-        ? ctx.lastReadAt
-        : ctx.metaFloor;
     const event = events.findLast((candidate) => {
       if (
         !candidate.created_at ||
-        candidate.created_at <= lowerBound ||
+        candidate.created_at <= ctx.metaFloor ||
         candidate.created_at > ctx.maxUpdatedAt
       ) {
         return false;
