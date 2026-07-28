@@ -2021,8 +2021,11 @@ describe('goal runtime', () => {
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
 
-    await expect(runtime.restore([legacyGoalRecord()])).rejects.toThrow(
-      'migration write failed',
+    await expect(runtime.restore([legacyGoalRecord()])).rejects.toEqual(
+      expect.objectContaining({
+        name: 'GoalPersistenceUnavailableError',
+        message: 'migration write failed',
+      }),
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),

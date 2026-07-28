@@ -601,7 +601,13 @@ export function createGoalRuntime(
               recordUuid,
               now: Date.now(),
             });
-            await options.journal.recordGoalState(recordUuid, payload);
+            try {
+              await options.journal.recordGoalState(recordUuid, payload);
+            } catch (error) {
+              throw new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
             assertAvailable();
             recoveredSnapshot = structuredClone(payload.snapshot);
             recoveredCause = payload.cause;
