@@ -126,10 +126,16 @@ describe('useBackgroundTasks', () => {
 
     await renderHarness();
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+    expect(sdkMock.actions.getTasks).toHaveBeenLastCalledWith({
+      silent: true,
+    });
 
     sessionId = 'session-b';
     await rerenderHarness();
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    expect(sdkMock.actions.getTasks).toHaveBeenLastCalledWith({
+      silent: true,
+    });
 
     await act(async () => {
       sessionA.resolve(
@@ -150,5 +156,8 @@ describe('useBackgroundTasks', () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(3);
+    expect(sdkMock.actions.getTasks).toHaveBeenLastCalledWith({
+      silent: true,
+    });
   });
 });

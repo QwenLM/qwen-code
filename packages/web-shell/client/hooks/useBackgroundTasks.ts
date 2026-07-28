@@ -57,7 +57,7 @@ export function useBackgroundTasks(
       const request = {};
       tasksRefreshInFlightRef.current = { sessionId, request };
       actions
-        .getTasks()
+        .getTasks({ silent: true })
         .then((snapshot) => {
           if (disposed || snapshot.sessionId !== sessionId) return;
           const composerTasks = snapshot.tasks.filter(isComposerTask);

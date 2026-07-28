@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DaemonSessionClient } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonSessionClient,
+} from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
@@ -518,6 +521,74 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('reports getTasks failures by default', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(new Error('Failed to fetch'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks()).rejects.toThrow('Failed to fetch');
+
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.load_tasks.failed',
+        message: 'Get tasks failed: Failed to fetch',
+        operation: 'load_tasks',
+      }),
+    );
+  });
+
+  it('suppresses notices for silent transient getTasks failures', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(new Error('Failed to fetch'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Failed to fetch',
+    );
+
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('suppresses notices for silent retryable HTTP getTasks failures', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(
+      new DaemonHttpError(500, undefined, 'Server error'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports silent hard getTasks failures once', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValue(new Error('Malformed response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+
+    expect(addNotice).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.load_tasks.failed',
+        message: 'Get tasks failed: Malformed response',
+        operation: 'load_tasks',
+      }),
+    );
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -679,6 +750,7 @@ function createMockSession(sessionId: string) {
     cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
+    tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
   };
 }
 

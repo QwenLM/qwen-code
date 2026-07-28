@@ -23,7 +23,11 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  isDaemonTurnError,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -144,6 +148,8 @@ export function createDaemonSessionActions({
   setAttachSessionNonce,
   setNewSessionNonce,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
+  const silentHardFailureNoticeKeys = new Set<string>();
+
   function clearActiveSessionState() {
     for (const [, active] of activePromptsRef.current) {
       active.controller.abort();
@@ -1126,21 +1132,28 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getTasks() {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Get tasks failed',
-        'load_tasks',
-      );
+    async getTasks(opts) {
       try {
+        const session = sessionRef.current;
+        if (!session) {
+          throw new Error('Daemon session is not connected');
+        }
         return await withActionTimeout(session.tasks(), 'Get tasks timed out');
       } catch (error) {
+        if (opts?.silent && isTransientActionError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Get tasks failed',
           error,
           'load_tasks',
+          opts?.silent
+            ? {
+                dispatchedNoticeKeys: silentHardFailureNoticeKeys,
+                noticeOnceKey: getActionErrorNoticeKey('load_tasks', error),
+              }
+            : undefined,
         );
       }
     },
@@ -1424,6 +1437,10 @@ function dispatchActionError(
   action: string,
   error: unknown,
   operation: DaemonNoticeOperation,
+  opts?: {
+    dispatchedNoticeKeys?: Set<string>;
+    noticeOnceKey?: string;
+  },
 ): Error {
   if (isAbortError(error)) {
     if (error instanceof Error) return error;
@@ -1433,18 +1450,63 @@ function dispatchActionError(
     return abortError;
   }
   const message = error instanceof Error ? error.message : String(error);
-  addNotice({
-    severity: 'error',
-    category: 'user_action',
-    operation,
-    code: `daemon.${operation}.failed`,
-    message: `${action}: ${message}`,
-    debugMessage: message,
-    recoverable: true,
-  });
+  const noticeKey = opts?.noticeOnceKey;
+  const dispatchedNoticeKeys = opts?.dispatchedNoticeKeys;
+  if (!noticeKey || !dispatchedNoticeKeys?.has(noticeKey)) {
+    addNotice({
+      severity: 'error',
+      category: 'user_action',
+      operation,
+      code: `daemon.${operation}.failed`,
+      message: `${action}: ${message}`,
+      debugMessage: message,
+      recoverable: true,
+    });
+    if (noticeKey) {
+      dispatchedNoticeKeys?.add(noticeKey);
+    }
+  }
   return markNoticeDispatched(
     error instanceof Error ? error : new Error(message),
   );
+}
+
+function getActionErrorNoticeKey(
+  operation: DaemonNoticeOperation,
+  error: unknown,
+): string {
+  return `${operation}:${getActionErrorMessage(error)}`;
+}
+
+function getActionErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientActionError(error: unknown): boolean {
+  if (isAbortError(error)) return true;
+  const status = extractHttpStatus(error);
+  if (status !== undefined) {
+    return status >= 500 || status === 408 || status === 429;
+  }
+  const message = getActionErrorMessage(error).toLowerCase();
+  return (
+    message.includes('timed out') ||
+    message.includes('failed to fetch') ||
+    message.includes('network error') ||
+    message.includes('networkerror')
+  );
+}
+
+function extractHttpStatus(error: unknown): number | undefined {
+  if (error instanceof DaemonHttpError) return error.status;
+  if (isRecord(error) && typeof error['status'] === 'number') {
+    return error['status'];
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isAbortError(error: unknown): boolean {
