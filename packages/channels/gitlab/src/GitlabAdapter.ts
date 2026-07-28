@@ -224,10 +224,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       : description || todo.body || '';
     if (!text) return;
 
-    const isMentionAction =
-      todo.action_name === 'mentioned' ||
-      todo.action_name === 'directly_addressed';
-
     const envelope = this.buildEnvelope(
       text,
       todo.author.username,
@@ -242,7 +238,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         String(todo.id),
         description,
       ),
-      !isMentionAction,
+      true,
     );
 
     await this.handleInbound(envelope);
