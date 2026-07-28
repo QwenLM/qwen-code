@@ -369,6 +369,55 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(1);
   });
 
+  it('should retry on transient network errors (ECONNRESET) by default', async () => {
+    let attempts = 0;
+    const mockFn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 2) {
+        const err = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('read ECONNRESET'), {
+            code: 'ECONNRESET',
+          }),
+        });
+        throw err;
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    expect(result).toBe('success');
+    expect(mockFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('should retry on ETIMEDOUT by default', async () => {
+    let attempts = 0;
+    const mockFn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw Object.assign(new Error('connect ETIMEDOUT'), {
+          code: 'ETIMEDOUT',
+        });
+      }
+      return 'ok';
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    expect(result).toBe('ok');
+    expect(mockFn).toHaveBeenCalledTimes(2);
+  });
+
   it('should respect maxDelayMs', async () => {
     const mockFn = createFailingFunction(3);
     const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
