@@ -240,6 +240,61 @@ describe('Web Shell markdown-chart integration', () => {
     });
   });
 
+  it('rejects unsafe chart option fields before calling ECharts', async () => {
+    const prototypeSeries: Record<string, unknown> = { type: 'bar' };
+    Object.defineProperty(prototypeSeries, '__proto__', {
+      value: { polluted: true },
+      enumerable: true,
+    });
+    const unsafeSpecs = [
+      {
+        tooltip: { formatter: '<img src=x onerror=alert(1)>' },
+        series: [{ type: 'bar' }],
+      },
+      {
+        color: ['javascript:alert(1)'],
+        series: [{ type: 'bar' }],
+      },
+      {
+        series: [
+          {
+            type: 'bar',
+            cursor: 'url(https://example.test/ping), auto',
+            href: 'javascript:alert(1)',
+            symbol: 'image://https://example.test/marker.png',
+          },
+        ],
+      },
+      { series: [prototypeSeries] },
+    ];
+
+    for (const spec of unsafeSpecs) {
+      const { runtime } = createFakeRuntime();
+      const registry = createMarkdownChartRegistry({
+        loadECharts: async () => runtime,
+        resizeObserver: false,
+      });
+      const chart = JSON.stringify({
+        version: 1,
+        renderer: 'echarts',
+        spec,
+      });
+      const { container } = await mount(
+        chartTree({
+          content: `\`\`\`markdown-chart\n${chart}\n\`\`\``,
+          registry,
+        }),
+      );
+      await flushChart();
+
+      expect(runtime.init).not.toHaveBeenCalled();
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'Chart render failed.',
+      );
+      expect(container.querySelector('pre code')).toBeNull();
+    }
+  });
+
   it('localizes shared chart controls and preserves host label overrides', async () => {
     const { runtime } = createFakeRuntime();
     const registry = createMarkdownChartRegistry({
@@ -464,6 +519,7 @@ describe('Web Shell markdown-chart integration', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       'Chart render failed.',
     );
+    expect(container.querySelector('pre code')).toBeNull();
   });
 
   it('rejects unsafe refs before calling the host resolver by default', async () => {
