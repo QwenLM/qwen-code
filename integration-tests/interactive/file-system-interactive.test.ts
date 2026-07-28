@@ -36,10 +36,7 @@ describe('Interactive file system', () => {
       const { ptyProcess } = rig.runInteractive();
 
       // Wait for the app to be ready
-      const isReady = await rig.waitForText(
-        'Type your message',
-        rig.getDefaultTimeout(),
-      );
+      const isReady = await rig.waitForText('Type your message');
       expect(
         isReady,
         'CLI did not start up in interactive mode correctly',
@@ -53,10 +50,7 @@ describe('Interactive file system', () => {
       const readCall = await rig.waitForToolCall('read_file');
       expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
-      const containsExpectedVersion = await rig.waitForText(
-        '1.0.0',
-        rig.getDefaultTimeout(),
-      );
+      const containsExpectedVersion = await rig.waitForText('1.0.0');
       expect(
         containsExpectedVersion,
         'Expected to see version "1.0.0" in output',
