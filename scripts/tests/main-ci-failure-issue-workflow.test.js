@@ -64,7 +64,7 @@ describe('main CI failure issue workflow', () => {
       '--search "\\"${title_prefix} ${WORKFLOW_NAME}\\" in:title"',
     );
     expect(workflow).toContain(
-      '--jq "[.[] | select(.title | startswith(\\"${title_prefix} ${WORKFLOW_NAME} on \\"))] | .[0].number // \\"\\""',
+      '--jq "[.[] | select(.author.login == \\"${bot_login}\\") | select(.title | startswith(\\"${title_prefix} ${WORKFLOW_NAME} on \\"))] | .[0].number // \\"\\""',
     );
     expect(workflow).toContain('--title "${title_prefix} ${WORKFLOW_NAME}');
     expect(workflow).toContain('gh issue comment "${existing_workflow_issue}"');
@@ -73,6 +73,12 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
     expect(workflow.match(/exit 0/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('verifies workflow ownership before reusing a title-matched issue', () => {
+    expect(workflow).toContain('bot_login="$(gh api user --jq .login)"');
+    expect(workflow).toContain('--json number,title,author');
+    expect(workflow).toContain('select(.author.login == \\"${bot_login}\\")');
   });
 
   it('does not check out repository code', () => {

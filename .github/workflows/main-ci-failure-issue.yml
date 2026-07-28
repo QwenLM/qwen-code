@@ -63,16 +63,17 @@ jobs:
             exit 0
           fi
 
-          # Search for an existing open issue for the same workflow failure
-          # This deduplicates issues: if E2E Tests failed before and the issue is still open,
-          # we comment on it instead of creating a new one.
+          # Search for an existing open issue for the same workflow failure,
+          # restricted to issues created by this bot so a same-shaped issue
+          # from another user cannot enter the autofix route.
+          bot_login="$(gh api user --jq .login)"
           existing_workflow_issue="$(
             gh issue list \
               --repo "${REPO}" \
               --state open \
               --search "\"${title_prefix} ${WORKFLOW_NAME}\" in:title" \
-              --json number,title \
-              --jq "[.[] | select(.title | startswith(\"${title_prefix} ${WORKFLOW_NAME} on \"))] | .[0].number // \"\""
+              --json number,title,author \
+              --jq "[.[] | select(.author.login == \"${bot_login}\") | select(.title | startswith(\"${title_prefix} ${WORKFLOW_NAME} on \"))] | .[0].number // \"\""
           )"
 
           if [[ -n "${existing_workflow_issue}" ]]; then
