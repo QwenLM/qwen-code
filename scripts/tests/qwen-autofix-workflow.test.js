@@ -2289,13 +2289,14 @@ describe('qwen-autofix workflow', () => {
       '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
     );
     // Command-style comments are instructions, not feedback — excluded at
-    // ALL FOUR feedback sites (scan count via $cf; NEWEST, LIVE_NEW, and
-    // the renderer inline) so /triage-, /review-, and /takeover-style
+    // ALL FIVE feedback sites (scan count via $cf; NEWEST, LIVE_NEW,
+    // Critical-only deferral rendering, and the renderer inline) so /triage-,
+    // /review-, and /takeover-style
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      3,
+      4,
     );
   });
 
@@ -3204,25 +3205,149 @@ describe('qwen-autofix workflow', () => {
     expect(broken.body).toBe('');
   });
 
-  it('treats Suggestion-level review findings as actionable feedback', () => {
-    // AGENTS.md: Suggestions ARE addressed during a PR's first ~5 review
-    // rounds; only past that are they deferred with a recorded reason. The
-    // loop's MAX_ROUNDS cap is that same boundary, so every round the loop
-    // runs is within the address-Suggestions window — the scan and the
-    // feedback rendering must NOT filter `**[Suggestion]**` /review comments.
-    expect(workflow).not.toContain('QWEN_SUGGESTION_FILTER');
-    // The filter REGEX (escaped form only ever appears in filter code, not in
-    // prose comments) must be gone from both the scan and the feedback render.
-    expect(workflow).not.toContain('\\*\\*\\[Suggestion\\]\\*\\*');
-    // The agent-facing policy lives in the SKILL: implement valuable
-    // suggestions, decline only with a recorded per-finding reason.
+  it('switches to Critical-only feedback after five change rounds', () => {
+    // ROUND counts change-producing rounds, so 4 still starts the fifth
+    // suggestion-capable change while 5 starts the first Critical-only round.
+    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '5'");
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
+    );
+    const modeBlock = prepareBranchAndFeedbackStep.match(
+      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+    )?.[1];
+    expect(modeBlock).toBeTruthy();
+    const modeAt = (round) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    expect(modeAt(4)).toBe('false');
+    expect(modeAt(5)).toBe('true');
+
+    // Once the boundary is crossed, only an explicit Critical inline finding
+    // or a formal changes-requested review is actionable. Suggestion and
+    // unclassified comments stay open instead of driving more code changes.
+    expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
+    expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const inlineFilter = prepareBranchAndFeedbackStep.match(
+      /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(inlineFilter).toBeTruthy();
+    const inlineFeedback = [
+      {
+        id: 10,
+        created_at: '2025-12-31T00:00:00Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** stale owner routes writes to the wrong runtime',
+      },
+      {
+        id: 11,
+        created_at: '2026-01-02T00:00:00Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** wrong workspace is mutated',
+      },
+      {
+        id: 12,
+        created_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Suggestion]** add an aria-label',
+      },
+      {
+        id: 13,
+        created_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'Could this helper be renamed?',
+      },
+      {
+        id: 14,
+        in_reply_to_id: 10,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'This still routes through the legacy primary.',
+      },
+      {
+        id: 15,
+        pull_request_review_id: 20,
+        created_at: '2026-01-02T00:00:04Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'The null branch still crashes.',
+      },
+    ];
+    const reviews = [
+      {
+        id: 20,
+        state: 'CHANGES_REQUESTED',
+      },
+    ];
+    const countInline = (criticalOnly) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '-s',
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'critical_only',
+            String(criticalOnly),
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--argjson',
+            'reviews',
+            JSON.stringify([reviews]),
+            `[\n${inlineFilter}\n] | length`,
+          ],
+          {
+            encoding: 'utf8',
+            input: JSON.stringify(inlineFeedback),
+          },
+        ),
+      );
+    expect(countInline(false)).toBe(5);
+    expect(countInline(true)).toBe(3);
+
+    // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
+    // associated inline details remain actionable even without the marker.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'or (.state // "") == "CHANGES_REQUESTED"',
+    );
+    expect(inlineFilter).toContain('pull_request_review_id');
+
+    // Scan still selects fresh suggestions so a no-op report can advance the
+    // watermark; prepare hides their bodies from the agent and the
+    // deterministic report records links to the items left open.
+    expect(reviewScanJob).not.toContain('CRITICAL_ONLY');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '## Deferred non-Critical feedback',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain('deferred-feedback.md');
+    expect(pushAndReportStep).toContain('deferred-feedback.md');
+
+    // The agent-facing policy is an independent second guard: even if someone
+    // later changes the rendering, a declared Critical-only round must never
+    // modify code for the deferred section.
     const skill = readAutofixSkill();
-    expect(skill).toContain('never');
-    expect(skill).toContain('drop one silently');
-    // A third disposition beyond fix/decline: escalate a judgment that is the
-    // maintainer's to make, instead of silently deciding it.
-    expect(skill).toContain("Needs a maintainer's decision");
-    expect(skill).toContain('escalate when the');
+    expect(skill).toContain('Critical-only mode');
+    expect(skill).toContain('do not modify code');
+    expect(skill).toContain('Deferred non-Critical feedback');
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
