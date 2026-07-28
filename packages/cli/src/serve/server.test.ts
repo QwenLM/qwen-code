@@ -8610,6 +8610,24 @@ describe('createServeApp', () => {
       });
     });
 
+    it('normalizes uppercase sessionId to lowercase', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionId: '550E8400-E29B-41D4-A716-446655440000' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]).toMatchObject({
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      });
+    });
+
     it('409 when sessionId already exists (active or archived)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(

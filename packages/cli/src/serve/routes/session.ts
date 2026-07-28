@@ -1285,7 +1285,7 @@ export function registerSessionRoutes(
         });
         return;
       }
-      requestedSessionId = rawSessionId;
+      requestedSessionId = rawSessionId.toLowerCase();
       // Reject an id that already exists (active or archived) at the route
       // boundary: loadCliConfig calls process.exit(1) on a duplicate, which
       // would terminate the shared ACP child and every session on its channel.
