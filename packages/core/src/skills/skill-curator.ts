@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { QWEN_DIR } from '../config/storage.js';
@@ -29,6 +30,50 @@ const CURATOR_LOCK_FILE = 'skill-curator.lock';
 // A real state file is a few KB even with hundreds of skills. Cap the read so
 // a crafted oversized regular file cannot drive an unbounded JSON parse.
 const MAX_STATE_FILE_BYTES = 1024 * 1024;
+// A managed SKILL.md is a small frontmatter + body. Cap the read so a crafted
+// or symlinked manifest (e.g. a git-mode-120000 link to /dev/zero) cannot drive
+// an unbounded read; the ceiling is well above any real manifest.
+const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+
+// O_NOFOLLOW refuses a symlink atomically at open (ELOOP) — closing the
+// lstat→read TOCTOU window a bare readFile leaves open — and O_NONBLOCK keeps a
+// FIFO from hanging the open (the fstat guard then rejects it as non-regular).
+// Both constants are omitted on platforms that lack them (Windows), where they
+// reduce to plain O_RDONLY.
+const NO_FOLLOW_READ_FLAGS =
+  (fsConstants.O_RDONLY ?? 0) |
+  (fsConstants.O_NOFOLLOW ?? 0) |
+  (fsConstants.O_NONBLOCK ?? 0);
+
+/**
+ * Read an entire regular file with O_NOFOLLOW and a size bound taken from an
+ * fstat on the open descriptor. Unlike an `lstat` guard followed by a separate
+ * `readFile`, this cannot be raced: a symlink swapped in after any earlier stat
+ * is refused atomically at open, and the size is re-checked on the same fd that
+ * is read, so a target such as /dev/zero cannot drive an unbounded read.
+ */
+async function readRegularFileNoFollow(
+  filePath: string,
+  maxBytes: number,
+): Promise<{ content: string; stat: import('node:fs').Stats }> {
+  const handle = await fs.open(filePath, NO_FOLLOW_READ_FLAGS);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error(
+        `Auto-skill curator refuses unsafe path ${filePath} (not a regular file).`,
+      );
+    }
+    if (stat.size > maxBytes) {
+      throw new Error(`Auto-skill curator file too large at ${filePath}.`);
+    }
+    const buffer = Buffer.allocUnsafe(stat.size);
+    const { bytesRead } = await handle.read(buffer, 0, stat.size, 0);
+    return { content: buffer.toString('utf8', 0, bytesRead), stat };
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
 
 type AutoSkillState = 'active' | 'stale' | 'archived';
 
@@ -241,11 +286,26 @@ async function readState(statePath: string): Promise<AutoSkillCuratorState> {
   if (stat.size > MAX_STATE_FILE_BYTES) {
     throw new Error(`Invalid auto-skill curator state at ${statePath}.`);
   }
+  let content: string;
   try {
-    const content = await fs.readFile(statePath, 'utf8');
-    return parseState(JSON.parse(content), statePath);
+    // Read with O_NOFOLLOW rather than a bare readFile: the lstat above only
+    // proves the path was safe at that instant, so a symlink (or a growing
+    // file) swapped in before the read would otherwise be followed. The
+    // O_NOFOLLOW open refuses that atomically and the fstat re-bounds the size.
+    ({ content } = await readRegularFileNoFollow(
+      statePath,
+      MAX_STATE_FILE_BYTES,
+    ));
   } catch (error) {
     if (isMissing(error)) return emptyState();
+    // The file passed the lstat guard, so any failure here means it raced into
+    // a symlink / non-regular file or grew past the cap between the stat and
+    // the O_NOFOLLOW open — fail closed instead of following it.
+    throw new Error(`Auto-skill curator refuses unsafe path ${statePath}.`);
+  }
+  try {
+    return parseState(JSON.parse(content), statePath);
+  } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(`Invalid auto-skill curator state at ${statePath}.`);
     }
@@ -294,19 +354,20 @@ async function readManagedSkill(
   const directoryPath = path.join(root, directoryName);
   const manifestPath = path.join(directoryPath, SKILL_FILE_NAME);
   try {
-    const [directoryStat, manifestStat, content] = await Promise.all([
-      fs.lstat(directoryPath),
-      fs.lstat(manifestPath),
-      fs.readFile(manifestPath, 'utf8'),
-    ]);
-    if (
-      directoryStat.isSymbolicLink() ||
-      !directoryStat.isDirectory() ||
-      manifestStat.isSymbolicLink() ||
-      !manifestStat.isFile()
-    ) {
+    const directoryStat = await fs.lstat(directoryPath);
+    if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
       return undefined;
     }
+    // Read the manifest with O_NOFOLLOW instead of the previous
+    // `Promise.all([lstat, readFile])`, where the readFile ran concurrently
+    // with the lstat guard: a symlinked SKILL.md (git mode 120000, survives a
+    // clone) pointing at /dev/zero would begin an unbounded read before the
+    // lstat could reject it. The O_NOFOLLOW open refuses the symlink atomically
+    // and the fstat bounds the read, so a crafted manifest cannot OOM the scan.
+    const { content, stat: manifestStat } = await readRegularFileNoFollow(
+      manifestPath,
+      MAX_MANIFEST_BYTES,
+    );
     const skillName = parseAutoSkillName(content);
     if (!skillName) return undefined;
     return {
@@ -631,8 +692,14 @@ export async function maybeRunAutoSkillCurator(
         const existing = state.skills[skill.directoryName];
         state.skills[skill.directoryName] = {
           skillName: skill.skillName,
-          firstSeenAt: nowIso,
-          lastActivityAt: nowIso,
+          // Preserve an existing baseline the way useCount/pinned/lastUsedAt are
+          // preserved below: if recordAutoSkillUsage already created a record
+          // before this first curator run, overwriting firstSeenAt/
+          // lastActivityAt with `now` would reset the inactivity clock and delay
+          // the stale transition. A brand-new skill still gets a fresh `now`
+          // baseline (never the old manifest mtime), keeping first-sight grace.
+          firstSeenAt: existing?.firstSeenAt ?? nowIso,
+          lastActivityAt: existing?.lastActivityAt ?? nowIso,
           useCount: existing?.useCount ?? 0,
           state: 'active',
           pinned: existing?.pinned ?? false,

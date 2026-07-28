@@ -122,6 +122,39 @@ describe('auto-skill curator', () => {
     expect(surfaced).not.toContain(maliciousDir);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses an auto-skill whose manifest is a symlink',
+    async () => {
+      const now = new Date('2026-07-27T00:00:00.000Z');
+      const old = new Date(now.getTime() - 100 * DAY_MS);
+
+      // A managed directory whose SKILL.md is a symlink (git mode 120000
+      // survives a clone). Even though the link target is a valid auto-skill
+      // manifest, the O_NOFOLLOW read refuses to follow it — so the skill is
+      // not managed and a crafted target (e.g. /dev/zero) can never be read.
+      const target = await writeSkill('auto-skill-real', 'auto-skill', old);
+      const linkedDir = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-linked',
+      );
+      await fs.mkdir(linkedDir, { recursive: true });
+      await fs.symlink(target, path.join(linkedDir, 'SKILL.md'));
+
+      const status = await getAutoSkillCuratorStatus(projectRoot, now);
+
+      const surfaced = [
+        ...status.active,
+        ...status.stale,
+        ...status.archived,
+      ].map((entry) => entry.directoryName);
+      expect(surfaced).not.toContain('auto-skill-linked');
+      // The real, non-symlinked skill is still enumerated normally.
+      expect(surfaced).toContain('auto-skill-real');
+    },
+  );
+
   it('keeps dry-run non-mutating while reporting first-sight seeding', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     await writeSkill(
@@ -209,6 +242,46 @@ describe('auto-skill curator', () => {
     if (result.status === 'ran') {
       expect(result.result.archived).toEqual(['auto-skill-existing']);
     }
+  });
+
+  it('preserves an existing usage baseline when seeding the first run', async () => {
+    const usedAt = new Date('2026-04-01T00:00:00.000Z');
+    const manifest = await writeSkill(
+      'auto-skill-preseeded',
+      'auto-skill',
+      new Date(usedAt.getTime() - 200 * DAY_MS),
+    );
+    // Usage recorded before the first curator run establishes the inactivity
+    // baseline (firstSeenAt / lastActivityAt) at usedAt.
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'preseeded', level: 'project', filePath: manifest },
+      usedAt,
+    );
+
+    // The first automatic (seeding) run happens ~40 days later. It must not
+    // reset the inactivity clock to `now`, or the stale transition would be
+    // delayed by up to the full interval.
+    const seedAt = new Date(usedAt.getTime() + 40 * DAY_MS);
+    await expect(
+      maybeRunAutoSkillCurator(projectRoot, seedAt),
+    ).resolves.toEqual({ status: 'seeded', checked: 1 });
+
+    const state = JSON.parse(
+      await fs.readFile(
+        path.join(projectRoot, '.qwen', 'skill-curator.json'),
+        'utf8',
+      ),
+    ) as {
+      skills: Record<
+        string,
+        { firstSeenAt: string; lastActivityAt: string; useCount: number }
+      >;
+    };
+    const record = state.skills['auto-skill-preseeded']!;
+    expect(record.firstSeenAt).toBe(usedAt.toISOString());
+    expect(record.lastActivityAt).toBe(usedAt.toISOString());
+    expect(record.useCount).toBe(1);
   });
 
   it('marks inactive skills stale before archiving them', async () => {
