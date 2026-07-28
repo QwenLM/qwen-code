@@ -100,6 +100,18 @@ const triageAndAddressStep =
   workflow.match(
     /- name: 'Triage and address'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
   )?.[0] ?? '';
+const repairDeterministicRejectionStep =
+  workflow.match(
+    /- name: 'Repair deterministic rejection'[\s\S]*?(?=\n[ ]{6}- name: 'Repair verification gate')/,
+  )?.[0] ?? '';
+const repairVerificationGateStep =
+  workflow.match(
+    /- name: 'Repair verification gate'[\s\S]*?(?=\n[ ]{6}- name: 'Finalize verification')/,
+  )?.[0] ?? '';
+const finalizeVerificationStep =
+  workflow.match(
+    /- name: 'Finalize verification'[\s\S]*?(?=\n[ ]{6}- name: 'Show run artifacts')/,
+  )?.[0] ?? '';
 const prepareBranchAndFeedbackStep =
   workflow.match(
     /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
@@ -301,12 +313,12 @@ describe('qwen-autofix workflow', () => {
     // discards itself — no agent run, no marker, no comment.
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
     expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
-    // Four gates, and both status-comment steps are among them: a discarded
-    // duplicate must neither announce a round it will never run nor rewrite
-    // the status the real round already finalised.
+    // Addressing, the first verification, the final verdict, and both status
+    // comment steps discard stale targets. The repair is gated by the first
+    // verdict, so it cannot start for a stale target.
     expect(
       workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
-    ).toBe(4);
+    ).toBe(5);
     expect(reviewScanJob).toContain(
       'capture("^review-address \\\\((?<pr>[0-9]+),")',
     );
@@ -3769,6 +3781,7 @@ describe('qwen-autofix workflow', () => {
       assessCandidatesStep,
       developFixStep,
       triageAndAddressStep,
+      repairDeterministicRejectionStep,
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
@@ -3790,6 +3803,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(developFixStep).toContain('rm -f "${WORKDIR}/failure.md"');
     expect(triageAndAddressStep).toContain('rm -f "${WORKDIR}/failure.md"');
+    expect(repairDeterministicRejectionStep).toContain(
+      '"${WORKDIR}/failure.md"',
+    );
   });
 
   it('keeps agent decision logic in the project autofix skill', () => {
@@ -3827,6 +3843,9 @@ describe('qwen-autofix workflow', () => {
     expect(triageAndAddressStep).toContain(
       'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \\\n            --mode address-review',
     );
+    expect(repairDeterministicRejectionStep).toContain(
+      'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \\\n            --mode address-review',
+    );
     // Staging must MIRROR the skill layout: run-agent.mjs resolves its
     // SKILL as `<own dir>/../SKILL.md`, so the staged runner and a staged
     // SKILL.md must sit in autofix-skill/{scripts/run-agent.mjs,SKILL.md}.
@@ -3856,6 +3875,7 @@ describe('qwen-autofix workflow', () => {
       assessCandidatesStep,
       developFixStep,
       triageAndAddressStep,
+      repairDeterministicRejectionStep,
     ]) {
       expect(step).not.toContain('## Role');
       expect(step).not.toContain('## Workflow');
@@ -4162,6 +4182,7 @@ describe('qwen-autofix workflow', () => {
       assessCandidatesStep,
       developFixStep,
       triageAndAddressStep,
+      repairDeterministicRejectionStep,
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
@@ -4505,6 +4526,165 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).not.toContain(
       "steps.verify.outputs.outcome == 'failed'",
     );
+  });
+
+  it('repairs one deterministic rejection and finalizes only the last verdict', () => {
+    const reviewVerificationGateStep = verificationGateSteps[1];
+    expect(reviewVerificationGateStep).toContain('continue-on-error: true');
+    expect(repairDeterministicRejectionStep).toContain(
+      "steps.verify.outputs.retryable == 'true'",
+    );
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain(
+      "QWEN_TIMEOUT_MS: '1080000'",
+    );
+    const settingsJson = (step) =>
+      step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
+    expect(settingsJson(repairDeterministicRejectionStep)).toBe(
+      settingsJson(triageAndAddressStep),
+    );
+    expect(settingsJson(repairDeterministicRejectionStep)).toContain(
+      '"sandbox": "docker"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'mkdir -p .qwen "${QWEN_HOME}"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'printf \'%s\\n\' "${SETTINGS_JSON}" > .qwen/settings.json',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'echo "attempted=true" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'cat "${WORKDIR}/gate-rejection.md"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'Keep that commit and add one follow-up commit',
+    );
+    const repairCleanup =
+      repairDeterministicRejectionStep.match(
+        /rm -f \\\n([\s\S]*?)\n {10}rm -rf "\$\{QWEN_HOME\}"/,
+      )?.[1] ?? '';
+    expect(repairCleanup).not.toContain('gate-rejection.md');
+    expect(repairDeterministicRejectionStep).not.toContain(
+      '"${WORKDIR}/resolved-comments.txt"',
+    );
+    expect(
+      repairDeterministicRejectionStep.match(
+        /node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/g,
+      ) ?? [],
+    ).toHaveLength(1);
+    expect(
+      workflow.match(/- name: 'Repair deterministic rejection'/g) ?? [],
+    ).toHaveLength(1);
+    expect(repairVerificationGateStep).toContain('continue-on-error: true');
+    expect(repairVerificationGateStep).toContain(
+      "steps.repair.outputs.attempted == 'true'",
+    );
+    expect(repairVerificationGateStep).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
+    expect(
+      reviewVerificationRunner.match(/retryable=true/g) ?? [],
+    ).toHaveLength(1);
+    expect(reviewVerificationRunner).toContain(
+      "run_check 'settings schema is stale on the agent-committed fix'",
+    );
+    expect(reviewVerificationRunner).toContain(
+      "run_check 'cross-package contract verification failed'",
+    );
+    expect(pushAndReportStep).toContain(
+      "steps.final_verify.outputs.outcome == 'fixed'",
+    );
+    expect(pushAndReportStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "COMMITTED: '${{ steps.final_verify.outputs.committed }}'",
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
+
+    const body = finalizeVerificationStep
+      .match(/ {8}run: \|-\n([\s\S]*)$/)?.[1]
+      .split('\n')
+      .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+      .join('\n');
+    expect(body).toBeTruthy();
+    const run = (env) => {
+      const dir = mkdtempSync(join(tmpdir(), 'final-verify-'));
+      const output = join(dir, 'output');
+      const result = spawnSync('bash', ['-c', `set -eo pipefail\n${body}`], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: output,
+          FIRST_OUTCOME: '',
+          FIRST_COMMITTED: '',
+          REPAIR_ATTEMPTED: '',
+          REPAIR_OUTCOME: '',
+          REPAIR_COMMITTED: '',
+          ...env,
+        },
+      });
+      const written = existsSync(output) ? readFileSync(output, 'utf8') : '';
+      rmSync(dir, { recursive: true, force: true });
+      return { status: result.status, written };
+    };
+
+    expect(run({ FIRST_OUTCOME: 'fixed' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=fixed'),
+    });
+    expect(run({ FIRST_OUTCOME: 'noop' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=noop'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        FIRST_COMMITTED: 'true',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'fixed',
+        REPAIR_COMMITTED: 'true',
+      }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=fixed'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        FIRST_COMMITTED: 'true',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'fixed',
+      }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('committed=true'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'failed',
+      }),
+    ).toMatchObject({
+      status: 1,
+      written: expect.stringContaining('outcome=failed'),
+    });
+    expect(run({ FIRST_OUTCOME: '' })).toMatchObject({ status: 1 });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: '',
+      }),
+    ).toMatchObject({ status: 1 });
   });
 
   it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
@@ -5365,6 +5545,8 @@ describe('qwen-autofix workflow', () => {
     // calls reject_fix on failure - so the verdict is declared AND the reason
     // is captured for the retry.
     for (const check of [
+      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
       "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
       "run_check 'lint failed on the agent-committed fix' npm run lint",
@@ -5389,6 +5571,7 @@ describe('qwen-autofix workflow', () => {
     }
     expect(status).not.toBe(0);
     expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    expect(readFileSync(out, 'utf8')).toContain('retryable=true');
     // The verdict must be declared BEFORE the detail file is written, and the
     // write must be non-fatal. An empty outcome on a failed job reads as "the
     // gate never reached a verdict" — a CRASH, which is retried — so a
@@ -6040,16 +6223,18 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {
-    // The agent step is bounded below the 120-minute job timeout so a runaway
+    // The primary + repair steps are bounded below the 150-minute job timeout
+    // so a runaway
     // agent fails the STEP, not the job, leaving the always() report step time to
     // run (a job-level timeout would cancel that step too and go silent).
-    // 120 is the review-address job timeout (unique; other jobs use 5/15/180).
-    expect(workflow).toContain('timeout-minutes: 120');
+    // 150 is the review-address job timeout (unique; other jobs use 5/15/180).
+    expect(workflow).toContain('timeout-minutes: 150');
     const addressStep =
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
     expect(addressStep).toContain('timeout-minutes: 80');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
 
     // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
     // state transitions are exercised, not merely string-matched.

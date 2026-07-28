@@ -456,6 +456,18 @@ jobs:
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
+      - name: 'Publish remaining channel packages'
+        working-directory: 'packages/channels'
+        run: |-
+          # Explicit allowlist: new channel workspaces require release approval.
+          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
+            echo "::group::Publishing @qwen-code/channel-${channel}"
+            (cd "${channel}" && npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }})
+            echo "::endgroup::"
+          done
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
       - name: 'Verify Standalone Archives'
         run: |-
           npm run verify:installation-release -- --dir dist/standalone

@@ -428,6 +428,16 @@ export interface DaemonHistoryTruncatedData {
   retainedEvents: number;
   maxBytes: number;
   truncatedTurns?: number;
+  /**
+   * Pagination anchor: the last `qwen.session.recordId` observed by the
+   * daemon's compaction engine before the truncation point. Present when
+   * at least one recordId-bearing `session_update` was ingested or seeded
+   * during the engine's lifetime; omitted otherwise. Clients use this as
+   * the `beforeRecordId` for `GET /session/:id/transcript` pagination
+   * when the retained replay window lost every turn-boundary event
+   * (e.g. live-journal truncation during one long in-flight turn).
+   */
+  recordId?: string;
   fullTranscriptAvailable: boolean;
   [key: string]: unknown;
 }

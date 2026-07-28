@@ -30,18 +30,18 @@ import {
   createSharedTestOptions,
   createResultWaiter,
 } from './test-helper.js';
+import {
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 const TEST_TIMEOUT = 60000;
-const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
-const IS_CONTAINER_SANDBOX =
-  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
 const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
-  ? '127.0.0.1,localhost,host.docker.internal'
+  ? CONTAINER_SANDBOX_NO_PROXY
   : '127.0.0.1,localhost';
-const FAKE_SERVER_OPTIONS = IS_CONTAINER_SANDBOX
-  ? { listenHost: '0.0.0.0' as const, baseUrlHost: 'host.docker.internal' }
-  : undefined;
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 
 function fakeModelOptions(baseUrl: string) {
   return {

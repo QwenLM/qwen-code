@@ -69,23 +69,23 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
-test('pastes long plain text as editable composer content @smoke', async ({
+test('pastes long plain text as a placeholder and expands it on submit @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   const pasted = `${'original '.repeat(151)}end`;
+  const placeholder = `[Pasted Content ${pasted.length} chars]`;
   const edited = `${pasted} edited`;
 
   await gotoSession(page, scenario, daemon);
   await pasteComposerText(page, pasted);
 
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
-  await expect(editor).toHaveText(pasted);
-  await expect(editor).not.toContainText('Pasted Content');
+  await expect(editor).toHaveText(placeholder);
 
   await page.keyboard.type(' edited');
-  await expect(editor).toHaveText(edited);
+  await expect(editor).toHaveText(`${placeholder} edited`);
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
@@ -378,6 +378,61 @@ test('gates voice dictation on the workspace voice setting @smoke', async ({
   await page.reload();
   await completeReplay(page, daemon);
   await expect(voiceButton).toBeVisible();
+});
+
+test('loads Voice status from the active secondary workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  const secondaryCwd = '/work/secondary';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: secondaryCwd,
+    capabilities: {
+      workspaceCwd: '/work/primary',
+      features: [
+        'session_events',
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: secondaryCwd,
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    voice: { enabled: true, workspaceCwd: secondaryCwd },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await expect(
+    page.getByRole('button', { name: 'Start voice dictation' }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) =>
+            request.method === 'GET' &&
+            request.path === '/workspaces/secondary/voice',
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'GET' && request.path === '/workspace/voice',
+    ),
+  ).toBe(false);
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
