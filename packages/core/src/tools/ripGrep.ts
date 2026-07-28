@@ -576,6 +576,8 @@ class GrepToolInvocation extends BaseToolInvocation<
     filterDescription: string,
     error?: Error,
   ): string {
+    // Keep the instruction explicit: an incomplete scan with zero valid matches
+    // is unknown coverage, not negative proof that no matches exist.
     const errorDetail = error ? ` Error: ${getErrorMessage(error)}` : '';
     return `Search did not complete for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}. No valid matches were returned; do not treat this as no matches.${errorDetail}`;
   }
@@ -592,6 +594,8 @@ class GrepToolInvocation extends BaseToolInvocation<
       return;
     }
 
+    // Only bounded recovery metadata is emitted here; pattern, paths, stdout,
+    // stderr, and raw error text stay out of telemetry.
     const eventParams: ConstructorParameters<
       typeof RipgrepRuntimeRecoveryEvent
     >[0] = {

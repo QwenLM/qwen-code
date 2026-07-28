@@ -420,6 +420,8 @@ export function logRipgrepRuntimeRecovery(
   config: Config,
   event: RipgrepRuntimeRecoveryEvent,
 ): void {
+  // Runtime recovery is separate from startup fallback; it describes a selected
+  // ripgrep binary that started but did not complete normally.
   QwenLogger.getInstance(config)?.logRipgrepRuntimeRecoveryEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
