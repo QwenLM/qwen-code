@@ -179,6 +179,10 @@ describe('Agent View supervisor runner', () => {
       peek: vi.fn(() => ({ sessionId: 'session-3' })),
       send: vi.fn(() => ({ sent: true })),
       answer: vi.fn(() => ({ answered: true })),
+      logs: vi.fn(() => ({ logs: ['line-1'] })),
+      stop: vi.fn(() => ({ stopped: true })),
+      kill: vi.fn(() => ({ killed: true })),
+      remove: vi.fn(() => ({ removed: true })),
       respawn: vi.fn(() => ({ respawned: true })),
       pin: vi.fn(() => ({ sessionId: 'session-3', pinned: true })),
       rename: vi.fn(() => ({
@@ -260,6 +264,26 @@ describe('Agent View supervisor runner', () => {
       sessionId: 'session-3',
       text: 'yes',
     });
+
+    await expect(handle.logs('session-3')).resolves.toEqual({
+      logs: ['line-1'],
+    });
+    expect(handler.logs).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
+    await expect(handle.stop('session-3')).resolves.toEqual({
+      stopped: true,
+    });
+    expect(handler.stop).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
+    await expect(handle.kill('session-3')).resolves.toEqual({
+      killed: true,
+    });
+    expect(handler.kill).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
+    await expect(handle.remove('session-3')).resolves.toEqual({
+      removed: true,
+    });
+    expect(handler.remove).toHaveBeenCalledWith({ sessionId: 'session-3' });
 
     await expect(handle.respawn('session-3')).resolves.toEqual({
       respawned: true,

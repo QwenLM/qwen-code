@@ -202,6 +202,14 @@ export async function handleAgentViewSupervisorRequest(
   }
 }
 
+interface ParsedRequest {
+  id: string;
+  protocolVersion?: number;
+  authToken?: string;
+  op: string;
+  params?: Record<string, unknown>;
+}
+
 async function respondToLine(
   line: string,
   handler: AgentViewSupervisorHandler,
@@ -215,53 +223,15 @@ async function respondToLine(
     request.op === 'attachStream' &&
     typeof handler.attachStream === 'function'
   ) {
-    if (!isCompatibleParsedRequest(request)) {
-      socket.end(
-        `${JSON.stringify(
-          errorResponse(
-            request.id,
-            'incompatible_protocol',
-            `Unsupported Agent View protocol version ${String(request.protocolVersion)}. Expected ${AGENT_VIEW_PROTOCOL_VERSION}.`,
-          ),
-        )}\n`,
-      );
-      return;
-    }
-    if (!isAuthorizedParsedRequest(request, authToken)) {
-      socket.end(
-        `${JSON.stringify(
-          errorResponse(
-            request.id,
-            'unauthorized',
-            'Agent View supervisor authentication failed.',
-          ),
-        )}\n`,
-      );
-      return;
-    }
-    socket.removeAllListeners('data');
-    if (remaining.length > 0) {
-      // Preserve terminal bytes that arrived in the same packet as the request.
-      socket.unshift(remaining);
-    }
-    socket.resume();
-    try {
-      await handler.attachStream(
-        parseSupervisorParams('attachStream', request.params),
-        socket,
-        request.id,
-      );
-    } catch (error) {
-      socket.end(
-        `${JSON.stringify(
-          errorResponse(
-            request.id,
-            'internal_error',
-            error instanceof Error ? error.message : 'Attach stream failed.',
-          ),
-        )}\n`,
-      );
-    }
+    await handleStreamingOp(
+      request,
+      socket,
+      authToken,
+      remaining,
+      'attachStream',
+      handler.attachStream,
+      'Attach stream failed.',
+    );
     return;
   }
 
@@ -270,52 +240,15 @@ async function respondToLine(
     request.op === 'subscribe' &&
     typeof handler.subscribe === 'function'
   ) {
-    if (!isCompatibleParsedRequest(request)) {
-      socket.end(
-        `${JSON.stringify(
-          errorResponse(
-            request.id,
-            'incompatible_protocol',
-            `Unsupported Agent View protocol version ${String(request.protocolVersion)}. Expected ${AGENT_VIEW_PROTOCOL_VERSION}.`,
-          ),
-        )}\n`,
-      );
-      return;
-    }
-    if (!isAuthorizedParsedRequest(request, authToken)) {
-      socket.end(
-        `${JSON.stringify(
-          errorResponse(
-            request.id,
-            'unauthorized',
-            'Agent View supervisor authentication failed.',
-          ),
-        )}\n`,
-      );
-      return;
-    }
-    socket.removeAllListeners('data');
-    if (remaining.length > 0) {
-      socket.unshift(remaining);
-    }
-    socket.resume();
-    try {
-      await handler.subscribe(
-        parseSupervisorParams('subscribe', request.params),
-        socket,
-        request.id,
-      );
-    } catch (error) {
-      socket.end(
-        `${JSON.stringify(
-          errorResponse(
-            request.id,
-            'internal_error',
-            error instanceof Error ? error.message : 'Subscribe failed.',
-          ),
-        )}\n`,
-      );
-    }
+    await handleStreamingOp(
+      request,
+      socket,
+      authToken,
+      remaining,
+      'subscribe',
+      handler.subscribe,
+      'Subscribe failed.',
+    );
     return;
   }
 
@@ -330,6 +263,64 @@ async function respondToLine(
     response = errorResponse('', 'invalid_json', 'Invalid JSON request.');
   }
   socket.end(`${JSON.stringify(response)}\n`);
+}
+
+async function handleStreamingOp<Op extends 'attachStream' | 'subscribe'>(
+  request: ParsedRequest,
+  socket: net.Socket,
+  authToken: string | undefined,
+  remaining: string,
+  op: Op,
+  method: (
+    params: AgentViewSupervisorRequestMap[Op],
+    socket: net.Socket,
+    requestId: string,
+  ) => Promise<void> | void,
+  fallbackErrorMessage: string,
+): Promise<void> {
+  if (!isCompatibleParsedRequest(request)) {
+    socket.end(
+      `${JSON.stringify(
+        errorResponse(
+          request.id,
+          'incompatible_protocol',
+          `Unsupported Agent View protocol version ${String(request.protocolVersion)}. Expected ${AGENT_VIEW_PROTOCOL_VERSION}.`,
+        ),
+      )}\n`,
+    );
+    return;
+  }
+  if (!isAuthorizedParsedRequest(request, authToken)) {
+    socket.end(
+      `${JSON.stringify(
+        errorResponse(
+          request.id,
+          'unauthorized',
+          'Agent View supervisor authentication failed.',
+        ),
+      )}\n`,
+    );
+    return;
+  }
+  socket.removeAllListeners('data');
+  if (remaining.length > 0) {
+    // Preserve terminal bytes that arrived in the same packet as the request.
+    socket.unshift(remaining);
+  }
+  socket.resume();
+  try {
+    await method(parseSupervisorParams(op, request.params), socket, request.id);
+  } catch (error) {
+    socket.end(
+      `${JSON.stringify(
+        errorResponse(
+          request.id,
+          'internal_error',
+          error instanceof Error ? error.message : fallbackErrorMessage,
+        ),
+      )}\n`,
+    );
+  }
 }
 
 async function prepareSocketPath(socketPath: string): Promise<void> {
@@ -406,15 +397,7 @@ function isSupervisorOperation(
   );
 }
 
-function parseRequestLine(line: string):
-  | {
-      id: string;
-      protocolVersion?: number;
-      authToken?: string;
-      op: string;
-      params?: Record<string, unknown>;
-    }
-  | undefined {
+function parseRequestLine(line: string): ParsedRequest | undefined {
   try {
     const parsed = JSON.parse(line) as unknown;
     if (!isRecord(parsed) || typeof parsed['id'] !== 'string') {
