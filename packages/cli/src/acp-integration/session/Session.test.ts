@@ -15183,6 +15183,18 @@ describe('Session', () => {
 
     it('keeps a full-turn model selected in a Stop hook continuation', async () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const runtimeView = {
+        contentGenerator: {},
+        contentGeneratorConfig: {
+          model: 'qwen3-vl-plus',
+          modalities: { image: true },
+        },
+        model: 'qwen3-vl-plus',
+      };
+      const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+        resolveForModel,
+      });
       const execute = vi.fn().mockResolvedValue({
         llmContent: [
           { text: 'captured screen' },
@@ -15206,17 +15218,25 @@ describe('Session', () => {
           return responseParts;
         },
       );
+      let stopHookRequestCount = 0;
       const messageBus = {
         request: vi
           .fn()
-          .mockResolvedValueOnce({
-            success: true,
-            output: {
-              decision: 'block',
-              reason: 'Inspect another screen',
-            },
-          })
-          .mockResolvedValueOnce({ success: true, output: {} }),
+          .mockImplementation(async (request: { eventName?: string }) => {
+            if (request.eventName !== 'Stop') {
+              return { success: true, output: {} };
+            }
+            stopHookRequestCount++;
+            return stopHookRequestCount === 1
+              ? {
+                  success: true,
+                  output: {
+                    decision: 'block',
+                    reason: 'Inspect another screen',
+                  },
+                }
+              : { success: true, output: {} };
+          }),
       };
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -15271,6 +15291,10 @@ describe('Session', () => {
 
       expect(execute).toHaveBeenCalledTimes(2);
       expect(selections).toEqual([true, true]);
+      expect(stopHookRequestCount).toBe(2);
+      expect(resolveForModel).toHaveBeenCalledWith('qwen3-vl-plus', {
+        failClosed: true,
+      });
     });
 
     it('uses the provider tool-call id for the GenAI field only', async () => {
