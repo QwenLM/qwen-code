@@ -674,34 +674,8 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('WARNING: could not fetch PR files');
   });
 
-  it('includes contested-merge detection in the triage skill', () => {
-    expect(prSkill).toContain('Contested-merge pattern');
-    expect(prSkill).toContain('`CHANGES_REQUESTED` entry after position 0');
-    expect(prSkill).toContain('after position 0');
-    expect(prSkill).toContain('need-discussion');
-    expect(prSkill).not.toContain('status/on-hold');
-    expect(prSkill).toContain('maintainer sign-off');
-    expect(prSkill).toContain('qwen-code-ci-bot');
-    expect(prSkill).toContain('packages/core/src/**');
-    expect(prSkill).toContain(
-      'contested-merge and non-maintainer + high-risk signals as resolved',
-    );
-    expect(prSkill).toContain('does not appear in any earlier entry');
-  });
-
-  it('includes non-maintainer high-risk tier in the triage skill', () => {
-    expect(prSkill).toContain('Non-maintainer + high-risk');
-    expect(prSkill).toContain('highest-risk tier');
-    expect(prSkill).toContain('do not auto-approve');
-    expect(prSkill).toContain('Stage 3 approval guardrail');
-    expect(prSkill).toContain('no Stage 1e do-not-auto-approve signal');
-    expect(prSkill).toContain(
-      'unless the re-triage clearing rule above applies',
-    );
-  });
-
   it('includes Risk field in the Stage 1 comment template', () => {
-    expect(prSkill).toContain('Risk: <if Stage 1e signals matched');
+    expect(prSkill).toContain('Risk: <if Stage 1e matched');
   });
 });
 

@@ -422,11 +422,6 @@ jobs:
               update_status "$PR" guarded
               continue
             fi
-            if jq -e 'any(.labels[]?; .name == "need-discussion")' >/dev/null <<<"$PR_STATE_JSON"; then
-              echo "PR #$PR: need-discussion label — approval guardrail blocks the deferred approval."
-              update_status "$PR" guarded
-              continue
-            fi
             # An unavailable gate or an empty run list is "cannot attest", not
             # "nothing failed" — skip without approving.
             if [ "$GATE_OK" != true ] || [ "$TOTAL" -eq 0 ]; then

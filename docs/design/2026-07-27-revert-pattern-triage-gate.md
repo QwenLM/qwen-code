@@ -131,7 +131,7 @@ review rounds, multiple merge/revert cycles, and often require patch releases.
 
 ## Design
 
-### Rule 1: High-risk path escalation (precision 66.7%, recall 32.3%)
+### High-risk path escalation
 
 When a non-maintainer PR touches any high-risk path (see definition above),
 Stage 1 triage escalates the PR to the deepest review tier instead of the
@@ -146,37 +146,6 @@ Implementation: the Stage 1e skill text instructs the triage model to run
 `gh pr view --json files | grep -E '...'` against the high-risk path patterns.
 No workflow YAML change is needed — the detection runs inside the skill,
 not as a separate workflow step.
-
-### Rule 2: Contested-merge detection (precision 50.0%, recall 19.4%)
-
-When a PR has a CHANGES_REQUESTED → APPROVED cycle in its review history and
-touches core paths, Stage 1 applies `need-discussion` and posts a summary
-recommending maintainer sign-off before merge.
-
-This targets the flip-flop pattern: PRs that went through multiple review
-rounds with disagreements have 50% precision (6 of 12 such PRs reverted),
-versus a 10% prevalence of the same signal in the control group (6/60).
-Note: this signal is not statistically significant at n = 31 (Fisher
-p = 0.33) — see the follow-up note below.
-
-Implementation: the Stage 1e skill text instructs the triage model to fetch
-the PR's review state sequence via `gh pr view --json reviews` and check for
-a `CHANGES_REQUESTED` entry after position 0. If found alongside core-path
-changes, the classifier applies `need-discussion` and recommends maintainer
-sign-off. No workflow YAML change is needed.
-
-### Rule 3: Non-maintainer + high-risk tier (precision 58.3%, recall 22.6%)
-
-A non-maintainer PR touching high-risk paths gets the highest-risk tier:
-full `/review` depth + `need-discussion` until a maintainer reviews. This
-combines the `non_maintainer` and `touches_high_risk` signals (Rule 1's
-high-risk path escalation restricted to non-maintainer authors), the
-intersection measured at 58.3% precision in the table above. Note: this
-signal does not reach significance at n = 31 (Fisher p = 0.098).
-
-This replaces PR #7414's behavior-neutral filter (~2% live-backlog hit
-rate; revert recall unmeasured) with a signal whose revert recall is
-measured at 22.6% — targeting the PRs that actually cause reverts.
 
 ### What this design does NOT do
 
@@ -203,14 +172,12 @@ measured at 22.6% — targeting the PRs that actually cause reverts.
 
 ## Files changed
 
-- `.qwen/skills/triage/references/pr-workflow.md` — add Stage 1e high-risk path
-  checklist, contested-merge detection, and non-maintainer + high-risk tier
-  instructions. The detection runs inside the triage skill (the model runs
-  `gh pr view --json files | grep …` and `gh pr view --json reviews` itself),
+- `.qwen/skills/triage/references/pr-workflow.md` — add the Stage 1e high-risk
+  path checklist. The detection runs inside the triage skill (the model runs
+  `gh api --paginate … | grep …` itself),
   so no workflow YAML change is needed.
-- `scripts/tests/qwen-triage-workflow.test.js` — assert the high-risk path,
-  contested-merge, and non-maintainer + high-risk routing strings exist in
-  the triage skill markdown.
+- `scripts/tests/qwen-triage-workflow.test.js` — assert the high-risk path
+  routing strings exist in the triage skill markdown.
 - `.github/scripts/qwen-triage-workflow.test.mjs` — the same assertions in
   the node:test runner.
 
@@ -234,13 +201,6 @@ measured at 22.6% — targeting the PRs that actually cause reverts.
   flip-flops retrospectively (after multiple reverts). A real-time version
   would monitor for revert→re-revert patterns on `main` and alert maintainers.
   This requires a separate monitoring workflow, not a triage gate.
-- **Statistical significance of Rules 2–3.** `core + contested` (Rule 2)
-  has Fisher p = 0.33 and `non_maintainer + high_risk` (Rule 3) has
-  p = 0.098 at n = 31 — neither reaches the 0.05 threshold. Only Rule 1
-  (`touches_high_risk`, p = 0.006) is well-supported. Rules 2–3 are
-  shipped as escalate-only signals (they add review friction but never
-  block), but if a future re-analysis with more data does not confirm
-  them, they should be removed.
 - **Expanding the high-risk path list.** The current list is manually curated
   from the reverted PR file paths. As the codebase evolves, new high-risk
   paths may emerge. A periodic re-run of the analysis scripts would keep the

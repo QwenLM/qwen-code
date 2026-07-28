@@ -227,9 +227,9 @@ If you spot a materially simpler path, or changes that go beyond the minimal set
 
 Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 10 files") belong in Stage 2a code review — you need to see the code for those.
 
-**1e. High-risk path and contested-merge detection (data-backed escalation):**
+**1e. High-risk path detection (data-backed escalation):**
 
-A revert-history analysis of this repo (111 revert commits, 46 unique reverted PRs) found that certain file paths and review patterns are correlated with post-merge reverts. Check for these signals before proceeding to Stage 2 — they do NOT block or close the PR, but they determine the review depth and whether a maintainer sign-off is recommended.
+A revert-history analysis of this repo (111 revert commits, 46 unique reverted PRs) found that certain file paths are correlated with post-merge reverts. Check this signal before proceeding to Stage 2 — it does NOT block or close the PR, but it determines the review depth.
 
 **High-risk paths** — check the PR's changed files against these patterns:
 
@@ -248,23 +248,7 @@ If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs 
 - Flag the high-risk paths in the Stage 1 comment so the reviewer knows where to focus.
 - If the PR author has write access, recommend E2E verification in tmux (Stage 2c) before approval. If the author lacks write access, the sandboxed lanes are unavailable — recommend that a maintainer check the PR out in a disposable container or reproduce the specific behavioural claim by hand (see Stage 2c).
 
-**Contested-merge pattern** — check the PR's review history for human reviewer disagreement (a CHANGES_REQUESTED entry that is not the first review, excluding bot reviews):
-
-```bash
-gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | select(.author.login != "qwen-code-ci-bot") | {state: .state, author: .author.login}]'
-```
-
-If the review array has a `CHANGES_REQUESTED` entry after position 0 from a reviewer who does not appear in any earlier entry (genuine cross-reviewer disagreement, not same-reviewer iteration) AND the PR touches core paths (`packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`):
-
-- Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists). A maintainer removes it once the discussion resolves.
-- Recommend maintainer sign-off before merge in the Stage 1 comment.
-- Do not auto-approve even if Stage 2 and Stage 3 are clean (this feeds the Stage 3 approval guardrail — see below).
-
-**Re-triage clearing:** the review history and touched paths are immutable — a `CHANGES_REQUESTED` entry from an earlier round remains even after the disagreement is resolved, and high-risk paths remain in the diff. On a re-triage (`@qwen-code /triage`), if the `need-discussion` label is absent, treat contested-merge and non-maintainer + high-risk signals as resolved and do not re-apply the label. The label is the clearing mechanism: a maintainer removes it once the discussion resolves, and its absence on re-run means those signals no longer fire.
-
-**Non-maintainer + high-risk**: a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions unless the re-triage clearing rule above applies: do not skip any Stage 2 enrichment, require Stage 2b CI evidence, flag the high-risk paths in the Stage 1 comment, recommend E2E verification (scoped to write-access authors per Stage 2c), apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
-
-These signals are NOT terminal gates — they do not stop the review or close the PR. They escalate review depth and flag risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
+This signal is NOT a terminal gate — it does not stop the review or close the PR. It escalates review depth and flags risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 
 Post a single Stage 1 comment. Be direct — say what you actually think, not what's polite:
 
@@ -283,7 +267,7 @@ Size: <if core paths are touched, report production lines vs. test lines vs. gen
 
 Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
-Risk: <if Stage 1e signals matched, list the matched high-risk paths and/or contested-merge pattern, the recommended review depth, and whether maintainer sign-off is recommended. Otherwise say "no elevated risk signals".>
+Risk: <if Stage 1e matched, list the high-risk paths and recommended review depth. Otherwise say "no elevated risk signals".>
 
 <If passing:> Moving on to code review. 🔍
 <If concerns:> Flagging these for discussion before diving deeper.
@@ -303,7 +287,7 @@ Risk: <if Stage 1e signals matched, list the matched high-risk paths and/or cont
 
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
 
-风险：<如果 Stage 1e 信号命中，列出匹配的高风险路径和/或 contested-merge 模式、建议的 review 深度、是否需要维护者签字。否则写"无升级风险信号"。>
+风险：<如果 Stage 1e 命中，列出匹配的高风险路径和建议的 review 深度。否则写"无升级风险信号"。>
 
 <如果通过：> 进入代码审查 🔍
 <如果有顾虑：> 先提出来讨论，再深入看代码。
@@ -616,7 +600,7 @@ Open it with a one-line confidence score — `**Confidence: N/5** — <one hones
 | 2/5   | Significant concerns; leaning against as-is                     | request changes |
 | 1/5   | Should not merge in its current form                            | request changes |
 
-A fork `refactor` that hits the approval guardrail below, **a PR that Stage 0 escalated for maintainer awareness, or a PR with an active Stage 1e do-not-auto-approve signal**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always the **defer path** (a comment, never `--request-changes`): name any concerns in the defer comment for the maintainer's attention without approving, and @mention the maintainer for an unresolvable question or when the cap is pure policy. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
+A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always the **defer path** (a comment, never `--request-changes`): name any concerns in the defer comment for the maintainer's attention without approving, and @mention the maintainer for an unresolvable question or when the cap is pure policy. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
 
 Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer (empty `HEAD_SHA` → fail closed, as above — don't blank a prior footer), and save this comment's ID.
 
@@ -636,7 +620,7 @@ GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
   --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
 ```
 
-Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, Stage 0 raised no maintainer escalation, and Stage 1e raised no do-not-auto-approve signal. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail and an active `need-discussion` label before approving, but that is a backstop, not the mechanism.)
+Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, and Stage 0 raised no maintainer escalation. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail before approving, but that is a backstop, not the mechanism.)
 
 When the marker is warranted, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include it on its own line (full OID, the same one the footer attests):
 
@@ -654,11 +638,9 @@ If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how cle
 
 If Stage 0 escalated the PR for maintainer awareness, do **not** approve automatically; use the "Genuinely unsure" path below.
 
-If Stage 1e flagged a contested-merge or non-maintainer + high-risk signal and `need-discussion` is still present, do **not** approve automatically; use the "Genuinely unsure" path below. A Stage 1e flag is a data-backed risk signal, not a hygiene concern. If a maintainer removed `need-discussion` and this is a re-triage, follow the clearing rule above.
-
 **Re-runs (manually triggered via `@qwen-code /triage`):** hygiene concerns (scope mismatch, undocumented changes, naming) that don't block the PR are not a valid reason to defer. Note them in the comment and approve. Only defer if you have genuine blocking uncertainty — something you cannot resolve from the diff, tests, and PR description.
 
-All stages genuinely clean, `GUARD` is `ok`, no Stage 0 maintainer escalation remains, and no Stage 1e do-not-auto-approve signal — how you approve depends on the `PENDING` count computed in Step 1:
+All stages genuinely clean, `GUARD` is `ok`, and no Stage 0 maintainer escalation remains — how you approve depends on the `PENDING` count computed in Step 1:
 
 - `PENDING` = 0 → approve now, pinned to the reviewed commit (see the Approval note above) — never `gh pr review --approve`, which binds to no SHA:
 

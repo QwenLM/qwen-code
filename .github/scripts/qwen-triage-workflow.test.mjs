@@ -301,35 +301,7 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('WARNING: could not fetch PR files'));
   });
 
-  it('includes contested-merge detection', () => {
-    assert.ok(prSkill.includes('Contested-merge pattern'));
-    assert.ok(prSkill.includes('`CHANGES_REQUESTED` entry after position 0'));
-    assert.ok(prSkill.includes('after position 0'));
-    assert.ok(prSkill.includes('need-discussion'));
-    assert.ok(!prSkill.includes('status/on-hold'));
-    assert.ok(prSkill.includes('maintainer sign-off'));
-    assert.ok(prSkill.includes('qwen-code-ci-bot'));
-    assert.ok(prSkill.includes('packages/core/src/**'));
-    assert.ok(
-      prSkill.includes(
-        'contested-merge and non-maintainer + high-risk signals as resolved',
-      ),
-    );
-    assert.ok(prSkill.includes('does not appear in any earlier entry'));
-  });
-
-  it('includes non-maintainer high-risk tier', () => {
-    assert.ok(prSkill.includes('Non-maintainer + high-risk'));
-    assert.ok(prSkill.includes('highest-risk tier'));
-    assert.ok(prSkill.includes('do not auto-approve'));
-    assert.ok(prSkill.includes('Stage 3 approval guardrail'));
-    assert.ok(prSkill.includes('no Stage 1e do-not-auto-approve signal'));
-    assert.ok(
-      prSkill.includes('unless the re-triage clearing rule above applies'),
-    );
-  });
-
   it('includes Risk field in the Stage 1 comment template', () => {
-    assert.ok(prSkill.includes('Risk: <if Stage 1e signals matched'));
+    assert.ok(prSkill.includes('Risk: <if Stage 1e matched'));
   });
 });
