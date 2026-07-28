@@ -689,6 +689,77 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(markerOf(snap)).toBeUndefined();
       expect(snap.liveJournal).toHaveLength(2);
     });
+
+    it('marker carries the last-seen recordId as a pagination anchor when the journal overflows', () => {
+      // Regression coverage: a single long in-flight turn can push the
+      // liveJournal past its caps with only streaming `session_update`s
+      // (no recordId). The marker must still carry the recordId of the
+      // most recent prior turn-boundary event so the client can anchor
+      // transcript pagination at `beforeRecordId`.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 3,
+      });
+      const turnBounded: BridgeEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'prior-turn' },
+            _meta: { 'qwen.session.recordId': 'record-anchor' },
+          },
+        },
+      };
+      engine.ingest(turnBounded);
+      engine.ingest(makeTextChunk(2, 'a'));
+      engine.ingest(makeTextChunk(3, 'b'));
+      engine.ingest(makeTextChunk(4, 'c'));
+      engine.ingest(makeTextChunk(5, 'd'));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker).toBeDefined();
+      expect(marker?.data).toMatchObject({
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 2,
+        retainedEvents: 3,
+        recordId: 'record-anchor',
+      });
+    });
+
+    it('seeded engine stamps marker with recordId observed on post-seed ingest', () => {
+      // A seed resets activeRecordId; subsequent ingest must rebuild it.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      engine.seed({
+        compactedTurns: [makeTextChunk(1, 'seeded')],
+        lastEventId: 1,
+      });
+      const bounded: BridgeEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'post-seed' },
+            _meta: { 'qwen.session.recordId': 'record-post-seed' },
+          },
+        },
+      };
+      engine.ingest(bounded);
+      engine.ingest(makeTextChunk(3, 'x'));
+      engine.ingest(makeTextChunk(4, 'y'));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker?.data).toMatchObject({
+        recordId: 'record-post-seed',
+      });
+    });
   });
 
   describe('multi-turn sessions', () => {
@@ -1170,6 +1241,183 @@ describe('EventBus + CompactionEngine integration', () => {
     expect(snapshot.compactedTurns[0]?.data).toMatchObject({
       truncatedEvents: 2,
       retainedEvents: 2,
+      // Last-seen recordId before the retained window — `new-record`
+      // lives inside the retained window, so it's also the last-seen
+      // value across the whole seed. Stamped as a pagination anchor so
+      // the client can issue `beforeRecordId: 'new-record'` even when
+      // no session_update on the retained suffix carries one.
+      recordId: 'new-record',
+    });
+  });
+
+  it('seedReplayEvents marker carries recordId from evicted head when retained records lack one', () => {
+    // Critical regression case: only the EVICTED records carry a
+    // recordId. The retained suffix has no recordId-bearing events. The
+    // pre-scan must still capture the evicted recordId so the marker
+    // ships with a pagination anchor — otherwise the client has no way
+    // to page the transcript backward.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'evicted-record' },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+          },
+        },
+      },
+    ]);
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 1,
+      recordId: 'evicted-record',
+    });
+  });
+
+  it('replay marker anchor is not advanced by post-seed ingest', () => {
+    // Critical regression: seed with evicted + retained events carrying
+    // distinct recordIds, then ingest a new turn boundary. The replay
+    // marker must carry the eviction-time anchor (the retained window's
+    // earliest recordId), NOT the post-ingest activeRecordId — otherwise
+    // the client's `beforeRecordId` re-fetches records already displayed.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'record-evicted' },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'record-retained' },
+          },
+        },
+      },
+    ]);
+    // Post-seed ingest advances activeRecordId past the eviction boundary.
+    engine.ingest({
+      id: 10,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'post-seed' },
+          _meta: { 'qwen.session.recordId': 'record-post-seed' },
+        },
+      },
+    });
+    engine.ingest({
+      id: 11,
+      v: 1,
+      type: 'turn_complete',
+      data: {},
+    });
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    // The replay marker carries the eviction-time anchor, not the
+    // post-ingest 'record-post-seed'.
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      recordId: 'record-retained',
+    });
+  });
+
+  it('replay marker anchor is the first retained recordId, not the last overall', () => {
+    // Critical regression (review): when the retained window holds
+    // MULTIPLE recordIds, the anchor must be the FIRST retained one (the
+    // eviction boundary). Anchoring on the last recordId across all seed
+    // events — which a retained segment may carry — puts `beforeRecordId`
+    // inside the retained window and re-fetches records the client
+    // already displays, duplicating transcript blocks (prepend has no
+    // dedup at the daemon boundary).
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    const bus = new EventBus(100, undefined, engine);
+    const segment = (recordId: string, pad: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${pad}-${'z'.repeat(300)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+    // Three ~330B segments (total ~990 > 900): the first evicts, leaving
+    // rec-B (first retained) and rec-C (last overall) in the window.
+    bus.seedReplayEvents([
+      segment('rec-A', 'a'),
+      segment('rec-B', 'b'),
+      segment('rec-C', 'c'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      recordId: 'rec-B',
+    });
+  });
+
+  it('seed pre-scans compactedTurns for recordId anchor', () => {
+    // Suggestion regression: seed() must pre-scan compactedTurns for
+    // recordIds (mirroring seedReplayEvents) so eviction doesn't lose
+    // the only anchor.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    engine.seed({
+      compactedTurns: [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+              _meta: { 'qwen.session.recordId': 'seed-anchor' },
+            },
+          },
+        },
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+            },
+          },
+        },
+      ],
+      lastEventId: 2,
+    });
+
+    const snap = engine.snapshot();
+    expect(snap.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snap.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 1,
+      recordId: 'seed-anchor',
     });
   });
 
