@@ -243,6 +243,44 @@ describe('auto-skill curator', () => {
     ]);
   });
 
+  it('refuses to restore over an existing active directory', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const manifest = await writeSkill(
+      'auto-skill-old',
+      'auto-skill',
+      new Date(now.getTime() - 100 * DAY_MS),
+    );
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'old', level: 'project', filePath: manifest },
+      new Date(now.getTime() - 100 * DAY_MS),
+    );
+    const run = await runAutoSkillCurator(projectRoot, { now });
+    expect(run.archived).toEqual(['auto-skill-old']);
+
+    // A new skill reclaims the archived directory name in the live library.
+    const reusedManifest = await writeSkill('auto-skill-old', 'auto-skill', now);
+    await fs.writeFile(reusedManifest, 'REUSED');
+
+    await expect(
+      restoreArchivedAutoSkill(projectRoot, 'auto-skill-old', now),
+    ).rejects.toThrow('an active directory already exists');
+
+    // Neither the reused active directory nor the archived copy is disturbed.
+    await expect(fs.readFile(reusedManifest, 'utf8')).resolves.toBe('REUSED');
+    await expect(
+      fs.access(
+        path.join(
+          projectRoot,
+          '.qwen',
+          'archived-skills',
+          'auto-skill-old',
+          'SKILL.md',
+        ),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('protects recently used skills and increments durable usage', async () => {
     const usedAt = new Date('2026-07-27T00:00:00.000Z');
     const manifest = await writeSkill(
