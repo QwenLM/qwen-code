@@ -718,6 +718,8 @@ function useThrottledValue<T>(
   intervalMs: number = 80,
 ): T {
   const [throttled, setThrottled] = useState(value);
+  const throttledRef = useRef(throttled);
+  throttledRef.current = throttled;
   const lastRunRef = useRef(0);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const valueRef = useRef(value);
@@ -730,7 +732,7 @@ function useThrottledValue<T>(
         timeoutRef.current = null;
       }
       // Flush immediately when streaming stops
-      if (throttled !== value) {
+      if (throttledRef.current !== value) {
         setThrottled(value);
       }
       return;
@@ -749,7 +751,7 @@ function useThrottledValue<T>(
         setThrottled(valueRef.current);
       }, intervalMs - elapsed);
     }
-  }, [value, isStreaming, intervalMs, throttled]);
+  }, [value, isStreaming, intervalMs]);
 
   useEffect(() => {
     return () => {
@@ -847,13 +849,11 @@ export const Markdown = memo(function Markdown({
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const sourceMarkdown = source ? markdown : undefined;
 
-  const rawRenderedContent =
-    content && source && sourceMarkdown?.transformMarkdown
-      ? sourceMarkdown.transformMarkdown(content, { source })
-      : content;
-
-  // Throttle the content that actually reaches the parser
-  const renderedContent = useThrottledValue(rawRenderedContent, isStreaming);
+  const throttledContent = useThrottledValue(content ?? '', isStreaming);
+  const renderedContent =
+    throttledContent && source && sourceMarkdown?.transformMarkdown
+      ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+      : throttledContent;
 
   const effectiveTableMode = isStreaming
     ? 'basic'

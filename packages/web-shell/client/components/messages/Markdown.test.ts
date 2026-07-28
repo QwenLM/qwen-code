@@ -3,7 +3,7 @@
  */
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
   type WebShellCodeBlockRenderInfo,
@@ -1481,6 +1481,59 @@ describe('Markdown code highlighting while streaming', () => {
     expect(container.querySelector('.shiki')).toBeNull();
 
     await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+});
+
+describe('Markdown streaming throttle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('flushes the latest content when multiple tokens arrive in one throttle window', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1 Token 2',
+          isStreaming: true,
+        }),
+      );
+    });
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1 Token 2 Token 3',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    expect(container.textContent).toContain('Token 1 Token 2 Token 3');
+
+    act(() => {
       root.unmount();
     });
     container.remove();
