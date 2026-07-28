@@ -9,7 +9,8 @@ PR #7584.
 
 ## Production behavior
 
-- A published Release starts the workflow from the Release tag's target commit.
+- A stable `vX.Y.0` Release starts the workflow from the Release tag's target
+  commit. Patch releases, prereleases, and unrelated tag families are skipped.
 - The Release tag is resolved to its immutable Git commit.
 - The full 500-instance SWE-bench Verified manifest is frozen before dispatch.
 - The self-hosted runner receives the Actions job over its outbound GitHub
@@ -21,9 +22,9 @@ PR #7584.
   Executor atomically claims one task and runs one Harbor/Docker trial at a time.
 - Harbor live trial directories stay on local NVMe. Completed attempt artifacts
   are copied to OSS without depending on OSS POSIX permission operations.
-- Executors heartbeat their leases and atomically submit outcomes. A normal
-  infrastructure error is returned to `PENDING` once, then becomes
-  `INFRA_FAILED` after the second failed attempt.
+- Executors heartbeat their leases and atomically submit outcomes. Retryable
+  infrastructure errors receive up to four attempts with 60, 120, and 240
+  second backoff.
 - The Coordinator recovers expired leases, reconciles run counters, and applies
   the manifest completion and publication gates. Isolated terminal failures do
   not cancel the remaining tasks.
@@ -51,21 +52,21 @@ artifacts do not share paths or tables with another benchmark pipeline.
 
 ## Branch validation
 
-Publish an isolated prerelease whose target commit is on this branch. GitHub
-then evaluates this branch's `release.published` workflow and automatically
-starts the DSW job with `instance_limit=500` and `executor_count=10`; no manual
-DSW dispatch is involved.
+Use `workflow_dispatch` from this branch and target an isolated prerelease.
+Automatic `release.published` runs are intentionally limited to stable
+`vX.Y.0` releases.
 
-For an event-driven test prerelease, a single body line such as
+For a manually dispatched test prerelease, a single body line such as
 `Benchmark-Qwen-Ref: v0.20.0-nightly.20260722.b98306b7e` selects an existing
 published Qwen npm version while keeping the result on the isolated POC Release.
 This override is accepted only for prereleases. A normal Release always evaluates
 its own tag.
 
 `workflow_dispatch` remains available for explicit diagnostics and reruns.
-Manual validation defaults to one instance to bound time and model cost. Both
-triggers are asynchronous: Actions records a dispatch receipt but does not stay
-alive for the benchmark duration.
+Manual validation defaults to one instance to bound time and model cost; 5 and
+500 instance runs do not forward the single-case `instance_id`. Both triggers
+are asynchronous: Actions records a dispatch receipt but does not stay alive
+for the benchmark duration.
 
 ## Component boundary
 

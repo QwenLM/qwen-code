@@ -112,15 +112,13 @@ jq -n \
   --arg qwen_ref "${QWEN_REF}" \
   --arg qwen_commit "${QWEN_COMMIT}" \
   --argjson expected_instances "${INSTANCE_LIMIT}" \
-  --argjson executor_count "${EXECUTOR_COUNT:-10}" \
   '{
     status: $status,
     run_id: $run_id,
     release_tag: $release_tag,
     qwen_ref: $qwen_ref,
     qwen_commit: $qwen_commit,
-    expected_instances: $expected_instances,
-    executor_count: $executor_count
+    expected_instances: $expected_instances
   }' > "${output_root}/dispatch-receipt.json"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then

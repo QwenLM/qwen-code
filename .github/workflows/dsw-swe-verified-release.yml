@@ -1,76 +1,94 @@
-name: DSW SWE-bench Verified Release
+name: 'DSW SWE-bench Verified Release'
 
 on:
   release:
-    types: [published]
+    types: ['published']
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing test/prerelease to receive the result
+        description: 'Existing test/prerelease to receive the result'
         required: true
-        type: string
+        type: 'string'
       qwen_release_tag:
-        description: Published Qwen npm release to evaluate (defaults to release_tag)
+        description: 'Published Qwen npm release to evaluate (defaults to release_tag)'
         required: false
-        type: string
+        type: 'string'
       instance_limit:
-        description: Number of Verified instances (500 is the full suite)
+        description: 'Number of Verified instances (500 is the full suite)'
         required: true
         default: '1'
-        type: choice
+        type: 'choice'
         options:
           - '1'
           - '5'
           - '500'
-      executor_count:
-        description: Concurrent DSW executors
-        required: true
-        default: '10'
-        type: choice
-        options:
-          - '1'
-          - '4'
-          - '10'
       instance_id:
-        description: Exact Verified instance when instance_limit is 1
+        description: 'Exact Verified instance when instance_limit is 1'
         required: false
-        default: sympy__sympy-20590
-        type: string
+        default: 'sympy__sympy-20590'
+        type: 'string'
 
 permissions:
-  contents: write
+  contents: 'read'
 
 concurrency:
-  group: dsw-swe-verified-release
+  group: 'dsw-swe-verified-release'
   cancel-in-progress: false
 
 jobs:
+  release_gate:
+    name: 'Check benchmark release'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
+    outputs:
+      should_run: '${{ steps.gate.outputs.should_run }}'
+    steps:
+      - name: 'Check release version'
+        id: 'gate'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          RELEASE_TAG: '${{ github.event.release.tag_name || '''' }}'
+          RELEASE_PRERELEASE: '${{ github.event.release.prerelease || false }}'
+        run: |-
+          should_run='false'
+          if [[ "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
+            should_run='true'
+          elif [[ "${RELEASE_PRERELEASE}" == 'false' && "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.0$ ]]; then
+            should_run='true'
+          fi
+          echo "should_run=${should_run}" >> "${GITHUB_OUTPUT}"
+          if [[ "${should_run}" == 'false' ]]; then
+            echo "::notice::Skipping benchmark for ${RELEASE_TAG:-non-release event}"
+          fi
+
   benchmark:
-    name: Dispatch SWE-bench Verified to DSW
-    runs-on: [self-hosted, Linux, X64, qwen-benchmark-dsw]
+    name: 'Dispatch SWE-bench Verified to DSW'
+    needs: 'release_gate'
+    if: '${{ needs.release_gate.outputs.should_run == ''true'' }}'
+    runs-on: ['self-hosted', 'Linux', 'X64', 'qwen-benchmark-dsw']
     timeout-minutes: 15
     env:
-      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-      QWEN_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}
-      INSTANCE_LIMIT: ${{ github.event_name == 'release' && '500' || inputs.instance_limit }}
-      EXECUTOR_COUNT: ${{ github.event_name == 'release' && '10' || inputs.executor_count }}
-      BENCHMARK_INSTANCE_ID: ${{ github.event_name == 'release' && '' || inputs.instance_id }}
-      RELEASE_ID: ${{ github.event_name == 'release' && github.event.release.id || '' }}
-      BENCHMARK_TRIGGER: ${{ github.event_name }}
-      BENCHMARK_IDEMPOTENCY_KEY: dsw-release-v1-${{ github.run_id }}
-      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RELEASE_TAG: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.release_tag }}'
+      QWEN_REF: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}'
+      INSTANCE_LIMIT: '${{ github.event_name == ''release'' && ''500'' || inputs.instance_limit }}'
+      BENCHMARK_INSTANCE_ID: '${{ (github.event_name != ''release'' && inputs.instance_limit == ''1'') && inputs.instance_id || '''' }}'
+      RELEASE_ID: '${{ github.event_name == ''release'' && github.event.release.id || '''' }}'
+      BENCHMARK_TRIGGER: '${{ github.event_name }}'
+      BENCHMARK_IDEMPOTENCY_KEY: 'dsw-release-v1-${{ github.run_id }}'
+      GITHUB_RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
 
     steps:
-      - name: Checkout pipeline
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: 'Checkout pipeline'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 1
 
-      - name: Resolve release
-        id: release
+      - name: 'Resolve release'
+        id: 'release'
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
           set -euo pipefail
           curl --fail --silent --show-error --location \
             --header "Accept: application/vnd.github+json" \
@@ -100,23 +118,22 @@ jobs:
             echo "release_url=$(jq -r .html_url release.json)"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Dispatch to persistent DSW pool
-        id: dispatch
+      - name: 'Dispatch to persistent DSW pool'
+        id: 'dispatch'
         env:
-          QWEN_REF: ${{ steps.release.outputs.qwen_ref }}
-          QWEN_COMMIT: ${{ steps.release.outputs.release_commit }}
-          RELEASE_ID: ${{ steps.release.outputs.release_id }}
-        run: |
+          QWEN_REF: '${{ steps.release.outputs.qwen_ref }}'
+          QWEN_COMMIT: '${{ steps.release.outputs.release_commit }}'
+          RELEASE_ID: '${{ steps.release.outputs.release_id }}'
+        run: |-
           .github/scripts/dsw-swe-verified/dispatch-release-benchmark.sh
 
-      - name: Record dispatch receipt
-        run: |
+      - name: 'Record dispatch receipt'
+        run: |-
           {
             echo "### DSW SWE-bench Verified dispatch"
             echo
             echo "- Pool run: \`${{ steps.dispatch.outputs.run_id }}\`"
             echo "- State: queued"
             echo "- Cases: ${INSTANCE_LIMIT}"
-            echo "- DSW executors: ${EXECUTOR_COUNT}"
             echo "- The persistent DSW publisher will update the Release after the run reaches a validated terminal state."
           } >> "${GITHUB_STEP_SUMMARY}"
