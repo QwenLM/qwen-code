@@ -3130,6 +3130,11 @@
           "type": "boolean",
           "default": false
         },
+        "sessionWriterLease": {
+          "description": "Enable cross-process write fencing for persisted ACP and daemon sessions. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
+          "type": "boolean",
+          "default": false
+        },
         "cronRecurringMaxAgeDays": {
           "type": "number",
           "minimum": 0,
