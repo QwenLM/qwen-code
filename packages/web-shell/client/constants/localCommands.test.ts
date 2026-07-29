@@ -19,7 +19,7 @@ describe('getLocalCommands', () => {
     expect(
       getLocalCommands(en).every((c) => c.source === 'builtin-command'),
     ).toBe(true);
-    expect(byName.get('fork')?.argumentHint).toBe('sider | <directive>');
+    expect(byName.get('fork')?.argumentHint).toBe('<directive>');
   });
 });
 

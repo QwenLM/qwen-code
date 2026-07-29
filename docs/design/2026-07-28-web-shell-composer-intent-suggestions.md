@@ -62,10 +62,21 @@ The change stays inside Web Shell. It reuses existing daemon session generation,
 editor submission, and `/btw` behavior. It does not add daemon or SDK routes,
 change styling, or introduce a general-purpose suggestion framework.
 
+## Composer performance
+
+Draft changes enter the classifier through a stable callback. They update the
+classifier's refs, cancellation state, and debounce timer without updating
+React state. The Web Shell app only rerenders when an actionable suggestion
+appears or an existing suggestion is invalidated.
+
+This keeps intent classification off the composer's render path while
+preserving immediate cancellation when the draft changes.
+
 ## Test strategy
 
 - Hook tests cover the three decision values, strict parsing, confidence,
   attachment gating, and stale-session results.
 - App tests cover `/btw` execution and composer clearing, stale draft/session
-  rejection, attachment rejection, and the existing new-session races.
+  rejection, attachment rejection, the existing new-session races, and the
+  absence of an app rerender while classification is pending.
 - ChatEditor tests cover attachment-presence reporting.

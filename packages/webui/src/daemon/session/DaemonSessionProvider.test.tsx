@@ -416,6 +416,28 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('does not rerender streaming state consumers for equivalent transcript updates', async () => {
+    let store: DaemonTranscriptStore | undefined;
+    let renderCount = 0;
+
+    function Harness() {
+      store = useDaemonTranscriptStore();
+      useDaemonStreamingState();
+      renderCount += 1;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    const initialRenderCount = renderCount;
+
+    act(() => {
+      store?.appendLocalUserMessage('first');
+      store?.appendLocalUserMessage('second');
+    });
+
+    expect(renderCount).toBe(initialRenderCount);
+  });
+
   it('keeps capabilities handshake failures out of the transcript', async () => {
     sdkMocks.capabilities.mockRejectedValue(
       Object.assign(new Error('GET /capabilities: HTTP 400'), { status: 400 }),
@@ -9527,7 +9549,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
   });
 
-  it('skips malformed older-page events and advances the cursor', async () => {
+  it('skips malformed older-page events and advances by record boundary', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
       features: ['session_transcript_pagination'],
@@ -9608,7 +9630,7 @@ describe('DaemonSessionProvider', () => {
       2,
       session.sessionId,
       {
-        cursor: 'next-page',
+        beforeRecordId: 'record-2',
         limit: 25,
         clientId: session.clientId,
       },
@@ -9623,6 +9645,78 @@ describe('DaemonSessionProvider', () => {
         message: 'Skipped malformed history event',
         debugMessage: 'malformed history event',
       }),
+    );
+  });
+
+  it('falls back to the server cursor when a page has no record boundary', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      text: string,
+      recordId?: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          ...(recordId ? { _meta: { 'qwen.session.recordId': recordId } } : {}),
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-history-cursor-fallback',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(3, 'recent prompt', 'recent-record')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(2, 'older prompt')],
+        nextCursor: 'next-page',
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(1, 'oldest prompt')],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await history?.loadMore();
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        cursor: 'next-page',
+        limit: 25,
+        clientId: session.clientId,
+      },
     );
   });
 

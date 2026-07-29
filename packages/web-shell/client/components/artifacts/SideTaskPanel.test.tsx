@@ -10,6 +10,7 @@ const {
   providerProps,
   latestChatPaneProps,
   renameSession,
+  sendPrompt,
   transcript,
 } = vi.hoisted(() => ({
   connection: {
@@ -26,6 +27,16 @@ const {
     current: undefined as Record<string, unknown> | undefined,
   },
   renameSession: vi.fn().mockResolvedValue(undefined),
+  sendPrompt: vi.fn(
+    async (
+      _prompt: string,
+      options?: {
+        onAdmitted?: () => void;
+      },
+    ) => {
+      options?.onAdmitted?.();
+    },
+  ),
   transcript: {
     blocks: [] as Array<{ kind: string }>,
     hasMore: false,
@@ -44,7 +55,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     return props.children;
   },
   useConnection: () => connection,
-  useActions: () => ({ renameSession }),
+  useActions: () => ({ renameSession, sendPrompt }),
   useTranscriptBlocks: () => transcript.blocks,
   useTranscriptHistory: () => transcript,
 }));
@@ -102,6 +113,7 @@ afterEach(() => {
   transcript.paginationError = undefined;
   renameSession.mockClear();
   renameSession.mockResolvedValue(undefined);
+  sendPrompt.mockClear();
 });
 
 it('creates a side task and reports the new session id', async () => {
@@ -219,6 +231,37 @@ it('names a restored empty side task from its first prompt', async () => {
   expect(onTitleChange).toHaveBeenCalledWith(
     'side-task:side-session-1',
     'Investigate restored task',
+    true,
+  );
+});
+
+it('sends the /btw question as the first side-task prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: 'Explain the current implementation',
+      onTitleChange,
+    });
+    await Promise.resolve();
+  });
+
+  expect(sendPrompt).toHaveBeenCalledWith(
+    'Explain the current implementation',
+    expect.objectContaining({ onAdmitted: expect.any(Function) }),
+  );
+  expect(renameSession).toHaveBeenCalledWith(
+    'Explain the current implementation',
+  );
+  expect(onTitleChange).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+    'Explain the current implementation',
     true,
   );
 });

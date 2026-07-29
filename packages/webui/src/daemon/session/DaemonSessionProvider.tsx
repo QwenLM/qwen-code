@@ -2456,6 +2456,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         ...eventOptionsRef.current,
         suppressOwnUserEcho: false,
       };
+      const nextBeforeRecordId = page.events
+        .map(getPersistedReplayRecordId)
+        .find((recordId): recordId is string => recordId !== undefined);
       const uiEvents: DaemonUiEvent[] = [];
       for (const replayEvent of page.events) {
         try {
@@ -2511,8 +2514,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
       history.capacityReached = page.hasMore && !hasCapacity;
-      history.cursor = page.nextCursor;
-      history.beforeRecordId = undefined;
+      history.cursor =
+        nextBeforeRecordId === undefined ? page.nextCursor : undefined;
+      history.beforeRecordId = nextBeforeRecordId;
       history.hasMore = page.hasMore && hasCapacity;
       history.loading = false;
       setTranscriptHistoryState({
@@ -2934,12 +2938,16 @@ export function useDaemonActiveTodoList() {
 }
 
 export function useDaemonStreamingState() {
-  const blocks = useDaemonTranscriptBlocks();
+  const store = useDaemonTranscriptStore();
   const promptStatus = useDaemonPromptStatus();
-
-  return useMemo(
-    () => selectDaemonStreamingState(blocks, promptStatus),
-    [blocks, promptStatus],
+  const getStreamingState = useCallback(
+    () => selectDaemonStreamingState(store.getSnapshot().blocks, promptStatus),
+    [promptStatus, store],
+  );
+  return useSyncExternalStore(
+    store.subscribe,
+    getStreamingState,
+    getStreamingState,
   );
 }
 

@@ -25,6 +25,7 @@ interface SideTaskPanelProps {
   workspaceCwd?: string;
   title: string;
   shouldNameFromFirstPrompt?: boolean;
+  initialPrompt?: string;
   createSession: (
     tabId: string,
     parentSessionId: string,
@@ -54,6 +55,7 @@ export function SideTaskPanel({
   workspaceCwd,
   title,
   shouldNameFromFirstPrompt,
+  initialPrompt,
   createSession,
   onCreated,
   onTitleChange,
@@ -90,6 +92,7 @@ export function SideTaskPanel({
         tabId={tabId}
         title={title}
         shouldNameFromFirstPrompt={shouldNameFromFirstPrompt}
+        initialPrompt={initialPrompt}
         workspaceCwd={workspaceCwd}
         onTitleChange={onTitleChange}
         onRightPanelOpen={onRightPanelOpen}
@@ -177,6 +180,7 @@ function SideTaskSession({
   tabId,
   title,
   shouldNameFromFirstPrompt,
+  initialPrompt,
   workspaceCwd,
   onTitleChange,
   onRightPanelOpen,
@@ -232,6 +236,28 @@ function SideTaskSession({
     },
     [actions, onError, onTitleChange, t, tabId],
   );
+  const initialPromptSentRef = useRef(false);
+  useEffect(() => {
+    const prompt = initialPrompt?.trim();
+    if (!prompt || !restoredEmptySession || initialPromptSentRef.current)
+      return;
+    initialPromptSentRef.current = true;
+    actions
+      .sendPrompt(prompt, {
+        onAdmitted: () => nameFromFirstPrompt(prompt),
+      })
+      .catch((error: unknown) => {
+        initialPromptSentRef.current = false;
+        onError?.(error, t('sideTask.promptFailed'));
+      });
+  }, [
+    actions,
+    initialPrompt,
+    nameFromFirstPrompt,
+    onError,
+    restoredEmptySession,
+    t,
+  ]);
 
   if (!connection.sessionId) {
     return (

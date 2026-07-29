@@ -20,7 +20,6 @@ import {
   useProviders,
   useSessionNotices,
   useStreamingState,
-  useTranscriptBlocks,
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
@@ -180,10 +179,10 @@ import {
   skillDescriptionKey,
 } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
-import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
-import { useMessages } from './hooks/useMessages';
+import { useMessagesFromBlocks } from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
@@ -606,8 +605,7 @@ export interface WebShellProps {
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
    * Called whenever transcript blocks change. Receives the full blocks array
-   * from useTranscriptBlocks(). Fires on every streaming delta during active
-   * generation, so consumers should debounce or throttle expensive work.
+   * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
@@ -1663,7 +1661,7 @@ export function App({
   const CustomComposerHeader = renderComposerHeader;
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
-  const blocks = useTranscriptBlocks();
+  const blocks = useAnimationFrameTranscriptBlocks();
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
@@ -2014,7 +2012,7 @@ export function App({
     });
   }, []);
 
-  const messages = useMessages(t);
+  const messages = useMessagesFromBlocks(t, blocks);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
@@ -2309,22 +2307,31 @@ export function App({
     (sideTaskCatalog.parentSessionId !== connection.sessionId ||
       !sideTaskCatalog.loaded);
   const nextSideTaskTabIdRef = useRef(0);
-  const createSideTask = useCallback(() => {
-    const parentSessionId = connection.sessionId;
-    if (!parentSessionId || !sideTasksAvailable) return false;
-    const tab: ArtifactPanelTab = {
-      id: `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`,
-      kind: 'side_task',
-      title: t('sideTask.title'),
-      parentSessionId,
-      workspaceCwd: connection.workspaceCwd,
-      nameFromFirstPrompt: true,
-    };
-    setArtifactPanelTabs((tabs) => [...tabs, tab]);
-    setActiveArtifactPanelTabId(tab.id);
-    setArtifactPanelOpen(true);
-    return true;
-  }, [connection.sessionId, connection.workspaceCwd, sideTasksAvailable, t]);
+  const createSideTask = useCallback(
+    (initialPrompt?: string) => {
+      const parentSessionId = connection.sessionId;
+      if (!parentSessionId || !sideTasksAvailable) return false;
+      const tab: ArtifactPanelTab = {
+        id: `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`,
+        kind: 'side_task',
+        title: t('sideTask.title'),
+        parentSessionId,
+        workspaceCwd: connection.workspaceCwd,
+        nameFromFirstPrompt: true,
+        ...(initialPrompt?.trim()
+          ? { initialPrompt: initialPrompt.trim() }
+          : {}),
+      };
+      setArtifactPanelTabs((tabs) => [...tabs, tab]);
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelOpen(true);
+      return true;
+    },
+    [connection.sessionId, connection.workspaceCwd, sideTasksAvailable, t],
+  );
+  const createEmptySideTask = useCallback(() => {
+    createSideTask();
+  }, [createSideTask]);
   const createSideTaskSession = useCallback(
     async (_tabId: string, parentSessionId: string, title: string) => {
       const parentClientId =
@@ -2397,7 +2404,12 @@ export function App({
           return {
             ...tab,
             title,
-            ...(fromFirstPrompt ? { nameFromFirstPrompt: false } : {}),
+            ...(fromFirstPrompt
+              ? {
+                  nameFromFirstPrompt: false,
+                  initialPrompt: undefined,
+                }
+              : {}),
           };
         }),
       );
@@ -2984,10 +2996,9 @@ export function App({
     [artifactPanelWidth, getMaxArtifactPanelWidth],
   );
   useEffect(() => () => artifactPanelResizeCleanupRef.current?.(), []);
-  const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
-    () => extractPendingPermission(messageBlocks),
-    [messageBlocks],
+    () => extractPendingPermission(blocks),
+    [blocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
   const canActOnPendingApproval = !(
@@ -3290,10 +3301,6 @@ export function App({
     },
   });
   const composerTextRef = useRef('');
-  const composerTextDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const [composerText, setComposerText] = useState('');
   const [hasComposerAttachments, setHasComposerAttachments] = useState<
     boolean | null
   >(null);
@@ -5881,25 +5888,6 @@ export function App({
   const handleOpenExistingWorkspace = useCallback(() => {
     setShowAddWorkspaceDialog(true);
   }, []);
-  useEffect(
-    () => () => {
-      if (composerTextDebounceRef.current) {
-        clearTimeout(composerTextDebounceRef.current);
-      }
-    },
-    [],
-  );
-
-  const handleComposerTextChange = useCallback((text: string) => {
-    composerTextRef.current = text;
-    if (composerTextDebounceRef.current) {
-      clearTimeout(composerTextDebounceRef.current);
-    }
-    composerTextDebounceRef.current = setTimeout(() => {
-      setComposerText(text);
-      composerTextDebounceRef.current = null;
-    }, 120);
-  }, []);
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -5910,12 +5898,12 @@ export function App({
 
   const {
     suggestion: newSessionSuggestion,
+    updateInput: updateNewSessionSuggestionInput,
     dismiss: dismissNewSessionSuggestion,
     suppress: suppressNewSessionSuggestion,
   } = useNewSessionSuggestion({
     enabled:
       connection.capabilities?.features.includes('session_generation') === true,
-    inputText: composerText,
     messages,
     sessionId: connection.sessionId,
     contextUsageRatio:
@@ -5927,6 +5915,14 @@ export function App({
     hasAttachments: hasComposerAttachments,
     generateContent: sessionActions.generateSessionContent,
   });
+
+  const handleComposerTextChange = useCallback(
+    (text: string) => {
+      composerTextRef.current = text;
+      updateNewSessionSuggestionInput(text);
+    },
+    [updateNewSessionSuggestionInput],
+  );
 
   const flushPendingNewSessionSuggestionSubmit = useCallback(
     (expectedToken?: number) => {
@@ -6734,12 +6730,6 @@ export function App({
               pushToast('error', t('fork.empty'));
               return true;
             }
-            if (directive.toLowerCase() === 'sider') {
-              if (!createSideTask()) {
-                pushToast('warning', t('fork.siderUnavailable'));
-              }
-              return true;
-            }
             sessionActions
               .forkSession(directive)
               .then((result) => {
@@ -7190,6 +7180,15 @@ export function App({
             return true;
           }
           if (cmd === 'btw') {
+            if (sideTasksAvailable) {
+              const question = text.slice(match[0].length).trim();
+              if (!question) {
+                pushToast('error', t('btw.empty'));
+                return true;
+              }
+              createSideTask(question);
+              return true;
+            }
             runVisibleBtw(text.slice(match[0].length));
             return true;
           }
@@ -7436,6 +7435,7 @@ export function App({
       handleLanguageChange,
       blockLocalCommandDuringTurn,
       createSideTask,
+      sideTasksAvailable,
       openEnvironmentTasksPanel,
       hiddenCommands,
       pushToast,
@@ -9920,7 +9920,7 @@ export function App({
                     sideTaskAvailable={sideTasksAvailable}
                     sideTasks={visibleSideTasks}
                     sideTasksLoading={sideTasksLoading}
-                    onCreateSideTask={createSideTask}
+                    onCreateSideTask={createEmptySideTask}
                     onOpenSideTask={openSideTask}
                     onCreateSideTaskSession={createSideTaskSession}
                     onSideTaskCreated={handleSideTaskCreated}
@@ -9974,7 +9974,7 @@ export function App({
                     sideTaskAvailable={sideTasksAvailable}
                     sideTasks={visibleSideTasks}
                     sideTasksLoading={sideTasksLoading}
-                    onCreateSideTask={createSideTask}
+                    onCreateSideTask={createEmptySideTask}
                     onOpenSideTask={openSideTask}
                     onCreateSideTaskSession={createSideTaskSession}
                     onSideTaskCreated={handleSideTaskCreated}

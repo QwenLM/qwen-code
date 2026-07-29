@@ -1041,6 +1041,7 @@ const EN: Messages = {
   'rightPanel.add': 'Add panel',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
+  'sideTask.promptFailed': 'Failed to send the side-task question',
   'sideTask.renameFailed': 'Failed to name side task',
   'turnOutputs.preview': 'Preview',
   'turnOutputs.collapseFiles': 'Collapse files',
@@ -1276,7 +1277,6 @@ const EN: Messages = {
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
-  'fork.siderUnavailable': 'Side tasks are not available in this session.',
   'fork.started': (v) =>
     `Started background agent: "${v?.name ?? ''}". Track it in background tasks.`,
   'command.hidden': 'This command is not available.',
@@ -3542,6 +3542,7 @@ const ZH: Messages = {
   'rightPanel.add': '添加页签',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
+  'sideTask.promptFailed': '发送侧边任务问题失败',
   'sideTask.renameFailed': '侧边任务命名失败',
   'turnOutputs.preview': '预览',
   'turnOutputs.collapseFiles': '收起文件',
@@ -3760,7 +3761,6 @@ const ZH: Messages = {
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',
-  'fork.siderUnavailable': '当前会话不支持侧边任务。',
   'fork.started': (v) =>
     `已启动后台智能体："${v?.name ?? ''}"，可在后台任务中查看。`,
   'command.hidden': '该命令不可用。',

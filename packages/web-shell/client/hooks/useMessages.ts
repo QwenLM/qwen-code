@@ -23,10 +23,17 @@ export function transcriptBlocksToLocalizedMessages(
   });
 }
 
-export function useMessages(t: Translator): Message[] {
-  const blocks = useTranscriptBlocks();
+export function useMessagesFromBlocks(
+  t: Translator,
+  blocks: readonly DaemonTranscriptBlock[],
+): Message[] {
   return useMemo(
     () => transcriptBlocksToLocalizedMessages(blocks, t),
     [blocks, t],
   );
+}
+
+export function useMessages(t: Translator): Message[] {
+  const blocks = useTranscriptBlocks();
+  return useMessagesFromBlocks(t, blocks);
 }

@@ -257,6 +257,7 @@ const {
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       messages: [] as unknown[],
+      chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
@@ -371,6 +372,11 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
 
 vi.mock('./hooks/useMessages', () => ({
   useMessages: () => testState.messages,
+  useMessagesFromBlocks: () => testState.messages,
+}));
+
+vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptBlocks: () => testState.blocks,
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -405,94 +411,97 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
   return {
-    ChatEditor: React.forwardRef(function ChatEditor(
-      props: ChatEditorTestProps,
-      ref: React.ForwardedRef<{
-        clear: () => void;
-        hasAttachments: () => boolean;
-        hasInput: () => boolean;
-        insertText: (text: string) => void;
-        submit: (input?: { text?: string }) => void;
-        focus: () => void;
-      }>,
-    ) {
-      testState.latestChatEditorProps = props;
-      const { onAttachmentsChange } = props;
-      React.useEffect(() => {
-        onAttachmentsChange?.(
-          Boolean(
-            testState.promptImages?.length ||
-              testState.inputAnnotations?.length,
-          ),
-        );
-      }, [onAttachmentsChange]);
-      React.useImperativeHandle(ref, () => ({
-        clear: () => {
-          testState.prompt = '';
-          testState.promptImages = undefined;
-          props.onInputTextChange?.('');
-          editorClear();
-        },
-        hasAttachments: () =>
-          Boolean(
-            testState.promptImages?.length ||
-              testState.inputAnnotations?.length,
-          ),
-        hasInput: () => testState.prompt.trim().length > 0,
-        insertText: editorInsertText,
-        submit: (input) => {
-          const accepted = props.onSubmit(
-            input?.text ?? testState.prompt,
-            testState.promptImages,
-            editorCommit,
-            testState.inputAnnotations
-              ? { inputAnnotations: testState.inputAnnotations }
-              : undefined,
+    ChatEditor: React.memo(
+      React.forwardRef(function ChatEditor(
+        props: ChatEditorTestProps,
+        ref: React.ForwardedRef<{
+          clear: () => void;
+          hasAttachments: () => boolean;
+          hasInput: () => boolean;
+          insertText: (text: string) => void;
+          submit: (input?: { text?: string }) => void;
+          focus: () => void;
+        }>,
+      ) {
+        testState.chatEditorRenderCount += 1;
+        testState.latestChatEditorProps = props;
+        const { onAttachmentsChange } = props;
+        React.useEffect(() => {
+          onAttachmentsChange?.(
+            Boolean(
+              testState.promptImages?.length ||
+                testState.inputAnnotations?.length,
+            ),
           );
-          if (accepted) editorCommit();
-        },
-        // The panel focus effect calls editorRef.current?.focus() when a panel
-        // closes with no pending approval (e.g. resuming a session).
-        focus: editorFocus,
-      }));
-      return React.createElement(
-        'div',
-        { 'data-web-shell-composer': '' },
-        React.createElement(
-          'button',
-          {
-            'data-testid': 'submit',
-            'data-preparing': props.isPreparing ? 'true' : 'false',
-            onClick: () => {
-              if (testState.inputAnnotations) {
-                props.onSubmit(testState.prompt, undefined, editorCommit, {
-                  inputAnnotations: testState.inputAnnotations,
-                });
-                return;
-              }
-              props.onSubmit(testState.prompt, undefined, editorCommit);
-            },
-            type: 'button',
+        }, [onAttachmentsChange]);
+        React.useImperativeHandle(ref, () => ({
+          clear: () => {
+            testState.prompt = '';
+            testState.promptImages = undefined;
+            props.onInputTextChange?.('');
+            editorClear();
           },
-          'submit',
-        ),
-        props.newSessionSuggestion
-          ? React.createElement(
-              'div',
-              { 'data-testid': 'new-session-suggestion' },
-              React.createElement(
-                'button',
-                {
-                  'data-testid': 'new-session-suggestion-start',
-                  onClick: () => props.onStartNewSessionSuggestion?.(),
-                  type: 'button',
-                },
-                'This looks like a new topic',
-              ),
-            )
-          : null,
-      );
-    }),
+          hasAttachments: () =>
+            Boolean(
+              testState.promptImages?.length ||
+                testState.inputAnnotations?.length,
+            ),
+          hasInput: () => testState.prompt.trim().length > 0,
+          insertText: editorInsertText,
+          submit: (input) => {
+            const accepted = props.onSubmit(
+              input?.text ?? testState.prompt,
+              testState.promptImages,
+              editorCommit,
+              testState.inputAnnotations
+                ? { inputAnnotations: testState.inputAnnotations }
+                : undefined,
+            );
+            if (accepted) editorCommit();
+          },
+          // The panel focus effect calls editorRef.current?.focus() when a panel
+          // closes with no pending approval (e.g. resuming a session).
+          focus: editorFocus,
+        }));
+        return React.createElement(
+          'div',
+          { 'data-web-shell-composer': '' },
+          React.createElement(
+            'button',
+            {
+              'data-testid': 'submit',
+              'data-preparing': props.isPreparing ? 'true' : 'false',
+              onClick: () => {
+                if (testState.inputAnnotations) {
+                  props.onSubmit(testState.prompt, undefined, editorCommit, {
+                    inputAnnotations: testState.inputAnnotations,
+                  });
+                  return;
+                }
+                props.onSubmit(testState.prompt, undefined, editorCommit);
+              },
+              type: 'button',
+            },
+            'submit',
+          ),
+          props.newSessionSuggestion
+            ? React.createElement(
+                'div',
+                { 'data-testid': 'new-session-suggestion' },
+                React.createElement(
+                  'button',
+                  {
+                    'data-testid': 'new-session-suggestion-start',
+                    onClick: () => props.onStartNewSessionSuggestion?.(),
+                    type: 'button',
+                  },
+                  'This looks like a new topic',
+                ),
+              )
+            : null,
+        );
+      }),
+    ),
   };
 });
 
@@ -1861,6 +1870,7 @@ beforeEach(() => {
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.messages = [];
+  testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
@@ -5731,7 +5741,7 @@ describe('App session callbacks', () => {
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
     }));
-    renderApp();
+    const { rerender } = renderApp();
     await flush();
     await flush();
 
@@ -5748,7 +5758,7 @@ describe('App session callbacks', () => {
 
     // The daemon's `git_status_changed` push lands as connection.gitStatus
     // (a provider state update in production; simulated here by mutating the
-    // connection object and forcing a re-render).
+    // connection object and rerendering the provider consumer).
     act(() => {
       mockConnection.gitStatus = {
         v: 2,
@@ -5757,8 +5767,8 @@ describe('App session callbacks', () => {
         staged: 2,
         computedAt: 1_700_000_000_000,
       };
-      testState.latestChatEditorProps?.onInputTextChange?.('x');
     });
+    rerender();
     await flush();
 
     await vi.waitFor(() => {
@@ -6485,6 +6495,40 @@ describe('App session callbacks', () => {
       finishClear?.();
       await Promise.resolve();
     });
+  });
+
+  it('does not rerender the composer while a draft waits for intent classification', async () => {
+    vi.useFakeTimers();
+    const ComposerFooter = vi.fn(() => null);
+
+    renderApp({ renderComposerFooter: ComposerFooter });
+    await flush();
+    const renderCount = ComposerFooter.mock.calls.length;
+
+    act(() => {
+      testState.latestChatEditorProps?.onInputTextChange?.(
+        'Help me brainstorm a separate Web Shell design proposal',
+      );
+      vi.advanceTimersByTime(121);
+    });
+    await flush();
+
+    expect(ComposerFooter).toHaveBeenCalledTimes(renderCount);
+  });
+
+  it('keeps ChatEditor memoized across transcript-only app renders', async () => {
+    testState.streamingState = 'responding';
+    testState.messages = [{ role: 'assistant', content: 'first delta' }];
+    const { rerender } = renderApp();
+    await flush();
+    const renderCount = testState.chatEditorRenderCount;
+
+    testState.blocks = [{ kind: 'debug', text: 'streaming delta' }];
+    testState.messages = [{ role: 'assistant', content: 'next delta' }];
+    rerender();
+    await flush();
+
+    expect(testState.chatEditorRenderCount).toBe(renderCount);
   });
 
   it('does not suggest a new session for obvious follow-up prompts', async () => {
@@ -7496,8 +7540,26 @@ describe('App session callbacks', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
-  it('opens a new side task for /fork sider', async () => {
+  it('opens a new side task for /btw when the capability is available', async () => {
     mockConnection.capabilities.features = ['session_side_task'];
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/btw explain the current implementation';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+    expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
+  });
+
+  it('passes sider to /fork as a regular background-agent directive', async () => {
+    mockSessionActions.forkSession.mockResolvedValue({
+      sessionId: 'session-1',
+      description: 'sider',
+      launched: true,
+    });
     const { container } = renderApp();
     await flush();
 
@@ -7505,8 +7567,8 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
-    expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
+    expect(mockSessionActions.forkSession).toHaveBeenCalledWith('sider');
+    expect(container.querySelector('button[title="Side task"]')).toBeNull();
   });
 
   it('notifies the host before forwarding a slash command', async () => {

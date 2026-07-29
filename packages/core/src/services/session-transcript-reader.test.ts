@@ -291,7 +291,7 @@ describe('SessionTranscriptReader', () => {
       limit: 2,
     });
     const second = await reader.readPage(sessionId, {
-      cursor: encodeCursor(first.nextCursorState!),
+      beforeRecordId: first.records[0]!.uuid,
       limit: 2,
     });
 
