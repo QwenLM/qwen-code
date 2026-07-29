@@ -399,6 +399,48 @@ describe('archiveDaemonSessions', () => {
     await lease.release();
   });
 
+  it('reports a gate race per session after another batch item was archived', async () => {
+    const archivedId = '550e8400-e29b-41d4-a716-446655440023';
+    const blockedId = '550e8400-e29b-41d4-a716-446655440024';
+    writeSessionFile(workspaceDir, archivedId, 'active');
+    writeSessionFile(workspaceDir, blockedId, 'active');
+    const coordinator = new SessionArchiveCoordinator();
+    let releaseBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseBlocked = resolve;
+    });
+    let competingMaintenance: Promise<void> | undefined;
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [archivedId, blockedId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn(async (sessionId) => {
+          if (sessionId === archivedId) {
+            competingMaintenance = coordinator.runExclusiveMany(
+              [blockedId],
+              () => blocked,
+            );
+          }
+        }),
+      },
+      coordinator,
+    });
+
+    try {
+      expect(result.archived).toEqual([archivedId]);
+      expect(result.errors).toEqual([
+        {
+          sessionId: blockedId,
+          error: expect.any(SessionArchivingError),
+        },
+      ]);
+    } finally {
+      releaseBlocked();
+      await competingMaintenance;
+    }
+  });
+
   it('keeps independent batch sessions moving when one classification fails', async () => {
     const failedId = '550e8400-e29b-41d4-a716-446655440019';
     const availableId = '550e8400-e29b-41d4-a716-446655440020';
@@ -722,6 +764,49 @@ describe('unarchiveDaemonSessions', () => {
 
     expect(result.unarchived).toEqual([availableId]);
     expect(result.errors).toEqual([{ sessionId: failedId, error: failure }]);
+  });
+
+  it('reports a gate race per session after another batch item was unarchived', async () => {
+    const unarchivedId = '550e8400-e29b-41d4-a716-446655440025';
+    const blockedId = '550e8400-e29b-41d4-a716-446655440026';
+    writeSessionFile(workspaceDir, unarchivedId, 'archived');
+    writeSessionFile(workspaceDir, blockedId, 'archived');
+    const service = new SessionService(workspaceDir);
+    const getLocation = service.getSessionLocation.bind(service);
+    const coordinator = new SessionArchiveCoordinator();
+    let releaseBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseBlocked = resolve;
+    });
+    let competingMaintenance: Promise<void> | undefined;
+    vi.spyOn(service, 'getSessionLocation').mockImplementation((sessionId) => {
+      if (sessionId === unarchivedId && !competingMaintenance) {
+        competingMaintenance = coordinator.runExclusiveMany(
+          [blockedId],
+          () => blocked,
+        );
+      }
+      return getLocation(sessionId);
+    });
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [unarchivedId, blockedId],
+      service,
+      coordinator,
+    });
+
+    try {
+      expect(result.unarchived).toEqual([unarchivedId]);
+      expect(result.errors).toEqual([
+        {
+          sessionId: blockedId,
+          error: expect.any(SessionArchivingError),
+        },
+      ]);
+    } finally {
+      releaseBlocked();
+      await competingMaintenance;
+    }
   });
 
   it('re-enables an archive-disabled task bound to the unarchived session', async () => {

@@ -1178,25 +1178,6 @@ export function registerSessionRoutes(
       error: e.error instanceof Error ? e.error.message : String(e.error),
     }));
 
-  const resolveWorkspaceParam = (
-    req: Request,
-    res: Response,
-  ): string | null => {
-    const workspaceCwd = req.params['id'] ?? '';
-    if (!path.isAbsolute(workspaceCwd)) {
-      res
-        .status(400)
-        .json({ error: '`:id` must decode to an absolute workspace path' });
-      return null;
-    }
-    const key = canonicalizeWorkspace(workspaceCwd);
-    if (key !== boundWorkspace) {
-      sendWorkspaceMismatch(res, key);
-      return null;
-    }
-    return key;
-  };
-
   const withPrimaryOnlyMutableSession = (
     route: string,
     handler: (
@@ -3694,14 +3675,17 @@ export function registerSessionRoutes(
   });
 
   app.post('/workspace/:id/session-groups', mutate(), async (req, res) => {
-    const key = resolveWorkspaceParam(req, res);
-    if (key === null) return;
-    const runtime = workspaceRegistry.getByWorkspaceCwd(key);
-    if (!runtime) return;
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+      'id',
+    );
+    if (runtime === null) return;
     const body = safeBody(req);
     try {
       const group = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        createSessionOrganizationService(key).createGroup({
+        createSessionOrganizationService(runtime.workspaceCwd).createGroup({
           name: body['name'] as string,
           color: body['color'] as SessionGroupColor,
         }),
@@ -3719,14 +3703,17 @@ export function registerSessionRoutes(
     '/workspace/:id/session-groups/:groupId',
     mutate(),
     async (req, res) => {
-      const key = resolveWorkspaceParam(req, res);
-      if (key === null) return;
-      const runtime = workspaceRegistry.getByWorkspaceCwd(key);
-      if (!runtime) return;
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+        'id',
+      );
+      if (runtime === null) return;
       const body = safeBody(req);
       try {
         const group = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          createSessionOrganizationService(key).updateGroup(
+          createSessionOrganizationService(runtime.workspaceCwd).updateGroup(
             req.params['groupId'] ?? '',
             {
               ...(Object.prototype.hasOwnProperty.call(body, 'name')
@@ -3755,13 +3742,16 @@ export function registerSessionRoutes(
     '/workspace/:id/session-groups/:groupId',
     mutate(),
     async (req, res) => {
-      const key = resolveWorkspaceParam(req, res);
-      if (key === null) return;
-      const runtime = workspaceRegistry.getByWorkspaceCwd(key);
-      if (!runtime) return;
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+        'id',
+      );
+      if (runtime === null) return;
       try {
         const deleted = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          createSessionOrganizationService(key).deleteGroup(
+          createSessionOrganizationService(runtime.workspaceCwd).deleteGroup(
             req.params['groupId'] ?? '',
           ),
         );

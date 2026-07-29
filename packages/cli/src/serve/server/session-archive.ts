@@ -696,10 +696,7 @@ export async function archiveDaemonSessions(params: {
           };
         });
       } catch (error) {
-        if (
-          error instanceof DaemonDrainingError ||
-          error instanceof SessionArchivingError
-        ) {
+        if (error instanceof DaemonDrainingError) {
           throw error;
         }
         return {
@@ -856,10 +853,7 @@ export async function unarchiveDaemonSessions(params: {
           };
         });
       } catch (error) {
-        if (
-          error instanceof DaemonDrainingError ||
-          error instanceof SessionArchivingError
-        ) {
+        if (error instanceof DaemonDrainingError) {
           throw error;
         }
         return {

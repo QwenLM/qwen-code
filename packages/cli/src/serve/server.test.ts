@@ -11733,6 +11733,55 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('rejects singular session-group mutations when the selected runtime is unavailable', async () => {
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([runtime]);
+      const app = createServeApp(baseOpts, undefined, {
+        workspaceRegistry,
+      });
+      workspaceRegistry.beginReplacement(
+        workspaceRegistry.primaryEntry,
+        'policy-2',
+      );
+      workspaceRegistry.blockReplacement(
+        workspaceRegistry.primaryEntry,
+        'runtime build failed',
+      );
+
+      const responses = await Promise.all([
+        request(app)
+          .post(`/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'Frontend', color: 'blue' }),
+        request(app)
+          .patch(
+            `/workspace/${encodeURIComponent(
+              WS_BOUND,
+            )}/session-groups/missing-group`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'Frontend' }),
+        request(app)
+          .delete(
+            `/workspace/${encodeURIComponent(
+              WS_BOUND,
+            )}/session-groups/missing-group`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+      ]);
+
+      for (const response of responses) {
+        expect(response.status).toBe(503);
+        expect(response.headers['retry-after']).toBe('1');
+        expect(response.body.code).toBe('workspace_runtime_unavailable');
+      }
+    });
+
     it('returns session organization errors for invalid REST inputs', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440000';
       await writeStoredSession({
