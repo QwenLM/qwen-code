@@ -70,9 +70,12 @@ node, the cert, and the gateway all live in one place.
    to `~/.qwen/rc/launcher-state.json`.
 5. **Surface connect info.** Compute `https://<host>.ts.net:<port>/ui/`, read
    the gateway's owner-bootstrap code, render a **terminal QR** of the
-   connect URL, and print URL + pairing code + QR. Also emit machine-readable
-   **`--json`** (`{ status, url, host, port, unit, bootstrapCode?, certExpiry
-}`) for the Electron app to consume.
+   connect URL, and — to the human-readable output only — print URL +
+   pairing code + QR. Also emit machine-readable **`--json`** (`{ status,
+url, host, port, unit, certExpiry }`) for the Electron app to consume.
+   The `--json` surface deliberately OMITS the owner pairing code (a
+   one-time credential must not enter a machine-captured stream — the app
+   reads the 0600 `owner-bootstrap.code` file itself if it needs it).
 
 ## `qwen-rc down`
 
