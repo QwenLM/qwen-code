@@ -463,9 +463,8 @@ jobs:
             if npm run typecheck; then break; fi
             COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
             if [[ "${COMMITS_LEFT}" -le 0 ]]; then
-              echo '❌ All commits reverted.'
-              echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
-              exit 0
+              echo '❌ All commits reverted; baseline still fails typecheck.'
+              break
             fi
             BAD="$(git rev-parse --short HEAD)"
             echo "⏪ Reverting ${BAD} (typecheck failed)"
@@ -482,6 +481,27 @@ jobs:
                 if [[ -n "${msg}" ]]; then echo "> - ${msg}"; fi
               done <<< "${REVERTED_MSGS}"
             } >> "${WORKDIR}/pr-body.md"
+
+            # Mirror the gate step: a reverted finding must not stay
+            # "committed" in findings.json, or the consolidated issue
+            # never reports it.
+            export REVERTED_MSGS
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const reverted = (process.env.REVERTED_MSGS || "").split("\n").filter(Boolean);
+              const moved = [];
+              f.fixes = f.fixes.filter(fix => {
+                if (!reverted.some(msg => msg.includes(`[${fix.id}]`))) return true;
+                fix.status = "reverted-verify"; moved.push(fix); return false;
+              });
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (reverted by CI: typecheck failed)" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log(`Moved ${moved.length} reverted finding(s) to reportOnly.`);
+            '
+
             COMMITS="$(git rev-list --count origin/main..HEAD)"
             echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
             if [[ "${COMMITS}" -eq 0 ]]; then

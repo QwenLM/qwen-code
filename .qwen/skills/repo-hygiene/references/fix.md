@@ -25,9 +25,11 @@ against this checkout before touching code.
    drop it.
    c. Run focused verification for the touched package. If it fails and you
    cannot make it pass confidently, revert this finding's edits
-   (`git checkout -- <paths>`; delete untracked files you created), mark
-   the finding `"status": "dropped"` with a reason in findings.json, and
-   move on. Never commit a finding whose verification failed.
+   (`git checkout -- <paths>`; delete untracked files you created), move
+   the entry from `fixes` to `reportOnly` in findings.json with
+   `"status": "dropped"` and the drop reason appended to `minimalFix`, and
+   move on. A dropped finding must surface in the consolidated issue, not
+   vanish. Never commit a finding whose verification failed.
    d. Commit as ONE Conventional Commit, e.g. `fix(cli): summary` or
    `docs(cli): summary`, then mark `"status": "committed"`.
 5. After all fixes: run `npm run build`, `npm run typecheck`, `npm run lint`,
