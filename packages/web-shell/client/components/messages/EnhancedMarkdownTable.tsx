@@ -2184,7 +2184,6 @@ export function EnhancedTable({
     if (width !== undefined) return { width };
     const minWidth =
       density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
-    if (flexibleColumnCount === 0) return { width: minWidth };
     return {
       width: flexibleColumnWidth(
         minWidth,

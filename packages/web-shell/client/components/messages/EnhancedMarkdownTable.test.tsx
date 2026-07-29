@@ -1448,6 +1448,26 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('subtracts fixed widths from the flexible column calc()', () => {
+    const container = renderTable();
+
+    act(() => {
+      button(container, 'Resize Team').dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'ArrowRight',
+        }),
+      );
+    });
+
+    const columns = Array.from(container.querySelectorAll('col'));
+    expect(columns).toHaveLength(3);
+    expect(columns[1]?.style.width).toBe('176px');
+    expect(columns[2]?.style.width).toContain('176px');
+    expect(columns[2]?.style.width).toContain('calc');
+    expect(container.querySelector('[class*="fillerColumn"]')).toBeNull();
+  });
+
   it('spans the detail row across the filler column', () => {
     const container = renderTable();
 
