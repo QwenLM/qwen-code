@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { normalizePath, withArtifactPreviewCsp } from './artifactUtils';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import {
+  getArtifactTypeLabel,
+  normalizePath,
+  withArtifactPreviewCsp,
+} from './artifactUtils';
 
 describe('artifactUtils', () => {
   afterEach(() => {
@@ -14,6 +19,21 @@ describe('artifactUtils', () => {
       '/workspace/app/src/main.ts',
     );
     expect(normalizePath('../outside/file.ts')).toBe('../outside/file.ts');
+  });
+
+  it('prefers the artifact type from metadata', () => {
+    const artifact = {
+      kind: 'other',
+      metadata: { artifactType: 'Diagram' },
+    } as DaemonSessionArtifact;
+
+    expect(getArtifactTypeLabel(artifact)).toBe('Diagram');
+  });
+
+  it('falls back to the artifact kind label without metadata', () => {
+    const artifact = { kind: 'other' } as DaemonSessionArtifact;
+
+    expect(getArtifactTypeLabel(artifact)).toBe('other');
   });
 
   it('injects preview CSP and strips unsafe metadata', () => {

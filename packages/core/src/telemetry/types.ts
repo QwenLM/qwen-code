@@ -18,6 +18,7 @@ import {
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
+import type { RipgrepFailureKind } from '../utils/ripgrepUtils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
@@ -434,6 +435,33 @@ export class RipgrepFallbackEvent implements BaseTelemetryEvent {
     this.use_ripgrep = use_ripgrep;
     this.use_builtin_ripgrep = use_builtin_ripgrep;
     this.error = error;
+  }
+}
+
+export type RipgrepRuntimeRecoveryFailureKind = RipgrepFailureKind;
+
+export class RipgrepRuntimeRecoveryEvent implements BaseTelemetryEvent {
+  'event.name': 'ripgrep_runtime_recovery';
+  'event.timestamp': string;
+  selection_mode: 'builtin' | 'system';
+  retry_triggered: boolean;
+  retry_succeeded?: boolean;
+  failure_kind: RipgrepRuntimeRecoveryFailureKind;
+
+  constructor(params: {
+    selection_mode: 'builtin' | 'system';
+    retry_triggered: boolean;
+    retry_succeeded?: boolean;
+    failure_kind: RipgrepRuntimeRecoveryFailureKind;
+  }) {
+    this['event.name'] = 'ripgrep_runtime_recovery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.selection_mode = params.selection_mode;
+    this.retry_triggered = params.retry_triggered;
+    if (params.retry_succeeded !== undefined) {
+      this.retry_succeeded = params.retry_succeeded;
+    }
+    this.failure_kind = params.failure_kind;
   }
 }
 
@@ -1094,6 +1122,7 @@ export type TelemetryEvent =
   | ApiCancelEvent
   | ApiResponseEvent
   | FlashFallbackEvent
+  | RipgrepRuntimeRecoveryEvent
   | LoopDetectedEvent
   | LoopDetectionDisabledEvent
   | NextSpeakerCheckEvent
