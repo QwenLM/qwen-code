@@ -1037,23 +1037,41 @@ describe('GithubChannel', () => {
       }
     });
 
-    it('warns about unrecognized reasonFilter values', async () => {
-      const stderrWrite = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-      try {
-        await initWithoutLoop({
-          reasonFilter: ['mentions'],
-        });
-
-        expect(stderrWrite).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'warning: unrecognized reasonFilter values: mentions',
+    it('rejects unrecognized reasonFilter values', () => {
+      expect(
+        () =>
+          new TestableGithubChannel(
+            'test-github',
+            makeConfig({ reasonFilter: ['mentions'] }),
+            makeBridge(),
           ),
-        );
-      } finally {
-        stderrWrite.mockRestore();
-      }
+      ).toThrow(
+        'Unrecognized reasonFilter values for channel test-github: mentions',
+      );
+    });
+
+    it('rejects non-array reasonFilter values', () => {
+      expect(
+        () =>
+          new TestableGithubChannel(
+            'test-github',
+            makeConfig({ reasonFilter: 'mention' }),
+            makeBridge(),
+          ),
+      ).toThrow(
+        'reasonFilter must be an array of GitHub notification reasons.',
+      );
+    });
+
+    it('accepts documented security notification reasons', () => {
+      expect(
+        () =>
+          new TestableGithubChannel(
+            'test-github',
+            makeConfig({ reasonFilter: ['security_alert'] }),
+            makeBridge(),
+          ),
+      ).not.toThrow();
     });
 
     it('processes all reasons when filter is empty or unset', async () => {

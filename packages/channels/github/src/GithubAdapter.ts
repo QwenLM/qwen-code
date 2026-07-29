@@ -17,7 +17,9 @@ interface GithubConfig extends ChannelConfig {
    * When set, notifications whose `reason` is not in this list are skipped
    * before any lane dispatch. Valid reasons: "mention", "review_requested",
    * "assign", "author", "comment", "ci_activity", "manual", "state_change",
-   * "subscribed", "team_mention". Defaults to undefined (all reasons processed).
+   * "subscribed", "team_mention", "security_alert", "approval_requested",
+   * "invitation", "member_feature_requested", "security_advisory_credit".
+   * Defaults to undefined (all reasons processed).
    */
   reasonFilter?: string[];
 }
@@ -33,6 +35,11 @@ const KNOWN_NOTIFICATION_REASONS = new Set([
   'state_change',
   'subscribed',
   'team_mention',
+  'security_alert',
+  'approval_requested',
+  'invitation',
+  'member_feature_requested',
+  'security_advisory_credit',
 ]);
 
 interface GithubCursor {
@@ -112,16 +119,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    if (Array.isArray(config.reasonFilter) && config.reasonFilter.length > 0) {
-      this.reasonFilterSet = new Set(config.reasonFilter);
-      const unknownReasons = config.reasonFilter.filter(
+    const reasonFilter = config.reasonFilter as unknown;
+    if (reasonFilter !== undefined && !Array.isArray(reasonFilter)) {
+      throw new Error(
+        'reasonFilter must be an array of GitHub notification reasons.',
+      );
+    }
+    if (reasonFilter && reasonFilter.length > 0) {
+      const unknownReasons = reasonFilter.filter(
         (reason) => !KNOWN_NOTIFICATION_REASONS.has(reason),
       );
       if (unknownReasons.length > 0) {
-        process.stderr.write(
-          `[Channel:${name}] warning: unrecognized reasonFilter values: ${unknownReasons.join(', ')}\n`,
+        throw new Error(
+          `Unrecognized reasonFilter values for channel ${name}: ${unknownReasons.join(', ')}`,
         );
       }
+      this.reasonFilterSet = new Set(reasonFilter);
     }
   }
 
