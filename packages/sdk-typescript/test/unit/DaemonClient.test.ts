@@ -1023,6 +1023,85 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('routes the git mutation and GitHub create methods over REST', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+
+      await ws.workspaceGitBranches();
+      await ws.workspaceGitCheckout('feat/thing');
+      await ws.workspaceGitCreateBranch('feat/new', 'main');
+      await ws.workspaceGitPush({ setUpstream: true, force: false });
+      await ws.workspaceGitPull({ rebase: true });
+      await ws.workspaceGitCommit('fix: thing', { all: true });
+      await ws.workspaceGitHubCreatePullRequest({
+        title: 'Add a thing',
+        body: 'body text',
+        base: 'main',
+      });
+      await ws.workspaceGitHubDefaultBranch();
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/branches`],
+        ['POST', `${base}/git/checkout`],
+        ['POST', `${base}/git/branch`],
+        ['POST', `${base}/git/push`],
+        ['POST', `${base}/git/pull`],
+        ['POST', `${base}/git/commit`],
+        ['POST', `${base}/github/prs/create`],
+        ['GET', `${base}/github/default-branch`],
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({ ref: 'feat/thing' });
+      expect(JSON.parse(calls[2]!.body!)).toEqual({
+        name: 'feat/new',
+        startPoint: 'main',
+      });
+      expect(JSON.parse(calls[3]!.body!)).toEqual({
+        setUpstream: true,
+        force: false,
+      });
+      expect(JSON.parse(calls[4]!.body!)).toEqual({ rebase: true });
+      expect(JSON.parse(calls[5]!.body!)).toEqual({
+        message: 'fix: thing',
+        all: true,
+      });
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        title: 'Add a thing',
+        body: 'body text',
+        base: 'main',
+      });
+    });
+
+    it('passes cwd as a query parameter on git mutation methods', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+      const cwd = '/work/secondary/packages/app';
+
+      await ws.workspaceGitBranches(cwd);
+      await ws.workspaceGitCheckout('feat/thing', cwd);
+      await ws.workspaceGitCreateBranch('feat/new', 'main', cwd);
+      await ws.workspaceGitPush({ setUpstream: true }, cwd);
+      await ws.workspaceGitPull({ rebase: true }, cwd);
+      await ws.workspaceGitCommit('fix: thing', { all: true }, cwd);
+      await ws.workspaceGitHubCreatePullRequest({ title: 'Add thing' }, cwd);
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      const enc = encodeURIComponent(cwd);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/branches?cwd=${enc}`],
+        ['POST', `${base}/git/checkout?cwd=${enc}`],
+        ['POST', `${base}/git/branch?cwd=${enc}`],
+        ['POST', `${base}/git/push?cwd=${enc}`],
+        ['POST', `${base}/git/pull?cwd=${enc}`],
+        ['POST', `${base}/git/commit?cwd=${enc}`],
+        ['POST', `${base}/github/prs/create?cwd=${enc}`],
+      ]);
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(
@@ -7210,6 +7289,10 @@ describe('DaemonClient', () => {
       await client.approveWorkspaceChannelPairing('bot/name', {
         code: 'ABCDEFGH',
       });
+      await client.workspaceChannelPairingApprovals('bot/name');
+      await client.revokeWorkspaceChannelPairingApproval('bot/name', {
+        senderId: 'sender/1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspace/channel-types'],
@@ -7225,9 +7308,18 @@ describe('DaemonClient', () => {
           'POST',
           'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
         ],
+        [
+          'GET',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[11]!.body!)).toEqual({ senderId: 'sender/1' });
     });
 
     it('uses the exact qualified workspace routes', async () => {
@@ -7245,6 +7337,10 @@ describe('DaemonClient', () => {
         config: { type: 'dingtalk' },
       });
       await workspace.workspaceChannelPairingRequests('bot');
+      await workspace.workspaceChannelPairingApprovals('bot');
+      await workspace.revokeWorkspaceChannelPairingApproval('bot', {
+        senderId: 'sender-1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
@@ -7258,9 +7354,20 @@ describe('DaemonClient', () => {
           'GET',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests',
         ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        senderId: 'sender-1',
+      });
     });
   });
 });

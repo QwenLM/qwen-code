@@ -792,19 +792,19 @@ describe('getManualPlanExitSystemReminder', () => {
   it('should name the new mode and forbid exit_plan_mode', () => {
     const result = getManualPlanExitSystemReminder('default');
 
-    expect(result).toMatch(/^<system-reminder>[\s\S]*<\/system-reminder>$/);
-    expect(result).toContain('manually switched out of plan mode');
-    expect(result).toContain('current approval mode: default');
-    expect(result).toContain('Do NOT call exit_plan_mode');
-    expect(result).toContain('no longer apply');
+    expect(result).toBe(`<system-reminder>
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: default.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
+</system-reminder>`);
   });
 
   it('should render whichever mode the user switched to', () => {
     expect(getManualPlanExitSystemReminder('yolo')).toContain(
-      'current approval mode: yolo',
+      'current approval mode is: yolo',
     );
     expect(getManualPlanExitSystemReminder('auto-edit')).toContain(
-      'current approval mode: auto-edit',
+      'current approval mode is: auto-edit',
     );
   });
 });

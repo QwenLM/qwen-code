@@ -172,6 +172,7 @@ export type {
   UserMessageContentRenderInfo,
   UserMessageContentParser,
   ComposerHeaderRenderer,
+  ComposerFooterRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellAtItemRenderInfo,
@@ -202,6 +203,7 @@ export type {
   WebShellAtProvider,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
+  WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
@@ -216,14 +218,19 @@ export type {
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
+  PaneHeaderActionsInfo,
+  PaneHeaderActionsRenderer,
+} from './components/ChatPane';
+export type {
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,
+  createMarkdownChartRegistry,
   createEchartsFullDataRenderer,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';
 export type {
   DatasetCell,
   EchartsFullDataBlockProps,
@@ -235,4 +242,4 @@ export type {
   EchartsInstance,
   EchartsRuntime,
   EchartsRuntimeLoader,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';

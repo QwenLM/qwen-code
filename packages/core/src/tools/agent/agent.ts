@@ -210,6 +210,8 @@ export interface AgentParams {
   /** Todo ID this top-level execution implements, when a visible plan exists. */
   todo_id?: string;
   subagent_type?: string;
+  /** User-defined model grade for this subagent invocation. */
+  model?: string;
   /**
    * Parent conversation turns inherited by a fork. Omitted or `all` inherits
    * everything; a positive integer string inherits that many recent user turns.
@@ -667,6 +669,12 @@ export async function createApprovalModeOverride(
   // These own properties intentionally mirror Config's TS-private field names.
   // Config prototype methods read/write them at runtime on this override object.
   override.approvalMode = mode;
+  override.manualPlanExitNoticeEventState = {
+    ...(override.manualPlanExitNoticeEventState ?? {
+      version: 0,
+      kind: 'clear',
+    }),
+  };
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
     mode === ApprovalMode.PLAN
@@ -982,6 +990,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // Update the parameter schema by modifying the existing object
     const schema = this.parameterSchema as {
       properties?: {
+        model?: {
+          type: string;
+          enum: string[];
+          description: string;
+        };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       };
@@ -994,6 +1007,20 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       } else {
         delete schema.properties.name;
         delete schema.properties.plan_mode_required;
+      }
+
+      const availableGrades = [
+        ...this.subagentManager.getAvailableModelGrades().keys(),
+      ];
+      if (availableGrades.length > 0) {
+        schema.properties.model = {
+          type: 'string',
+          enum: availableGrades,
+          description:
+            'User-defined model grade for this subagent. Custom agents with an explicit model keep their configured model. Omit it to use the agent default.',
+        };
+      } else {
+        delete schema.properties.model;
       }
     }
   }
@@ -1051,6 +1078,30 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
       }
     }
+
+    if (params.model !== undefined) {
+      if (typeof params.model !== 'string' || params.model.trim() === '') {
+        return 'Parameter "model" must be a non-empty model grade when set.';
+      }
+      if (params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE) {
+        return 'Parameter "model" cannot be used with subagent_type "fork".';
+      }
+      if (
+        params.name &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "model" is not supported for a named teammate.';
+      }
+      const availableGrades = this.subagentManager.getAvailableModelGrades();
+      if (!availableGrades.has(params.model)) {
+        return `Unknown model grade "${params.model}". Available: ${[
+          ...availableGrades.keys(),
+        ].join(', ')}.`;
+      }
+    }
+
     // Some models emit an empty placeholder for the unused optional field.
     // With isolation selected, normalize it away before downstream routing.
     if (
@@ -2131,6 +2182,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
         );
+      } else if (this.params.model !== undefined) {
+        return this.buildSpawnBlockedResult(
+          'Error: "model" is not supported for a named teammate.',
+          'model is incompatible with a named teammate',
+        );
       } else if (this.params.working_dir !== undefined) {
         // A teammate spawns via TeamManager with cwd = getCwd() and returns
         // before the working_dir rebind below is reached, so the pin would be
@@ -2437,6 +2493,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           };
         }
         subagentConfig = loadedConfig;
+      }
+      const model = this.subagentManager.resolveModelGrade(
+        this.params.model,
+        subagentConfig,
+      );
+      if (model !== undefined && model !== subagentConfig.model) {
+        subagentConfig = { ...subagentConfig, model };
       }
       // Initialize the current display state
       this.currentDisplay = {

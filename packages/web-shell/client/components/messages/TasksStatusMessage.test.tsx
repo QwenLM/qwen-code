@@ -4,6 +4,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
+  DaemonSessionMonitorTaskStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
@@ -59,12 +61,33 @@ function agentTask(
   };
 }
 
+function monitorTask(
+  overrides: Partial<DaemonSessionMonitorTaskStatus> = {},
+): DaemonSessionMonitorTaskStatus {
+  return {
+    kind: 'monitor',
+    id: 'monitor-1',
+    label: 'monitor-label',
+    description: 'watch server log',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'tail -f server.log',
+    eventCount: 3,
+    lastEventTime: 5_000,
+    droppedLines: 0,
+    ...overrides,
+  };
+}
+
 function renderPanel(
-  tasks: DaemonSessionAgentTaskStatus[],
+  tasks: DaemonSessionTaskStatus[],
   options: {
+    embedded?: boolean;
     planTodos?: readonly TodoItem[];
     agentTools?: readonly ACPToolCall[];
     onOpenSubagent?: (tool: ACPToolCall) => void;
+    onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
   } = {},
 ): HTMLElement {
   const snapshot: DaemonSessionTasksStatus = {
@@ -82,16 +105,54 @@ function renderPanel(
       <I18nProvider language="en">
         <TasksStatusMessage
           message={{ snapshot }}
+          embedded={options.embedded}
           manageActiveEvent={false}
           planTodos={options.planTodos}
           agentTools={options.agentTools}
           onOpenSubagent={options.onOpenSubagent}
+          onOpenMonitor={options.onOpenMonitor}
         />
       </I18nProvider>,
     );
   });
   return container;
 }
+
+describe('TasksStatusMessage monitor details', () => {
+  it('opens an embedded monitor in the right-panel callback', () => {
+    const onOpenMonitor = vi.fn();
+    const task = monitorTask();
+    const container = renderPanel([task], {
+      embedded: true,
+      onOpenMonitor,
+    });
+    const label = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent === '[monitor] watch server log',
+    );
+    expect(label?.parentElement).not.toBeNull();
+
+    act(() => {
+      label?.parentElement?.click();
+    });
+
+    expect(onOpenMonitor).toHaveBeenCalledOnce();
+    expect(onOpenMonitor).toHaveBeenCalledWith(task);
+    expect(container.textContent).not.toContain('tail -f server.log');
+  });
+
+  it('keeps the existing inline detail when no panel callback is provided', () => {
+    const container = renderPanel([monitorTask()], { embedded: true });
+    const label = Array.from(container.querySelectorAll('span')).find(
+      (node) => node.textContent === '[monitor] watch server log',
+    );
+
+    act(() => {
+      label?.parentElement?.click();
+    });
+
+    expect(container.textContent).toContain('tail -f server.log');
+  });
+});
 
 describe('TasksStatusMessage nested-agent tree', () => {
   it('leaves workflow and subagent buttons in control of their keyboard input', async () => {

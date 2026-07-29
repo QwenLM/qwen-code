@@ -15,8 +15,8 @@ const CATALOG_PREVIEW_LIMIT = 240;
 const CATALOG_ENTRY_LIMIT = 100;
 const CATALOG_BYTE_LIMIT = 24_000;
 const CATALOG_LINEAGE_LIMIT = 16;
-const VERIFIER_REFERENCE_LIMIT = 12;
-const VERIFIER_EVIDENCE_BYTE_LIMIT = 24_000;
+export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
+const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 
 export type GoalEvidenceProvenance =
   | 'real_user'
@@ -107,7 +107,9 @@ export type InvalidGoalEvidenceReferenceCode =
   | 'wrong_goal_id'
   | 'wrong_revision'
   | 'wrong_turn_lineage'
+  | 'catalog_truncated'
   | 'immediate_blocker_external_evidence_required'
+  | 'immediate_blocker_newer_evidence_required'
   | 'repeated_blocker_turn_coverage';
 
 export class InvalidGoalEvidenceReferenceError extends Error {
@@ -143,9 +145,7 @@ export function buildGoalEvidenceCatalog(
   return {
     entries: analysis.catalog.map((entry) => ({ ...entry })),
     lineageTurnIds: analysis.lineageTurnIds.slice(-CATALOG_LINEAGE_LIMIT),
-    truncated:
-      analysis.catalogTruncated ||
-      analysis.lineageTurnIds.length > CATALOG_LINEAGE_LIMIT,
+    truncated: analysis.catalogTruncated,
   };
 }
 
@@ -159,10 +159,10 @@ export function validateGoalEvidenceReferences(
       'A terminal Goal proposal must cite at least one evidence record.',
     );
   }
-  if (references.length > VERIFIER_REFERENCE_LIMIT) {
+  if (references.length > GOAL_EVIDENCE_REFERENCE_LIMIT) {
     throw new InvalidGoalEvidenceReferenceError(
       'too_many_evidence_references',
-      `A terminal Goal proposal may cite at most ${VERIFIER_REFERENCE_LIMIT} evidence records.`,
+      `A terminal Goal proposal may cite at most ${GOAL_EVIDENCE_REFERENCE_LIMIT} evidence records.`,
     );
   }
   if (new Set(references).size !== references.length) {
@@ -176,6 +176,12 @@ export function validateGoalEvidenceReferences(
   const citedRecords = references.map((reference) =>
     validateReference(reference, input, analysis),
   );
+  if (input.proposal.status === 'complete' && analysis.catalogTruncated) {
+    throw new InvalidGoalEvidenceReferenceError(
+      'catalog_truncated',
+      'A complete Goal proposal requires an exhaustive bounded evidence catalog.',
+    );
+  }
   const evidenceBytes = citedRecords.reduce(
     (total, record) => total + Buffer.byteLength(record.content, 'utf8'),
     0,
@@ -412,6 +418,26 @@ function validateBlockerCoverage(
       throw new InvalidGoalEvidenceReferenceError(
         'immediate_blocker_external_evidence_required',
         'An immediate blocker requires cited user input or external tool evidence.',
+      );
+    }
+    const citedIds = new Set(citedRecords.map(({ uuid }) => uuid));
+    const oldestBlockerIndex = Math.min(
+      ...citedRecords
+        .filter(
+          ({ provenance }) =>
+            provenance === 'real_user' || provenance === 'tool_result',
+        )
+        .map(({ uuid }) =>
+          analysis.catalog.findIndex((entry) => entry.uuid === uuid),
+        ),
+    );
+    const uncitedNewerEvidence = analysis.catalog
+      .slice(oldestBlockerIndex + 1)
+      .filter(({ uuid }) => !citedIds.has(uuid));
+    if (uncitedNewerEvidence.length > 0) {
+      throw new InvalidGoalEvidenceReferenceError(
+        'immediate_blocker_newer_evidence_required',
+        'An immediate blocker must cite every newer bounded evidence record so contradictory evidence cannot be omitted.',
       );
     }
     return;

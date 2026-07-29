@@ -242,6 +242,26 @@ This setting accepts the same selectors described above. It is applied only
 when Qwen Code resolves the built-in Explore definition; a session, project,
 user, or extension agent named Explore keeps its own `model` setting.
 
+To let the model select from user-defined grades without exposing concrete
+model IDs, configure `agents.modelGrades` and optionally restrict them with
+`agents.allowedGrades`:
+
+```json
+{
+  "agents": {
+    "modelGrades": {
+      "small": "fast",
+      "high": "qwen-max"
+    },
+    "allowedGrades": ["small", "high"]
+  }
+}
+```
+
+The Agent tool then accepts `model: "small"` or `model: "high"` for regular
+subagents. Unknown, disallowed, fork, and named-teammate grade selections are
+rejected. A custom agent's explicit model still takes precedence over a grade.
+
 #### Permission Mode
 
 Use the optional `approvalMode` frontmatter field to control how a subagent's tool calls are approved. Valid values:

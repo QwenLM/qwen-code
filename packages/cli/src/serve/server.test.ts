@@ -363,6 +363,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_context_usage',
   'session_supported_commands',
   'session_tasks',
+  'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
   'session_status',

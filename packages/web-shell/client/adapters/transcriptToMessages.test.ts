@@ -170,7 +170,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('hides background task notifications by metadata', () => {
+  it('renders live background task notifications as system messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
         'bg-1',
@@ -190,6 +190,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([
+      {
+        id: 'bg-1',
+        role: 'system',
+        content:
+          'Background agent "general-purpose: 查询百度云活动信息" completed.',
+        variant: 'info',
+        source: 'background_notification',
+        data: { taskId: 'task-1', status: 'completed' },
+        timestamp: 1,
+      },
       {
         id: 'assistant-1',
         role: 'assistant',
@@ -234,10 +244,20 @@ describe('transcriptBlocksToDaemonMessages', () => {
         ),
       ]);
 
-      expect(messages).toHaveLength(1);
+      expect(messages).toHaveLength(2);
       expect(messages[0]).toMatchObject({
         role: 'tool_group',
         tools: [{ callId: 'agent-call', status: expectedStatus, endTime: 2 }],
+      });
+      expect(messages[1]).toMatchObject({
+        role: 'system',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          status: notificationStatus,
+          taskId: 'agent-task',
+          toolUseId: 'agent-call',
+        },
       });
       if (notificationStatus === 'cancelled') {
         expect(
@@ -270,6 +290,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages).toMatchObject([
       { role: 'tool_group', tools: [{ status: 'pending' }] },
+      {
+        role: 'system',
+        source: 'background_notification',
+        data: {
+          kind: 'shell',
+          status: 'completed',
+          toolUseId: 'agent-call',
+        },
+      },
+    ]);
+  });
+
+  it('renders replayed background notifications without task metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('bg-replay', 'user', 'Monitor completed.', 1, false, {
+        meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'bg-replay',
+        role: 'system',
+        content: 'Monitor completed.',
+        variant: 'info',
+        source: 'background_notification',
+        timestamp: 1,
+      },
     ]);
   });
 

@@ -20,7 +20,6 @@ import {
   useProviders,
   useSessionNotices,
   useStreamingState,
-  useTranscriptBlocks,
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
@@ -34,6 +33,7 @@ import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
+  DaemonSessionMonitorTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
@@ -41,14 +41,27 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 import { type SessionGitIntent } from './components/GitModePopover';
-import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
+import {
+  SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
+  SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+} from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import {
   SubagentDetailsProvider,
   useSubagentTreeResolver,
 } from './subagentDetailsContext';
+import { MonitorDetailsProvider } from './monitorDetailsContext';
+import { findMonitorTaskForTool } from './utils/monitorTasks';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
+import {
+  loadVoiceProviders,
+  resolveVoiceWorkspaceTarget,
+  setVoiceModelSetting,
+  supportsVoiceModelSettings,
+  type VoiceStatusRevision,
+} from './voice/voice-workspace-target';
+import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -84,6 +97,7 @@ import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
+import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
   type ArtifactPanelTab,
@@ -122,6 +136,7 @@ import {
 } from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
+import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
@@ -156,9 +171,9 @@ import {
   skillDescriptionKey,
 } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
-import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { useMessages } from './hooks/useMessages';
+import { useMessagesFromBlocks } from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
@@ -262,6 +277,7 @@ import {
   type ComposerToolbarEndRenderer,
   type ComposerToolbarRightRenderer,
   type ComposerHeaderRenderer,
+  type ComposerFooterRenderer,
   type ChatHeaderRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
@@ -532,6 +548,12 @@ export interface WebShellProps {
   /** Called when the split pane list changes from inside WebShell. */
   onSplitSessionIdsChange?: (sessionIds: string[]) => void;
   /**
+   * Extra actions rendered in each split-pane header, before the built-in
+   * close button. Receives the pane's session id (and workspace when known).
+   * When the actions no longer fit they collapse into a `…` overflow menu.
+   */
+  renderPaneHeaderActions?: PaneHeaderActionsRenderer;
+  /**
    * Called instead of the built-in right panel open behavior when a user clicks
    * a turn output such as review changes, an artifact, or a scheduled task.
    */
@@ -555,8 +577,7 @@ export interface WebShellProps {
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
    * Called whenever transcript blocks change. Receives the full blocks array
-   * from useTranscriptBlocks(). Fires on every streaming delta during active
-   * generation, so consumers should debounce or throttle expensive work.
+   * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
@@ -610,6 +631,8 @@ export interface WebShellProps {
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom renderer shown directly above the chat composer input. */
   renderComposerHeader?: ComposerHeaderRenderer;
+  /** Custom renderer shown directly below the chat composer input. */
+  renderComposerFooter?: ComposerFooterRenderer;
   /**
    * Custom renderer shown at the top of the chat view, above the message list.
    * Only rendered when a session is active (not in the welcome/empty state).
@@ -957,12 +980,24 @@ export function getBackgroundTaskActivityKey(
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (isBackgroundShellToolCall(tool)) {
+      if (
+        isBackgroundShellToolCall(tool) ||
+        tool.toolName.toLowerCase() === 'monitor'
+      ) {
         parts.push(`${tool.callId}:${tool.status}`);
       }
     }
   }
   return parts.join('|');
+}
+
+export function mergeMonitorTaskSnapshot(
+  current: DaemonSessionMonitorTaskStatus,
+  next: DaemonSessionMonitorTaskStatus,
+): DaemonSessionMonitorTaskStatus {
+  return current.status !== 'running' && next.status === 'running'
+    ? current
+    : next;
 }
 
 function mapToWebShellTaskInfo(
@@ -1037,6 +1072,29 @@ function translateCopyMessage(
   return message;
 }
 
+function isSameGitStatus(
+  current: DaemonWorkspaceGitStatus | undefined,
+  next: DaemonWorkspaceGitStatus | undefined,
+): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return (
+    current.v === next.v &&
+    current.workspaceCwd === next.workspaceCwd &&
+    current.branch === next.branch &&
+    current.detached === next.detached &&
+    current.staged === next.staged &&
+    current.unstaged === next.unstaged &&
+    current.untracked === next.untracked &&
+    current.conflicted === next.conflicted &&
+    current.hasUpstream === next.hasUpstream &&
+    current.ahead === next.ahead &&
+    current.behind === next.behind &&
+    current.stashCount === next.stashCount &&
+    current.operation === next.operation
+  );
+}
+
 /**
  * Read a model setting's value for the scope currently being edited. Model
  * pickers persist to `modelSettingScope`, so their "current" value reflects
@@ -1090,6 +1148,7 @@ export function App({
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
   renderComposerHeader,
+  renderComposerFooter,
   renderChatHeader,
   renderFooter,
   bottomStatusItems,
@@ -1097,6 +1156,7 @@ export function App({
   sidebar,
   splitSessionIds: externalSplitSessionIds,
   onSplitSessionIdsChange,
+  renderPaneHeaderActions,
   onRightPanelOpen,
   messageTurnOutputs,
   shellRef,
@@ -1294,6 +1354,7 @@ export function App({
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
       renderComposerHeader,
+      renderComposerFooter,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1316,6 +1377,7 @@ export function App({
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
       renderComposerHeader,
+      renderComposerFooter,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
@@ -1326,12 +1388,14 @@ export function App({
   );
   const CustomFooter = renderFooter;
   const CustomComposerHeader = renderComposerHeader;
+  const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
-  const blocks = useTranscriptBlocks();
+  const blocks = useAnimationFrameTranscriptBlocks();
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
   const resolveSubagentTree = useSubagentTreeResolver();
+  const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
     if (
@@ -1344,6 +1408,45 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const composerWorkspacesRef = useRef<
+    | Array<{
+        id: string;
+        cwd: string;
+        label: string;
+        primary: boolean;
+        trusted: boolean;
+      }>
+    | undefined
+  >(undefined);
+  const nextComposerWorkspaces = !lockedWorkspaceCwd
+    ? workspaces.map((entry) => ({
+        id: entry.id,
+        cwd: entry.cwd,
+        label: workspaceLabel(entry),
+        primary: entry.primary,
+        trusted: entry.trusted,
+      }))
+    : undefined;
+  const currentComposerWorkspaces = composerWorkspacesRef.current;
+  if (
+    currentComposerWorkspaces?.length !== nextComposerWorkspaces?.length ||
+    currentComposerWorkspaces?.some((current, index) => {
+      const next = nextComposerWorkspaces?.[index];
+      return (
+        !next ||
+        current.id !== next.id ||
+        current.cwd !== next.cwd ||
+        current.label !== next.label ||
+        current.primary !== next.primary ||
+        current.trusted !== next.trusted
+      );
+    })
+  ) {
+    composerWorkspacesRef.current = nextComposerWorkspaces;
+  }
+  const composerWorkspaces = composerWorkspacesRef.current;
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
   const visibleWorkspaces = useMemo(
     () =>
       lockedWorkspaceCwd
@@ -1362,6 +1465,10 @@ export function App({
   const transcriptReloadSupported =
     connection.capabilities?.features.includes(
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
+  const monitorDetailsSupported =
+    connection.capabilities?.features.includes(
+      SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -1386,6 +1493,8 @@ export function App({
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
+  // Changes before async session clearing updates connection state.
+  const composerSourceVersionRef = useRef(0);
   type ScratchOutcomeState = 'clear' | 'refreshing' | 'awaiting-ack';
   const scratchOutcomeUnknownRef = useRef<ScratchOutcomeState>('clear');
   const committedScratchCwdRef = useRef<string | undefined>(undefined);
@@ -1415,6 +1524,7 @@ export function App({
       (entry) => entry.cwd === selectedWorkspaceCwd,
     );
     if (selected?.trusted) return;
+    composerSourceVersionRef.current += 1;
     selectedWorkspaceCwdRef.current = undefined;
     setSelectedWorkspaceCwd(undefined);
   }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
@@ -1506,7 +1616,11 @@ export function App({
       void git
         .workspaceGit({ cwd: sessionWorktree?.path })
         .then((status) => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(status);
+          if (!cancelled) {
+            setSelectedWorkspaceGitStatus((current) =>
+              isSameGitStatus(current, status) ? current : status,
+            );
+          }
         })
         .catch(() => {
           if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
@@ -1522,7 +1636,11 @@ export function App({
         void git
           .workspaceGit({ wait: true })
           .then((status) => {
-            if (!cancelled) setSelectedWorkspaceGitStatus(status);
+            if (!cancelled) {
+              setSelectedWorkspaceGitStatus((current) =>
+                isSameGitStatus(current, status) ? current : status,
+              );
+            }
           })
           .catch((err) => {
             console.warn('[web-shell] git status fresh path failed:', err);
@@ -1587,7 +1705,7 @@ export function App({
     });
   }, []);
 
-  const messages = useMessages(t);
+  const messages = useMessagesFromBlocks(t, blocks);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
@@ -1960,6 +2078,35 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openMonitorPanel = useCallback(
+    (task: DaemonSessionMonitorTaskStatus) => {
+      const tab: ArtifactPanelTab = {
+        id: `monitor:${task.id}`,
+        kind: 'monitor',
+        title: task.description,
+        task,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => {
+              if (item.id !== tab.id || item.kind !== 'monitor') return item;
+              const mergedTask = mergeMonitorTaskSnapshot(item.task, task);
+              return {
+                ...tab,
+                title: mergedTask.description,
+                task: mergedTask,
+              };
+            })
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth],
+  );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
       const rawOutput =
@@ -2037,7 +2184,6 @@ export function App({
         );
         return;
       }
-
       if (!request.workspaceActions) {
         setArtifactPanelExtraArtifacts((current) => {
           const index = current.findIndex(
@@ -2219,10 +2365,9 @@ export function App({
     [artifactPanelWidth, getMaxArtifactPanelWidth],
   );
   useEffect(() => () => artifactPanelResizeCleanupRef.current?.(), []);
-  const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
-    () => extractPendingPermission(messageBlocks),
-    [messageBlocks],
+    () => extractPendingPermission(blocks),
+    [blocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
   const canActOnPendingApproval = !(
@@ -2368,10 +2513,67 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
+    useState(0);
   const backgroundTasks = useBackgroundTasks(
+    connection.sessionId,
     backgroundTaskActivityKey,
     connection.status === 'connected',
+    backgroundTasksRefreshTrigger,
   );
+  const monitorDetailsSessionIdRef = useRef(connection.sessionId);
+  monitorDetailsSessionIdRef.current = connection.sessionId;
+  const openMonitorPanelFromTool = useCallback(
+    async (tool: ACPToolCall): Promise<boolean> => {
+      const sessionId = monitorDetailsSessionIdRef.current;
+      if (!sessionId) return false;
+      try {
+        const snapshot = await sessionActions.getTasks();
+        if (
+          monitorDetailsSessionIdRef.current !== sessionId ||
+          snapshot.sessionId !== sessionId
+        ) {
+          return false;
+        }
+        const task = findMonitorTaskForTool(snapshot.tasks, tool);
+        if (!task) return false;
+        setBackgroundTasksRefreshTrigger((value) => value + 1);
+        openMonitorPanel(task);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [openMonitorPanel, sessionActions],
+  );
+  useEffect(() => {
+    const monitors = new Map(
+      backgroundTasks
+        .filter(
+          (task): task is DaemonSessionMonitorTaskStatus =>
+            task.kind === 'monitor',
+        )
+        .map((task) => [task.id, task]),
+    );
+    if (monitors.size === 0) return;
+    setArtifactPanelTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind !== 'monitor') return tab;
+        const task = monitors.get(tab.task.id);
+        if (!task || task === tab.task) return tab;
+        const mergedTask = mergeMonitorTaskSnapshot(tab.task, task);
+        if (mergedTask === tab.task) return tab;
+        changed = true;
+        return {
+          ...tab,
+          title: mergedTask.description,
+          task: mergedTask,
+        };
+      });
+      return changed ? next : tabs;
+    });
+  }, [backgroundTasks]);
   const footerTasks = useMemo(
     () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
     [backgroundTasks, renderFooter],
@@ -2426,14 +2628,23 @@ export function App({
     },
   });
   const composerTextRef = useRef('');
-  const composerTextDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const [composerText, setComposerText] = useState('');
+  const [hasComposerAttachments, setHasComposerAttachments] = useState<
+    boolean | null
+  >(null);
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  // Cleared in three places: the session-switch effect, the drain loop, and
+  // handleCancel. Bumping drainGenerationRef at each clear site also cancels
+  // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
+  // The session-switch effect exempts the lazy-creation transition (into
+  // preparingSessionIdRef.current) so a submit's own session creation does
+  // not cancel the command.
+  const queuedShellCommandsRef = useRef<string[]>([]);
+  const drainGenerationRef = useRef(0);
+  const shellSubmitInFlightRef = useRef(false);
+  const isDrainingRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -2528,6 +2739,7 @@ export function App({
   const [mainView, setMainView] = useState<
     'chat' | 'scheduledTasks' | 'goals' | 'split'
   >('chat');
+  const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
   // Sessions to seed the split view with (e.g. the selection from the overview).
@@ -2550,8 +2762,10 @@ export function App({
     | 'skills'
     | 'plugins'
     | 'agents'
+    | 'channels'
     | null
   >(null);
+  const activePanelRef = useRef(activePanel);
   const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -2579,7 +2793,8 @@ export function App({
         | 'mcp'
         | 'skills'
         | 'plugins'
-        | 'agents',
+        | 'agents'
+        | 'channels',
     ) => {
       setMainView('chat');
       setActivePanel(panel);
@@ -2816,7 +3031,7 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
-      if (activePanel === 'extensions') {
+      if (activePanel === 'extensions' || activePanel === 'channels') {
         panelHeadingRef.current?.focus();
         return;
       }
@@ -3001,6 +3216,14 @@ export function App({
         : [],
     [floatingTodosState, messages, tasksDialogMessage],
   );
+  const handleOpenMonitorDetails = useCallback(
+    (task: DaemonSessionMonitorTaskStatus) => {
+      setTasksDialogMessage(null);
+      setBackgroundTasksRefreshTrigger((value) => value + 1);
+      openMonitorPanel(task);
+    },
+    [openMonitorPanel],
+  );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -3027,7 +3250,9 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
-  const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
+    null,
+  );
   const preparingSessionIdRef = useRef<string | null>(null);
   /** Git mode intent for the next lazily-created session (branch or worktree). */
   const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
@@ -3079,10 +3304,11 @@ export function App({
       ) {
         return createSessionPromiseRef.current;
       }
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     }
-    if (currentSessionId) return Promise.resolve();
+    if (currentSessionId) return Promise.resolve(undefined);
     const promise = (async () => {
+      let allocatedSessionId: string | undefined;
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
@@ -3115,6 +3341,7 @@ export function App({
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
+          allocatedSessionId = sessionId;
         },
         getCurrentSessionId: () => connectionRef.current.sessionId,
       }).then((result) => {
@@ -3133,6 +3360,7 @@ export function App({
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
       setSelectedWorkspaceCwd(undefined);
+      return allocatedSessionId;
     })();
     createSessionPromiseRef.current = promise;
     const clearPreparation = () => {
@@ -3148,6 +3376,16 @@ export function App({
   onSubmitBeforeRef.current = onSubmitBefore;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
+  const getComposerWorkspaceCwd = useCallback(() => {
+    if (connectionRef.current.sessionId) {
+      return connectionRef.current.workspaceCwd;
+    }
+    return (
+      lockedWorkspaceCwd ??
+      selectedWorkspaceCwdRef.current ??
+      workspacesRef.current.find((entry) => entry.primary)?.cwd
+    );
+  }, [lockedWorkspaceCwd]);
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -3160,6 +3398,16 @@ export function App({
     },
     [],
   );
+  // Daemon-side session registration lags behind the client, so schedule a
+  // backup reload ~2 s after the immediate one to pick up newly created sessions.
+  const scheduleDelayedSessionListReload = useCallback(() => {
+    if (delayedReloadTimerRef.current !== null) {
+      clearTimeout(delayedReloadTimerRef.current);
+    }
+    delayedReloadTimerRef.current = setTimeout(() => {
+      setSessionListReloadToken((n) => n + 1);
+    }, 2000);
+  }, []);
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
@@ -3191,6 +3439,13 @@ export function App({
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
+      const restoreCancelledSubmitState = () => {
+        setIsPreparingPrompt(false);
+        lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
+        lastSubmittedImagesRef.current = previousLastSubmittedImages;
+        retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+        setShowRetryHint(previousShowRetryHint);
+      };
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
@@ -3199,10 +3454,13 @@ export function App({
       setShowRetryHint(false);
       const shouldShowPreparing = !connectionRef.current.sessionId;
       if (onSubmitBeforeRef.current) {
+        const sourceSessionId = connectionRef.current.sessionId;
+        const sourceWorkspaceCwd = getComposerWorkspaceCwd();
+        const sourceVersion = composerSourceVersionRef.current;
         setIsPreparingPrompt(true);
         try {
           await onSubmitBeforeRef.current({
-            sessionId: connectionRef.current.sessionId,
+            sessionId: sourceSessionId,
             prompt: text,
           });
         } catch (err) {
@@ -3210,13 +3468,17 @@ export function App({
             '[web-shell] onSubmitBefore rejected, prompt cancelled',
             err,
           );
-          setIsPreparingPrompt(false);
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
-          lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
-          lastSubmittedImagesRef.current = previousLastSubmittedImages;
-          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
-          setShowRetryHint(previousShowRetryHint);
+          restoreCancelledSubmitState();
+          return;
+        }
+        if (
+          connectionRef.current.sessionId !== sourceSessionId ||
+          getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
+          composerSourceVersionRef.current !== sourceVersion
+        ) {
+          restoreCancelledSubmitState();
           return;
         }
         // Only reset if session already exists; otherwise keep true and let
@@ -3256,15 +3518,7 @@ export function App({
           prompt: text,
           queued: false,
         });
-        // Schedule an additional delayed reload to account for daemon-side
-        // session registration lag — the immediate reload above may return
-        // a list that doesn't yet include the newly created session.
-        if (delayedReloadTimerRef.current !== null) {
-          clearTimeout(delayedReloadTimerRef.current);
-        }
-        delayedReloadTimerRef.current = setTimeout(() => {
-          setSessionListReloadToken((n) => n + 1);
-        }, 2000);
+        scheduleDelayedSessionListReload();
       }
       const result = await (
         sessionActions.sendPrompt as (
@@ -3274,8 +3528,51 @@ export function App({
       )(text, promptOptions);
       return result;
     },
-    [clearFollowup, ensureSessionForPrompt, sessionActions],
+    [
+      clearFollowup,
+      ensureSessionForPrompt,
+      getComposerWorkspaceCwd,
+      scheduleDelayedSessionListReload,
+      sessionActions,
+    ],
   );
+
+  const resolveSessionForWorkspace = useCallback(
+    async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
+      try {
+        if (!forceCreate) {
+          // Reuse the connected session only when it owns the target checkout.
+          // For a linked-worktree session the owned checkout is the worktree
+          // path, not the base workspace (activeWorkspaceCwd), so a Commit
+          // opened on the base workspace must not borrow the worktree session.
+          const sessionOwnerCwd = sessionWorktree?.path ?? activeWorkspaceCwd;
+          if (connection.sessionId && sessionOwnerCwd === cwd) {
+            return connection.sessionId;
+          }
+          // Fetch the most recent session for this workspace.
+          const sessions = await workspace.client
+            .workspaceByCwd(cwd)
+            .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
+          if (sessions.length > 0) return sessions[0].sessionId;
+        }
+        // No session exists or forced: create one.
+        const result = await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).createSession({ workspaceCwd: cwd });
+        return result.sessionId;
+      } catch {
+        return undefined;
+      }
+    },
+    [
+      connection.sessionId,
+      activeWorkspaceCwd,
+      workspace.client,
+      sessionActions,
+      sessionWorktree,
+    ],
+  );
+
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -3298,6 +3595,22 @@ export function App({
       setGitModeIntent({ mode: 'current' });
     }
   }, [gitModeEligible]);
+  const handleOpenGitDiff = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'diff',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenCommit = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'commit',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -3326,6 +3639,60 @@ export function App({
   // while a full-pane view (the Scheduled Tasks page) covers the chat, so
   // keystrokes/Escape can't reach the hidden composer underneath.
   const interactionBlocked = dialogOpen || mainView !== 'chat';
+  const mainVoiceTarget = useMemo(
+    () =>
+      resolveVoiceWorkspaceTarget({
+        capabilities: workspace.capabilities,
+        intendedCwd: activeWorkspaceCwd,
+        sessionId: connection.sessionId,
+        workspaces:
+          workspace.capabilities?.workspaces || lockedWorkspaceCapability
+            ? workspaces
+            : undefined,
+      }),
+    [
+      activeWorkspaceCwd,
+      connection.sessionId,
+      lockedWorkspaceCapability,
+      workspace.capabilities,
+      workspaces,
+    ],
+  );
+  const [voiceUserRevision, setVoiceUserRevision] = useState(0);
+  const [voiceWorkspaceRevisions, setVoiceWorkspaceRevisions] = useState<
+    Record<string, number>
+  >({});
+  const mainVoiceStatusRevision: VoiceStatusRevision = useMemo(
+    () => ({
+      user: voiceUserRevision,
+      workspace: mainVoiceTarget
+        ? (voiceWorkspaceRevisions[mainVoiceTarget.workspaceKey] ?? 0)
+        : 0,
+    }),
+    [mainVoiceTarget, voiceUserRevision, voiceWorkspaceRevisions],
+  );
+  const voiceModelSettingsSupported = supportsVoiceModelSettings(
+    mainVoiceTarget,
+    workspace.capabilities?.features ?? [],
+  );
+  const matchingVoiceSettingsVersion =
+    mainVoiceTarget?.sessionId === connection.sessionId &&
+    (!mainVoiceTarget?.cwd || mainVoiceTarget.cwd === connection.workspaceCwd)
+      ? workspaceEventSignals?.settingsVersion
+      : undefined;
+  const {
+    descriptor: qualifiedVoiceSetting,
+    reload: reloadQualifiedVoiceSettings,
+  } = useVoiceWorkspaceSettings(
+    workspace.client,
+    mainVoiceTarget,
+    voiceModelSettingsSupported && mainView !== 'split',
+    JSON.stringify([
+      voiceUserRevision,
+      mainVoiceStatusRevision.workspace,
+      matchingVoiceSettingsVersion ?? null,
+    ]),
+  );
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -3378,12 +3745,22 @@ export function App({
       inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
+        const sourceSessionId = connectionRef.current.sessionId;
+        const sourceWorkspaceCwd = getComposerWorkspaceCwd();
+        const sourceVersion = composerSourceVersionRef.current;
         onSubmitBeforeRef
           .current({
-            sessionId: connectionRef.current.sessionId,
+            sessionId: sourceSessionId,
             prompt: text,
           })
           .then(() => {
+            if (
+              connectionRef.current.sessionId !== sourceSessionId ||
+              getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
+              composerSourceVersionRef.current !== sourceVersion
+            ) {
+              return;
+            }
             const result = rawEnqueuePrompt(
               text,
               images,
@@ -3397,11 +3774,10 @@ export function App({
                 editorRef.current?.clear();
               }
             }
-            const sessionId = connectionRef.current.sessionId;
-            if (sessionId && text.trim()) {
+            if (sourceSessionId && text.trim()) {
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
-                sessionId,
+                sessionId: sourceSessionId,
                 prompt: text,
                 queued: true,
               });
@@ -3432,7 +3808,7 @@ export function App({
       }
       return result;
     },
-    [rawEnqueuePrompt],
+    [getComposerWorkspaceCwd, rawEnqueuePrompt],
   );
 
   useEffect(() => {
@@ -3671,6 +4047,47 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const reloadTargetedWorkspaceSettings = useCallback(async () => {
+    const status = await reloadWorkspaceSettings();
+    if (mainVoiceTarget?.route === 'workspace-qualified') {
+      await reloadQualifiedVoiceSettings();
+    }
+    return status;
+  }, [
+    mainVoiceTarget?.route,
+    reloadQualifiedVoiceSettings,
+    reloadWorkspaceSettings,
+  ]);
+  const targetedWorkspaceSettings = useMemo(() => {
+    const withoutVoice = workspaceSettings.filter(
+      (setting) => setting.key !== 'voiceModel',
+    );
+    if (mainView === 'split') return withoutVoice;
+    if (mainVoiceTarget?.route === 'legacy-primary') return workspaceSettings;
+    if (!voiceModelSettingsSupported || !qualifiedVoiceSetting) {
+      return withoutVoice;
+    }
+    const voiceIndex = workspaceSettings.findIndex(
+      (setting) => setting.key === 'voiceModel',
+    );
+    if (voiceIndex < 0) {
+      return [...withoutVoice, qualifiedVoiceSetting];
+    }
+    return workspaceSettings.map((setting) =>
+      setting.key === 'voiceModel' ? qualifiedVoiceSetting : setting,
+    );
+  }, [
+    mainView,
+    mainVoiceTarget?.route,
+    qualifiedVoiceSetting,
+    voiceModelSettingsSupported,
+    workspaceSettings,
+  ]);
+  const targetedWorkspaceSettingsState = {
+    ...workspaceSettingsState,
+    settings: targetedWorkspaceSettings,
+    reload: reloadTargetedWorkspaceSettings,
+  };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
   );
@@ -3682,7 +4099,7 @@ export function App({
   );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
-      workspaceSettings,
+      targetedWorkspaceSettings,
       modelSettingScope,
       'voiceModel',
     );
@@ -3718,6 +4135,207 @@ export function App({
           .filter(Boolean)
       : [];
   }, [workspaceSettings, modelSettingScope]);
+  const bumpVoiceRevision = useCallback(
+    (target: typeof mainVoiceTarget, scope: 'workspace' | 'user') => {
+      if (!target) return;
+      if (scope === 'user') {
+        setVoiceUserRevision((revision) => revision + 1);
+        return;
+      }
+      setVoiceWorkspaceRevisions((revisions) => ({
+        ...revisions,
+        [target.workspaceKey]: (revisions[target.workspaceKey] ?? 0) + 1,
+      }));
+    },
+    [],
+  );
+  const writeVoiceModelForTarget = useCallback(
+    async (
+      value: string,
+      scope: 'workspace' | 'user',
+      target = mainVoiceTarget,
+    ) => {
+      if (
+        !target ||
+        !supportsVoiceModelSettings(
+          target,
+          workspace.capabilities?.features ?? [],
+        )
+      ) {
+        throw new Error(
+          'Voice model settings are unavailable for this workspace.',
+        );
+      }
+      try {
+        if (target.route === 'legacy-primary' || scope === 'user') {
+          await setWorkspaceSetting(scope, 'voiceModel', value);
+        } else {
+          await setVoiceModelSetting(workspace.client, target, scope, value);
+        }
+      } catch (error) {
+        bumpVoiceRevision(target, scope);
+        if (target.route === 'legacy-primary') {
+          await reloadWorkspaceSettings().catch(() => undefined);
+        } else {
+          await reloadQualifiedVoiceSettings().catch(() => undefined);
+        }
+        throw error;
+      }
+      bumpVoiceRevision(target, scope);
+      if (target.route === 'legacy-primary') {
+        await reloadWorkspaceSettings().catch(() => undefined);
+      } else {
+        await reloadQualifiedVoiceSettings().catch(() => undefined);
+      }
+    },
+    [
+      bumpVoiceRevision,
+      mainVoiceTarget,
+      reloadQualifiedVoiceSettings,
+      reloadWorkspaceSettings,
+      setWorkspaceSetting,
+      workspace.capabilities?.features,
+      workspace.client,
+    ],
+  );
+  const mainVoiceTargetRef = useRef(mainVoiceTarget);
+  const voiceFeaturesRef = useRef(workspace.capabilities?.features ?? []);
+  useLayoutEffect(() => {
+    modelDialogModeRef.current = modelDialogMode;
+    showFallbacksDialogRef.current = showFallbacksDialog;
+    mainViewRef.current = mainView;
+    activePanelRef.current = activePanel;
+    showAuthDialogRef.current = showAuthDialog;
+    mainVoiceTargetRef.current = mainVoiceTarget;
+    voiceFeaturesRef.current = workspace.capabilities?.features ?? [];
+  }, [
+    activePanel,
+    mainView,
+    mainVoiceTarget,
+    modelDialogMode,
+    showAuthDialog,
+    showFallbacksDialog,
+    workspace.capabilities?.features,
+  ]);
+  const voicePickerRequestRef = useRef(0);
+  const pendingVoicePickerSourceRef = useRef<
+    'command' | 'settings' | undefined
+  >(undefined);
+  const pendingVoicePickerOwnerRef = useRef<string | undefined>(undefined);
+  const voicePickerTargetRef = useRef(mainVoiceTarget);
+  useEffect(
+    () => () => {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    },
+    [],
+  );
+  const openVoiceModelPicker = useCallback(
+    async (scope: 'workspace' | 'user', source: 'command' | 'settings') => {
+      const target = mainVoiceTargetRef.current;
+      if (
+        !target ||
+        !supportsVoiceModelSettings(
+          target,
+          workspace.capabilities?.features ?? [],
+        )
+      ) {
+        reportError(
+          new Error('Voice model settings are unavailable for this workspace.'),
+          t('model.setVoice'),
+        );
+        return;
+      }
+      const request = ++voicePickerRequestRef.current;
+      pendingVoicePickerSourceRef.current = source;
+      pendingVoicePickerOwnerRef.current = target.ownerKey;
+      const intentIsCurrent = () =>
+        request === voicePickerRequestRef.current &&
+        mainVoiceTargetRef.current?.ownerKey === target.ownerKey &&
+        supportsVoiceModelSettings(
+          mainVoiceTargetRef.current,
+          voiceFeaturesRef.current,
+        ) &&
+        (source === 'settings'
+          ? activePanelRef.current === 'settings'
+          : activePanelRef.current === null) &&
+        mainViewRef.current === 'chat' &&
+        modelDialogModeRef.current === null &&
+        !showFallbacksDialogRef.current &&
+        !showAuthDialogRef.current;
+      try {
+        const status = await loadVoiceProviders(workspace.client, target);
+        if (!intentIsCurrent()) {
+          if (request === voicePickerRequestRef.current) {
+            pendingVoicePickerSourceRef.current = undefined;
+          }
+          return;
+        }
+        pendingVoicePickerSourceRef.current = undefined;
+        voicePickerTargetRef.current = target;
+        setVoiceModels(extractVoiceModels(status));
+        setModelSettingScope(scope);
+        setModelDialogMode('voice');
+      } catch (error) {
+        if (!intentIsCurrent()) {
+          if (request === voicePickerRequestRef.current) {
+            pendingVoicePickerSourceRef.current = undefined;
+          }
+          return;
+        }
+        pendingVoicePickerSourceRef.current = undefined;
+        reportError(error, t('model.setVoice'));
+      }
+    },
+    [reportError, t, workspace.capabilities?.features, workspace.client],
+  );
+  useEffect(() => {
+    if (
+      pendingVoicePickerSourceRef.current &&
+      (pendingVoicePickerOwnerRef.current !== mainVoiceTarget?.ownerKey ||
+        !voiceModelSettingsSupported)
+    ) {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    }
+  }, [mainVoiceTarget?.ownerKey, voiceModelSettingsSupported]);
+  useEffect(() => {
+    const source = pendingVoicePickerSourceRef.current;
+    const sourceSurfaceIsCurrent =
+      source === 'settings' ? activePanel === 'settings' : activePanel === null;
+    if (source && !sourceSurfaceIsCurrent) {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    }
+  }, [activePanel]);
+  useEffect(() => {
+    if (
+      pendingVoicePickerSourceRef.current &&
+      (mainView !== 'chat' ||
+        modelDialogMode !== null ||
+        showFallbacksDialog ||
+        showAuthDialog)
+    ) {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    }
+  }, [mainView, modelDialogMode, showAuthDialog, showFallbacksDialog]);
+  useEffect(() => {
+    const pickerTarget = voicePickerTargetRef.current;
+    if (
+      modelDialogMode === 'voice' &&
+      (pickerTarget?.ownerKey !== mainVoiceTarget?.ownerKey ||
+        !voiceModelSettingsSupported ||
+        mainView !== 'chat')
+    ) {
+      setModelDialogMode(null);
+    }
+  }, [
+    mainView,
+    mainVoiceTarget?.ownerKey,
+    modelDialogMode,
+    voiceModelSettingsSupported,
+  ]);
   // Fallback candidates are the selectable (non-runtime) models, keyed by their
   // base id — the same value shape the modelFallbacks setting stores.
   const fallbackModelOptions = useMemo(() => {
@@ -3882,11 +4500,96 @@ export function App({
     streamingStateRef.current = streamingState;
   }, [streamingState]);
 
+  // Drop queued commands on a session switch so the drain never runs a
+  // command against a different workspace's daemon (mirrors useQueuedPrompts).
+  const prevQueueSessionIdRef = useRef(connection.sessionId);
   useEffect(() => {
-    modelDialogModeRef.current = modelDialogMode;
-    showFallbacksDialogRef.current = showFallbacksDialog;
-    showAuthDialogRef.current = showAuthDialog;
-  }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
+    if (prevQueueSessionIdRef.current === connection.sessionId) return;
+    prevQueueSessionIdRef.current = connection.sessionId;
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    // Skip the bump when the transition is into the session that
+    // ensureSessionForPrompt is preparing — that is the submit's own lazy
+    // creation, not a user-initiated switch.
+    if (connection.sessionId !== preparingSessionIdRef.current) {
+      drainGenerationRef.current++;
+      isDrainingRef.current = false;
+    }
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
+  }, [connection.sessionId, pushToast, t]);
+
+  // Declared after the session-switch wipe effect above: React runs effects in
+  // declaration order, so the queue is already cleared before this drain sees it.
+  const prevShellDrainStreamingStateRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevShellDrainStreamingStateRef.current;
+    prevShellDrainStreamingStateRef.current = streamingState;
+    // Only start a drain on the transition into idle. sendShellCommand drives
+    // streamingState non-idle while each command runs, so cancelling the drain
+    // on every streamingState change would drop every command after the first.
+    if (prev === 'idle' || streamingState !== 'idle') return;
+    // A running drain re-reads the queue after each batch, so commands queued
+    // mid-drain are picked up by it. Starting a second drain here would bump the
+    // generation and cancel the in-flight batch, silently dropping commands.
+    if (isDrainingRef.current) return;
+    const cmds = queuedShellCommandsRef.current;
+    if (cmds.length === 0) return;
+    queuedShellCommandsRef.current = [];
+    isDrainingRef.current = true;
+    const generation = ++drainGenerationRef.current;
+    const drainSessionId = connectionRef.current.sessionId;
+    void (async () => {
+      try {
+        let batch = cmds;
+        while (batch.length > 0) {
+          for (let i = 0; i < batch.length; i++) {
+            const generationChanged = drainGenerationRef.current !== generation;
+            if (
+              generationChanged ||
+              connectionRef.current.sessionId !== drainSessionId ||
+              connectionRef.current.status !== 'connected'
+            ) {
+              let dropped = batch.length - i;
+              if (!generationChanged) {
+                // The two generation-bump sites (session switch, cancel) wipe
+                // the queue themselves, so anything parked here was queued
+                // after the drop and is fresh user intent. A disconnect has no
+                // such wipe — clear it so a reconnect cannot resurrect a newer
+                // command behind an already-dropped older one.
+                dropped += queuedShellCommandsRef.current.length;
+                queuedShellCommandsRef.current = [];
+              }
+              console.warn(
+                '[web-shell] dropping %d queued shell command(s)',
+                dropped,
+              );
+              pushToast('warning', t('queue.shellDropped', { count: dropped }));
+              return;
+            }
+            try {
+              await sessionActions.sendShellCommand(batch[i]);
+            } catch (error: unknown) {
+              reportError(
+                error,
+                `Failed to execute shell command: !${batch[i]}`,
+              );
+            }
+          }
+          batch = queuedShellCommandsRef.current;
+          queuedShellCommandsRef.current = [];
+        }
+      } finally {
+        // Release the lock only if this IIFE is still the active drainer; a
+        // cancel or session switch may have bumped the generation and handed
+        // the lock to a newer drain that must not be unblocked prematurely.
+        if (drainGenerationRef.current === generation) {
+          isDrainingRef.current = false;
+        }
+      }
+    })();
+  }, [streamingState, sessionActions, reportError, pushToast, t]);
 
   useEffect(() => {
     let retryableTurnErrorId: string | null = null;
@@ -3981,8 +4684,14 @@ export function App({
       lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
+    // After a session is cleared the connection's workspaceCwd is a leftover
+    // from the previous session; reporting it would misroute the host back to
+    // the old workspace. activeWorkspaceCwd resolves the workspace picked for
+    // the next session (locked / selected / primary) and is what the composer
+    // chip reports, so the host and the chip stay in agreement.
+    const reportedWorkspaceCwd = activeWorkspaceCwd ?? connection.workspaceCwd;
     const activeWorkspace = workspaces.find(
-      (entry) => entry.cwd === connection.workspaceCwd,
+      (entry) => entry.cwd === reportedWorkspaceCwd,
     );
     if (connection.sessionId && !workspace.capabilities) return;
     const workspaceId =
@@ -3992,23 +4701,24 @@ export function App({
     if (
       lastNotifiedSessionIdRef.current === connection.sessionId &&
       lastNotifiedWorkspaceIdRef.current === workspaceId &&
-      lastNotifiedWorkspaceCwdRef.current === connection.workspaceCwd
+      lastNotifiedWorkspaceCwdRef.current === reportedWorkspaceCwd
     ) {
       return;
     }
     lastNotifiedSessionIdRef.current = connection.sessionId;
     lastNotifiedWorkspaceIdRef.current = workspaceId;
-    lastNotifiedWorkspaceCwdRef.current = connection.workspaceCwd;
+    lastNotifiedWorkspaceCwdRef.current = reportedWorkspaceCwd;
     onSessionIdChange?.(
       connection.sessionId,
       workspaceId,
-      connection.workspaceCwd,
+      reportedWorkspaceCwd,
     );
   }, [
     connection.missingSession,
     connection.sessionId,
     connection.workspaceCwd,
     onSessionIdChange,
+    activeWorkspaceCwd,
     workspace.capabilities,
     workspaces,
   ]);
@@ -4226,6 +4936,7 @@ export function App({
       opts?: { keepView?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
+      composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending git mode intent so it never
@@ -4278,7 +4989,7 @@ export function App({
   const switchWorkspace = useCallback(
     async (
       workspaceCwd: string | undefined,
-      acceptedWorkspaces: readonly DaemonWorkspaceCapability[] = workspaces,
+      acceptedWorkspaces: readonly DaemonWorkspaceCapability[] = workspacesRef.current,
     ) => {
       if (workspaceSwitchTokenRef.current) return;
       const token = Symbol('workspace-switch');
@@ -4299,6 +5010,7 @@ export function App({
           await createNewSession(workspaceCwd);
           return;
         }
+        composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
       } finally {
@@ -4307,14 +5019,14 @@ export function App({
         }
       }
     },
-    [createNewSession, workspaces],
+    [createNewSession],
   );
 
   /** Refreshes once and switches only from the accepted capability snapshot. */
   const reconcileAddedWorkspace = useCallback(
     async (canonicalCwd: string): Promise<boolean> => {
       try {
-        const capabilities = await workspace.refreshCapabilities?.();
+        const capabilities = await refreshWorkspaceCapabilities?.();
         const acceptedWorkspaces = capabilities?.workspaces ?? [];
         const added = acceptedWorkspaces.find(
           (entry) => entry.cwd === canonicalCwd,
@@ -4331,7 +5043,7 @@ export function App({
         return false;
       }
     },
-    [reportError, switchWorkspace, workspace],
+    [refreshWorkspaceCapabilities, reportError, switchWorkspace],
   );
 
   /** Registers an existing directory through the shared mutation lane. */
@@ -4385,7 +5097,7 @@ export function App({
   const refreshScratchOutcome = useCallback(async () => {
     setScratchOutcome('refreshing');
     try {
-      const capabilities = await workspace.refreshCapabilities?.();
+      const capabilities = await refreshWorkspaceCapabilities?.();
       if (!capabilities) return;
       const acceptedWorkspaces = capabilities.workspaces ?? [];
       const committedCwd = committedScratchCwdRef.current;
@@ -4407,7 +5119,12 @@ export function App({
     } catch (error) {
       reportError(error, 'Failed to refresh the workspace list');
     }
-  }, [reportError, setScratchOutcome, switchWorkspace, workspace]);
+  }, [
+    reportError,
+    setScratchOutcome,
+    switchWorkspace,
+    refreshWorkspaceCapabilities,
+  ]);
 
   /**
    * Creates at most one scratch directory per intent and locks further POSTs
@@ -4455,34 +5172,34 @@ export function App({
     t,
     workspaceActions,
   ]);
-  useEffect(
-    () => () => {
-      if (composerTextDebounceRef.current) {
-        clearTimeout(composerTextDebounceRef.current);
-      }
+  const handleSelectComposerWorkspace = useCallback(
+    (cwd: string | undefined) => {
+      void switchWorkspace(cwd);
+    },
+    [switchWorkspace],
+  );
+  const handleCreateComposerScratchWorkspace = useCallback(() => {
+    void handleCreateScratchWorkspace();
+  }, [handleCreateScratchWorkspace]);
+  const handleOpenExistingWorkspace = useCallback(() => {
+    setShowAddWorkspaceDialog(true);
+  }, []);
+
+  const handleComposerAttachmentsChange = useCallback(
+    (hasAttachments: boolean) => {
+      setHasComposerAttachments(hasAttachments);
     },
     [],
   );
 
-  const handleComposerTextChange = useCallback((text: string) => {
-    composerTextRef.current = text;
-    if (composerTextDebounceRef.current) {
-      clearTimeout(composerTextDebounceRef.current);
-    }
-    composerTextDebounceRef.current = setTimeout(() => {
-      setComposerText(text);
-      composerTextDebounceRef.current = null;
-    }, 120);
-  }, []);
-
   const {
     suggestion: newSessionSuggestion,
+    updateInput: updateNewSessionSuggestionInput,
     dismiss: dismissNewSessionSuggestion,
     suppress: suppressNewSessionSuggestion,
   } = useNewSessionSuggestion({
     enabled:
       connection.capabilities?.features.includes('session_generation') === true,
-    inputText: composerText,
     messages,
     sessionId: connection.sessionId,
     contextUsageRatio:
@@ -4491,8 +5208,17 @@ export function App({
         : 0,
     isRunning: streamingState !== 'idle',
     dialogOpen: interactionBlocked || approvalOverlayActive,
+    hasAttachments: hasComposerAttachments,
     generateContent: sessionActions.generateSessionContent,
   });
+
+  const handleComposerTextChange = useCallback(
+    (text: string) => {
+      composerTextRef.current = text;
+      updateNewSessionSuggestionInput(text);
+    },
+    [updateNewSessionSuggestionInput],
+  );
 
   const flushPendingNewSessionSuggestionSubmit = useCallback(
     (expectedToken?: number) => {
@@ -4554,7 +5280,11 @@ export function App({
   const handleAcceptNewSessionSuggestion = useCallback(() => {
     const draft = composerTextRef.current.trim();
     if (!draft || isStartingNewSessionSuggestion) return;
-    if (newSessionSuggestion?.classifiedInput !== draft) {
+    if (
+      newSessionSuggestion?.suggestion !== 'new_session' ||
+      newSessionSuggestion.classifiedInput !== draft ||
+      newSessionSuggestion.sourceSessionId !== connectionRef.current.sessionId
+    ) {
       dismissNewSessionSuggestion();
       return;
     }
@@ -4593,6 +5323,24 @@ export function App({
     onSessionIdChange,
     suppressNewSessionSuggestion,
   ]);
+
+  const handleAcceptBtwSuggestion = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    if (
+      !draft ||
+      newSessionSuggestion?.suggestion !== 'btw' ||
+      newSessionSuggestion.classifiedInput !== draft ||
+      newSessionSuggestion.sourceSessionId !==
+        connectionRef.current.sessionId ||
+      editorRef.current?.hasAttachments() !== false
+    ) {
+      dismissNewSessionSuggestion();
+      return;
+    }
+    dismissNewSessionSuggestion();
+    editorRef.current?.submit({ text: `/btw ${draft}` });
+    editorRef.current?.focus();
+  }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
@@ -4949,7 +5697,7 @@ export function App({
           !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(text, images, {
           clearComposerOnPromptStart,
-          commitComposerAccepted: deferComposerCommit
+          commitComposerAccepted: clearComposerOnPromptStart
             ? opts?.commitComposerAccepted
             : undefined,
         }).catch((error: unknown) => {
@@ -5044,7 +5792,7 @@ export function App({
         sendPrompt(promptText, promptImages, {
           ...opts,
           clearComposerOnPromptStart,
-          commitComposerAccepted: deferComposerCommit
+          commitComposerAccepted: clearComposerOnPromptStart
             ? commitComposerAccepted
             : undefined,
         }).catch((error: unknown) => reportError(error, errorMessage));
@@ -5197,7 +5945,7 @@ export function App({
                   !connectionRef.current.sessionId || deferComposerCommit;
                 sendPrompt(`/language ui ${nextLanguage}`, undefined, {
                   clearComposerOnPromptStart,
-                  commitComposerAccepted: deferComposerCommit
+                  commitComposerAccepted: clearComposerOnPromptStart
                     ? commitComposerAccepted
                     : undefined,
                 })
@@ -5301,25 +6049,13 @@ export function App({
             }
             if (modelArg === '--voice') {
               if (echoOrDeferLocalCommand(text, images)) return true;
-              workspaceActions
-                .loadProviders()
-                .then((status) => {
-                  setVoiceModels(extractVoiceModels(status));
-                  setModelDialogMode('voice');
-                })
-                .catch((error: unknown) =>
-                  reportError(error, t('model.setVoice')),
-                );
+              void openVoiceModelPicker('workspace', 'command');
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
               const voiceModelId = modelArg.replace(/^--voice\s+/, '');
-              setWorkspaceSetting(
-                'workspace',
-                'voiceModel',
-                voiceModelId,
-              ).catch((error: unknown) =>
-                reportError(error, t('model.setVoice')),
+              void writeVoiceModelForTarget(voiceModelId, 'workspace').catch(
+                (error: unknown) => reportError(error, t('model.setVoice')),
               );
               return true;
             }
@@ -5870,17 +6606,56 @@ export function App({
           inputAnnotations: metadata?.inputAnnotations,
         });
       } else if (text.startsWith('!')) {
-        if (promptBlocked) {
-          pushToast('error', t('queue.shellBlocked'));
-          return false;
-        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (!requireActiveSessionForLocalCommand()) return false;
-        sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
-          reportError(error, 'Failed to execute shell command');
-        });
-        return true;
+        if (promptBlocked) {
+          queuedShellCommandsRef.current.push(cmd);
+          pushToast('info', t('queue.shellQueued'));
+          return true;
+        }
+        const needsSession = !connectionRef.current.sessionId;
+        if (needsSession) {
+          if (shellSubmitInFlightRef.current) return false;
+          shellSubmitInFlightRef.current = true;
+          setIsPreparingPrompt(true);
+        }
+        let sessionCreated = false;
+        const generationAtSubmit = drainGenerationRef.current;
+        void ensureSessionForPrompt()
+          .finally(() => {
+            if (needsSession) {
+              setIsPreparingPrompt(false);
+              shellSubmitInFlightRef.current = false;
+            }
+          })
+          .then((createdSessionId) => {
+            if (drainGenerationRef.current !== generationAtSubmit) return;
+            if (needsSession && createdSessionId) {
+              sessionCreated = true;
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId: createdSessionId,
+                prompt: `!${cmd}`,
+                queued: false,
+              });
+              scheduleDelayedSessionListReload();
+            }
+            return sessionActions.sendShellCommand(cmd);
+          })
+          .catch((error: unknown) => {
+            reportError(
+              error,
+              needsSession && !sessionCreated
+                ? 'Failed to create session for shell command'
+                : 'Failed to execute shell command',
+            );
+          });
+        return !needsSession;
       } else {
         if (promptBlocked) {
           return enqueuePrompt(
@@ -5909,6 +6684,8 @@ export function App({
       openScheduledTasks,
       openGoals,
       createNewSession,
+      ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
@@ -5931,12 +6708,16 @@ export function App({
       setPendingModel,
       setPendingMode,
       setWorkspaceSetting,
+      openVoiceModelPicker,
+      writeVoiceModelForTarget,
       showContextUsage,
       t,
       workspaceActions,
     ],
   );
 
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
   const handleEditorSubmit = useCallback(
     (
       text: string,
@@ -5944,7 +6725,7 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
-      const accepted = handleSubmit(
+      const accepted = handleSubmitRef.current(
         text,
         images,
         commitComposerAccepted,
@@ -5955,7 +6736,7 @@ export function App({
       }
       return accepted;
     },
-    [handleSubmit, resumeChatBottomFollow],
+    [resumeChatBottomFollow],
   );
 
   const handleConfirm = useCallback(
@@ -5970,10 +6751,18 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    drainGenerationRef.current++;
+    isDrainingRef.current = false;
+    shellSubmitInFlightRef.current = false;
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });
-  }, [sessionActions, reportError]);
+  }, [sessionActions, reportError, pushToast, t]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;
@@ -6383,11 +7172,23 @@ export function App({
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
       // not ACP format. extractVoiceModels() sets id to the baseModelId.
       const bareModelId = extractBareModelId(modelId);
-      setWorkspaceSetting(modelSettingScope, 'voiceModel', bareModelId).catch(
-        (error: unknown) => reportError(error, t('model.setVoice')),
-      );
+      const target = voicePickerTargetRef.current;
+      if (!target || target.ownerKey !== mainVoiceTargetRef.current?.ownerKey) {
+        reportError(
+          new Error(
+            'The Voice workspace changed before the selection applied.',
+          ),
+          t('model.setVoice'),
+        );
+        return;
+      }
+      void writeVoiceModelForTarget(
+        bareModelId,
+        modelSettingScope,
+        target,
+      ).catch((error: unknown) => reportError(error, t('model.setVoice')));
     },
-    [modelSettingScope, reportError, setWorkspaceSetting, t],
+    [modelSettingScope, reportError, t, writeVoiceModelForTarget],
   );
 
   const handleVisionModelSelect = useCallback(
@@ -6767,6 +7568,8 @@ export function App({
               workspaceCwd={gitDialog.workspaceCwd}
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
+              sessionId={connection.sessionId}
+              resolveSessionForWorkspace={resolveSessionForWorkspace}
               onClose={() => setGitDialog(undefined)}
             />
           )}
@@ -6791,6 +7594,7 @@ export function App({
                   setTasksDialogMessage(null);
                   openSubagentPanel(tool);
                 }}
+                onOpenMonitor={handleOpenMonitorDetails}
               />
             </DialogShell>
           )}
@@ -6945,6 +7749,10 @@ export function App({
               onSuggest={(prefix) =>
                 workspaceActions.suggestWorkspacePaths(prefix)
               }
+              onPick={async () => {
+                const result = await workspaceActions.pickWorkspaceDirectory();
+                return result.selected ? result.path : undefined;
+              }}
               persistenceSupported={
                 persistentWorkspaceRegistrationSupported
               }
@@ -7022,6 +7830,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
+                  onOpenChannels={() => {
+                    closeMobileDrawer();
+                    openPanel('channels');
+                  }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -7069,7 +7881,28 @@ export function App({
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
-                    setGitDialog({ workspaceCwd, view: 'diff' })
+                    setGitDialog({
+                      workspaceCwd,
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'diff',
+                    })
+                  }
+                  onOpenCommit={(workspaceCwd) =>
+                    setGitDialog({
+                      workspaceCwd,
+                      // A worktree session commits in the worktree checkout,
+                      // not the base workspace cwd — but only for the active
+                      // session's own workspace chip; another workspace's chip
+                      // has no association with this session's worktree.
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'commit',
+                    })
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
@@ -7155,6 +7988,8 @@ export function App({
                               ? t('agents.title')
                           : activePanel === 'plugins'
                               ? t('plugins.title')
+                            : activePanel === 'channels'
+                              ? t('channels.title')
                               : t('sessionsOverview.title')
                   }
                 >
@@ -7162,7 +7997,8 @@ export function App({
                     activePanel !== 'mcp' &&
                     activePanel !== 'skills' &&
                     activePanel !== 'agents' &&
-                    activePanel !== 'plugins' && (
+                    activePanel !== 'plugins' &&
+                    activePanel !== 'channels' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -7214,14 +8050,15 @@ export function App({
                       initialFocusRef={
                         activePanel === 'plugins'
                           ? pluginTabRef
-                          : activePanel === 'extensions'
+                          : activePanel === 'extensions' ||
+                              activePanel === 'channels'
                             ? panelHeadingRef
                             : undefined
                       }
                     >
                       {activePanel === 'settings' ? (
                       <SettingsMessage
-                        settingsState={workspaceSettingsState}
+                        settingsState={targetedWorkspaceSettingsState}
                         embedded
                         onLanguageChange={handleSettingsLanguageChange}
                         onThemeChange={handleThemeChange}
@@ -7250,33 +8087,7 @@ export function App({
                             setModelSettingScope(scope);
                             setModelDialogMode('vision');
                           } else if (key === 'voiceModel') {
-                            // The voice picker opens asynchronously (after
-                            // loadProviders), so DON'T record the scope up front:
-                            // if the user opens and closes another picker while
-                            // loading, the reset effect would clobber it and the
-                            // voice model would persist to the wrong scope. Set
-                            // the scope together with the open, from this click's
-                            // captured `scope`, and only when no other surface
-                            // opened meanwhile.
-                            workspaceActions
-                              .loadProviders()
-                              .then((status) => {
-                                setVoiceModels(extractVoiceModels(status));
-                                // "No other surface opened meanwhile" — mirror the
-                                // reset effect's condition so the voice picker
-                                // never opens on top of a fallbacks/auth dialog.
-                                if (
-                                  modelDialogModeRef.current === null &&
-                                  !showFallbacksDialogRef.current &&
-                                  !showAuthDialogRef.current
-                                ) {
-                                  setModelSettingScope(scope);
-                                  setModelDialogMode('voice');
-                                }
-                              })
-                              .catch((error: unknown) =>
-                                reportError(error, t('model.setVoice')),
-                              );
+                            void openVoiceModelPicker(scope, 'settings');
                           } else if (key === 'modelFallbacks') {
                             setModelSettingScope(scope);
                             setShowFallbacksDialog(true);
@@ -7328,6 +8139,11 @@ export function App({
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                      />
+                    ) : activePanel === 'channels' ? (
+                      <ChannelsManagerPage
+                        onClose={closePanel}
+                        initialFocusRef={panelHeadingRef}
                       />
                     ) : (
                       <SessionOverviewPanel
@@ -7571,6 +8387,15 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
+                        renderPaneHeaderActions={renderPaneHeaderActions}
+                        voiceUserRevision={voiceUserRevision}
+                        voiceWorkspaceRevisions={voiceWorkspaceRevisions}
+                        voiceWorkspaces={
+                          workspace.capabilities?.workspaces ||
+                          lockedWorkspaceCapability
+                            ? workspaces
+                            : undefined
+                        }
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -7656,6 +8481,8 @@ export function App({
                                 historyCapacityReached={
                                   transcriptHistory.capacityReached
                                 }
+                                historyPaginationError={
+                                  transcriptHistory.paginationError}
                                 onLoadOlderHistory={transcriptHistory.loadMore}
                                 transcriptBlockCount={blocks.length}
                                 transcriptActivity={store}
@@ -7714,13 +8541,22 @@ export function App({
                                 }
                               />
                             );
-                            const messageList = (
+                            const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
                                 resolveTree={resolveSubagentTree}
                               >
                                 {messageListContent}
                               </SubagentDetailsProvider>
+                            );
+                            const messageList = monitorDetailsSupported ? (
+                              <MonitorDetailsProvider
+                                onOpen={openMonitorPanelFromTool}
+                              >
+                                {messageListWithSubagentDetails}
+                              </MonitorDetailsProvider>
+                            ) : (
+                              messageListWithSubagentDetails
                             );
 
                             const btwPanel =
@@ -7872,7 +8708,11 @@ export function App({
                           <div
                             className={styles.composerActionTip}
                             role="status"
-                            data-testid="new-session-suggestion"
+                            data-testid={
+                              newSessionSuggestion.suggestion === 'btw'
+                                ? 'btw-suggestion'
+                                : 'new-session-suggestion'
+                            }
                           >
                             <span
                               className={styles.composerActionTipIcon}
@@ -7881,17 +8721,29 @@ export function App({
                               ✦
                             </span>
                             <span className={styles.composerActionTipText}>
-                              {t('editor.newSessionSuggestionTitle')}
+                              {newSessionSuggestion.suggestion === 'btw'
+                                ? t('editor.btwSuggestionTitle')
+                                : t('editor.newSessionSuggestionTitle')}
                             </span>
                             <div className={styles.composerActionTipActions}>
                               <button
                                 type="button"
                                 className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                data-testid="new-session-suggestion-start"
+                                data-testid={
+                                  newSessionSuggestion.suggestion === 'btw'
+                                    ? 'btw-suggestion-send'
+                                    : 'new-session-suggestion-start'
+                                }
                                 onMouseDown={(event) => event.preventDefault()}
-                                onClick={handleAcceptNewSessionSuggestion}
+                                onClick={
+                                  newSessionSuggestion.suggestion === 'btw'
+                                    ? handleAcceptBtwSuggestion
+                                    : handleAcceptNewSessionSuggestion
+                                }
                               >
-                                {t('editor.newSessionSuggestionStart')}
+                                {newSessionSuggestion.suggestion === 'btw'
+                                  ? t('editor.btwSuggestionSend')
+                                  : t('editor.newSessionSuggestionStart')}
                               </button>
                             </div>
                           </div>
@@ -7922,6 +8774,9 @@ export function App({
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
                           onInputTextChange={handleComposerTextChange}
+                          onAttachmentsChange={
+                            handleComposerAttachmentsChange
+                          }
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -7931,7 +8786,10 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
-                            isDisabled || isStartingNewSessionSuggestion
+                            isDisabled ||
+                            isStartingNewSessionSuggestion ||
+                            interactionBlocked ||
+                            approvalOverlayActive
                           }
                           commands={commands}
                           skills={loadedSkills}
@@ -7939,6 +8797,12 @@ export function App({
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
+                          voiceTarget={
+                            activePanel !== null || mainView !== 'chat'
+                              ? undefined
+                              : mainVoiceTarget
+                          }
+                          voiceStatusRevision={mainVoiceStatusRevision}
                           queuedMessages={queuedTexts}
                           onFocusFooter={handleFocusTaskPill}
                           onPopQueuedMessages={editLastQueuedPrompt}
@@ -7958,17 +8822,18 @@ export function App({
                                     undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
+                          gitCwd={sessionWorktree?.path}
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd
-                              ? () =>
-                                  setGitDialog({
-                                    workspaceCwd: gitDiffWorkspaceCwd,
-                                    gitCwd: sessionWorktree?.path,
-                                    view: 'diff',
-                                  })
+                              ? handleOpenGitDiff
+                              : undefined
+                          }
+                          onOpenCommit={
+                            gitDiffWorkspaceCwd
+                              ? handleOpenCommit
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}
@@ -7978,17 +8843,7 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          workspaces={
-                            !lockedWorkspaceCwd
-                              ? workspaces.map((entry) => ({
-                                    id: entry.id,
-                                    cwd: entry.cwd,
-                                    label: workspaceLabel(entry),
-                                    primary: entry.primary,
-                                    trusted: entry.trusted,
-                                  }))
-                              : undefined
-                          }
+                          workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
                               ? workspaces.find(
@@ -8007,9 +8862,7 @@ export function App({
                               : (selectedWorkspaceCwd ??
                                 workspaces.find((entry) => entry.primary)?.cwd))
                           }
-                          onSelectWorkspace={(cwd) => {
-                            void switchWorkspace(cwd);
-                          }}
+                          onSelectWorkspace={handleSelectComposerWorkspace}
                           scratchWorkspaceSupported={
                             scratchWorkspaceRegistrationSupported
                           }
@@ -8017,13 +8870,12 @@ export function App({
                             dynamicWorkspaceRegistrationSupported
                           }
                           workspaceMutationBusy={workspaceMutationBusy}
-                          onCreateScratchWorkspace={() => {
-                            void handleCreateScratchWorkspace();
-                          }}
-                          onOpenExistingWorkspace={() =>
-                            setShowAddWorkspaceDialog(true)
+                          onCreateScratchWorkspace={
+                            handleCreateComposerScratchWorkspace
                           }
+                          onOpenExistingWorkspace={handleOpenExistingWorkspace}
                           onChatWidthModeChange={handleChatWidthModeChange}
+                          sessionId={connection.sessionId}
                           sessionName={sessionDisplayName}
                           dialogOpen={
                             interactionBlocked || approvalOverlayActive
@@ -8035,6 +8887,15 @@ export function App({
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
                         />
+                        {CustomComposerFooter && (
+                          <CustomComposerFooter
+                            disabled={isDisabled}
+                            isRunning={streamingState !== 'idle'}
+                            currentMode={currentMode}
+                            currentModel={currentModel}
+                            sessionName={sessionDisplayName}
+                          />
+                        )}
                       </div>
                       {CustomFooter ? (
                         hasMobileComposerBottom ? (

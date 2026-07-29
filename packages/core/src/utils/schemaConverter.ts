@@ -110,12 +110,33 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 
     // 6. Recursively process other properties
     for (const [key, value] of Object.entries(source)) {
+      // `properties` / `$defs` / `definitions` are name->schema MAPS: their
+      // keys are property/definition names, not JSON Schema keywords. Walking
+      // one as if it were a schema node makes every step above misfire on a
+      // property whose name collides with a keyword — a property called
+      // `const` is replaced by a bogus `enum`, one called `default` is
+      // dropped by the skip list below, and one called `type` is copied
+      // verbatim instead of being converted. Only the VALUES are schemas.
+      if (
+        (key === 'properties' || key === '$defs' || key === 'definitions') &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        const map: Record<string, unknown> = {};
+        for (const [mapKey, mapValue] of Object.entries(
+          value as Record<string, unknown>,
+        )) {
+          map[mapKey] = convert(mapValue);
+        }
+        target[key] = map;
+        continue;
+      }
+
       // Skip fields we've already handled or want to remove
       if (
         key === 'type' ||
         key === 'const' ||
-        key === 'exclusiveMinimum' ||
-        key === 'exclusiveMaximum' ||
         key === 'items' ||
         key === 'enum' ||
         key === '$schema' ||
@@ -123,6 +144,21 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
         key === 'default' || // Optional: Gemini sometimes complains about defaults conflicting with types
         key === 'dependencies' ||
         key === 'patternProperties'
+      ) {
+        continue;
+      }
+
+      // Step 3 consumes only the NUMERIC form of the exclusive limits, so
+      // only the numeric form may be skipped here. A boolean is a Draft 4
+      // schema that already carries the exact shape step 3 emits, and
+      // skipping it unconditionally dropped it: `{minimum: 10,
+      // exclusiveMinimum: true}` came back as `{minimum: 10}`, silently
+      // relaxing `> 10` into `>= 10`. That also made this function
+      // non-idempotent — feeding its own output back in lost the flag it had
+      // just added.
+      if (
+        (key === 'exclusiveMinimum' || key === 'exclusiveMaximum') &&
+        typeof value === 'number'
       ) {
         continue;
       }

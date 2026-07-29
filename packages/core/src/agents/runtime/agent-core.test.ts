@@ -45,6 +45,36 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../../utils/invocation-context.js';
+import { GeminiChat } from '../../core/geminiChat.js';
+import { ContextState } from './agent-headless.js';
+
+describe('AgentCore.createChat manual plan-exit notice ownership', () => {
+  it('enables notices only for interactive agent chats', async () => {
+    const core = new AgentCore(
+      'notice-agent',
+      {} as Config,
+      { renderedSystemPrompt: 'system', initialMessages: [] },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+    const enableSpy = vi.spyOn(
+      GeminiChat.prototype,
+      'enableManualPlanExitNotices',
+    );
+
+    const interactiveChat = await core.createChat(new ContextState(), {
+      interactive: true,
+    });
+    expect(interactiveChat).toBeDefined();
+    expect(enableSpy).toHaveBeenCalledTimes(1);
+
+    const headlessChat = await core.createChat(new ContextState());
+    expect(headlessChat).toBeDefined();
+    expect(enableSpy).toHaveBeenCalledTimes(1);
+
+    enableSpy.mockRestore();
+  });
+});
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the

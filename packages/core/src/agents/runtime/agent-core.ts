@@ -474,6 +474,9 @@ export class AgentCore {
         generationConfig,
         startHistory,
       );
+      if (options?.interactive) {
+        chat.enableManualPlanExitNotices();
+      }
       // Seed the per-chat token count so the auto-compaction threshold
       // gate sees the inherited history's true size on the first send.
       // Without this, fork subagents start at 0 and the gate NOOPs even

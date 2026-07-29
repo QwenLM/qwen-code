@@ -615,6 +615,7 @@ describe('resumeHistoryUtils', () => {
         toolCallResult: {
           callId: 'call-1',
           resultDisplay: 'Read 1 file',
+          visionBridgeNotice: 'Converted image via qwen3-vl-plus.',
           status: 'success',
           responseParts: [
             {
@@ -629,6 +630,9 @@ describe('resumeHistoryUtils', () => {
       });
       const tool = firstTool(items);
       expect(tool?.resultDisplay).toBe('Read 1 file');
+      expect(tool?.visionBridgeNotice).toBe(
+        'Converted image via qwen3-vl-plus.',
+      );
       expect(tool?.detailedDisplay).toBe('FULL FILE CONTENTS');
     });
 

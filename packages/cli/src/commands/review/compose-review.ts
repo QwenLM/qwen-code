@@ -22,7 +22,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
@@ -30,6 +30,15 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { gh, setGhHost } from './lib/gh.js';
+import {
+  isPositivePrNumber,
+  hasExecutableScript,
+  requiredAgents,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
+import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -39,6 +48,25 @@ import {
 } from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * The floor above which a zero-finding Approve is disclosed as low-signal,
+ * in the plan's `srcDiffLines` — diff lines belonging to `source` files, the
+ * same field the review topology is chosen from (tests, docs and generated
+ * files excluded by construction). A trivial edit stays under it even
+ * scattered one changed line per hunk (~8 diff lines each with context and
+ * hunk header, plus 4 file-header lines), and the smallest diff the topology
+ * gate calls big is 500 — so the floor sits well past the typo-fix class and
+ * well before "big".
+ */
+export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
+
+/**
+ * Reads a PR's description body, given its `owner/repo` and number. The one
+ * production implementation calls `gh pr view`; the bilingual fallback uses it
+ * to recover the Han signal from the live PR when the plan does not carry it.
+ */
+export type PrBodyFetcher = (ownerRepo: string, prNumber: string) => string;
 
 export interface ComposeReviewInput {
   /**
@@ -95,6 +123,18 @@ export interface ComposeReviewInput {
    * anything that would change where the transcripts are found on a real run.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How the bilingual fallback reads the live PR body when the plan carries a
+   * PR identity but no `prDescriptionHasHan` (a `plan-diff` plan, or one an
+   * improvising orchestrator wired in place of `fetch-pr`'s report). A test
+   * seam ONLY: production leaves it undefined and the CLI reads the PR with
+   * `gh pr view`. The handler **strips it from the input JSON** before use (the
+   * same way it strips `env`), so a model cannot supply one — not even a
+   * non-function value that would throw past the default and drop the fold. It
+   * can neither force nor suppress the Chinese fold, which is the whole point of
+   * keeping the signal the CLI's own.
+   */
+  prBodyFetcher?: PrBodyFetcher;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -133,6 +173,18 @@ export interface ComposeReviewResult {
    * operator which command repairs it. Two registers, two channels.
    */
   remediation: string[];
+  /**
+   * Set on an APPROVE composed from zero findings over a non-trivial source
+   * diff (the plan's `srcDiffLines` above `LOW_SIGNAL_SRC_DIFF_LINES`).
+   * Disclosure only — the event never moves on it: the coverage gate proves
+   * the agents READ the diff, not that the review had discriminating power,
+   * and a dogfooded weak-model run drafted nothing from its whole roster on a
+   * diff where stronger same-condition runs found a verified blocker, then
+   * printed a bare confident Approve. The verdict line names the shape.
+   * `agents` is the plan's required roster — all on record at APPROVE, or
+   * coverage would have capped — and `srcDiffLines` the plan's own count.
+   */
+  lowSignal: { agents: number; srcDiffLines: number } | null;
 }
 
 function withMarker(line: string): string {
@@ -249,13 +301,42 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
 
-  // The Criticals a verifier must have ruled on before this review may post
-  // them as blockers. Deterministic `[build]`/`[test]` body findings are
-  // pre-confirmed and skip verification by design; every other Critical —
-  // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
-  // is not confirmed at all.
-  const nonDeterministicBodyCriticals = bodyCriticals.filter(
-    (x) => !/\[(?:build|test)\]/i.test(x),
+  // The deterministic script-lint gate. `compose-review` is the authority here:
+  // it reads the report the orchestrator's `qwen review script-lint` step wrote
+  // and turns it into the verdict itself, so neither the existence of a blocker
+  // nor its severity depends on a model. A finding on a changed line (above
+  // cosmetic `style`) is a pre-confirmed `[lint]` Critical; an uninstalled or
+  // crashed checker is unreviewed scope; and — the proof it ran — a diff that
+  // carries an executable script but has no readable report is itself unreviewed
+  // (fail closed). The report path is derived from the plan, not the input JSON a
+  // model wrote, and the plan decides whether the lint was owed.
+  // The gate's own body Criticals are deterministic by PROVENANCE — `scriptLintGate`
+  // ran the linter — so they never need a verifier. Track them as a SEPARATE list
+  // rather than mix them into the model's criticals and subtract a COUNT: a count
+  // subtraction misfires when a model claim happens to carry a `[build]`/`[test]`/
+  // `[probe]` tag (filtered out before the subtract) or a gate finding's own text
+  // contains one, erasing an unrelated claim's verification requirement. Identity,
+  // not arithmetic, decides provenance.
+  const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
+  // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
+  // in the body on every verdict, but never fed into the cap.
+  const gateDisclosed: string[] = [];
+  if (input.planPath) {
+    const gate = scriptLintGate(input.planPath);
+    bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
+    unreviewed.push(...gate.unreviewed);
+    gateDisclosed.push(...gate.disclosed);
+  }
+
+  // The Criticals a verifier must have ruled on before this review may post them as
+  // blockers. Only the MODEL's criticals are candidates — the gate's are excluded by
+  // construction (they are not in `modelBodyCriticals`). Of the model's, `[build]`/
+  // `[test]` (Agent 7 ran the tool) and `[probe]` (the verifier ran a probe) are
+  // pre-confirmed and skip verification. `[lint]` is NOT trusted as a tag — a
+  // model-written string containing it must not launder an unverified claim into a
+  // blocker (that is what the gate's provenance-tracked criticals are for).
+  const nonDeterministicBodyCriticals = modelBodyCriticals.filter(
+    (x) => !/\[(?:build|test|probe)\]/i.test(x),
   ).length;
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
@@ -434,9 +515,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
     // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist —
     // and their count is not in the plan, so its roster cannot reach them. This is
-    // the floor that does, and only `compose-review` asks it, which runs only at
-    // high effort — the only effort at which verify and reverse audit run at all.
-    // Reverse audit is required on every high-effort review; verify once the review
+    // the floor that does, and only `compose-review` asks it, which runs at high
+    // and medium effort. Reverse audit is required only at high; medium skips it by
+    // design, and `verificationGaps` caps a clean medium verdict at Comment instead
+    // of flagging it as missing. Verify runs at both, once the review
     // has non-deterministic findings to verify. Deterministic `[build]`/`[test]`
     // findings are pre-confirmed and skip verification by design, so they do not
     // demand a verifier — including a body Critical that carries their source tag.
@@ -584,16 +666,44 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgradedFrom = 'Request changes';
   }
 
+  // A zero-finding Approve over a non-trivial source diff is disclosed, not
+  // capped. Every gate above proves the agents READ the diff; none proves the
+  // review could tell good code from bad, and a dogfooded weak-model run
+  // drafted nothing from all of its agents on a diff where stronger runs found
+  // a verified blocker — then composed a bare confident Approve. The verdict
+  // stands (nothing was found, and a cap would punish every genuinely clean
+  // diff), but the verdict line must say which kind of Approve this is.
+  // "Non-trivial" is measured in the plan's own risk metric (`srcDiffLines`,
+  // the field the topology is chosen from), so a docs-only or typo-class diff
+  // keeps its bare Approve — there, finding nothing is the expected outcome.
+  let lowSignal: ComposeReviewResult['lowSignal'] = null;
+  if (event === 'APPROVE' && input.planPath) {
+    try {
+      const plan = JSON.parse(
+        readFileSync(input.planPath, 'utf8'),
+      ) as RosterPlan;
+      const src = Number(plan.srcDiffLines ?? 0);
+      if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
+        lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
+      }
+    } catch {
+      // Unreachable on a real APPROVE — the coverage gate already read this
+      // plan — and a disclosure must never take the review down.
+    }
+  }
+
   const footer = `_— ${modelId} via Qwen Code /review_`;
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
   // own PR descriptions use, decided by the plan the CLI wrote, never by the
-  // caller. Fragments with no deterministic translation (model-written
-  // findings, caller echoes, error interpolations) ride verbatim in both
-  // halves. The footer stays outside the fold, once. A `zh === en` body has
-  // nothing translated, so no empty fold is published.
-  const bilingual = bilingualFromPlan(input.planPath);
+  // caller. When the plan does not record the signal but still names the PR,
+  // the switch recovers it from the live description (see `bilingualFromPlan`).
+  // Fragments with no deterministic translation (model-written findings, caller
+  // echoes, error interpolations) ride verbatim in both halves. The footer
+  // stays outside the fold, once. A `zh === en` body has nothing translated, so
+  // no empty fold is published.
+  const bilingual = bilingualFromPlan(input.planPath, input.prBodyFetcher);
   const render = (parts: Bi[], sep: string): string => {
     const en = parts.map((p) => p.en).join(sep);
     if (en === '') return '';
@@ -809,6 +919,19 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
 
+  // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
+  // including Approve — so the reader knows a workflow's shell was not linted, but
+  // it does not cap the verdict (it is a tool limitation, not a finding or an
+  // unrun-checker gap). This is the "disclosed but not capping" half.
+  const deferredBlock: Bi[] = gateDisclosed.length
+    ? [
+        {
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -818,6 +941,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
+      ...deferredBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -828,6 +952,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       downgraded,
       downgradedFrom,
       remediation,
+      lowSignal,
     };
   }
 
@@ -835,14 +960,18 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     return {
       event,
       body: render(
-        [{ en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' }],
-        ' ',
+        [
+          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...deferredBlock,
+        ],
+        deferredBlock.length ? '\n\n' : ' ',
       ),
       baseEvent,
       cappedBy,
       downgraded,
       downgradedFrom,
       remediation,
+      lowSignal,
     };
   }
 
@@ -944,6 +1073,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // 6. Not-reviewed disclosure.
   clauses.push(...notReviewedParts);
 
+  // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
+  //     shell actionlint would lint but we do not yet trust.
+  clauses.push(...deferredBlock);
+
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
   //    cap. Either way the body copy is the ONLY copy of an unanchorable
@@ -960,6 +1093,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgraded,
     downgradedFrom,
     remediation,
+    lowSignal,
   };
 }
 
@@ -1041,6 +1175,175 @@ interface Bi {
   zh: string;
 }
 
+/** The production reader: one `gh pr view` for the description body. */
+const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
+  const json = gh(
+    'pr',
+    'view',
+    prNumber,
+    '--repo',
+    ownerRepo,
+    '--json',
+    'body',
+  );
+  return (JSON.parse(json) as { body?: string }).body ?? '';
+};
+
+/**
+ * Read the script-lint report the orchestrator wrote and turn it into verdict
+ * inputs, deterministically. Returns the pre-confirmed `[lint]` Criticals (a
+ * finding on a changed line, above cosmetic `style`) and the unreviewed-scope
+ * entries (a checker not installed or crashed, or — owed but absent — a report
+ * the run never produced). The path is DERIVED from the plan, never taken from
+ * the model's input JSON, and the plan itself decides whether the lint was owed:
+ * this is what takes the model out of both the block decision and the proof it ran.
+ */
+export function scriptLintGate(planPath: string): {
+  criticals: string[];
+  unreviewed: string[];
+  disclosed: string[];
+} {
+  const criticals: string[] = [];
+  const unreviewed: string[] = [];
+  // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
+  // limitation, not a finding and not an unrun-checker gap — the reader is told a
+  // workflow's embedded shell was not linted, but the verdict is not capped on it.
+  const disclosed: string[] = [];
+  let plan: {
+    prNumber?: unknown;
+    files?: unknown;
+    diffPathAbsolute?: unknown;
+  };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    // Fail CLOSED, like every other gate path: an unreadable plan means we cannot
+    // tell whether the lint was owed, and "cannot tell" must not open the gate.
+    unreviewed.push(
+      'the executable-script lint — could not read the plan to check the gate',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
+  // A diff-only (cross-repo lightweight) review has no worktree, so the
+  // orchestrator could not have run script-lint — do not fail it closed for a
+  // command it cannot run, exactly as the roster never owed it there.
+  if (reviewMode(plan as RosterPlan) === 'diff-only') {
+    return { criticals, unreviewed, disclosed };
+  }
+  const owed = hasExecutableScript(plan as RosterPlan);
+  const reportPath = join(
+    dirname(planPath),
+    scriptLintReportName(plan.prNumber),
+  );
+  let report: ScriptLintReport;
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8')) as ScriptLintReport;
+  } catch {
+    // No report. Fail closed ONLY when the diff carried a path-detected script
+    // (owed) — otherwise a diff with no scripts would be capped for a command it
+    // had no reason to run.
+    //
+    // The one gap this leaves — a SHEBANG-only script (`hasExecutableScript` is
+    // path-only, so `owed` is false for it) whose command was skipped — is closed by
+    // a CONTRACT, not by this predicate: SKILL.md has the orchestrator run
+    // `qwen review script-lint` on EVERY same-repo review, unconditionally. So a
+    // compliant run always writes a report (even "nothing to lint"), the shebang
+    // script is linted and appears in it, and it is handled below on its own
+    // findings regardless of `owed`. "No report" therefore means the command did not
+    // run — the `owed` cap covers the path-detectable case; the shebang case relies
+    // on the always-run contract above, which is why it is stated there in prose.
+    if (owed) {
+      unreviewed.push(
+        'the executable-script lint — `qwen review script-lint` produced no report',
+      );
+    }
+    return { criticals, unreviewed, disclosed };
+  }
+  // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
+  // report carries a hash of the diff it ran against; we re-hash the plan's current
+  // diff. A mismatch means it is not this review's report: a later PR commit
+  // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
+  // changes the working-tree diff. An absent hash on EITHER side (the diff could not
+  // be read here or there) is unverifiable and also fails closed — `!planDiffHash`
+  // handles that explicitly, because `undefined !== undefined` is FALSE and would
+  // otherwise accept an arbitrary hashless report. Only both sides present and equal
+  // is fresh.
+  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  if (!planDiffHash || report.diffHash !== planDiffHash) {
+    unreviewed.push(
+      'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
+  // Process the report's findings REGARDLESS of the path-only owed predicate: the
+  // report can name a shebang script (`hook.sh` by its `#!`) that `pathTool` could
+  // not, and returning early on the predicate would drop exactly those findings.
+  for (const file of report.checked ?? []) {
+    for (const f of file.findings ?? []) {
+      if (f.inDiff && f.level !== 'style') {
+        criticals.push(
+          `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+        );
+      }
+    }
+  }
+  // Each skipped entry carries its OWN reason (not installed, or an irregular file
+  // like a symlink) — surface it, rather than hard-coding "not installed". A
+  // deferred checker is NOT here: it is its own state, disclosed below without capping.
+  for (const s of report.skipped ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${mdField(s.path)}: ${s.reason ?? `${s.tool} unavailable`}`,
+    );
+  }
+  for (const e of report.errored ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${e.tool} errored on ${mdField(e.path)}`,
+    );
+  }
+  // A deferred checker (actionlint) is disclosed but does not cap — the reader is
+  // told the workflow's embedded shell was not linted, without making every
+  // workflow PR un-Approvable on a checker we deliberately decline to run.
+  for (const d of report.deferred ?? []) {
+    disclosed.push(
+      `the executable-script lint — ${mdField(d.path)}: ${d.reason ?? `${d.tool} deferred`}`,
+    );
+  }
+  return { criticals, unreviewed, disclosed };
+}
+
+/**
+ * Render a PR-controlled segment — a diff file path, a linter's message — safe to
+ * splice into the review body we POST to GitHub. Git allows almost any byte in a
+ * filename, so an unescaped path could carry `@mentions`, HTML, Markdown, or a
+ * newline that forges body structure. An inline code span makes Markdown/HTML/`@`
+ * inert; stripping backticks and newlines stops the value breaking out of the span
+ * or forging new lines. (`capture-local`'s `display()` does the terminal-side
+ * equivalent for stderr; this is the Markdown-body side.)
+ */
+function mdField(s: unknown): string {
+  return (
+    '`' +
+    String(s)
+      .replace(/[`\r\n]+/g, ' ')
+      .trim() +
+    '`'
+  );
+}
+
+/**
+ * The report filename the orchestrator writes and this derives — pr-numbered
+ * when the plan resolved a PR, a stable local name otherwise (matching the old
+ * `agent-prompt` convention so a mid-flight upgrade finds the same file).
+ */
+function scriptLintReportName(pr: unknown): string {
+  const positive =
+    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
+  return positive
+    ? `qwen-review-pr-${pr}-script-lint.json`
+    : 'qwen-review-script-lint.json';
+}
+
 /**
  * Whether the posted body carries the collapsed Chinese version: the plan
  * (fetch-pr's report) recorded Han characters in the PR description. The
@@ -1048,14 +1351,49 @@ interface Bi {
  * the register of a certified body. A local plan has no such field, and a
  * plan that cannot be read defaults to English-only: the language must never
  * take the review down.
+ *
+ * A recorded `false` is authoritative: `fetch-pr` fetched the body and found
+ * no Han, so English-only is the answer and no network is spent — every
+ * English-authored PR review takes this path.
+ *
+ * The field being *absent* is a different state, and the one that shipped an
+ * English-only review over a Chinese-authored PR (#7686): `fetch-pr` always
+ * writes it, but a `plan-diff` plan never does, and an orchestrator that
+ * improvises the pipeline can wire `compose-review` at a plan that is not
+ * `fetch-pr`'s report at all. So when the flag is missing yet the plan still
+ * carries the PR's identity, recover the signal from the live PR — the real
+ * description, which the caller cannot fake, so this hardens the "signal is
+ * the CLI's own" property rather than loosening it. Any failure of that fetch
+ * falls back to English: the language must never take the review down.
  */
-function bilingualFromPlan(planPath: string | undefined): boolean {
+function bilingualFromPlan(
+  planPath: string | undefined,
+  fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
+): boolean {
   if (!planPath) return false;
+  let plan: {
+    prDescriptionHasHan?: unknown;
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+  };
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      prDescriptionHasHan?: unknown;
-    };
-    return plan?.prDescriptionHasHan === true;
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof plan?.prDescriptionHasHan === 'boolean') {
+    return plan.prDescriptionHasHan;
+  }
+  const ownerRepo =
+    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
+      ? plan.ownerRepo
+      : undefined;
+  const prNumber = isPositivePrNumber(plan?.prNumber)
+    ? String(plan.prNumber)
+    : undefined;
+  if (!ownerRepo || !prNumber) return false;
+  try {
+    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
   } catch {
     return false;
   }
@@ -1065,6 +1403,8 @@ interface ComposeReviewCliArgs {
   input: string | undefined;
   comments: string;
   out: string | undefined;
+  /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
+  host?: string;
 }
 
 /**
@@ -1140,9 +1480,22 @@ export const composeReviewCommand: CommandModule = {
       .option('out', {
         type: 'string',
         describe: 'Also write the {event, body} JSON to this path',
+      })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
+          'the bilingual body-language recovery has to fetch the PR description',
       }),
   handler: (argv) => {
-    const { input, comments, out } = argv as unknown as ComposeReviewCliArgs;
+    const { input, comments, out, host } =
+      argv as unknown as ComposeReviewCliArgs;
+    // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
+    // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
+    // do. Without it a GHE review whose plan lacks the Han flag fetches the body
+    // from github.com, fails, and composes an English-only body that disagrees
+    // with what `submit` (which routes by host) posts.
+    setGhHost(host);
     // yargs enforces --comments on the real command line; this covers every
     // other way in (tests, programmatic calls) with the same sentence instead
     // of an ENOENT on `undefined`.
@@ -1162,6 +1515,13 @@ export const composeReviewCommand: CommandModule = {
     // always resolves the transcripts from the environment the CLI exported.
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
+    // Same reasoning for the bilingual body-language fetcher: it is a unit-test
+    // seam (production reads the PR with `gh pr view`). A state JSON carrying it —
+    // even a non-function value like `"suppress"` — would otherwise reach
+    // `bilingualFromPlan`, be called, throw, and drop the Chinese fold through the
+    // fail-safe. Stripping it here keeps the register the CLI's own, not the
+    // caller's, which is the whole point of the seam.
+    delete parsed.prBodyFetcher;
     // The inline counts are counted, not accepted — `submit` has refused them
     // since the count-beside-the-comments bug, and this boundary refusing them
     // too is what makes the Step 6 line and the posted verdict the same
@@ -1275,6 +1635,18 @@ export function verdictLine(r: ComposeReviewResult): string {
     // lose and no blocker to hide, but the event did change and the user should see
     // it did.
     line += ' — downgraded by a presubmit check';
+  }
+  // Not a cap and not a downgrade — the Approve stands. But a bare confident
+  // Approve from a run that drafted nothing on a real diff reads as evidence
+  // of quality when it is only absence of signal, so the line says which
+  // Approve this is. Both numbers are the run's own: the roster the plan
+  // required (all on record, or coverage would have capped) and the plan's
+  // source-line count.
+  if (r.event === 'APPROVE' && r.lowSignal) {
+    line +=
+      ` — low signal: none of the ${r.lowSignal.agents} review agents ` +
+      `reported a finding on a non-trivial diff ` +
+      `(${r.lowSignal.srcDiffLines} source diff lines)`;
   }
   return line;
 }
