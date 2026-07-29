@@ -2073,6 +2073,29 @@ jobs:
           (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
           qwen --version
 
+          # Chromium for evidence screenshots, installed HERE and not by the
+          # agent, because the agent cannot: it runs as `node` under `env -i`
+          # with a fresh HOME, so `playwright install --with-deps` would need
+          # an apt it has no rights to and would re-download ~170 MB into a
+          # directory thrown away at the end of every run. Installing as root
+          # into a shared path fixes both.
+          #
+          # Best-effort: a failure here must not fail the job. The agent
+          # checks QWEN_VERIFY_CHROMIUM before attempting a capture and falls
+          # back to a text-only report, which is what every run has produced
+          # so far anyway.
+          export PLAYWRIGHT_BROWSERS_PATH="${RUNNER_TEMP:?}/pw-browsers"
+          mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+          if (cd "${RUNNER_TEMP:?}" && npx --yes playwright@1.56.1 install --with-deps chromium); then
+            # World-readable: the agent runs as `node` and this tree is
+            # created by root.
+            chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"
+            printf '%s' "$PLAYWRIGHT_BROWSERS_PATH" > "${RUNNER_TEMP:?}/verify-chromium-path"
+            echo "Chromium available for evidence screenshots." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Chromium install failed; the verification agent will produce a text-only report."
+          fi
+
       # This container mounts the persistent runner workspace, and a previous
       # run EXECUTED PR code as the node user with write access to .git —
       # hooks or config planted then would fire during the checkout below (as
@@ -2754,6 +2777,18 @@ jobs:
             "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
             "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
           )
+          # Evidence screenshots: root pre-installed chromium into a shared,
+          # world-readable path (the agent is `node` and could not). Both
+          # variables are set only when that install actually succeeded, so
+          # their ABSENCE is the agent's signal to skip captures rather than
+          # burn budget on a download it cannot complete.
+          if CHROMIUM_PATH="$(cat "${RUNNER_TEMP:?}/verify-chromium-path" 2>/dev/null)" &&
+             [ -n "$CHROMIUM_PATH" ]; then
+            QWEN_ENV+=(
+              "PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH"
+              "QWEN_VERIFY_CHROMIUM=1"
+            )
+          fi
           if [ -n "${OPENAI_MODEL:-}" ]; then
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi

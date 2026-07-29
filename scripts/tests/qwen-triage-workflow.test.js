@@ -2140,6 +2140,46 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
   });
 
+  // Evidence images: the hosting machinery has been complete since the lane
+  // shipped, and across 14 real reports it produced ZERO images. Two
+  // independent causes, both fixed here — the agent physically could not
+  // install chromium (runs as `node`, `env -i`, fresh HOME, no apt), and the
+  // skill framed captures as optional and TUI-only.
+  it('pre-installs chromium and hands it to the agent', () => {
+    const tools = stepIn('verify', 'Install verify runner tools');
+    // Installed as ROOT here, because the agent cannot.
+    expect(tools).toContain('playwright');
+    expect(tools).toContain('--with-deps chromium');
+    // Shared, world-readable, and outside the agent's throwaway HOME.
+    expect(tools).toContain('PLAYWRIGHT_BROWSERS_PATH');
+    expect(tools).toContain('chmod -R a+rX');
+    // Best-effort: a failed browser install must not fail a verification.
+    expect(tools).toContain('::warning::Chromium install failed');
+    expect(tools).not.toContain('exit 1');
+
+    // The agent is told ONLY when the install actually succeeded, so the
+    // variable's absence is a real signal rather than a stale promise.
+    const runStep = stepIn('verify', 'Run verification agent');
+    expect(runStep).toContain('verify-chromium-path');
+    expect(runStep).toContain('QWEN_VERIFY_CHROMIUM=1');
+    const marker = runStep.indexOf('QWEN_VERIFY_CHROMIUM=1');
+    const guard = runStep.indexOf('verify-chromium-path');
+    expect(guard).toBeLessThan(marker);
+
+    // The tmux lane is untouched: it has no evidence-image path.
+    expect(stepIn('tmux-testing', 'Run tmux real-user testing')).not.toContain(
+      'QWEN_VERIFY_CHROMIUM',
+    );
+
+    // And the skill must stop calling captures optional, must name the
+    // gate, and must forbid the install the agent cannot complete.
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('Produce these whenever you ran a harness');
+    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
+    expect(flat).toContain('Do **not** run `playwright install`');
+    expect(flat).not.toContain('Optionally `evidence/*.png`');
+  });
+
   // Cleanups must never descend through a PR-writable parent, and an
   // outward-resolving hooks entry must be removed rather than reported.
   it('survives symlink escapes in the workspace cleanup', () => {
