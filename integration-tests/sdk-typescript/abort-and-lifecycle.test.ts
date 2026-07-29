@@ -158,6 +158,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
             }
           }
         }
+
+        // Should not reach here - query should be aborted
+        expect(false).toBe(true);
       } catch (error) {
         expect(isAbortError(error)).toBe(true);
         expect(error instanceof AbortError).toBe(true);
@@ -196,6 +199,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         for await (const _message of q) {
           // May or may not receive messages before abort
         }
+
+        // Should not reach here - query should be aborted
+        expect(false).toBe(true);
       } catch (error) {
         expect(isAbortError(error)).toBe(true);
         expect(error instanceof AbortError).toBe(true);
@@ -639,6 +645,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         for await (const _message of q) {
           // May receive some messages before abort
         }
+
+        // Should not reach here - query should be aborted
+        expect(false).toBe(true);
       } catch (error) {
         // Verify error type and helper functions
         expect(isAbortError(error)).toBe(true);
@@ -783,6 +792,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         for await (const _message of q) {
           // Should be interrupted
         }
+
+        // Should not reach here - query should be aborted
+        expect(false).toBe(true);
       } catch (error) {
         expect(isAbortError(error)).toBe(true);
       } finally {
