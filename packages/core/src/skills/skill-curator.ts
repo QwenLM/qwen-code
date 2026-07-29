@@ -303,10 +303,13 @@ async function readState(statePath: string): Promise<AutoSkillCuratorState> {
     ));
   } catch (error) {
     if (isMissing(error)) return emptyState();
-    // The file passed the lstat guard, so any failure here means it raced into
-    // a symlink / non-regular file or grew past the cap between the stat and
-    // the O_NOFOLLOW open — fail closed instead of following it.
-    throw new Error(`Auto-skill curator refuses unsafe path ${statePath}.`);
+    // The file passed the lstat guard, but the read can still fail because it
+    // raced into a symlink / non-regular file, grew past the cap, or hit a
+    // transient I/O error such as EMFILE, EACCES, or EIO. Fail closed either
+    // way, while retaining the original failure for diagnosis.
+    throw new Error(`Auto-skill curator refuses unsafe path ${statePath}.`, {
+      cause: error,
+    });
   }
   try {
     return parseState(JSON.parse(content), statePath);

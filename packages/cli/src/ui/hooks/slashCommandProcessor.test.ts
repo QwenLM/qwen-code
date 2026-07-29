@@ -2324,6 +2324,7 @@ describe('useSlashCommandProcessor', () => {
         skillName: 'review-skill',
         success: false,
       });
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
     });
 
     it('records blocked skill slash commands as failures', async () => {
@@ -2357,6 +2358,7 @@ describe('useSlashCommandProcessor', () => {
         skillName: 'review-skill',
         success: false,
       });
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
     });
 
     it('records confirmed skill slash commands only once', async () => {
