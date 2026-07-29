@@ -78,6 +78,14 @@ vi.mock('./ChatPane', () => ({
         data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
         <span data-testid="pane-title">{props.title}</span>
+        {props.renderHeaderActions && (
+          <span data-testid="pane-header-slot">
+            {props.renderHeaderActions({
+              sessionId: 'from-props',
+              workspaceCwd: props.workspaceCwd,
+            })}
+          </span>
+        )}
         {props.onToggleMaximize && (
           <button data-testid="pane-maximize" onClick={props.onToggleMaximize}>
             max
@@ -924,5 +932,27 @@ describe('SplitView', () => {
     expect(
       workspaceClient.listWorkspaceSessions.mock.calls.length,
     ).toBeGreaterThan(before);
+  });
+
+  it('passes renderPaneHeaderActions through to each ChatPane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      renderPaneHeaderActions: (info: {
+        sessionId: string;
+        workspaceCwd?: string;
+      }) => (
+        <button type="button" data-testid={`host-${info.sessionId}`}>
+          host
+        </button>
+      ),
+    });
+    expect(
+      container!.querySelectorAll('[data-testid="pane-header-slot"]'),
+    ).toHaveLength(2);
+    // The mock ChatPane invokes the renderer with a stand-in session id; the
+    // important contract is that SplitView forwards the prop at all.
+    expect(
+      container!.querySelectorAll('[data-testid="host-from-props"]'),
+    ).toHaveLength(2);
   });
 });
