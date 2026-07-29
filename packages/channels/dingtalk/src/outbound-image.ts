@@ -109,6 +109,22 @@ export function replaceImageMarkers(
   return result;
 }
 
+export function sanitizeStreamingImageMarkers(text: string): string {
+  const markers = findImageMarkers(text);
+  let result = replaceImageMarkers(
+    text,
+    markers,
+    markers.map(() => '[Image pending]'),
+  );
+  const visibleText = maskCode(result);
+  const partialMarker =
+    /\[(?:I(?:M(?:A(?:G(?:E(?::[^\]\r\n]*)?)?)?)?)?)?$/i.exec(visibleText);
+  if (partialMarker?.index !== undefined) {
+    result = `${result.slice(0, partialMarker.index)}[Image pending]`;
+  }
+  return result;
+}
+
 function isInside(realPath: string, directory: string): boolean {
   const pathFromDirectory = relative(directory, realPath);
   return (

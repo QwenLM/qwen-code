@@ -209,6 +209,36 @@ function textButton(container: HTMLElement, text: string): HTMLButtonElement {
   return el!;
 }
 
+function openCustomColumns(container: HTMLElement): void {
+  if (container.textContent?.includes('Columns shown in the table')) return;
+  click(textButton(container, 'Custom columns'));
+  expect(container.textContent).toContain('Columns shown in the table');
+}
+
+function customColumnCheckbox(
+  container: HTMLElement,
+  columnLabel: string,
+  section: 'table' | 'details' = 'table',
+): HTMLButtonElement {
+  openCustomColumns(container);
+  const labels = [
+    ...container.querySelectorAll<HTMLLabelElement>('label'),
+  ].filter((label) => label.textContent === columnLabel);
+  const label = labels[section === 'table' ? 0 : 1];
+  expect(label).toBeDefined();
+  const checkbox = document.getElementById(label!.htmlFor);
+  expect(checkbox).not.toBeNull();
+  return checkbox as HTMLButtonElement;
+}
+
+function toggleTableColumn(container: HTMLElement, columnLabel: string): void {
+  click(customColumnCheckbox(container, columnLabel));
+}
+
+function toggleDetailColumn(container: HTMLElement, columnLabel: string): void {
+  click(customColumnCheckbox(container, columnLabel, 'details'));
+}
+
 function cellDialog(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[role="dialog"]');
 }
@@ -357,10 +387,12 @@ function dragColumn(
   fromLabel: string,
   toLabel: string,
 ): void {
+  openCustomColumns(container);
   dragColumnElements(button(container, fromLabel), button(container, toLabel));
 }
 
 function dropExternalColumn(container: HTMLElement, toLabel: string): void {
+  openCustomColumns(container);
   const dataTransfer = {
     dropEffect: '',
     effectAllowed: '',
@@ -387,6 +419,7 @@ function dropExternalColumn(container: HTMLElement, toLabel: string): void {
 }
 
 function dropForgedColumn(container: HTMLElement, toLabel: string): void {
+  openCustomColumns(container);
   const dataTransfer = {
     dropEffect: '',
     effectAllowed: '',
@@ -1003,10 +1036,11 @@ describe('EnhancedMarkdownTable', () => {
 
   it('keeps table Escape handling from running behind the cell dialog', () => {
     const container = renderTable();
-    const teamHandle = button(container, 'Move Team');
 
     click(button(container, 'Sort by Team'));
-    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('activeHeaderCell');
 
     doubleClick(dataCell(container, 0, 0));
     const event = new KeyboardEvent('keydown', {
@@ -1020,7 +1054,9 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(event.defaultPrevented).toBe(true);
     expect(cellDialog()).toBeNull();
-    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(
+      button(container, 'Sort by Team, ascending').closest('th')?.className,
+    ).toContain('activeHeaderCell');
   });
 
   it('clears table selection and row details when opening a cell dialog', () => {
@@ -1079,7 +1115,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     click(button(container, 'Sort by Score'));
-    click(textButton(container, 'Quick copy'));
+    click(textButton(container, 'Copy table'));
 
     expect(writeText).toHaveBeenCalledWith(
       ['Team\tScore', 'Beta\t2', 'Alpha\t10', 'Gamma\t30'].join('\n'),
@@ -1117,7 +1153,7 @@ describe('EnhancedMarkdownTable', () => {
       </tbody>,
     ]);
 
-    click(textButton(container, 'Quick copy'));
+    click(textButton(container, 'Copy table'));
     expect(writeText).toHaveBeenCalledWith(
       [
         'Name\tFormula',
@@ -1133,17 +1169,15 @@ describe('EnhancedMarkdownTable', () => {
     expect(writeText).toHaveBeenLastCalledWith("'=1+1");
   });
 
-  it('hides columns and restores them from the toolbar', () => {
+  it('hides columns and restores them from custom columns', () => {
     const container = renderTable();
 
-    click(button(container, 'Filter Team'));
-    click(textButton(container, 'Hide column'));
+    toggleTableColumn(container, 'Team');
 
     expect(rowTexts(container)).toEqual(['10', '2', '30']);
-    expect(container.textContent).toContain('Show 1 hidden column');
     expect(container.querySelector('thead')?.textContent).not.toContain('Team');
 
-    click(textButton(container, 'Show 1 hidden column'));
+    click(textButton(container, 'Reset'));
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2', 'Gamma|30']);
   });
 
@@ -1151,9 +1185,8 @@ describe('EnhancedMarkdownTable', () => {
     const writeText = mockClipboard();
     const container = renderTable();
 
-    click(button(container, 'Filter Team'));
-    click(textButton(container, 'Hide column'));
-    click(textButton(container, 'Quick copy'));
+    toggleTableColumn(container, 'Team');
+    click(textButton(container, 'Copy table'));
 
     expect(writeText).toHaveBeenCalledWith(
       ['Score', '10', '2', '30'].join('\n'),
@@ -1386,7 +1419,7 @@ describe('EnhancedMarkdownTable', () => {
 
   it('resizes compact auto columns from their rendered width with keyboard arrows', () => {
     const container = renderTable();
-    click(textButton(container, 'Density: Standard'));
+    selectValue(button(container, 'Table density'), 'compact');
     const header = button(container, 'Sort by Team').closest('th');
     expect(header).not.toBeNull();
     Object.defineProperty(header, 'getBoundingClientRect', {
@@ -1426,87 +1459,6 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
-  it('shows column move handles only for the active column', () => {
-    const container = renderWideTable();
-    const teamHandle = button(container, 'Move Team');
-    const scoreHandle = button(container, 'Move Score');
-
-    expect(teamHandle.className).not.toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(-1);
-    expect(scoreHandle.className).not.toContain('reorderHandleVisible');
-    expect(scoreHandle.tabIndex).toBe(-1);
-
-    click(button(container, 'Sort by Team'));
-
-    expect(teamHandle.className).toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(0);
-    expect(scoreHandle.className).not.toContain('reorderHandleVisible');
-    expect(scoreHandle.tabIndex).toBe(-1);
-    expect(
-      button(container, 'Sort by Team, ascending').closest('th')?.className,
-    ).toContain('activeHeaderCell');
-  });
-
-  it('clears the active column move handle on outside click, cell selection, and Escape', () => {
-    const container = renderWideTable();
-    const teamHandle = button(container, 'Move Team');
-
-    click(button(container, 'Sort by Team'));
-    act(() => {
-      document.body.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true }),
-      );
-    });
-    expect(teamHandle.className).not.toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(-1);
-
-    click(button(container, 'Sort by Team, ascending'));
-    act(() => {
-      dataCell(container, 0, 0).dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-    });
-    expect(teamHandle.className).not.toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(-1);
-
-    click(button(container, 'Sort by Team, descending'));
-    act(() => {
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
-      );
-    });
-    expect(teamHandle.className).not.toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(-1);
-  });
-
-  it('keeps the active column when Escape closes an open filter menu first', () => {
-    const container = renderWideTable();
-    const teamHandle = button(container, 'Move Team');
-
-    click(button(container, 'Sort by Team'));
-    click(button(container, 'Filter Team'));
-    expect(container.textContent).toContain('Custom filter');
-
-    act(() => {
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
-      );
-    });
-
-    expect(container.textContent).not.toContain('Custom filter');
-    expect(teamHandle.className).toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(0);
-
-    act(() => {
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
-      );
-    });
-
-    expect(teamHandle.className).not.toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(-1);
-  });
-
   it('reorders columns and quick copies in the visible order', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
@@ -1514,7 +1466,7 @@ describe('EnhancedMarkdownTable', () => {
     dragColumn(container, 'Move Score', 'Move Team');
 
     expect(rowTexts(container)).toEqual(['10|Alpha|US', '2|Beta|EMEA']);
-    click(textButton(container, 'Quick copy'));
+    click(textButton(container, 'Copy table'));
     expect(writeText).toHaveBeenCalledWith(
       ['Score\tTeam\tRegion', '10\tAlpha\tUS', '2\tBeta\tEMEA'].join('\n'),
     );
@@ -1536,39 +1488,37 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
   });
 
-  it('ignores column drags from another table', () => {
-    const source = renderWideTable();
-    const target = renderWideTable();
-
-    dragColumnElements(
-      button(source, 'Move Score'),
-      button(target, 'Move Team'),
-    );
-
-    expect(rowTexts(source)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
-    expect(rowTexts(target)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
-  });
-
-  it('drops reordered columns on the target header cell', () => {
+  it('only reorders columns when dropped within custom columns', () => {
     const container = renderWideTable();
+    openCustomColumns(container);
 
     dragColumnElements(
       button(container, 'Move Score'),
       button(container, 'Sort by Team'),
     );
 
-    expect(rowTexts(container)).toEqual(['10|Alpha|US', '2|Beta|EMEA']);
+    expect(rowTexts(container)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
   });
 
-  it('preserves hidden column slots when reordering visible columns', () => {
+  it('resets table visibility and order from custom columns', () => {
     const container = renderWideTable();
 
-    click(button(container, 'Filter Region'));
-    click(textButton(container, 'Hide column'));
+    toggleTableColumn(container, 'Region');
+    toggleDetailColumn(container, 'Region');
     dragColumn(container, 'Move Score', 'Move Team');
-    click(textButton(container, 'Show 1 hidden column'));
+    expect(rowTexts(container)).toEqual(['10|Alpha', '2|Beta']);
+    const detailsButton = button(container, 'View details for row 1');
+    click(detailsButton);
+    const details = document.getElementById(
+      detailsButton.getAttribute('aria-controls')!,
+    );
+    expect(details?.textContent).not.toContain('Region');
 
-    expect(rowTexts(container)).toEqual(['10|US|Alpha', '2|EMEA|Beta']);
+    openCustomColumns(container);
+    click(textButton(container, 'Reset'));
+
+    expect(rowTexts(container)).toEqual(['Alpha|US|10', 'Beta|EMEA|2']);
+    expect(details?.textContent).toContain('Region');
   });
 
   it('keeps hidden columns out of reordered selections', () => {
@@ -1576,8 +1526,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderWideTable();
 
     dragColumn(container, 'Move Score', 'Move Team');
-    click(button(container, 'Filter Region'));
-    click(textButton(container, 'Hide column'));
+    toggleTableColumn(container, 'Region');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
 
     expect(container.textContent).toContain('Selected 4');
@@ -1640,11 +1589,12 @@ describe('EnhancedMarkdownTable', () => {
 
   it('dismisses the first-column context menu without clearing the active column', () => {
     const container = renderWideTable();
-    const teamHandle = button(container, 'Move Team');
 
     openColumnMenu(container, 'Team');
     expect(container.textContent).toContain('Freeze first column');
-    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(
+      button(container, 'Sort by Team').closest('th')?.className,
+    ).toContain('activeHeaderCell');
 
     const escapeEvent = new KeyboardEvent('keydown', {
       bubbles: true,
@@ -1657,16 +1607,15 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(escapeEvent.defaultPrevented).toBe(true);
     expect(container.textContent).not.toContain('Freeze first column');
-    expect(teamHandle.className).toContain('reorderHandleVisible');
-    expect(teamHandle.tabIndex).toBe(0);
+    expect(
+      button(container, 'Sort by Team').closest('th')?.className,
+    ).toContain('activeHeaderCell');
   });
 
   it('keeps the active column while clicking inside the first-column context menu', () => {
     const container = renderWideTable();
-    const teamHandle = button(container, 'Move Team');
 
     openColumnMenu(container, 'Team');
-    expect(teamHandle.className).toContain('reorderHandleVisible');
 
     act(() => {
       textButton(container, 'Freeze first column').dispatchEvent(
@@ -1674,7 +1623,9 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(teamHandle.className).toContain('reorderHandleVisible');
+    expect(
+      button(container, 'Sort by Team').closest('th')?.className,
+    ).toContain('activeHeaderCell');
   });
 
   it('dismisses the first-column context menu on outside click, scroll, and resize', () => {
@@ -1844,7 +1795,7 @@ describe('EnhancedMarkdownTable', () => {
     ]);
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
     });
 
@@ -1890,7 +1841,7 @@ describe('EnhancedMarkdownTable', () => {
     ]);
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
     });
 
@@ -1960,31 +1911,36 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(textButton(container, 'Expand text')).toBeDefined();
 
-    click(button(container, 'Filter Note'));
-    click(textButton(container, 'Hide column'));
+    toggleTableColumn(container, 'Note');
 
     expect(rowTexts(container)).toEqual(['Alpha']);
     expect(container.textContent).not.toContain('Expand text');
   });
 
-  it('cycles display density from the toolbar', () => {
+  it('selects display density from the toolbar', () => {
     const container = renderTable();
     const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
     const teamHeader = button(container, 'Sort by Team').closest('th');
     expect(shell?.className).toContain('densityStandard');
-    expect(textButton(container, 'Density: Standard')).toBeDefined();
+    expect(button(container, 'Table density').textContent).toContain(
+      'Standard density',
+    );
     expect(teamHeader?.style.width).toBe('160px');
 
-    click(textButton(container, 'Density: Standard'));
+    selectValue(button(container, 'Table density'), 'compact');
     expect(shell?.className).toContain('densityCompact');
-    expect(textButton(container, 'Density: Compact')).toBeDefined();
+    expect(button(container, 'Table density').textContent).toContain(
+      'Compact density',
+    );
     expect(teamHeader?.style.width).toBe('auto');
     expect(teamHeader?.style.minWidth).toBe('');
     expect(teamHeader?.style.maxWidth).toBe('');
 
-    click(textButton(container, 'Density: Compact'));
+    selectValue(button(container, 'Table density'), 'comfortable');
     expect(shell?.className).toContain('densityComfortable');
-    expect(textButton(container, 'Density: Comfortable')).toBeDefined();
+    expect(button(container, 'Table density').textContent).toContain(
+      'Comfortable density',
+    );
     expect(teamHeader?.style.width).toBe('160px');
   });
 
@@ -2063,6 +2019,22 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Selected 1');
 
     render(['10']);
+
+    expect(container.textContent).not.toContain('Selected');
+    expect(container.textContent).not.toContain('Copy TSV');
+  });
+
+  it('clears a selection when clicking outside the table', () => {
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+    expect(container.textContent).toContain('Selected 1');
+
+    act(() => {
+      document.body.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true }),
+      );
+    });
 
     expect(container.textContent).not.toContain('Selected');
     expect(container.textContent).not.toContain('Copy TSV');
@@ -2315,21 +2287,21 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(container.textContent).toContain('✓');
     expect(container.textContent).toContain('Copied!');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
 
     await act(async () => {
       vi.advanceTimersByTime(2000);
     });
 
     expect(container.textContent).not.toContain('✓');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
   });
 
   it('keeps copy feedback working under StrictMode effect replay', async () => {
@@ -2360,7 +2332,7 @@ describe('EnhancedMarkdownTable', () => {
     mounted.push({ root, container });
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2374,7 +2346,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2391,14 +2363,14 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).toContain('Copied!');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
 
     await act(async () => {
       vi.advanceTimersByTime(1000);
     });
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
   });
 
   it('resets quick copy feedback when visible table data changes', async () => {
@@ -2407,7 +2379,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2417,7 +2389,7 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Sort by Score'));
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
   });
 
   it('ignores stale quick copy feedback after visible data changes', async () => {
@@ -2425,7 +2397,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     act(() => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
     });
     click(button(container, 'Sort by Score'));
 
@@ -2435,7 +2407,7 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
   });
 
   it('resets quick copy feedback when filters change visible rows', async () => {
@@ -2444,7 +2416,7 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2460,7 +2432,7 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Confirm'));
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
   });
 
   it('does not show copied feedback when clipboard write fails', async () => {
@@ -2469,17 +2441,17 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
 
     await act(async () => {
-      textButton(container, 'Quick copy').click();
+      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(warn).toHaveBeenCalled();
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
   });
 
-  it('shows checkmark feedback after copying a selection', async () => {
+  it('shows text feedback after copying a selection', async () => {
     vi.useFakeTimers();
     mockClipboard();
     const container = renderTable();
@@ -2492,15 +2464,14 @@ describe('EnhancedMarkdownTable', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('✓');
     expect(container.textContent).toContain('Copied!');
     expect(container.textContent).not.toContain('Copy TSV');
+    expect(textButton(container, 'Copied!').querySelector('svg')).toBeNull();
 
     await act(async () => {
       vi.advanceTimersByTime(2000);
     });
 
-    expect(container.textContent).not.toContain('✓');
     expect(container.textContent).toContain('Copy TSV');
   });
 
@@ -2578,8 +2549,8 @@ describe('EnhancedMarkdownTable', () => {
         </tr>
       </tbody>,
     ]);
-    click(button(container, 'Filter Team'));
-    click(textButton(portalRoot, 'Hide column'));
+    click(textButton(container, 'Custom columns'));
+    click(customColumnCheckbox(document.body, 'Team'));
     expect(rowTexts(container)).toEqual(['10']);
 
     render([
@@ -2615,8 +2586,7 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Confirm'));
     expect(rowTexts(container)).toEqual(['Gamma|30', 'Alpha|10']);
 
-    click(button(container, 'Filter Team'));
-    click(textButton(container, 'Hide column'));
+    toggleTableColumn(container, 'Team');
 
     expect(rowTexts(container)).toEqual(['10', '2', '30']);
     expect(container.textContent).toContain('3 rows');
@@ -2626,8 +2596,7 @@ describe('EnhancedMarkdownTable', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
 
-    click(button(container, 'Filter Region'));
-    click(textButton(container, 'Hide column'));
+    toggleTableColumn(container, 'Region');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
     click(textButton(container, 'Copy TSV'));
 
@@ -2921,39 +2890,36 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('Custom filter');
   });
 
-  it('does not offer hiding the last visible column', () => {
+  it('keeps sorting and column visibility out of the filter menu', () => {
     const container = renderTable();
 
     click(button(container, 'Filter Team'));
-    click(textButton(container, 'Hide column'));
-    click(button(container, 'Filter Score'));
 
-    expect(
-      [...container.querySelectorAll('button')].some(
-        (el) => el.textContent === 'Hide column',
-      ),
-    ).toBe(false);
+    expect(container.textContent).not.toContain('Hide column');
+    expect(container.textContent).not.toContain('Sort ascending');
+    expect(container.textContent).not.toContain('Sort descending');
   });
 
-  it('shows row details for visible columns', () => {
+  it('controls row-detail fields independently from table columns', () => {
     const container = renderTable();
 
     const detailsButton = button(container, 'View details for row 2');
     click(detailsButton);
     const detailsId = detailsButton.getAttribute('aria-controls');
     expect(detailsId).toBeTruthy();
-    expect(container.ownerDocument.getElementById(detailsId!)).not.toBeNull();
-    expect(container.textContent).toContain('Row details');
-    expect(container.textContent).toContain('Team');
-    expect(container.textContent).toContain('Beta');
-    expect(container.textContent).toContain('Score');
-    expect(container.textContent).toContain('2');
+    const details = container.ownerDocument.getElementById(detailsId!);
+    expect(details).not.toBeNull();
+    expect(details?.textContent).toContain('Team');
+    expect(details?.textContent).toContain('Beta');
+    expect(details?.textContent).toContain('Score');
+    expect(details?.textContent).toContain('2');
 
-    click(button(container, 'Filter Team'));
-    click(textButton(container, 'Hide column'));
-    expect(container.textContent).not.toContain('Beta');
-    expect(container.textContent).toContain('Score');
-    expect(container.textContent).toContain('2');
+    toggleDetailColumn(container, 'Team');
+    expect(details?.textContent).not.toContain('Team');
+    expect(details?.textContent).not.toContain('Beta');
+    expect(details?.textContent).toContain('Score');
+    expect(details?.textContent).toContain('2');
+    expect(container.querySelector('thead')?.textContent).toContain('Team');
   });
 
   it('closes row details when the row is filtered out', () => {
@@ -2999,7 +2965,7 @@ describe('EnhancedMarkdownTable', () => {
     );
 
     expect(container.textContent).toContain('plain fallback');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
   });
 
   it('falls back when a table has no parsed columns', () => {
@@ -3018,7 +2984,7 @@ describe('EnhancedMarkdownTable', () => {
     );
 
     expect(container.textContent).toContain('plain fallback');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
   });
 
   it('shows a distinct message for empty tables', () => {
@@ -3068,7 +3034,7 @@ describe('EnhancedMarkdownTable', () => {
       </tr>,
     ]);
 
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
     expect(rowTexts(container)).toEqual(['Alpha|10']);
   });
 
@@ -3097,8 +3063,8 @@ describe('EnhancedMarkdownTable', () => {
       'zh-CN',
     );
 
-    expect(container.textContent).toContain('快捷复制');
-    expect(container.textContent).toContain('密度：标准');
+    expect(container.textContent).toContain('复制表格');
+    expect(container.textContent).toContain('标准密度');
     expect(container.textContent).toContain('展开文本');
     expect(container.textContent).toContain('详情');
 
@@ -3110,6 +3076,7 @@ describe('EnhancedMarkdownTable', () => {
     openColumnMenu(container, 'Team');
     expect(container.textContent).toContain('冻结首列');
     click(button(container, '筛选 Team'));
-    expect(container.textContent).toContain('隐藏列');
+    expect(container.textContent).not.toContain('隐藏列');
+    expect(container.textContent).not.toContain('升序排序');
   });
 });
