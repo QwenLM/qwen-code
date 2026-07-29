@@ -935,6 +935,25 @@ describe('readTextCursorWindowFromHandle', () => {
     });
   });
 
+  it('does not let a budget-excluded CRLF line flip lineEnding', async () => {
+    // "aaa" (3) + sep (1) + "bbb" (3) = 7 <= 8; "ccc\r" would need 7+1+4 = 12 > 8.
+    await withHandle(
+      'crlf-budget.log',
+      'aaa\nbbb\nccc\r\n',
+      async (fh, size) => {
+        const page = await readTextCursorWindowFromHandle(fh, {
+          startOffset: 0,
+          fileSize: size,
+          maxOutputBytes: 8,
+          maxSnapBytes: 1_024,
+        });
+        expect(page.content).toBe('aaa\nbbb');
+        expect(page.lineEnding).toBe('lf');
+        expect(page.nextOffset).toBe(8);
+      },
+    );
+  });
+
   it('returns nothing for an offset at or past EOF', async () => {
     await withHandle('eof.log', 'a\nb\n', async (fh, size) => {
       const page = await readTextCursorWindowFromHandle(fh, {

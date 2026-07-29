@@ -282,7 +282,6 @@ export async function readTextCursorWindowFromHandle(
   let sawCrlf = false;
 
   const emit = (line: string, hadNewline: boolean): void => {
-    if (hadNewline && line.endsWith('\r')) sawCrlf = true;
     const separator = lines.length > 0 ? 1 : 0;
     const lineBytes = Buffer.byteLength(line, 'utf8');
     if (contentBytes + separator + lineBytes > maxOutputBytes) {
@@ -296,6 +295,7 @@ export async function readTextCursorWindowFromHandle(
       // following cursors would loop on it forever.
       const cut = truncateUtf8(line, maxOutputBytes);
       lines.push(cut.content);
+      if (hadNewline && line.endsWith('\r')) sawCrlf = true;
       contentBytes = Buffer.byteLength(cut.content, 'utf8');
       consumedBytes += contentBytes;
       truncatedByBytes = true;
@@ -307,6 +307,7 @@ export async function readTextCursorWindowFromHandle(
       return;
     }
     lines.push(line);
+    if (hadNewline && line.endsWith('\r')) sawCrlf = true;
     contentBytes += separator + lineBytes;
     consumedBytes += lineBytes + (hadNewline ? 1 : 0);
     if (request.limit !== undefined && lines.length >= request.limit) {

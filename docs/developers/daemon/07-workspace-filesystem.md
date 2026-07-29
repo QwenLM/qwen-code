@@ -139,14 +139,14 @@ sequenceDiagram
     FS->>FSP: stat(path)
     FSP-->>FS: stats
     FS->>FS: reject if not regular file (describeStatKind)
-    alt file <= 256 KiB
-        FS->>FSP: open + read stable full snapshot
-        FSP-->>FS: buffer
-        FS->>FS: hash full snapshot; apply line/output limits
-    else cursor supplied
+    alt cursor supplied
         FS->>FSP: open stable FileHandle
         FS->>FS: validate cursor {dev,ino,size}; seek to the byte offset
         FS->>FS: return whole lines; emit the next cursor
+    else file <= 256 KiB
+        FS->>FSP: open + read stable full snapshot
+        FSP-->>FS: buffer
+        FS->>FS: hash full snapshot; apply line/output limits
     else file > 256 KiB AND an explicit window arg
         FS->>FSP: open stable FileHandle
         FS->>FS: stream requested lines from the same inode
