@@ -271,6 +271,23 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(response.content).toBe(lines.slice(2, 22).join('\n'));
     });
 
+    it('serves an oversized ACP line-only read as a bounded window', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-line-only.txt');
+      await fsp.writeFile(target, 'x'.repeat(MAX_READ_BYTES + 1), 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 2,
+      });
+
+      expect(response.content).toBe('');
+    });
+
     it('treats null line/limit as undefined (ACP wire compatibility)', async () => {
       const target = path.join(tmpDir, 'null-window.txt');
       await fsp.writeFile(target, 'hello\nworld\n', 'utf8');

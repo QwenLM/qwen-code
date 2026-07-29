@@ -89,9 +89,12 @@ readTextRangeFromHandle(fh, request: ReadTextRangeFromHandleRequest)
 The handle variant always streams — there is no flag, because a caller reaches
 for a handle precisely when it needs the read bounded, and the buffering fast
 path would read the whole file. Its request type has no `path` (nothing for one
-to disambiguate) and makes both byte bounds required rather than optional:
+to disambiguate), retains the numeric `fileSize` captured from the opening
+`fstat`, and makes both byte bounds required rather than optional.
 `maxOutputBytes` caps what the read returns, `maxScanBytes` caps what it costs,
-and a handle-bound read exists because a security boundary needs both.
+and `fileSize` prevents an append from widening the descriptor snapshot while
+the read is in flight. A handle-bound read exists because a security boundary
+needs all three bounds.
 
 `maxScanBytes` stays optional on the path variant, where it defaults to
 `Infinity` so the `read_file` tool is unchanged.
@@ -117,8 +120,9 @@ untouched.
 
 ## Blast radius
 
-- `readTextRange` is not exported from `packages/core/src/index.ts`; only the
-  two error classes are. The reshaped surface is core-internal.
+- `readTextRange` is not exported from `packages/core/src/index.ts`; the three
+  boundary-facing error classes are. The reshaped reader surface is
+  core-internal.
 - `readTextRange` and `readFileWithLineAndLimit` have exactly one production
   caller each (`fileUtils.ts`, `fileSystemService.ts`).
 - `detectFileEncoding` is public via `export * from './utils/fileUtils.js'`.
@@ -134,9 +138,10 @@ It was `Omit<CoreReadTextFileRequest, 'limit' | 'stats' | 'maxOutputBytes'> &
 {...}`, which left two fields the handle path never reads:
 
 - **`stats`** was documented as required — "must pass the Stats captured from
-  that handle" — and nothing downstream read it. The handle path always streams,
-  so it never needs a size to choose a strategy, and the encoding probe does its
-  own `fstat`.
+  that handle" — and nothing downstream read the object. The final API retains
+  only its numeric `fileSize`: the handle path does not need metadata to choose
+  a strategy, but it does need the opening size to keep reads bounded when the
+  file is appended to concurrently.
 - **`path`** became dead once `readTextRangeFromHandle` replaced the
   path-plus-handle call: the read is bound to the descriptor, and errors are
   labelled with the path by the Serve boundary that owns it.
@@ -147,15 +152,14 @@ raised nothing. That is the argument for declaring the type standalone rather
 than deriving it: the `Omit` chain was stripping four of six inherited fields
 and quietly re-admitting the rest.
 
-282 production logic lines change in `packages/core`; across `packages/` the
-change is net −68 lines.
+At the refactor commit, 282 production logic lines changed in `packages/core`;
+the later cursor follow-up adds behavior and tests on top of that baseline.
 
 ## Testing
 
-The existing suites are the specification: the whole point is that the Serve
-boundary cannot tell. `packages/cli/src/serve/fs/` and the bridge adapter — 222
-tests — pass unmodified, as does the full `packages/core` `src/utils` +
-`src/services` run (6078 tests).
+At the refactor commit, the existing suites were the specification: the whole
+point was that the Serve boundary could not tell. The later cursor follow-up
+adds boundary behavior and its own tests.
 
 Three tests in `read-text-range.test.ts` moved to `readTextRangeFromHandle`. Two
 used `fileHandle` directly. The third used a _path_ with `forceStreaming: true`
@@ -181,6 +185,5 @@ are kept — they need no mock.
 
 ## Follow-up
 
-`chunksFromHandle` gained a `from` parameter that nothing yet passes a non-zero
-value for. It is the single seam byte-cursor text paging needs, and that is the
-change this refactor exists to enable.
+`chunksFromHandle` gained a `from` parameter as the single seam byte-cursor text
+paging needed. The follow-up now uses it to resume from a non-zero byte offset.

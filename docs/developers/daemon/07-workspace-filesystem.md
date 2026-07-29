@@ -45,7 +45,7 @@ The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST 
 | `path_not_found`         | 404          | `ENOENT`.                                                                                                                                                                                     |
 | `binary_file`            | 422          | Content sniffed binary on a text route, or large text in an encoding the text route cannot decode.                                                                                            |
 | `file_too_large`         | 413          | Windowless/full-snapshot text above `MAX_READ_BYTES`, a line offset beyond `MAX_TEXT_SCAN_BYTES`, or a write above `MAX_WRITE_BYTES`.                                                         |
-| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed.                                                                                                                                               |
+| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed, or the file changed during a stable read.                                                                                                     |
 | `file_already_exists`    | 409          | `mode: 'create'` against an existing file.                                                                                                                                                    |
 | `text_not_found`         | 422          | `POST /file/edit`'s search string wasn't in the file.                                                                                                                                         |
 | `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                               |
@@ -68,10 +68,10 @@ interface BridgeFileSystem {
 
 This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) so agent-side ACP writes pick up the same TOCTOU, symlink, trust-gate, and audit gates the HTTP routes use.
 
-Two defensive gates the adapter MUST replicate (because the inline proxy is fully bypassed when the adapter is injected):
+Two defensive properties the adapter MUST preserve (because the inline proxy is fully bypassed when the adapter is injected):
 
 1. **Reject non-regular files** — sockets / pipes / char devices / procfs / sysfs entries can stream unbounded data despite `stats.size === 0`. The inline path throws with `describeStatKind(stats)` in the message.
-2. **Cap buffered size** at `READ_FILE_SIZE_CAP = 100 MiB`. A tiny `{ line: 1, limit: 10 }` request against a 500 MB log would otherwise cost 500 MB of RSS just to return 10 lines.
+2. **Avoid unbounded full-file buffering.** The inline fallback caps a buffered read at `READ_FILE_SIZE_CAP = 100 MiB`. The injected adapter instead applies the stricter WorkspaceFileSystem contract: full snapshots stop at 256 KiB, while larger UTF-8 files require a finite `limit` and are streamed from an inode-bound handle with at most 256 KiB returned. It must not read an entire 500 MB log merely to return `{ line: 1, limit: 10 }`.
 
 The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 

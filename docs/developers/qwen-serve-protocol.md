@@ -1572,11 +1572,14 @@ Filesystem errors use this JSON shape:
 
 #### `GET /file`
 
-Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
-`limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
+Reads a text file. Query params: `path` (required), `maxBytes`, `line`, `limit`,
+and `cursor`. The daemon rejects binary files. Files above the 256 KiB
+full-snapshot
 cap require at least one explicit window argument (`line`, `limit`, or
 `maxBytes`); a request with none of them remains `file_too_large`. Such a
 window is streamed, and its returned UTF-8 content stays capped at 256 KiB.
+`maxBytes` always applies to the UTF-8 response bytes after decoding, including
+when the source uses another supported encoding within the full-snapshot cap.
 
 Line offsets are resolved by scanning from the start of the file, so a window
 is also refused with `file_too_large` when reaching it would read more than

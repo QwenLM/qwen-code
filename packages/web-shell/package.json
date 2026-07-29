@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -13,8 +13,7 @@
   },
   "files": [
     "dist/index.js",
-    "dist/types",
-    "docs/examples/qwencode-viz/SKILL.md"
+    "dist/types"
   ],
   "scripts": {
     "dev": "vite",
@@ -39,10 +38,14 @@
     "@codemirror/merge": "^6.12.2",
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.35.0",
+    "@datafe-open/markdown-chart": "^0.1.12",
+    "@datafe-open/markdown-chart-echarts": "^0.1.12",
+    "@datafe-open/markdown-chart-react": "^0.1.12",
     "@tanstack/react-virtual": "^3.13.26",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.0",
+    "echarts": "^6.0.0",
     "fzf": "^0.5.2",
     "katex": "^0.16.47",
     "lucide-react": "^1.24.0",

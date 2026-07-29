@@ -97,17 +97,17 @@ export function decodeTextCursor(cursor: string): TextCursorState {
 }
 
 /**
- * Reject a cursor minted against different bytes.
+ * Reject a cursor known stale through replacement or shrinkage.
  *
  * Growth is fine and is the point: appending to a log does not move the lines
  * an outstanding cursor points at. Shrinking is not — the offset may now land
  * mid-line or past the end, and the bytes there are not the ones the client
  * was reading.
  *
- * Residual: a delete-and-recreate that reuses the inode passes both checks.
- * That is the same limit `assertSameFile` carries everywhere in this boundary,
- * and `mtimeMs` cannot close it (a recreated file has a *newer* mtime, and
- * mtime equality would break the append case this exists to serve).
+ * Residual: a same-inode rewrite that keeps or grows the file, or a
+ * delete-and-recreate that reuses the inode, passes both checks. `mtimeMs`
+ * cannot close that gap because both those cases and a valid append advance
+ * it; hashing the prefix would make every page O(n), defeating the cursor.
  */
 export function assertCursorMatchesFile(
   cursor: TextCursorState,

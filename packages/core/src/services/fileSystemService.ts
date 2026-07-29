@@ -63,7 +63,8 @@ export type CoreReadTextFileRequest = Omit<
  * Declared standalone rather than derived from {@link CoreReadTextFileRequest}:
  * a handle-bound read shares only `line` and `signal` with a path-bound one, so
  * an `Omit` chain would strip more than it kept and would keep re-admitting
- * fields — `path`, `stats` — that this path has no use for.
+ * fields that this path has no use for. `fileSize` is the one value retained
+ * from the descriptor's opening stat because it bounds reads against appends.
  *
  * Both byte bounds are required rather than optional: what makes a large-file
  * read safe at a boundary is that the *returned* bytes and the *scanned* bytes
@@ -73,6 +74,8 @@ export type CoreReadTextFileRequest = Omit<
  */
 export interface CoreReadTextFileHandleRequest {
   fileHandle: FileHandle;
+  /** File size captured from the opened descriptor before reading. */
+  fileSize: number;
   /** 0-based start line, matching {@link CoreReadTextFileRequest}. */
   line?: number | null;
   limit?: number;
@@ -355,6 +358,11 @@ export class StandardFileSystemService implements FileSystemService {
   async readTextFileFromHandle(
     params: CoreReadTextFileHandleRequest,
   ): Promise<ReadTextFileResponse> {
+    if (!Number.isSafeInteger(params.fileSize) || params.fileSize < 0) {
+      throw new RangeError(
+        `handle-bound text reads require a non-negative integer fileSize, got ${params.fileSize}`,
+      );
+    }
     if (!isPositiveSafeInteger(params.maxOutputBytes)) {
       throw new RangeError(
         `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
@@ -374,9 +382,19 @@ export class StandardFileSystemService implements FileSystemService {
         `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
       );
     }
+    if (
+      params.line !== undefined &&
+      params.line !== null &&
+      (!Number.isSafeInteger(params.line) || params.line < 0)
+    ) {
+      throw new RangeError(
+        `handle-bound text reads require a non-negative integer line, got ${params.line}`,
+      );
+    }
     const range = await readTextRangeFromHandle(params.fileHandle, {
       offset: params.line ?? 0,
       limit: params.limit ?? Number.POSITIVE_INFINITY,
+      fileSize: params.fileSize,
       maxOutputBytes: params.maxOutputBytes,
       maxScanBytes: params.maxScanBytes,
       ...(params.signal !== undefined ? { signal: params.signal } : {}),

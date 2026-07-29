@@ -25,7 +25,7 @@ export function workspaceReadTools(state: BridgeState): any[] {
           .string()
           .optional()
           .describe(
-            "Resume token from a previous read's next_cursor. Reaches any point in the file in constant time, unlike a large `line` offset.",
+            "Resume token from a previous read's nextCursor. Reaches any point in the file in constant time, unlike a large `line` offset.",
           ),
       },
       handler(async (args) => {

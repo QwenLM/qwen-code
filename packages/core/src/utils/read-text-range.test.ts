@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,7 +12,6 @@ import { iconvEncode } from './iconvHelper.js';
 import {
   CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
-  TextScanBudgetExceededError,
   readTextCursorWindowFromHandle,
   readTextRange,
   readTextRangeFromHandle,
@@ -101,11 +100,13 @@ describe('readTextRange', () => {
   it('streams a requested range from a caller-owned file handle', async () => {
     const filePath = await writeFile('handle.log', largeUtf8Lines(2_000));
     const fileHandle = await fs.open(filePath, 'r');
+    const readSpy = vi.spyOn(fileHandle, 'read');
     try {
       const stats = await fileHandle.stat();
       const result = await readTextRangeFromHandle(fileHandle, {
         offset: 1_500,
         limit: 3,
+        fileSize: stats.size,
         maxOutputBytes: 10_000,
         maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
@@ -120,6 +121,7 @@ describe('readTextRange', () => {
       const beyondEof = await readTextRangeFromHandle(fileHandle, {
         offset: 10_000,
         limit: 3,
+        fileSize: stats.size,
         maxOutputBytes: 10_000,
         maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
@@ -129,15 +131,176 @@ describe('readTextRange', () => {
       await expect(fileHandle.stat()).resolves.toMatchObject({
         size: stats.size,
       });
+      expect(
+        readSpy.mock.calls.some(
+          ([buffer]) => Buffer.isBuffer(buffer) && buffer.length === 512 * 1024,
+        ),
+      ).toBe(true);
+    } finally {
+      readSpy.mockRestore();
+      await fileHandle.close();
+    }
+  });
+
+  it('bounds handle reads to the supplied snapshot and reuses the chunk buffer', async () => {
+    const original = Buffer.from(`${'x'.repeat(99)}\n`.repeat(7_000));
+    let current = original;
+    let appended = false;
+    const streamBuffers: Buffer[] = [];
+    const streamReads: Array<{ position: number; length: number }> = [];
+    const fileHandle = {
+      read: vi.fn(
+        async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          const available = Math.max(0, current.length - position);
+          const bytesRead = Math.min(length, available);
+          current.copy(buffer, offset, position, position + bytesRead);
+          if (buffer.length === 512 * 1024) {
+            streamBuffers.push(buffer);
+            streamReads.push({ position, length });
+            if (!appended) {
+              appended = true;
+              current = Buffer.concat([
+                current,
+                Buffer.from('APPENDED-AFTER-OPEN\n'),
+              ]);
+            }
+          }
+          return { bytesRead, buffer };
+        },
+      ),
+    } as unknown as import('node:fs/promises').FileHandle;
+
+    const result = await readTextRangeFromHandle(fileHandle, {
+      offset: 7_000,
+      limit: 1,
+      fileSize: original.length,
+      maxOutputBytes: 10_000,
+      maxScanBytes: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(result.content).toBe('');
+    expect(streamBuffers.length).toBeGreaterThan(1);
+    expect(streamBuffers.every((buffer) => buffer === streamBuffers[0])).toBe(
+      true,
+    );
+    expect(
+      streamReads.every(
+        ({ position, length }) => position + length <= original.length,
+      ),
+    ).toBe(true);
+  });
+
+  it('reads a handle-bound range beyond 10 MiB with a byte cap', async () => {
+    const content = largeUtf8Lines(65_000);
+    const marker = 'line-60001';
+    expect(
+      Buffer.byteLength(content.slice(0, content.indexOf(marker))),
+    ).toBeGreaterThan(10 * 1024 * 1024);
+    const filePath = await writeFile('deep-handle.log', content);
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRangeFromHandle(fileHandle, {
+        offset: 60_000,
+        limit: 3,
+        fileSize: stats.size,
+        maxOutputBytes: 256,
+        maxScanBytes: Number.MAX_SAFE_INTEGER,
+      });
+
+      expect(result.content).toMatch(/^line-60001 /);
+      expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(256);
+      expect(result.content).not.toContain('\uFFFD');
+      expect(result.truncatedByBytes).toBe(true);
+      expect(result.originalLineCountExact).toBe(false);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('accepts handle-bound UTF-8 when the encoding sample splits an emoji', async () => {
+    const firstLine = `${'a'.repeat(8191)}🙂`;
+    const filePath = await writeFile(
+      'split-encoding-sample.log',
+      `${firstLine}\n${'b'.repeat(300_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRangeFromHandle(fileHandle, {
+        offset: 0,
+        limit: 1,
+        fileSize: stats.size,
+        maxOutputBytes: 16_384,
+        maxScanBytes: Number.MAX_SAFE_INTEGER,
+      });
+
+      expect(result.content).toBe(firstLine);
+      expect(result.encoding).toBe('utf-8');
+      expect(result.content).not.toContain('\uFFFD');
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('does not read bytes appended past the supplied handle stats', async () => {
+    const filePath = await writeFile(
+      'growing.log',
+      `${'a'.repeat(500_000)}\n${'b'.repeat(50_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    const stats = await fileHandle.stat();
+    let appended = false;
+    const boundedHandle = {
+      read: async (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        const result = await fileHandle.read(buffer, offset, length, position);
+        if (!appended && length === 512 * 1024 && position === 0) {
+          appended = true;
+          await fs.appendFile(filePath, '\nAPPENDED');
+        }
+        return result;
+      },
+    } as unknown as import('node:fs/promises').FileHandle;
+
+    try {
+      const result = await readTextRangeFromHandle(boundedHandle, {
+        offset: 1,
+        limit: 2,
+        fileSize: stats.size,
+        maxOutputBytes: 100_000,
+        maxScanBytes: Number.MAX_SAFE_INTEGER,
+      });
+
+      expect(appended).toBe(true);
+      expect(result.content).toBe('b'.repeat(50_000));
+      expect(result.content).not.toContain('APPENDED');
+      expect(result.originalLineCount).toBe(2);
+      expect(result.originalLineCountExact).toBe(true);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size + 9,
+      });
     } finally {
       await fileHandle.close();
     }
   });
 
   it('reads the pinned inode after the path is replaced underneath it', async () => {
-    // The handle variant takes no path, so "read the wrong file" is no longer
-    // representable. What is still worth pinning down is the property that
-    // motivated the API: once opened, the read follows the inode, not the name.
     const targetPath = await writeFile(
       'original.log',
       'safe-one\nsafe-two\nsafe-three\n',
@@ -148,11 +311,13 @@ describe('readTextRange', () => {
     );
     const fileHandle = await fs.open(targetPath, 'r');
     try {
+      const stats = await fileHandle.stat();
       await fs.rename(replacementPath, targetPath);
 
       const result = await readTextRangeFromHandle(fileHandle, {
         offset: 0,
         limit: 2,
+        fileSize: stats.size,
         maxOutputBytes: 1_024,
         maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
@@ -175,7 +340,11 @@ describe('readTextRange', () => {
         maxOutputBytes: 262_144,
         maxScanBytes: 100_000,
       }),
-    ).rejects.toBeInstanceOf(TextScanBudgetExceededError);
+    ).rejects.toMatchObject({
+      name: 'TextScanBudgetExceededError',
+      scannedBytes: 100_000,
+      maxScanBytes: 100_000,
+    });
   });
 
   it('serves a shallow window from a file far larger than maxScanBytes', async () => {
@@ -209,6 +378,7 @@ describe('readTextRange', () => {
     const result = await readTextRangeFromHandle(fileHandle, {
       offset: 98,
       limit: 10,
+      fileSize: Buffer.byteLength(body),
       maxOutputBytes: 262_144,
       maxScanBytes: Buffer.byteLength(body),
     }).finally(() => fileHandle.close());
@@ -294,6 +464,26 @@ describe('readTextRange', () => {
 
     expect(result.lineEnding).toBe('crlf');
     expect(result.content).toContain('\r\nsecond');
+  });
+
+  it('reports the next byte offset when a skipped line spans chunks', async () => {
+    const firstLine = 'a'.repeat(512 * 1024 + 10);
+    const body = `${firstLine}\nsecond\nthird`;
+    const filePath = await writeFile('split-line-offset.log', body);
+    const fileHandle = await fs.open(filePath, 'r');
+
+    const result = await readTextRangeFromHandle(fileHandle, {
+      offset: 1,
+      limit: 1,
+      fileSize: Buffer.byteLength(body),
+      maxOutputBytes: 1_024,
+      maxScanBytes: Buffer.byteLength(body),
+    }).finally(() => fileHandle.close());
+
+    expect(result.content).toBe('second');
+    expect(result.nextByteOffset).toBe(
+      Buffer.byteLength(`${firstLine}\nsecond\n`),
+    );
   });
 
   it('strips UTF-8 BOM from large file content and reports BOM metadata', async () => {
@@ -578,6 +768,26 @@ describe('readTextCursorWindowFromHandle', () => {
     });
   });
 
+  it('stops decoding an oversized line before reading the next full chunk', async () => {
+    const body = `${'z'.repeat(2 * 1024 * 1024)}\ntail\n`;
+    await withHandle('bounded-line.log', body, async (fh, size) => {
+      const readSpy = vi.spyOn(fh, 'read');
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        maxOutputBytes: 100,
+        maxSnapBytes: 1_024,
+      });
+
+      expect(page.content).toBe('z'.repeat(100));
+      expect(page.nextOffset).toBe(2 * 1024 * 1024 + 1);
+      const readCalls = readSpy.mock.calls as unknown as ReadonlyArray<
+        readonly unknown[]
+      >;
+      expect(readCalls.map((call) => call[3])).not.toContain(512 * 1024);
+    });
+  });
+
   it('mints only line-start cursors, so paging never straddles a line', async () => {
     const body = `${'q'.repeat(300)}\nshort\n`;
     await withHandle('seam.log', body, async (fh, size) => {
@@ -617,6 +827,24 @@ describe('readTextCursorWindowFromHandle', () => {
         expect(page.truncatedByBytes).toBe(true);
         // The file is a single line, so skipping its dropped remainder lands at
         // EOF and there is no next page.
+        expect(page.nextOffset).toBeUndefined();
+      },
+    );
+  });
+
+  it('ends paging after truncating a final line without a newline', async () => {
+    await withHandle(
+      'unterminated-long-line.log',
+      'x'.repeat(5_000),
+      async (fh, size) => {
+        const page = await readTextCursorWindowFromHandle(fh, {
+          startOffset: 0,
+          fileSize: size,
+          maxOutputBytes: 100,
+          maxSnapBytes: 1_024,
+        });
+        expect(page.content).toBe('x'.repeat(100));
+        expect(page.truncatedByBytes).toBe(true);
         expect(page.nextOffset).toBeUndefined();
       },
     );

@@ -448,9 +448,10 @@ describe('AssistantMessage markdown tables', () => {
       </WebShellCustomizationProvider>,
     );
 
-    expect(container.textContent).toContain('Quick copy');
-    expect(container.textContent).toContain('Details');
-    expect(container.querySelector('button[aria-label*="table"]')).toBeNull();
+    expect(container.textContent).toContain('Copy table');
+    expect(
+      container.querySelector('button[aria-label="View details for row 1"]'),
+    ).not.toBeNull();
   });
 
   it('keeps streaming assistant tables plain', () => {
@@ -459,6 +460,6 @@ describe('AssistantMessage markdown tables', () => {
     );
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
   });
 });

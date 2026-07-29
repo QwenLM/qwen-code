@@ -116,6 +116,7 @@ interface ChatEditorProps {
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -1161,6 +1162,7 @@ export const ChatEditor = memo(
     const {
       onSubmit,
       onInputTextChange,
+      onAttachmentsChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1267,6 +1269,10 @@ export const ChatEditor = memo(
     const { t } = useI18n();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
+
+    useEffect(() => {
+      onAttachmentsChange?.(core.hasAttachments);
+    }, [core.hasAttachments, onAttachmentsChange]);
 
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);

@@ -227,6 +227,21 @@ describe('GET /file', () => {
     expect(res.body.hash).toBeUndefined();
   });
 
+  it('keeps an oversized read without a window behind the snapshot cap', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    await fsp.writeFile(
+      path.join(h.workspace, 'large-no-window.txt'),
+      'x'.repeat(MAX_READ_BYTES + 1),
+    );
+
+    const res = await request(h.app)
+      .get('/file?path=large-no-window.txt')
+      .set('Host', loopbackHost());
+
+    expect(res.status).toBe(413);
+    expect(res.body.errorKind).toBe('file_too_large');
+  });
+
   it('attaches Cache-Control: no-store and X-Content-Type-Options: nosniff', async () => {
     await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'x');
     const res = await request(h.app)

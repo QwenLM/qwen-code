@@ -5,8 +5,8 @@ import { memo, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
-  artifactKindLabel,
   formatArtifactSize,
+  getArtifactTypeLabel,
   isSamePath,
   stripWorkspacePath,
 } from './artifactUtils';
@@ -321,9 +321,7 @@ function ArtifactCard({
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[artifactKindLabel(artifact.kind), size]
-              .filter(Boolean)
-              .join(' · ')}
+            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>

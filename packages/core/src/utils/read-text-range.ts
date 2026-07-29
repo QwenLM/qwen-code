@@ -43,6 +43,8 @@ export interface ReadTextRangeRequest {
 export interface ReadTextRangeFromHandleRequest {
   offset?: number;
   limit?: number;
+  /** Upper bound captured from the opened descriptor before reading. */
+  fileSize: number;
   maxOutputBytes: number;
   maxScanBytes: number;
   signal?: AbortSignal;
@@ -191,6 +193,7 @@ export async function readTextRange(
     request,
     maxOutputBytes,
     maxScanBytes,
+    stats.size,
   );
 }
 
@@ -212,6 +215,7 @@ export async function readTextRangeFromHandle(
     request,
     normalizeMaxBytes(request.maxOutputBytes),
     request.maxScanBytes,
+    request.fileSize,
   );
 }
 
@@ -317,6 +321,7 @@ export async function readTextCursorWindowFromHandle(
   for await (const raw of chunksFromHandle(
     fileHandle,
     startOffset,
+    request.fileSize,
     request.signal,
   )) {
     request.signal?.throwIfAborted();
@@ -334,6 +339,20 @@ export async function readTextCursorWindowFromHandle(
     pending += text;
 
     let newline = pending.indexOf('\n');
+    const pendingLine = newline === -1 ? pending : pending.slice(0, newline);
+    const pendingSeparator = lines.length > 0 ? 1 : 0;
+    if (
+      contentBytes + pendingSeparator + Buffer.byteLength(pendingLine, 'utf8') >
+      maxOutputBytes
+    ) {
+      if (lines.length === 0) {
+        emit(pendingLine, newline !== -1);
+      } else {
+        stop = true;
+      }
+      reachedEof = false;
+      break;
+    }
     while (newline !== -1) {
       emit(pending.slice(0, newline), true);
       pending = pending.slice(newline + 1);
@@ -355,10 +374,18 @@ export async function readTextCursorWindowFromHandle(
   }
 
   if (skipRestOfLine) {
-    const resumeAt = await snapToLineStart(fileHandle, {
-      ...request,
-      startOffset: startOffset + consumedBytes,
-    });
+    const resumeAt = await snapToLineStart(
+      fileHandle,
+      {
+        ...request,
+        startOffset: startOffset + consumedBytes,
+        // This offset was produced internally after returning a truncated prefix,
+        // so it must advance past the rest of that line. `maxSnapBytes` protects
+        // only client-supplied offsets.
+        maxSnapBytes: request.fileSize,
+      },
+      true,
+    );
     consumedBytes = resumeAt - startOffset;
   }
 
@@ -405,6 +432,7 @@ async function hasUtf8Bom(
 async function snapToLineStart(
   fileHandle: FileHandle,
   request: ReadTextCursorWindowRequest,
+  allowEof = false,
 ): Promise<number> {
   const { startOffset, fileSize, maxSnapBytes, signal } = request;
   if (startOffset <= 0) return 0;
@@ -415,12 +443,18 @@ async function snapToLineStart(
   if (bytesRead === 1 && previous[0] === LINE_FEED) return startOffset;
 
   let scanned = 0;
-  for await (const chunk of chunksFromHandle(fileHandle, startOffset, signal)) {
+  const snapEnd = Math.min(fileSize, startOffset + maxSnapBytes);
+  for await (const chunk of chunksFromHandle(
+    fileHandle,
+    startOffset,
+    snapEnd,
+    signal,
+  )) {
     const index = chunk.indexOf(LINE_FEED);
     if (index !== -1) return startOffset + scanned + index + 1;
     scanned += chunk.length;
-    if (scanned >= maxSnapBytes) break;
   }
+  if (allowEof) return fileSize;
   throw new CursorNotAtLineBoundaryError(startOffset, maxSnapBytes);
 }
 
@@ -469,6 +503,7 @@ async function readLargeUtf8Range(
   request: { offset?: number; limit?: number; signal?: AbortSignal },
   maxOutputBytes: number,
   maxScanBytes: number,
+  sourceSize?: number,
 ): Promise<ReadTextRangeResult> {
   const encoding = await detectFileEncoding(source);
   // Detection is one bounded 8 KiB read, but check here anyway so an abort
@@ -492,13 +527,11 @@ async function readLargeUtf8Range(
   let originalLineCountExact = true;
   let stoppedEarly = false;
   let scannedBytes = 0;
-  let budgetExhausted = false;
-  // Bytes of the file the scanner has walked past, counted per line rather
-  // than per chunk. `scannedBytes` is chunk-granular (512 KiB at a time) and
-  // so cannot locate a line boundary, and mapping a position in the decoded
-  // chunk back to a byte offset is wrong because `decode(..., {stream: true})`
-  // holds back an incomplete trailing sequence. Re-encoding each line is exact
-  // here because this path has already refused non-UTF-8.
+  // Bytes of the file the decoder has walked past. `scannedBytes` is
+  // chunk-granular and cannot locate a line boundary, while mapping a decoded
+  // string index back into its raw chunk is wrong because streaming decode can
+  // hold an incomplete trailing sequence. Re-encoding each decoded fragment is
+  // exact here because this path has already refused non-UTF-8.
   let consumedBytes = 0;
   const decoder = new TextDecoder('utf-8', {
     fatal: true,
@@ -507,14 +540,24 @@ async function readLargeUtf8Range(
 
   let pathStream: ReturnType<typeof createReadStream> | undefined;
   let chunks: AsyncIterable<Buffer>;
+  const sourceEnd = Math.min(
+    sourceSize ?? Number.POSITIVE_INFINITY,
+    maxScanBytes,
+  );
+  if (sourceEnd <= 0 && (sourceSize ?? 0) > 0) {
+    throw new TextScanBudgetExceededError(0, maxScanBytes);
+  }
   if (typeof source === 'string') {
     pathStream = createReadStream(source, {
       highWaterMark: 512 * 1024,
       signal: request.signal,
+      ...(Number.isFinite(sourceEnd)
+        ? { end: Math.max(0, sourceEnd - 1) }
+        : {}),
     });
     chunks = pathStream;
   } else {
-    chunks = chunksFromHandle(source, 0, request.signal);
+    chunks = chunksFromHandle(source, 0, sourceEnd, request.signal);
   }
 
   function appendSelected(fragment: string): void {
@@ -554,14 +597,6 @@ async function readLargeUtf8Range(
   try {
     for await (const rawChunk of chunks) {
       request.signal?.throwIfAborted();
-      // Checked on arrival of the *next* chunk rather than after consuming
-      // the current one: reaching here at all proves there was more file to
-      // read, which is what separates "budget ran out mid-file" from "the
-      // file happened to end on the budget". Costs one chunk of overshoot.
-      if (scannedBytes >= maxScanBytes) {
-        budgetExhausted = true;
-        break;
-      }
       scannedBytes += (rawChunk as Buffer).length;
       let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
       if (firstChunk) {
@@ -574,8 +609,9 @@ async function readLargeUtf8Range(
       }
 
       if (
-        (previousChunkEndedWithCR && chunk.startsWith('\n')) ||
-        chunk.includes('\r\n')
+        isSelectedLine() &&
+        previousChunkEndedWithCR &&
+        chunk.startsWith('\n')
       ) {
         lineEnding = 'crlf';
       }
@@ -585,7 +621,9 @@ async function readLargeUtf8Range(
       let newline = chunk.indexOf('\n', start);
       while (newline !== -1) {
         if (isSelectedLine()) {
-          appendSelected(chunk.slice(start, newline));
+          const fragment = chunk.slice(start, newline);
+          if (fragment.endsWith('\r')) lineEnding = 'crlf';
+          appendSelected(fragment);
           if (currentLine + 1 < endLine) {
             appendSelected('\n');
           }
@@ -602,8 +640,12 @@ async function readLargeUtf8Range(
         newline = chunk.indexOf('\n', start);
       }
 
-      if (start < chunk.length && isSelectedLine()) {
-        appendSelected(chunk.slice(start));
+      if (!stoppedEarly && start < chunk.length) {
+        const tail = chunk.slice(start);
+        if (isSelectedLine()) {
+          appendSelected(tail);
+        }
+        consumedBytes += Buffer.byteLength(tail, 'utf8');
       }
       if (currentLine >= endLine || truncatedByBytes) {
         originalLineCountExact = false;
@@ -617,6 +659,11 @@ async function readLargeUtf8Range(
     }
   }
 
+  const budgetExhausted =
+    !stoppedEarly &&
+    sourceSize !== undefined &&
+    sourceSize > maxScanBytes &&
+    scannedBytes >= maxScanBytes;
   if (budgetExhausted) {
     throw new TextScanBudgetExceededError(scannedBytes, maxScanBytes);
   }
@@ -640,32 +687,35 @@ async function readLargeUtf8Range(
 }
 
 /**
- * Sequential chunks off a borrowed descriptor, starting at `from`.
+ * Sequential chunks off a borrowed descriptor in `[from, toExclusive)`.
  *
  * Reads use explicit positions, so the caller's file position is untouched and
- * two readers can share one handle. Each chunk is a fresh buffer and stays
- * valid after the next iteration — do not "optimize" this into one reused
- * buffer without giving the yielded value a documented lifetime.
+ * two readers can share one handle.
  */
 async function* chunksFromHandle(
   fileHandle: FileHandle,
   from = 0,
+  toExclusive = Number.POSITIVE_INFINITY,
   signal?: AbortSignal,
 ): AsyncGenerator<Buffer> {
   const highWaterMark = 512 * 1024;
+  const buffer = Buffer.allocUnsafe(highWaterMark);
   let position = from;
-  while (true) {
+  while (position < toExclusive) {
     signal?.throwIfAborted();
-    const buffer = Buffer.allocUnsafe(highWaterMark);
+    const bytesToRead = Math.min(highWaterMark, toExclusive - position);
     const { bytesRead } = await fileHandle.read(
       buffer,
       0,
-      buffer.length,
+      bytesToRead,
       position,
     );
     signal?.throwIfAborted();
     if (bytesRead === 0) return;
     position += bytesRead;
+    // `buffer` is reused across iterations, so each yielded view is valid
+    // only until the next read; consumers must decode or copy it before
+    // advancing the generator.
     yield buffer.subarray(0, bytesRead);
   }
 }

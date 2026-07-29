@@ -199,6 +199,7 @@ describe('StandardFileSystemService', () => {
       await expect(
         fileSystem.readTextFileFromHandle({
           fileHandle,
+          fileSize: 300_000,
           limit: 20,
           maxOutputBytes: 262_144,
           maxScanBytes: 8 * 1024 * 1024,
@@ -217,11 +218,32 @@ describe('StandardFileSystemService', () => {
       await expect(
         fileSystem.readTextFileFromHandle({
           fileHandle,
+          fileSize: 300_000,
           limit,
           maxOutputBytes: 262_144,
           maxScanBytes: 8 * 1024 * 1024,
         }),
       ).rejects.toThrow(/positive integer limit or Infinity/);
+    });
+
+    it.each([
+      ['fileSize', { fileSize: -1 }],
+      ['fileSize', { fileSize: 1.5 }],
+      ['line', { line: -1 }],
+      ['line', { line: 1.5 }],
+    ])('should reject invalid handle-bound %s', async (field, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          fileHandle,
+          fileSize: 300_000,
+          limit: 1,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(field));
     });
 
     it('should return encoding info for GBK file', async () => {
