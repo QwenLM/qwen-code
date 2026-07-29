@@ -110,6 +110,14 @@ describe('writeSkillArgs', () => {
     expect(readFileSync(target, 'utf8')).toBe('precious'); // untouched
   });
 
+  it('refuses a dangling symlink planted at its path', () => {
+    const linkPath = skillArgsPath('review');
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    symlinkSync(join(dir, 'missing.txt'), linkPath);
+
+    expect(writeSkillArgs('review', 'attacker')).toBeNull();
+  });
+
   it('writes the file mode 0600 — arguments can carry a secret', () => {
     if (process.platform === 'win32') return;
     writeSkillArgs('review', 'TOKEN=sk-secret');

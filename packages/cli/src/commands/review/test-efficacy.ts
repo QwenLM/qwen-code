@@ -44,7 +44,7 @@ import {
   lstatSync,
   existsSync,
 } from 'node:fs';
-import { dirname, join, isAbsolute, sep } from 'node:path';
+import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
@@ -257,6 +257,17 @@ function gitOut(cwd: string, ...args: string[]): string {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
   }
   return (r.stdout ?? '').trim();
+}
+
+function findVitestBin(start: string): string | null {
+  let dir = resolve(start);
+  while (true) {
+    const candidate = join(dir, 'node_modules', 'vitest', 'vitest.mjs');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /**
@@ -485,9 +496,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
+        const vitestBin = findVitestBin(worktree);
+        if (!vitestBin) throw new Error('vitest binary not found');
         const r = spawnSync(
-          process.platform === 'win32' ? 'npx.cmd' : 'npx',
-          ['vitest', 'run', '--reporter=json', ...probes],
+          process.execPath,
+          [vitestBin, 'run', '--reporter=json', ...probes],
           {
             cwd: probeTree,
             encoding: 'utf8',

@@ -64,10 +64,9 @@ function roundMs(value: number): number {
 
 function getAppendProfileOpenFlags(): number {
   const constants = fs.constants;
-  const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-  if (noFollow === undefined) {
-    throw new Error('session-start profiler requires O_NOFOLLOW support');
-  }
+  // Windows does not expose O_NOFOLLOW. The profiler writes append-only
+  // diagnostics, so keep symlink hardening where the platform supports it.
+  const noFollow = constants.O_NOFOLLOW ?? 0;
   return (
     (constants.O_APPEND ?? 0) |
     (constants.O_CREAT ?? 0) |

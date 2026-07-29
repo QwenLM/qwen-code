@@ -24,7 +24,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 import { testEfficacyCommand } from './test-efficacy.js';
 
 type Handler = (args: {
@@ -37,7 +37,6 @@ const runHandler = testEfficacyCommand.handler as unknown as Handler;
 
 let repo: string;
 let outside: string;
-const originalPath = process.env['PATH'];
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -107,16 +106,21 @@ beforeEach(() => {
   mkdirSync(hooksDir);
   git(repo, 'config', 'core.hooksPath', hooksDir);
 
-  // Put a fake `npx` first on PATH so the probe is independent of npm's
-  // platform-specific package lookup. It reports every test file as passed.
-  mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
-  const binDir = join(repo, 'node_modules', '.bin');
-  const script = join(binDir, 'vitest.cjs');
+  // Put a fake vitest entry in the repo parent so the probe is independent of
+  // npm's platform-specific bin wrappers. It reports every test file as passed.
+  const vitestDir = join(repo, 'node_modules', 'vitest');
+  mkdirSync(vitestDir, { recursive: true });
+  const script = join(vitestDir, 'vitest.mjs');
   writeFileSync(
     script,
     `#!/usr/bin/env node
-const path = require('path');
-const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+import path from 'node:path';
+const args = process.argv.slice(2);
+if (args[0] !== 'run' || args[1] !== '--reporter=json') {
+  process.stderr.write('unexpected vitest argv: ' + JSON.stringify(args));
+  process.exit(1);
+}
+const files = args.slice(2).filter((a) => a.includes('.test.'));
 process.stdout.write(JSON.stringify({
   numPassedTests: files.length,
   numFailedTests: 0,
@@ -127,18 +131,10 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  if (process.platform === 'win32') {
-    writeFileSync(join(binDir, 'npx.cmd'), '@node "%~dp0\\vitest.cjs" %*\r\n');
-  } else {
-    const bin = join(binDir, 'npx');
-    writeFileSync(bin, readFileSync(script));
-    chmodSync(bin, 0o755);
-  }
-  process.env['PATH'] = `${binDir}${delimiter}${originalPath ?? ''}`;
+  chmodSync(script, 0o755);
 });
 
 afterEach(() => {
-  process.env['PATH'] = originalPath;
   // The handler removes its own probe tree; force-remove any a failed test left.
   try {
     git(repo, 'worktree', 'remove', '--force', join(repo, 'wt-probe'));
