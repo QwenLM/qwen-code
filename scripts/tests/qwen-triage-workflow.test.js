@@ -899,10 +899,16 @@ describe('qwen-triage verify workflow', () => {
       expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe('true');
       expect(gate('@qwen-code /tmux', 'mallory', 'bob').run).toBe('false');
       expect(gate('@qwen-code /triage', 'mallory', 'bob').run).toBe('true');
-      // Neither non-verify path emits routing outputs.
-      expect(
-        gate('@qwen-code /triage', 'mallory', 'bob').runner,
-      ).toBeUndefined();
+      // Neither non-verify path emits trust outputs. Assert the REAL keys:
+      // this line read `.runner` — a name from an earlier design that
+      // `gate()` never returns — so it was `expect(undefined).toBeUndefined()`
+      // and could not fail, however badly the trust level leaked.
+      const triage = gate('@qwen-code /triage', 'mallory', 'bob');
+      expect(triage.trust).toBeUndefined();
+      expect(triage.oid).toBeUndefined();
+      const tmux = gate('@qwen-code /tmux', 'alice', 'bob');
+      expect(tmux.trust).toBeUndefined();
+      expect(tmux.oid).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1165,7 +1171,7 @@ describe('qwen-triage verify hardening', () => {
     );
 
     let n = 0;
-    const run = ({ trust, diff, prOid, sponsoredOid, baseUrl }) => {
+    const run = ({ trust, diff, prOid, sponsoredOid, baseUrl, apiKey }) => {
       const temp = join(dir, `t${n}`);
       mkdirSync(temp, { recursive: true });
       const out = join(dir, `out-${n}`);
@@ -1190,7 +1196,7 @@ describe('qwen-triage verify hardening', () => {
           RUN_URL: 'u',
           VERIFY_TRUST: trust,
           SPONSORED_OID: sponsoredOid ?? 'oid-1',
-          REVIEW_OPENAI_API_KEY: 'k',
+          REVIEW_OPENAI_API_KEY: apiKey === undefined ? 'k' : apiKey,
           REVIEW_OPENAI_BASE_URL: baseUrl ?? `http://127.0.0.1:${port}/v1`,
           OPENAI_MODEL: 'screen-model',
         },
@@ -1220,6 +1226,19 @@ describe('qwen-triage verify hardening', () => {
       expect(lifecycle.reason).toContain('npm lifecycle');
       expect(modelHits()).toBe(before);
 
+      // npm runs pre/post hooks for ANY `npm run <script>`, and this job
+      // runs `npm run build` while the agent runs the PR's suites — so a
+      // `prebuild` executes exactly like a `postinstall`. The alternation
+      // originally stopped at the install lifecycle and let these through.
+      for (const script of ['prebuild', 'postbuild', 'pretest', 'posttest']) {
+        const hook = run({
+          trust: 'external',
+          diff: `+++ b/package.json\n+    "${script}": "node payload.js",\n`,
+        });
+        expect(hook.decision, `${script} was not flagged`).toBe('skip');
+        expect(hook.reason).toContain('npm lifecycle');
+      }
+
       // Mechanical: a dependency resolving off-registry.
       const offReg = run({
         trust: 'external',
@@ -1227,6 +1246,69 @@ describe('qwen-triage verify hardening', () => {
       });
       expect(offReg.decision).toBe('skip');
       expect(offReg.reason).toContain('registry.npmjs.org');
+
+      // A lookalike host CONTAINS the registry name, so an unanchored
+      // exclusion read it as npmjs and waved it through — and the malicious
+      // tarball's own postinstall lives inside the tarball, never in the
+      // diff this screen can see.
+      for (const url of [
+        'https://registry.npmjs.org.evil.com/pkg.tgz',
+        'https://evil.com/?u=registry.npmjs.org',
+        'https://registry.npmjs.org@evil.com/pkg.tgz',
+      ]) {
+        const lookalike = run({
+          trust: 'external',
+          diff: `+++ b/package-lock.json\n+      "resolved": "${url}",\n`,
+        });
+        expect(lookalike.decision, `${url} was not flagged`).toBe('skip');
+        expect(lookalike.reason).toContain('registry.npmjs.org');
+      }
+      // ...and the genuine registry still passes, or the arm would be
+      // refusing every lockfile change and the tests above would prove
+      // nothing.
+      expect(
+        run({
+          trust: 'external',
+          diff: '+++ b/package-lock.json\n+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.0.0.tgz",\n',
+        }).decision,
+      ).toBe('run');
+
+      // Package-manager config: settings like `script-shell` redirect what
+      // every later npm invocation executes.
+      for (const cfg of ['.npmrc', '.yarnrc', '.yarnrc.yml', 'bunfig.toml']) {
+        const pm = run({
+          trust: 'external',
+          diff: `+++ b/${cfg}\n+script-shell=/tmp/evil\n`,
+        });
+        expect(pm.decision, `${cfg} was not flagged`).toBe('skip');
+        expect(pm.reason).toContain('package-manager configuration');
+      }
+
+      // Long opaque single-line content: 600+ chars with no space is the
+      // shape of a packed payload, and the arm must skip lockfile
+      // integrity/resolved lines or every dependency bump would refuse.
+      const packed = run({
+        trust: 'external',
+        diff: `+++ b/src/x.js\n+${'A'.repeat(700)}\n`,
+      });
+      expect(packed.decision).toBe('skip');
+      expect(packed.reason).toContain('long opaque');
+      expect(
+        run({
+          trust: 'external',
+          diff: `+++ b/package-lock.json\n+      "integrity": "sha512-${'B'.repeat(700)}",\n`,
+        }).decision,
+      ).toBe('run');
+
+      // Unconfigured model screen -> refuse. A missing key must never mean
+      // "nothing flagged it, proceed".
+      const unconfigured = run({
+        trust: 'external',
+        diff: CLEAN,
+        apiKey: '',
+      });
+      expect(unconfigured.decision).toBe('skip');
+      expect(unconfigured.reason).toContain('not configured');
 
       // Clean diff + model clear -> the run proceeds.
       setReply('{"risk":"clear"}');

@@ -2067,9 +2067,19 @@ jobs:
               # upstream grep takes SIGPIPE, which pipefail turns into a
               # spurious failure — the same trap this file documents in the
               # docs-only classifier.
-              hit="$(grep -E '^\+' "$diff_file" | grep -E '"(pre|post)?(install|prepare|prepack|uninstall)"[[:space:]]*:' | head -1 || true)"
+              # `build` and `test` are in the list because npm runs pre/post
+              # hooks for ANY `npm run <script>`, not just the install
+              # lifecycle: this job runs `npm run build`, and the agent runs
+              # the PR's suites, so `prebuild`/`posttest` execute exactly
+              # like `postinstall` would.
+              hit="$(grep -E '^\+' "$diff_file" | grep -E '"(pre|post)?(install|prepare|prepack|uninstall|build|test)"[[:space:]]*:' | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff adds or modifies an npm lifecycle script'
-              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http' | grep -Ev 'registry\.npmjs\.org' | head -1 || true)"
+              # Anchor the registry exclusion to scheme + host + '/'. An
+              # unanchored substring match treats any URL merely CONTAINING
+              # the registry name as npmjs, so
+              # `https://registry.npmjs.org.evil.com/pkg.tgz` would pass —
+              # and the tarball's own postinstall never appears in the diff.
+              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/' | head -1 || true)"
               [ -n "$hit" ] && add_reason 'a dependency resolves outside registry.npmjs.org'
               hit="$(grep -E '^\+\+\+ b/(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$' "$diff_file" | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff modifies package-manager configuration'
