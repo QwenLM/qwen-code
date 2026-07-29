@@ -1192,7 +1192,7 @@ describe('GithubChannel', () => {
         },
       });
       await connectForPublication();
-      const response = 'Final public reply 🙂';
+      const response = 'Use <no-reply/> to suppress replies 🙂';
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -1265,9 +1265,8 @@ describe('GithubChannel', () => {
 
     it('does not retry an ambiguous failed final delivery', async () => {
       await connectForPublication();
-      mockOctokit.rest.issues.createComment.mockRejectedValue(
-        new Error('ambiguous transport failure'),
-      );
+      const error = new Error('ambiguous transport failure');
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -1281,7 +1280,10 @@ describe('GithubChannel', () => {
 
       await expect(
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
-      ).rejects.toThrow('ambiguous transport failure');
+      ).rejects.toMatchObject({
+        message: 'ambiguous transport failure',
+        cause: error,
+      });
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       const audit = readFileSync(
         join(
@@ -1340,7 +1342,7 @@ describe('GithubChannel', () => {
       },
     );
 
-    it('does not post an error comment after final delivery fails', async () => {
+    it('distinguishes pre-delivery validation from ambiguous failures', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockRejectedValue(
         new Error('ambiguous transport failure'),
@@ -1349,7 +1351,7 @@ describe('GithubChannel', () => {
         channel as unknown as {
           publishFinalResponse: (
             chatId: string,
-            threadId: string,
+            threadId: string | undefined,
             text: string,
             sessionId: string,
           ) => Promise<void>;
@@ -1389,6 +1391,19 @@ describe('GithubChannel', () => {
 
       expect(handled).toBe(false);
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      let validationError: unknown;
+      try {
+        await publish(
+          'owner/repo',
+          undefined,
+          'Final reply',
+          'session-publication',
+        );
+      } catch (error) {
+        validationError = error;
+      }
+      expect(validationError).toBeInstanceOf(Error);
+      expect((validationError as Error).constructor).toBe(Error);
     });
 
     it('records the active source message and response thread', async () => {
@@ -1849,7 +1864,7 @@ describe('GithubChannel', () => {
             ) => Promise<void>;
           }
         ).sendThreadMessage('owner/repo', undefined, 'response'),
-      ).rejects.toThrow('requires a threadId');
+      ).rejects.toThrow('createIssueComment requires a threadId');
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
       channel.disconnect();
     });

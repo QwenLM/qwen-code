@@ -318,6 +318,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
       return;
     }
+    if (!threadId) {
+      throw new Error(
+        `[Channel:${this.name}] publishFinalResponse requires a threadId`,
+      );
+    }
+    if (!threadMatch) {
+      throw new Error(
+        `[Channel:${this.name}] invalid threadId format: ${threadId}`,
+      );
+    }
 
     try {
       const comment = await this.createIssueComment(
@@ -349,6 +359,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
       throw new FinalPublicationError(
         err instanceof Error ? err.message : String(err),
+        { cause: err },
       );
     }
   }
@@ -362,7 +373,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): Promise<PostedGithubComment> {
     if (!threadId) {
       throw new Error(
-        `[Channel:${this.name}] sendMessage requires a threadId; use sendThreadMessage`,
+        `[Channel:${this.name}] createIssueComment requires a threadId`,
       );
     }
     const match = threadId.match(/^(?:issue|pr):(\d+)$/);
