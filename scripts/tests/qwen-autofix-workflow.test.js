@@ -4648,6 +4648,41 @@ describe('qwen-autofix workflow', () => {
       /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\n {10}fi\n/,
     )?.[0];
     expect(digestBlock).toBeTruthy();
+    // Cross-pin: each census grep needle must match the actual headline
+    // emission site, so a reword that updates one but not the other fails
+    // here — not silently in production.
+    const emitPush = pushAndReportStep.match(
+      /echo "(🤖 Addressed the latest review feedback[^"]*)"/,
+    )?.[1];
+    const emitNoop = pushAndReportStep.match(
+      /echo "(🤖 Reviewed the latest feedback — no changes needed[^"]*)"/,
+    )?.[1];
+    const emitTimeout = reviewAddressReportStep.match(
+      /CAUSE="(ran out of time before finishing[^"]*)"/,
+    )?.[1];
+    const emitRejected = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 Could not address the latest feedback[^"]*)"/,
+    )?.[1];
+    expect(emitPush).toBeTruthy();
+    expect(emitNoop).toBeTruthy();
+    expect(emitTimeout).toBeTruthy();
+    expect(emitRejected).toBeTruthy();
+    const needlePushed = digestBlock.match(/N_PUSHED=.*grep -c '([^']*)'/)?.[1];
+    const needleNoop = digestBlock.match(/N_NOOP=.*grep -c '([^']*)'/)?.[1];
+    const needleTimeout = digestBlock.match(
+      /N_TIMEOUT=.*grep -c '([^']*)'/,
+    )?.[1];
+    const needleRejected = digestBlock.match(
+      /N_REJECTED=.*grep -cE '([^']*)'/,
+    )?.[1];
+    expect(needlePushed).toBeTruthy();
+    expect(needleNoop).toBeTruthy();
+    expect(needleTimeout).toBeTruthy();
+    expect(needleRejected).toBeTruthy();
+    expect(emitPush).toContain(needlePushed);
+    expect(emitNoop).toContain(needleNoop);
+    expect(`🤖 AutoFix ${emitTimeout}`).toContain(needleTimeout);
+    expect(emitRejected).toMatch(new RegExp(needleRejected));
     const HEADS = {
       push: '🤖 Addressed the latest review feedback (round 2/100). What changed…',
       noop: '🤖 Reviewed the latest feedback — no changes needed. Why…',
