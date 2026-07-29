@@ -30,6 +30,7 @@ import {
 } from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { tryRecoverXmlToolCalls } from './xml-tool-call-fallback.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import {
   getRateLimitErrorDetails,
@@ -4238,6 +4239,32 @@ export class GeminiChat {
       .map((part) => part.text)
       .join('')
       .trim();
+
+    // XML tool call fallback: some models (e.g. qwen3.8-max-preview in very
+    // long contexts) occasionally emit tool calls as raw XML in the content
+    // field instead of using the structured tool_calls array. Detect and
+    // recover these so the agent loop is not broken. See #8003.
+    if (!hasToolCall && contentText && /<invoke\s+name="/.test(contentText)) {
+      const recovery = tryRecoverXmlToolCalls(contentText);
+      if (recovery.recovered) {
+        hasToolCall = true;
+        // Replace the XML text parts with recovered functionCall parts
+        for (let i = consolidatedHistoryParts.length - 1; i >= 0; i--) {
+          const part = consolidatedHistoryParts[i];
+          if (part.text && /<invoke\s+name="/.test(part.text)) {
+            consolidatedHistoryParts.splice(
+              i,
+              1,
+              ...recovery.functionCallParts,
+            );
+            break;
+          }
+        }
+        debugLogger.warn(
+          `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) from plain text content`,
+        );
+      }
+    }
 
     if (streamError === null && protocolTagDetector.leaked) {
       throw new InvalidStreamError(
