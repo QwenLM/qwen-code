@@ -251,6 +251,10 @@ const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
+// Default `tools.toolSearch.threshold` (percent of the context window):
+// mirrors the settings-schema default in packages/cli.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+
 import {
   ModelsConfig,
   type ModelProvidersConfig,
@@ -977,6 +981,16 @@ export interface ConfigParameters {
    * silently ignored (they don't cause config errors).
    */
   visibleTools?: string[];
+  /**
+   * Percentage of the model's context window used as the session-start
+   * budget for preloading deferred tools. When the combined estimated
+   * schema size of every deferred tool — bundled built-ins and MCP alike
+   * — fits within the budget, they are all revealed upfront instead of
+   * loaded on demand via `tool_search`, keeping the declaration list
+   * stable for the whole session (prefix-cache friendly). `0` disables
+   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   */
+  toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -1309,6 +1323,11 @@ export interface ConfigParameters {
   warnings?: string[];
   /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
   allowedHttpHookUrls?: string[];
+  /**
+   * When true, HTTP hooks may target private/link-local IP ranges
+   * (from security.allowPrivateNetworkHooks; trusted scopes only).
+   */
+  allowPrivateNetworkHooks?: boolean;
   /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
@@ -1649,7 +1668,9 @@ export class Config {
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
   private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
+  private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
+  private sessionWriterHandoffRequested = false;
   private sessionWriterActivationPromise: Promise<void> | undefined;
   private sessionWriterClosePromise: Promise<void> | undefined;
   /**
@@ -1748,6 +1769,7 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
+  private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1932,6 +1954,7 @@ export class Config {
   private readonly safeMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
+  private readonly allowPrivateNetworkHooks: boolean;
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
@@ -2048,6 +2071,8 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
+    this.toolSearchThreshold =
+      params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -2204,6 +2229,7 @@ export class Config {
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
+    this.allowPrivateNetworkHooks = params.allowPrivateNetworkHooks ?? false;
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // (web search removed)
@@ -2989,6 +3015,7 @@ export class Config {
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
+        takeoverPolicy: this.sessionWriterTakeoverPolicy,
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
@@ -4889,6 +4916,15 @@ export class Config {
   }
 
   /**
+   * Percentage of the context window used as the session-start budget for
+   * preloading deferred tools. See
+   * {@link ConfigParameters.toolSearchThreshold}.
+   */
+  getToolSearchThreshold(): number {
+    return this.toolSearchThreshold;
+  }
+
+  /**
    * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
@@ -6626,6 +6662,16 @@ export class Config {
       : this.allowedHttpHookUrls;
   }
 
+  /**
+   * Returns whether HTTP hooks may target private/link-local IP ranges.
+   * Only settable from trusted settings scopes (User/System/SystemDefaults).
+   */
+  getAllowPrivateNetworkHooks(): boolean {
+    return this.getBareMode() || this.isSafeMode()
+      ? false
+      : this.allowPrivateNetworkHooks;
+  }
+
   isTrustedFolder(): boolean {
     // isWorkspaceTrusted in cli/src/config/trustedFolder.js returns undefined
     // when the file based trust value is unavailable, since it is mainly used
@@ -7031,9 +7077,21 @@ export class Config {
     this.sessionWriterReclaimPolicy = policy;
   }
 
-  closeSessionWriter(): Promise<void> {
+  setSessionWriterTakeoverPolicy(policy: 'never' | 'certified'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterTakeoverPolicy = policy;
+  }
+
+  closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+    if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
+      this.sessionWriterHandoffRequested = true;
+    }
     this.sessionWriterShutdownRequested = true;
-    this.chatRecordingService?.beginClose();
+    this.chatRecordingService?.beginClose({
+      handoff: this.sessionWriterHandoffRequested,
+    });
     this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
     return this.sessionWriterClosePromise;
   }
@@ -7048,7 +7106,9 @@ export class Config {
       }
     }
     try {
-      await this.chatRecordingService?.close();
+      await this.chatRecordingService?.close({
+        handoff: this.sessionWriterHandoffRequested,
+      });
     } catch (error) {
       failures.push(error);
     }

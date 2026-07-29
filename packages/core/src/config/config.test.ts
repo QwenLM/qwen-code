@@ -2772,6 +2772,29 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('accepts managed handoff only after certified takeover is configured', async () => {
+      const standalone = new Config(baseParams);
+      await standalone.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          standalone as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(false);
+
+      const managed = new Config(baseParams);
+      managed.setSessionWriterTakeoverPolicy('certified');
+      await managed.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          managed as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(true);
+    });
+
     it.each([
       [
         'an ACP session without an opt-in',
