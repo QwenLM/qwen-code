@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\administrator\\qwen-code\\integrations\\external-context\\dist\\auto-recall.js'",
+            "shell": "powershell",
+            "timeout": 8000,
+            "name": "external-context-auto-recall",
+            "statusMessage": "Retrieving external context"
+          }
+        ]
+      }
+    ]
+  },
+  "$version": 4
+}

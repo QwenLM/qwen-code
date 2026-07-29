@@ -157,6 +157,7 @@ afterEach(() => {
     delete (navigator as unknown as Record<string, unknown>)['maxTouchPoints'];
   }
   window.history.replaceState({}, '', '/');
+  vi.restoreAllMocks();
 });
 
 describe('useComposerCore mobile textarea backend', () => {
@@ -194,6 +195,29 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(onInputTextChange).toHaveBeenCalledWith('hello');
     typeText('');
     expect(latest!.hasContent).toBe(false);
+  });
+
+  it('reads the textarea height cap once instead of on every input', async () => {
+    mockTouchDevice();
+    const getComputedStyle = window.getComputedStyle.bind(window);
+    let textareaStyleReads = 0;
+    const styleSpy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockImplementation((element, pseudoElement) => {
+        if (element instanceof HTMLTextAreaElement) {
+          textareaStyleReads += 1;
+        }
+        return getComputedStyle(element, pseudoElement);
+      });
+
+    await mount();
+    const initialStyleReads = textareaStyleReads;
+    typeText('one');
+    typeText('one two');
+    typeText('one two three');
+
+    expect(textareaStyleReads).toBe(initialStyleReads);
+    styleSpy.mockRestore();
   });
 
   it('submits through the shared pipeline and clears the draft', async () => {
