@@ -63,6 +63,11 @@ fallback:
   so a single-part record can only be user-authored);
 - (c) legacy bare-injected records: unchanged concatenation.
 
+The `@`-command resume branch still prefers `AtCommandRecordPayload.userText`
+when present; only the absent-`userText` fallback goes through
+`extractUserRecordDisplayText`, so a trailing tagged part does not override
+the `@`-command display text.
+
 ## Scope notes
 
 - Focused on the interactive `UserPromptSubmit` path. The ACP session path
