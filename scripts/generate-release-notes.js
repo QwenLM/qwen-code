@@ -276,7 +276,7 @@ function parseModelJson(value) {
 export async function generateAiContent(
   entries,
   complete,
-  { batchSize = 12, maxConsecutiveBatchFailures = 3 } = {},
+  { batchSize = 8, maxConsecutiveBatchFailures = 3 } = {},
 ) {
   const summaries = new Map();
   const warnings = [];
@@ -431,10 +431,10 @@ export function createOpenAiCompleter({
   baseUrl,
   model,
   fetchImpl = fetch,
-  timeoutMs = 60_000,
+  timeoutMs = 180_000,
   maxRetries = 2,
   baseDelayMs = 2_000,
-  totalTimeoutMs = 12 * 60_000,
+  totalTimeoutMs = 30 * 60_000,
 }) {
   const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
   const deadline = Date.now() + totalTimeoutMs;
