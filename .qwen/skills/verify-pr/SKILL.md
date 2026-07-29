@@ -174,11 +174,13 @@ differs only by the change under test; the verdict is the pair of counts.
   strips everything the mechanism cannot touch — measured example: an npm
   download cache was claimed to cut `npm ci` by ~75%; running with
   `--ignore-scripts` isolated pure download+extract at 36 s cold of a 226 s
-  total, so the cache's ceiling was 20 s and the real saving 15%, the rest
-  being the repo's own `postinstall`/`tsc`/bundler work. Then check the
-  saving against the **whole job budget**: 33 s off a 14 m 37 s job is not
-  the headline the description claimed. A perf PR whose mechanism works but
-  targets 15% of the cost is a finding about the premise, not the code.
+  install, and warming just that slice removed 20 s of it (36 s → 16 s) —
+  the cache's ceiling. End-to-end the install went 226 s → 193 s, a 15%
+  saving rather than the claimed 75%, the rest of the cost being the repo's
+  own `postinstall`/`tsc`/bundler work. Then check that saving against the
+  **whole job budget**: 33 s off a 14 m 37 s job is not the headline the
+  description claimed. A perf PR whose mechanism works but targets 15% of the
+  cost is a finding about the premise, not the code.
 - **A mechanism that persists something has a cost, not only a benefit —
   price it.** Caches, artifacts and generated entries consume a shared,
   bounded resource. Measure what it adds (219 MB per lockfile hash), what
@@ -190,11 +192,13 @@ differs only by the change under test; the verdict is the pair of counts.
   found a real problem, the temptation is to report the worst reading of it.
   Bound it instead: in the cache case the write-path finding was real
   (a post-step uploads the directory that untrusted code can write), but
-  code injection was **disproved** — tampering with every cached tarball
-  made npm integrity-check, refetch and exit 0 — and privilege escalation
-  was **disproved** — `chown -R` does not follow symlinks. What survived was
-  content and quota abuse. A finding that names what it is _not_ is far
-  harder to wave away than one that implies everything.
+  code injection was **disproved** — tampering with a cached tarball made
+  npm reject it against the lockfile hash and refetch under the flag CI
+  uses, and all 2262 lockfile entries carry an `integrity` hash, so nothing
+  installs unhashed — and privilege escalation was **disproved** —
+  `chown -R` does not follow symlinks. What survived was content and quota
+  abuse. A finding that names what it is _not_ is far harder to wave away
+  than one that implies everything.
 - When the PR adds a defensive guard or shape check, its unit tests usually
   mock the reject path — so verify the **accept path against the real
   artifacts it will see in production** (the shipped chunks, the real
@@ -321,9 +325,15 @@ retry budget does not absorb it.** Ordinary flake is random, so `retry: 2`
 converts it to a pass; a failure driven by machine speed is fully correlated
 across attempts — measured on a real PR as 5/5 runs failing all three
 attempts. Before writing off an intermittent failure as flake, establish
-which kind it is: repeat under load and idle, and report the natural
-durations alongside the outcomes. The two get opposite verdicts — flake is a
-note, a speed-correlated failure is blocking.
+which kind it is: in local mode, repeat under load and idle, and report the
+natural durations alongside the outcomes. The two get opposite verdicts —
+flake is a note, a speed-correlated failure is blocking. Make that blocking
+verdict expressible in the contract by encoding the margin as a scripted
+assertion: measure the natural duration N times and assert it stays on the
+side the test needs (here `min(duration) > timer`, because the test fails on
+the fast side). A distribution that crosses the threshold then lands in
+`fail`, and the existing rule (nonzero `fail` ⇒ not `merge-ready`) carries
+the verdict without a special case.
 
 Note the CI verify job runs on a **shared, loaded** runner, which is the
 regime where such a test passes. You cannot reproduce a fast-machine failure
@@ -385,11 +395,11 @@ inconclusive.
   the system: a cursor query, a profiler number, a coverage percentage can
   each be wrong in ways your assertion cannot see. Find a second effect of
   the same physical fact whose failure mode is independent. Worked example:
-  the hardware cursor row was read with `tmux display-message -p
-'#{cursor_y}'`, then confirmed by letting the TUI exit and printing a
-  marker — anything printed after exit lands wherever the cursor actually
-  was, so the marker's row corroborates the query without trusting it.
-  Two agreeing instruments turn a measurement into evidence.
+  the hardware cursor row was read with
+  `tmux display-message -p '#{cursor_y}'`, then confirmed by letting the TUI
+  exit and printing a marker — anything printed after exit lands wherever the
+  cursor actually was, so the marker's row corroborates the query without
+  trusting it. Two agreeing instruments turn a measurement into evidence.
 - **To exercise real production data safely, interpose a refusing proxy on
   the write path.** Read-only claims about a live system are best tested
   against that system, and the objection is always side effects. Remove it

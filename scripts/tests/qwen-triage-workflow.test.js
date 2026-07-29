@@ -1612,6 +1612,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('measure it, do not sample it');
     expect(flat).toContain('speed-correlated failure is not flake');
     expect(flat).toContain('You cannot reproduce a fast-machine failure');
+    // The blocking verdict must be expressible in the contract, not just
+    // asserted in prose: encode the margin as a scripted assertion so a
+    // crossing distribution lands in `fail`.
+    expect(flat).toContain('encoding the margin as a scripted assertion');
 
     // #7934 R4 §2: the abort cases fired during CLI startup, so the fake
     // server saw zero requests — a suite named for mid-stream aborts never
