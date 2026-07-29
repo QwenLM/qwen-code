@@ -399,6 +399,27 @@ describe('WorkspaceFileSystem - readText', () => {
     expect((conflict as { kind: string }).kind).toBe('parse_error');
   });
 
+  it('maps a cursor that points inside a line to parse_error', async () => {
+    const target = path.join(h.workspace, 'cursor-mid-line.txt');
+    await fsp.writeFile(target, 'alpha');
+    const stats = await fsp.stat(target);
+    const r = await h.fs.resolve('cursor-mid-line.txt', 'read');
+
+    const err = await h.fs
+      .readText(r, {
+        cursor: encodeTextCursor({
+          off: 1,
+          size: stats.size,
+          dev: String(stats.dev),
+          ino: String(stats.ino),
+        }),
+      })
+      .catch((e: unknown) => e);
+
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
   it('refuses a cursor read of oversized non-UTF-8 text', async () => {
     const target = path.join(h.workspace, 'cursor-utf16.txt');
     const body = Buffer.concat([
@@ -685,6 +706,8 @@ describe('WorkspaceFileSystem - readText', () => {
             } finally {
               await writer.close();
             }
+            // Restore mtime after ctime has advanced so the stability check
+            // proves that ctime alone detects the same-size overwrite.
             await new Promise((resolve) => setTimeout(resolve, 50));
             await fsp.utimes(target, before.atime, before.mtime);
           }
@@ -749,6 +772,8 @@ describe('WorkspaceFileSystem - readText', () => {
             } finally {
               await writer.close();
             }
+            // Restore mtime after ctime has advanced so the stability check
+            // proves that ctime alone detects the same-size overwrite.
             await new Promise((resolve) => setTimeout(resolve, 50));
             await fsp.utimes(target, before.atime, before.mtime);
           }

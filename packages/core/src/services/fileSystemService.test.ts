@@ -246,6 +246,66 @@ describe('StandardFileSystemService', () => {
       ).rejects.toThrow(new RegExp(field));
     });
 
+    it.each([
+      ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
+      ['maxOutputBytes', { maxOutputBytes: 0 }],
+      ['maxSnapBytes', { maxSnapBytes: Number.POSITIVE_INFINITY }],
+      ['maxSnapBytes', { maxSnapBytes: 0 }],
+    ])('should reject invalid cursor-bound %s', async (bound, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextCursorFromHandle({
+          fileHandle,
+          startOffset: 0,
+          fileSize: 300_000,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxSnapBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
+    });
+
+    it.each([
+      ['startOffset', { startOffset: -1 }],
+      ['startOffset', { startOffset: 1.5 }],
+      ['fileSize', { fileSize: -1 }],
+      ['fileSize', { fileSize: 1.5 }],
+    ])('should reject invalid cursor-bound %s', async (field, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextCursorFromHandle({
+          fileHandle,
+          startOffset: 0,
+          fileSize: 300_000,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxSnapBytes: 8 * 1024 * 1024,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(field));
+    });
+
+    it.each([2.5, 0, -1])(
+      'should reject invalid cursor-bound limit %s',
+      async (limit) => {
+        const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+        await expect(
+          fileSystem.readTextCursorFromHandle({
+            fileHandle,
+            startOffset: 0,
+            fileSize: 300_000,
+            limit,
+            maxOutputBytes: 262_144,
+            maxSnapBytes: 8 * 1024 * 1024,
+          }),
+        ).rejects.toThrow(/positive integer limit/);
+      },
+    );
+
     it('should return encoding info for GBK file', async () => {
       vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
         content: '你好世界',

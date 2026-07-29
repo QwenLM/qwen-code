@@ -378,7 +378,7 @@ export async function readTextCursorWindowFromHandle(
       fileHandle,
       {
         ...request,
-        startOffset: startOffset + consumedBytes,
+        startOffset: startOffset + Math.max(consumedBytes, 1),
         // This offset was produced internally after returning a truncated prefix,
         // so it must advance past the rest of that line. `maxSnapBytes` protects
         // only client-supplied offsets.
@@ -675,7 +675,9 @@ async function readLargeUtf8Range(
   return {
     content: output,
     originalLineCount: currentLine + 1,
-    ...(stoppedEarly && !truncatedByBytes
+    ...(stoppedEarly &&
+    !truncatedByBytes &&
+    consumedBytes < (sourceSize ?? Number.POSITIVE_INFINITY)
       ? { nextByteOffset: consumedBytes }
       : {}),
     encoding: 'utf-8',

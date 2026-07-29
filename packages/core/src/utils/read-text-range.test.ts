@@ -486,6 +486,23 @@ describe('readTextRange', () => {
     );
   });
 
+  it('does not report a cursor at EOF when the limit ends on the final newline', async () => {
+    const body = 'first\nsecond\n';
+    const filePath = await writeFile('exact-page.log', body);
+    const fileHandle = await fs.open(filePath, 'r');
+
+    const result = await readTextRangeFromHandle(fileHandle, {
+      offset: 0,
+      limit: 2,
+      fileSize: Buffer.byteLength(body),
+      maxOutputBytes: 1_024,
+      maxScanBytes: Buffer.byteLength(body),
+    }).finally(() => fileHandle.close());
+
+    expect(result.content).toBe('first\nsecond');
+    expect(result.nextByteOffset).toBeUndefined();
+  });
+
   it('strips UTF-8 BOM from large file content and reports BOM metadata', async () => {
     const body = largeUtf8Lines(65_000);
     const filePath = await writeFile(
@@ -830,6 +847,29 @@ describe('readTextCursorWindowFromHandle', () => {
         expect(page.nextOffset).toBeUndefined();
       },
     );
+  });
+
+  it('advances when no multibyte character fits in maxOutputBytes', async () => {
+    await withHandle('tiny-budget.log', '中\nnext\n', async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        maxOutputBytes: 1,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.content).toBe('');
+      expect(first.truncatedByBytes).toBe(true);
+      expect(first.nextOffset).toBe(Buffer.byteLength('中\n'));
+      expect(first.nextOffset).toBeGreaterThan(first.startOffset);
+
+      const second = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(second.content).toBe('next\n');
+    });
   });
 
   it('ends paging after truncating a final line without a newline', async () => {
