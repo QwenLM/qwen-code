@@ -59,11 +59,10 @@ export type CoreReadTextFileRequest = Omit<
  * an `Omit` chain would strip more than it kept and would keep re-admitting
  * fields — `path`, `stats` — that this path has no use for.
  *
- * Both byte bounds are required rather than optional: what makes a large-file
- * read safe at a boundary is that the *returned* bytes and the *scanned* bytes
- * are each capped. A finite `limit` is not one of those bounds — `limit: 20` at
- * `line: 900_000_000` still walks the whole file — so it stays optional and
- * `maxScanBytes` is what actually keeps the read affordable.
+ * `maxOutputBytes` is required rather than optional: what makes a large-file
+ * read safe at a boundary is that the *returned* bytes are capped. `limit`
+ * stays optional — a caller may read to end of file — and the borrowing
+ * boundary decides which reads to admit.
  */
 export interface CoreReadTextFileHandleRequest {
   fileHandle: FileHandle;
@@ -71,7 +70,6 @@ export interface CoreReadTextFileHandleRequest {
   line?: number | null;
   limit?: number;
   maxOutputBytes: number;
-  maxScanBytes: number;
   signal?: AbortSignal;
 }
 
@@ -339,11 +337,6 @@ export class StandardFileSystemService implements FileSystemService {
         `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
       );
     }
-    if (!isPositiveSafeInteger(params.maxScanBytes)) {
-      throw new RangeError(
-        `handle-bound text reads require a positive finite maxScanBytes, got ${params.maxScanBytes}`,
-      );
-    }
     if (
       params.limit !== undefined &&
       params.limit !== Number.POSITIVE_INFINITY &&
@@ -366,7 +359,6 @@ export class StandardFileSystemService implements FileSystemService {
       offset: params.line ?? 0,
       limit: params.limit ?? Number.POSITIVE_INFINITY,
       maxOutputBytes: params.maxOutputBytes,
-      maxScanBytes: params.maxScanBytes,
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
     return toReadTextFileResponse(range);

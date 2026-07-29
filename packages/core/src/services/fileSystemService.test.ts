@@ -190,9 +190,7 @@ describe('StandardFileSystemService', () => {
     // argument validation below needs a unit test, and it needs no mock.
     it.each([
       ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
-      ['maxScanBytes', { maxScanBytes: Number.POSITIVE_INFINITY }],
       ['maxOutputBytes', { maxOutputBytes: 0 }],
-      ['maxScanBytes', { maxScanBytes: -1 }],
     ])('should reject a handle read with unbounded %s', async (bound, over) => {
       const fileHandle = {} as import('node:fs/promises').FileHandle;
 
@@ -200,8 +198,6 @@ describe('StandardFileSystemService', () => {
         fileSystem.readTextFileFromHandle({
           fileHandle,
           limit: 20,
-          maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
           ...over,
         }),
       ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
@@ -219,7 +215,6 @@ describe('StandardFileSystemService', () => {
           fileHandle,
           limit,
           maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
         }),
       ).rejects.toThrow(/positive integer limit or Infinity/);
     });
@@ -236,7 +231,6 @@ describe('StandardFileSystemService', () => {
           line,
           limit: 20,
           maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
         }),
       ).rejects.toThrow(/non-negative integer line/);
     });

@@ -172,6 +172,24 @@ describe('GET /file', () => {
     expect(res.body.hash).toBeUndefined();
   });
 
+  it.each(['', '&line=2', '&maxBytes=1024', '&line=2&maxBytes=1024'])(
+    'keeps oversized reads without a finite limit behind the snapshot cap (%s)',
+    async (query) => {
+      const { MAX_READ_BYTES } = await import('../fs/policy.js');
+      await fsp.writeFile(
+        path.join(h.workspace, 'large-no-limit.txt'),
+        'x'.repeat(MAX_READ_BYTES + 1),
+      );
+
+      const res = await request(h.app)
+        .get(`/file?path=large-no-limit.txt${query}`)
+        .set('Host', loopbackHost());
+
+      expect(res.status).toBe(413);
+      expect(res.body.errorKind).toBe('file_too_large');
+    },
+  );
+
   it('attaches Cache-Control: no-store and X-Content-Type-Options: nosniff', async () => {
     await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'x');
     const res = await request(h.app)

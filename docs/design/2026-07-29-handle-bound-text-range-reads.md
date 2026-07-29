@@ -89,12 +89,10 @@ readTextRangeFromHandle(fh, request: ReadTextRangeFromHandleRequest)
 The handle variant always streams — there is no flag, because a caller reaches
 for a handle precisely when it needs the read bounded, and the buffering fast
 path would read the whole file. Its request type has no `path` (nothing for one
-to disambiguate) and makes both byte bounds required rather than optional:
-`maxOutputBytes` caps what the read returns, `maxScanBytes` caps what it costs,
-and a handle-bound read exists because a security boundary needs both.
-
-`maxScanBytes` stays optional on the path variant, where it defaults to
-`Infinity` so the `read_file` tool is unchanged.
+to disambiguate) and makes `maxOutputBytes` required rather than optional: it
+caps what the read returns, and a handle-bound read exists because a security
+boundary needs that bound. `limit` stays optional — a caller may read to end of
+file — and the borrowing boundary decides which reads to admit.
 
 Both delegate to the same streaming implementation, which now takes
 `source: string | FileHandle` and selects `createReadStream` or
@@ -103,8 +101,8 @@ called it are deleted.
 
 ### The fallthrough disappears
 
-`readFileWithLineAndLimit` loses `fileHandle`, `forceStreaming`, and
-`maxScanBytes` — its single production caller passes none of them.
+`readFileWithLineAndLimit` loses `fileHandle` and `forceStreaming` — its single
+production caller passes neither.
 `StandardFileSystemService.readTextFileFromHandle` now calls
 `readTextRangeFromHandle` directly, and the two read paths share a
 `toReadTextFileResponse` helper so their metadata shaping cannot drift. With no
@@ -117,8 +115,8 @@ untouched.
 
 ## Blast radius
 
-- `readTextRange` is not exported from `packages/core/src/index.ts`; only the
-  two error classes are. The reshaped surface is core-internal.
+- `readTextRange` is not exported from `packages/core/src/index.ts`; only
+  `LargeNonUtf8TextError` is. The reshaped surface is core-internal.
 - `readTextRange` and `readFileWithLineAndLimit` have exactly one production
   caller each (`fileUtils.ts`, `fileSystemService.ts`).
 - `detectFileEncoding` is public via `export * from './utils/fileUtils.js'`.
@@ -147,23 +145,19 @@ raised nothing. That is the argument for declaring the type standalone rather
 than deriving it: the `Omit` chain was stripping four of six inherited fields
 and quietly re-admitting the rest.
 
-282 production logic lines change in `packages/core`; across `packages/` the
-change is net −68 lines.
+The change is confined to `packages/core` internals and the single
+cross-package call site named above.
 
 ## Testing
 
 The existing suites are the specification: the whole point is that the Serve
-boundary cannot tell. `packages/cli/src/serve/fs/` and the bridge adapter — 222
-tests — pass unmodified, as does the full `packages/core` `src/utils` +
-`src/services` run (6078 tests).
+boundary cannot tell. `packages/cli/src/serve/fs/` and the bridge adapter pass
+against the refactor unchanged apart from one assertion updated for the
+deliberate non-UTF-8 → `binary_file` mapping, as does the full `packages/core`
+`src/utils` + `src/services` run.
 
-Three tests in `read-text-range.test.ts` moved to `readTextRangeFromHandle`. Two
-used `fileHandle` directly. The third used a _path_ with `forceStreaming: true`
-to force streaming on a file too small to leave the fast path, so that it could
-exercise the budget-at-EOF boundary; with the flag gone, the handle variant is
-the only thing that always streams.
-
-One of the moved tests changed meaning. It previously passed a handle for one
+Two tests in `read-text-range.test.ts` moved to `readTextRangeFromHandle`. One
+of them changed meaning. It previously passed a handle for one
 file and a path naming a different file, asserting the handle won — a test for
 the confusion the old signature permitted. The handle variant has no `path`, so
 that confusion is now unrepresentable and the test would assert nothing. It was

@@ -20,7 +20,6 @@ import { glob as globAsync } from 'glob';
 import {
   LargeNonUtf8TextError,
   StandardFileSystemService,
-  TextScanBudgetExceededError,
   decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
   encodeTextFileContentAsync,
@@ -46,7 +45,6 @@ import {
 import {
   BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
-  MAX_TEXT_SCAN_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
   enforceWriteSize,
@@ -87,13 +85,6 @@ export interface ReadMeta {
   originalLineCount?: number;
 }
 
-/**
- * Above `MAX_READ_BYTES` at least one of these must be set. Any of them is
- * the caller stating it accepts partial content, which is all the streamed
- * path returns; with none of them the read is refused rather than silently
- * handing back a truncated "whole file". Which one is set does not affect
- * cost — that is bounded by `MAX_TEXT_SCAN_BYTES`.
- */
 export interface ReadTextOptions {
   /** Returned-byte cap in [1, MAX_READ_BYTES]; defaults to MAX_READ_BYTES. */
   maxBytes?: number;
@@ -1384,25 +1375,13 @@ async function readTextFromResolvedFile(
     throw new FsError('parse_error', `path is not a regular file: ${p}`);
   }
 
-  // Any explicit window argument is the caller stating it accepts partial
-  // content, which is what the large-file path returns. Gating on `limit`
-  // alone got this backwards in both directions: `{ line: 900_000_000,
-  // limit: 20 }` was admitted despite costing a full scan, while
-  // `{ maxBytes: 4096 }` — satisfiable from the first 4 KiB — was refused.
-  // Cost is bounded by MAX_TEXT_SCAN_BYTES, not by which knob was set.
-  //
-  // A read with no window argument at all still fails: an agent that
-  // believes it holds the whole file may write it back truncated. The
-  // omitted `hash` blocks that for `editText`/`writeTextAtomic`, but
-  // `writeTextOverwrite` takes no hash, so `truncated: true` is the only
-  // signal on that path — refusing the unbounded read keeps the caller
-  // from ever being in that position by accident.
-  const wantsWindow =
-    opts.limit !== undefined ||
-    opts.maxBytes !== undefined ||
-    opts.line !== undefined;
-  if (pre.size > MAX_READ_BYTES && wantsWindow) {
-    return readLargeTextWindowFromResolvedFile(p, pre, opts, lowFs);
+  if (pre.size > MAX_READ_BYTES && opts.limit !== undefined) {
+    return readLargeTextWindowFromResolvedFile(
+      p,
+      pre,
+      { ...opts, limit: opts.limit },
+      lowFs,
+    );
   }
   return readTextSnapshotFromResolvedFile(p, opts, pre);
 }
@@ -1448,7 +1427,8 @@ async function readTextSnapshotFromResolvedFile(
     startLineIndex,
     opts.limit ?? Number.POSITIVE_INFINITY,
   );
-  const sizeOutcome = enforceReadSize(raw.length, opts.maxBytes);
+  const maxOutputBytes = opts.maxBytes ?? MAX_READ_BYTES;
+  const sizeOutcome = enforceReadSize(raw.length, maxOutputBytes);
   let content = sliced.content;
   const meta: TextSnapshot['meta'] = {
     encoding: decoded.encoding,
@@ -1459,13 +1439,13 @@ async function readTextSnapshotFromResolvedFile(
     hash: hashBuffer(raw),
   };
 
-  const outputCap = opts.maxBytes ?? MAX_READ_BYTES;
-  const decodedBuf = Buffer.from(content, 'utf-8');
-  if (decodedBuf.length > outputCap) {
-    content = safeUtf8Truncate(decodedBuf, outputCap).toString('utf-8');
+  const output = Buffer.from(content, 'utf-8');
+  if (output.length > maxOutputBytes) {
+    content = safeUtf8Truncate(output, maxOutputBytes).toString('utf-8');
     meta.lineEnding = detectLineEnding(content);
     meta.truncated = true;
-  } else if (sizeOutcome.truncated) {
+  }
+  if (sizeOutcome.truncated) {
     meta.truncated = true;
   }
 
@@ -1480,143 +1460,127 @@ async function readTextSnapshotFromResolvedFile(
   return { content, meta };
 }
 
-/**
- * Stability check for a streamed *prefix* window.
- *
- * The full-snapshot path can demand byte-for-byte stability (`size` and
- * `mtimeMs` unchanged) because it returns the whole file: any change
- * invalidates the result. A line window does not return the whole file, so
- * demanding whole-file stability rejects reads whose returned bytes are
- * still perfectly valid — and the case it rejects is the one this feature
- * exists for. Appending to a log does not change lines 1-20, but under an
- * equality check every read of a live log is a coin flip.
- *
- * So the streamed path asserts only what the returned bytes depend on: the
- * inode is unchanged (`assertSameFile`, checked separately) and the file did
- * not shrink. Truncation, `>` rewrites, and replacement are still rejected.
- *
- * The residual gap is a writer that truncates *and* regrows past the
- * original size inside one read window while keeping the same inode. That is
- * narrower than what an equality check on `mtimeMs` catches, and it is the
- * price of supporting append-only files at all.
- */
-function assertDidNotShrink(
-  before: { size: number | bigint },
-  after: { size: number | bigint },
-  p: ResolvedPath,
-  reason: string,
-): void {
-  if (toBigInt(after.size) < toBigInt(before.size)) {
-    throw new FsError('hash_mismatch', `${reason}: ${p}`, {
-      hint: 'retry after re-reading the latest file',
-    });
-  }
-}
-
 async function readLargeTextWindowFromResolvedFile(
   p: ResolvedPath,
   pre: Awaited<ReturnType<typeof fsp.lstat>>,
-  opts: ReadTextOptions,
+  opts: ReadTextOptions & { limit: number },
   lowFs: StandardFileSystemService,
 ): Promise<TextReadOutcome> {
   const fh = await fsp.open(p as string, 'r');
-  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
-  let content = '';
-  let readMeta:
-    | Awaited<
-        ReturnType<StandardFileSystemService['readTextFileFromHandle']>
-      >['_meta']
-    | undefined;
   try {
-    opened = await fh.stat();
+    const opened = await fh.stat();
     assertSameFile(pre, opened, p as string, 'read');
-    assertDidNotShrink(pre, opened, p, 'file was truncated before read');
-
-    const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
-    if (probe.length > 0) {
-      const { bytesRead } = await fh.read(probe, 0, probe.length, 0);
-      if (looksBinary(probe.subarray(0, bytesRead))) {
-        throw new FsError('binary_file', `binary file: ${p}`, {
-          hint: 'use readBytes for binary content',
-        });
-      }
+    if (didFileVersionChange(pre, opened)) {
+      throw new FsError('hash_mismatch', `file changed before read: ${p}`, {
+        hint: 'retry after re-reading the latest file',
+      });
     }
 
-    let result: Awaited<
-      ReturnType<StandardFileSystemService['readTextFileFromHandle']>
-    >;
+    let result:
+      | Awaited<ReturnType<StandardFileSystemService['readTextFileFromHandle']>>
+      | undefined;
+    let primaryError: unknown;
+    let hasPrimaryError = false;
     try {
+      const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
+      if (probe.length > 0) {
+        const { bytesRead } = await fh.read(probe, 0, probe.length, 0);
+        if (looksBinary(probe.subarray(0, bytesRead))) {
+          throw new FsError('binary_file', `binary file: ${p}`, {
+            hint: 'use readBytes for binary content',
+          });
+        }
+      }
+
       result = await lowFs.readTextFileFromHandle({
         fileHandle: fh,
-        limit: opts.limit ?? Number.POSITIVE_INFINITY,
+        limit: opts.limit,
         line: opts.line !== undefined ? opts.line - 1 : 0,
         maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
-        maxScanBytes: MAX_TEXT_SCAN_BYTES,
       });
     } catch (err) {
+      hasPrimaryError = true;
+      primaryError = err;
+    }
+
+    const afterRead = await fh.stat();
+    const post = await fsp.lstat(p as string);
+    if (post.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `path was replaced with a symlink during read: ${p}`,
+        { hint: 'TOCTOU swap detected via post-read lstat' },
+      );
+    }
+    assertSameFile(opened, afterRead, p as string, 'read');
+    assertSameFile(opened, post, p as string, 'read');
+    if (
+      didFileVersionChange(opened, afterRead) ||
+      didFileVersionChange(opened, post)
+    ) {
+      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+        hint: 'retry after re-reading the latest file',
+      });
+    }
+
+    if (hasPrimaryError) {
       // An encoding the text route can't represent is the same class of
-      // refusal as sniffed-binary content, and `binary_file` already tells
-      // clients to fall back to `readBytes` — which is the right remedy for
-      // a GBK file too. `file_too_large` (413) would send a client that
-      // retries with a smaller window into a loop it can never exit.
-      if (err instanceof LargeNonUtf8TextError) {
-        throw new FsError('binary_file', err.message, {
-          cause: err,
+      // refusal as sniffed-binary content; `binary_file` already tells
+      // clients to fall back to `readBytes`. `file_too_large` (413) would
+      // send a client that retries with a smaller window into a loop it
+      // can never exit.
+      if (primaryError instanceof LargeNonUtf8TextError) {
+        throw new FsError('binary_file', primaryError.message, {
+          cause: primaryError,
           hint: 'convert the file to UTF-8, or use readBytes for the raw bytes',
         });
       }
-      // Budget exhaustion *is* a size refusal: the file is too large to
-      // reach this line offset by scanning. 413 is correct, and the hint
-      // names the O(1) alternative so the retry has somewhere to go.
-      if (err instanceof TextScanBudgetExceededError) {
-        throw new FsError('file_too_large', err.message, {
-          cause: err,
-          hint: `line offsets are resolved by scanning from byte 0 and stop after ${MAX_TEXT_SCAN_BYTES} bytes; use readBytes to reach a deeper offset directly`,
-        });
-      }
-      throw err;
+      throw primaryError;
     }
-    content = result.content;
-    readMeta = result._meta;
 
-    const afterRead = await fh.stat();
-    assertSameFile(opened, afterRead, p as string, 'read');
-    assertDidNotShrink(opened, afterRead, p, 'file was truncated during read');
+    if (result === undefined) {
+      throw new FsError(
+        'internal_error',
+        `large text range read returned no result: ${p}`,
+      );
+    }
+
+    const meta: TextReadOutcome['meta'] = {
+      encoding: result._meta?.encoding,
+      bom: result._meta?.bom,
+      lineEnding: detectLineEnding(result.content),
+      sizeBytes: opened.size,
+      truncated: true,
+    };
+    if (
+      result._meta?.originalLineCountExact === true &&
+      result._meta.originalLineCount !== undefined
+    ) {
+      meta.originalLineCount = result._meta.originalLineCount;
+    }
+    return { content: result.content, meta };
   } finally {
     await fh.close();
   }
+}
 
-  if (opened === undefined) {
-    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
-  }
-  const post = await fsp.lstat(p as string);
-  if (post.isSymbolicLink()) {
-    throw new FsError(
-      'symlink_escape',
-      `path was replaced with a symlink during read: ${p}`,
-      { hint: 'TOCTOU swap detected via post-read lstat' },
-    );
-  }
-  assertSameFile(opened, post, p as string, 'read');
-  assertDidNotShrink(opened, post, p, 'file was truncated during read');
-
-  const meta: TextReadOutcome['meta'] = {
-    encoding: readMeta?.encoding,
-    bom: readMeta?.bom,
-    lineEnding: detectLineEnding(content),
-    // Size as of `open`, not as of now: it describes the snapshot the
-    // returned window was cut from. A file that grew during the read
-    // reports the smaller, consistent number.
-    sizeBytes: opened.size,
-    truncated: true,
-  };
-  if (
-    readMeta?.originalLineCountExact === true &&
-    readMeta?.originalLineCount !== undefined
-  ) {
-    meta.originalLineCount = readMeta.originalLineCount;
-  }
-  return { content, meta };
+function didFileVersionChange(
+  before: {
+    size: number | bigint;
+    mtimeMs: number | bigint;
+    ctimeMs: number | bigint;
+  },
+  after: {
+    size: number | bigint;
+    mtimeMs: number | bigint;
+    ctimeMs: number | bigint;
+  },
+): boolean {
+  return (
+    after.size !== before.size ||
+    after.mtimeMs !== before.mtimeMs ||
+    after.ctimeMs !== before.ctimeMs
+  );
 }
 
 async function readStableRegularFileBuffer(
@@ -1747,12 +1711,10 @@ async function atomicWriteTextResolvedFile(
   const target = input.target as string;
   const parent = path.dirname(target);
   const parentStat = await fsp.lstat(parent);
-  // Defense-in-depth against a parent-symlink swap. A full fix
-  // requires parent-fd / `openat`-style publish (Node stdlib does
-  // not expose this) — tracked alongside the fd-based read
-  // follow-up referenced by `assertInodeStableAfterRead`. This
-  // guard at least surfaces an obviously-swapped parent before
-  // we open the temp file or rename through it.
+  // Defense-in-depth against a parent-symlink swap. A full fix requires
+  // parent-fd / `openat`-style publish, which Node stdlib does not expose.
+  // This guard at least surfaces an obviously-swapped parent before we open
+  // the temp file or rename through it.
   if (parentStat.isSymbolicLink()) {
     throw new FsError('symlink_escape', `parent path is a symlink: ${parent}`, {
       hint: 're-resolve the target after detecting parent-symlink swaps',
@@ -2174,20 +2136,12 @@ function safeUtf8Truncate(buf: Buffer, maxBytes: number): Buffer {
 }
 
 /**
- * Post-read TOCTOU guard. After reading the file at `p`, re-`lstat`
- * to confirm the inode hasn't changed and the path isn't now a
- * symlink. Catches the swap-then-leave attack where a regular
- * file is replaced with a symlink to outside the workspace
- * BETWEEN the boundary's pre-stat and the actual read — the
- * pre-stat saw the original (small, regular) file but the read
- * followed the swap to wherever the attacker pointed. There's a
- * residual race where the attacker swaps back after our read but
- * before this check; that window is much smaller than the swap-
- * and-leave attack and outside this module's threat model. The proper
- * fix is fd-based reading (`fsp.open` + `fileHandle.read`) so the
- * fd binds to the inode at open time; that's a follow-up since it
- * requires a new variant of `lowFs.readTextFile` that takes a
- * FileHandle instead of a path.
+ * Post-read pathname guard for handle-bound byte reads. The content read is
+ * already tied to the opened inode; re-`lstat` confirms the requested path
+ * still names that inode and was not replaced by a symlink before the response
+ * is emitted. A swap after this final check remains outside the module's
+ * point-in-time guarantee, but cannot change the bytes already read from the
+ * original handle.
  */
 async function assertInodeStableAfterRead(
   p: string,

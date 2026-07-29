@@ -11,7 +11,6 @@ import * as path from 'node:path';
 import { iconvEncode } from './iconvHelper.js';
 import {
   LargeNonUtf8TextError,
-  TextScanBudgetExceededError,
   readTextRange,
   readTextRangeFromHandle,
 } from './read-text-range.js';
@@ -105,7 +104,6 @@ describe('readTextRange', () => {
         offset: 1_500,
         limit: 3,
         maxOutputBytes: 10_000,
-        maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
 
       expect(result.content.split('\n')).toEqual([
@@ -119,7 +117,6 @@ describe('readTextRange', () => {
         offset: 10_000,
         limit: 3,
         maxOutputBytes: 10_000,
-        maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
       expect(beyondEof.content).toBe('');
       expect(beyondEof.originalLineCount).toBe(2_000);
@@ -152,7 +149,6 @@ describe('readTextRange', () => {
         offset: 0,
         limit: 2,
         maxOutputBytes: 1_024,
-        maxScanBytes: Number.MAX_SAFE_INTEGER,
       });
 
       expect(result.content).toBe('safe-one\nsafe-two');
@@ -160,63 +156,6 @@ describe('readTextRange', () => {
     } finally {
       await fileHandle.close();
     }
-  });
-
-  it('refuses a line offset that cannot be reached within maxScanBytes', async () => {
-    const filePath = await writeFile('budget.log', largeUtf8Lines(5_000));
-
-    await expect(
-      readTextRange({
-        path: filePath,
-        offset: 4_000,
-        limit: 20,
-        maxOutputBytes: 262_144,
-        maxScanBytes: 100_000,
-      }),
-    ).rejects.toBeInstanceOf(TextScanBudgetExceededError);
-  });
-
-  it('serves a shallow window from a file far larger than maxScanBytes', async () => {
-    const filePath = await writeFile('budget-head.log', largeUtf8Lines(5_000));
-
-    const result = await readTextRange({
-      path: filePath,
-      offset: 0,
-      limit: 3,
-      maxOutputBytes: 262_144,
-      maxScanBytes: 100_000,
-    });
-
-    expect(result.content.split('\n')).toEqual([
-      expect.stringContaining('line-1 '),
-      expect.stringContaining('line-2 '),
-      expect.stringContaining('line-3 '),
-    ]);
-  });
-
-  it('does not charge a budget failure to a file that ends within it', async () => {
-    // The scan reaches EOF on the same chunk that exhausts the budget; the
-    // window was fully satisfied, so there is nothing to refuse.
-    // Goes through the handle variant purely because that is the one that
-    // always streams: this file is far too small to leave the path variant's
-    // buffering fast path, and the buffered path never consults the budget.
-    const body = largeUtf8Lines(100);
-    const filePath = await writeFile('budget-exact.log', body);
-    const fileHandle = await fs.open(filePath, 'r');
-
-    const result = await readTextRangeFromHandle(fileHandle, {
-      offset: 98,
-      limit: 10,
-      maxOutputBytes: 262_144,
-      maxScanBytes: Buffer.byteLength(body),
-    }).finally(() => fileHandle.close());
-
-    expect(result.content.split('\n')).toEqual([
-      expect.stringContaining('line-99 '),
-      expect.stringContaining('line-100 '),
-    ]);
-    expect(result.originalLineCount).toBe(100);
-    expect(result.originalLineCountExact).toBe(true);
   });
 
   it('streams a large UTF-8 file from the beginning when no range is provided', async () => {
