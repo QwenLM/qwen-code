@@ -3344,16 +3344,22 @@ jobs:
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf '**Sandboxed verification: ⚠️ incomplete — cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The verification job was cancelled before producing a report.\n\n'
+              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 已取消</summary>\n\n'
+              printf '验证作业在生成报告前被取消。\n\n'
+              printf '</details>\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
+              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
+              printf '验证作业未完成（检出、runner 或初始化错误），未生成报告。详见工作流运行日志。\n\n'
+              printf '</details>\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
@@ -3364,12 +3370,17 @@ jobs:
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               if [ "${VERDICT:-}" = "skipped" ]; then
-                printf '**Sandboxed verification: not run** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf '**Sandboxed verification: ⚠️ not run — skipped** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未运行 · 已跳过</summary>\n\n'
+                printf '跳过原因：%s。\n\n' "${SKIP_REASON:-PR 不处于可验证状态}"
+                printf '</details>\n\n'
               else
-                printf '**Sandboxed verification: n/a** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf '**Sandboxed verification: ⚠️ not run — n/a** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'This PR changes documentation/assets only — there is no code to execute, so a sandboxed verification has nothing to verify.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未运行 · 不适用</summary>\n\n'
                 printf '该 PR 仅改动文档/静态资源，没有可执行的代码，沙箱验证没有验证对象。\n\n'
+                printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
@@ -3382,9 +3393,11 @@ jobs:
             WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
               printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+              printf '</details>\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
@@ -3397,6 +3410,7 @@ jobs:
             # build` had "failed twice in a row" — the same false
             # accusation, from the other direction.
             PREPARE_ATTEMPTS=''
+            PREPARE_ATTEMPTS_ZH=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
                 PREPARE_COMMAND='npm ci'
@@ -3405,6 +3419,7 @@ jobs:
                 # sentence below blames the PR for it, and "failed twice in
                 # a row" is the part that earns the accusation.
                 PREPARE_ATTEMPTS=' twice in a row'
+                PREPARE_ATTEMPTS_ZH='（连续两次）'
                 ;;
               build) PREPARE_COMMAND='npm run build' ;;
               *)
@@ -3427,13 +3442,18 @@ jobs:
               # Reachable: the prepare step reports infra-error when the
               # registry was unreachable from the runner at failure time.
               if [ "${VERDICT:-}" = 'infra-error' ]; then
-                printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf '`%s` failed before any verification started, and `registry.npmjs.org` was unreachable from the runner at that moment — so this looks like an infrastructure incident rather than a problem with this PR. Re-running `@qwen-code /verify` may well succeed; the install log below is the place to confirm.\n\n' "$PREPARE_COMMAND"
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
                 printf '`%s` 在验证开始前失败，且当时 runner 无法访问 `registry.npmjs.org`——因此更像基础设施问题而非本 PR 的代码问题。重新运行 `@qwen-code /verify` 有可能成功；下方安装日志可用于确认。\n\n' "$PREPARE_COMMAND"
+                printf '</details>\n\n'
               else
                 printf '%s\n\n' '<!-- qwen-triage:verify-substantive -->'
-                printf '**Sandboxed verification: fail** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf '**Sandboxed verification: ❌ not passed — the PR could not be built** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'The PR could not be built because `%s` failed%s before any verification started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND" "${PREPARE_ATTEMPTS:-}"
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · PR 构建失败</summary>\n\n'
+                printf '由于 `%s` 在验证开始前失败%s，无法构建该 PR。判定为 PR 问题而非基础设施故障；安装日志见下方折叠块。\n\n' "$PREPARE_COMMAND" "${PREPARE_ATTEMPTS_ZH:-}"
+                printf '</details>\n\n'
               fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
@@ -3445,6 +3465,7 @@ jobs:
             REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
             ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
             ASSERT_LINE=''
+            ASSERT_LINE_ZH=''
             if [ -n "$ASSERTIONS_FILE" ]; then
               # Numbers only — coerce anything non-numeric to 0 so untrusted
               # JSON cannot smuggle text into the comment body.
@@ -3455,15 +3476,23 @@ jobs:
               # non-negative integers, a positive total, and total == pass +
               # fail; anything else yields no line and (below) no trusted
               # agent verdict.
-              ASSERT_LINE="$(
+              ASSERT_META="$(
                 jq -r 'if (type == "object")
                           and ([.pass, .fail, .total] | all(type == "number" and . >= 0 and . == floor))
                           and (.total > 0)
                           and (.total == .pass + .fail)
-                       then "Scripted assertions: \(.pass) passed · \(.fail) failed · \(.total) total\n\n脚本断言：\(.pass) 通过 · \(.fail) 失败 · \(.total) 总计"
+                       then "\(.pass|floor) \(.fail|floor) \(.total|floor)"
                        else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
               )"
-              if [ -z "$ASSERT_LINE" ]; then
+              if [ -n "$ASSERT_META" ]; then
+                # Both language lines are built from the SAME validated
+                # triple, so an inconsistent assertions.json suppresses both
+                # — the Chinese line must never become a second, ungated
+                # channel for the same numbers.
+                read -r A_PASS A_FAIL A_TOTAL <<< "$ASSERT_META"
+                ASSERT_LINE="Scripted assertions: ${A_PASS} passed · ${A_FAIL} failed · ${A_TOTAL} total"
+                ASSERT_LINE_ZH="脚本断言：${A_PASS} 通过 · ${A_FAIL} 失败 · ${A_TOTAL} 总计"
+              else
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
               fi
             fi
@@ -3474,36 +3503,46 @@ jobs:
             # headline comes from the process outcome.
             TRUST_AGENT_VERDICT=false
             if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
-              # ASSERT_LINE is only non-empty when the whole object
-              # validated above, so .fail is known to be a sane integer here.
-              ASSERT_FAIL="$(jq -r '.fail' "$ASSERTIONS_FILE" 2>/dev/null || echo 1)"
               case "${AGENT_VERDICT:-}" in
-                merge-ready) [ "$ASSERT_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
+                merge-ready) [ "$A_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
               esac
             fi
-            # The verdict headline carries its Chinese twin. The verdict is the one
-            # line a reader acts on, and until now it was the only part of
-            # the unfolded comment that was English-only — the scope
-            # disclaimer below it has been bilingual all along, so a Chinese
-            # reader got the caveat and not the conclusion.
+            # Every headline leads with a QUALITATIVE call — passed / not
+            # passed / inconclusive / incomplete — because "merge-ready
+            # (agent verdict)" is lane jargon and a maintainer scanning a PR
+            # asked for pass/no-pass, not a taxonomy. The mapping is honest
+            # about what each outcome can claim: only agent verdicts judge
+            # the code (passed / not passed); a run that crashed, timed out,
+            # or produced no usable verdict says nothing about the PR and
+            # gets incomplete/inconclusive, never a pass or a fail.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
               case "$AGENT_VERDICT" in
-                merge-ready) HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
-                findings) HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
-                blocked) HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
-                inconclusive) HEADLINE='inconclusive (agent verdict)'; HEADLINE_ZH='结论不足（agent 判定）' ;;
+                merge-ready) QUAL='✅ passed'; QUAL_ZH='✅ 通过'; HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
+                findings) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                blocked) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
+                inconclusive) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='the agent could not reach a conclusion'; HEADLINE_ZH='agent 未能得出结论' ;;
               esac
             else
               case "${VERDICT:-}" in
-                pass) HEADLINE='completed (no usable structured verdict)'; HEADLINE_ZH='已完成（无可用的结构化判定）' ;;
-                fail) HEADLINE='agent run failed'; HEADLINE_ZH='agent 运行失败' ;;
-                timeout) HEADLINE='timeout — partial evidence'; HEADLINE_ZH='超时——证据不完整' ;;
-                infra-error) HEADLINE='infra-error (crash, OOM, or unwritable results)'; HEADLINE_ZH='基础设施故障（崩溃、OOM 或结果不可写）' ;;
-                *) HEADLINE='unknown'; HEADLINE_ZH='未知' ;;
+                pass) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='completed without a usable structured verdict'; HEADLINE_ZH='已完成但无可用的结构化判定' ;;
+                fail) QUAL='⚠️ incomplete'; QUAL_ZH='⚠️ 未完成'; HEADLINE='the agent run failed'; HEADLINE_ZH='agent 运行失败' ;;
+                timeout) QUAL='⚠️ incomplete'; QUAL_ZH='⚠️ 未完成'; HEADLINE='the run timed out with partial evidence'; HEADLINE_ZH='运行超时，证据不完整' ;;
+                infra-error) QUAL='⚠️ incomplete'; QUAL_ZH='⚠️ 未完成'; HEADLINE='infra-error (crash, OOM, or unwritable results)'; HEADLINE_ZH='基础设施故障（崩溃、OOM 或结果不可写）' ;;
+                *) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='the run ended in an unrecognized state'; HEADLINE_ZH='运行以未识别的状态结束' ;;
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
-                echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
+                if [ "${VERDICT:-}" = 'pass' ]; then
+                  if [ -z "$REPORT" ]; then
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
+                  elif [ -z "$ASSERT_LINE" ]; then
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
+                  else
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  fi
+                else
+                  echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
+                fi
               fi
             fi
             if [ -z "$REPORT" ]; then
@@ -3526,18 +3565,36 @@ jobs:
                 printf '%s\n' '<!-- qwen-triage:verify-substantive -->'
               fi
               printf '\n'
-              printf '**Sandboxed verification: %s** - [workflow run](%s)\n' "$HEADLINE" "$RUN_URL"
-              printf '**沙箱验证：%s**\n\n' "${HEADLINE_ZH:-$HEADLINE}"
+              # English is the unfolded default (matching the repo's PR-body
+              # convention); the Chinese version folds into one <details>
+              # whose SUMMARY carries the qualitative verdict — so even
+              # collapsed, a Chinese reader sees 通过/不通过 in one line
+              # instead of a caveat with no conclusion.
+              printf '**Sandboxed verification: %s — %s** - [workflow run](%s)\n\n' "$QUAL" "$HEADLINE" "$RUN_URL"
               if [ "${VERDICT:-}" = 'pass' ]; then
                 printf '%s\n\n' "$SCOPE_EN"
-                printf '%s\n\n' "$SCOPE_ZH"
               else
                 printf '%s\n\n' "$PARTIAL_EN"
-                printf '%s\n\n' "$PARTIAL_ZH"
               fi
               if [ -n "$ASSERT_LINE" ]; then
                 printf '%s\n\n' "$ASSERT_LINE"
               fi
+              if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
+                printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
+              fi
+              printf '<details>\n<summary>中文 — 判定：%s · %s</summary>\n\n' "$QUAL_ZH" "${HEADLINE_ZH:-$HEADLINE}"
+              if [ "${VERDICT:-}" = 'pass' ]; then
+                printf '%s\n\n' "$SCOPE_ZH"
+              else
+                printf '%s\n\n' "$PARTIAL_ZH"
+              fi
+              if [ -n "$ASSERT_LINE_ZH" ]; then
+                printf '%s\n\n' "$ASSERT_LINE_ZH"
+              fi
+              if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
+                printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
+              fi
+              printf '</details>\n\n'
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
