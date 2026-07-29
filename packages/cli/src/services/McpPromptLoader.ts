@@ -18,6 +18,11 @@ import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import type { PromptArgument } from '@modelcontextprotocol/sdk/types.js';
 
+// Shared by completion() and parseArgs() so the named-arg grammar stays in
+// sync between tab-completion and execution. Declared without `/g`; callers
+// create a stateful `/g` instance per use.
+const NAMED_ARG_REGEX = /--([^=]+)=(?:"((?:\\.|[^"\\])*)"|([^ ]+))/;
+
 /**
  * Discovers and loads executable slash commands from prompts exposed by
  * Model-Context-Protocol (MCP) servers.
@@ -172,7 +177,7 @@ export class McpPromptLoader implements ICommandLoader {
               indexOfFirstSpace === 0
                 ? ''
                 : invocation.raw.substring(indexOfFirstSpace);
-            const namedArgRegex = /--([^=]+)=(?:"((?:\\.|[^"\\])*)"|([^ ]+))/g;
+            const namedArgRegex = new RegExp(NAMED_ARG_REGEX.source, 'g');
             const providedArgNames = new Set<string>();
             let m: RegExpExecArray | null;
             while ((m = namedArgRegex.exec(argsString)) !== null) {
@@ -269,7 +274,7 @@ export class McpPromptLoader implements ICommandLoader {
     const promptInputs: Record<string, unknown> = {};
 
     // arg parsing: --key="value" or --key=value
-    const namedArgRegex = /--([^=]+)=(?:"((?:\\.|[^"\\])*)"|([^ ]+))/g;
+    const namedArgRegex = new RegExp(NAMED_ARG_REGEX.source, 'g');
     let match;
     let lastIndex = 0;
     const positionalParts: string[] = [];

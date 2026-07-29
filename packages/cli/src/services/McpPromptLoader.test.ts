@@ -394,6 +394,26 @@ describe('McpPromptLoader', () => {
         expect(suggestions).toEqual([]);
       });
 
+      it('should handle mixed named and positional arguments', async () => {
+        const loader = new McpPromptLoader(mockConfigWithPrompts);
+        const commands = await loader.loadCommands(
+          new AbortController().signal,
+        );
+        const completion = commands[0].completion!;
+        const context = {
+          invocation: {
+            raw: '/find --name="test-name" Fluffy 5 ',
+            name: 'find',
+            args: '--name="test-name" Fluffy 5',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '');
+        // --name fills "name" by name; the two positional tokens fill the
+        // remaining required args (age, species), so nothing is suggested
+        // and Enter executes the prompt (#7991).
+        expect(suggestions).toEqual([]);
+      });
+
       it('should suggest all arguments when none are present', async () => {
         const loader = new McpPromptLoader(mockConfigWithPrompts);
         const commands = await loader.loadCommands(
