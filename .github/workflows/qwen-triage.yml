@@ -2080,7 +2080,15 @@ jobs:
           # "Install evidence browser" step, using the checkout's own
           # Playwright so it always matches the lockfile. Best-effort: a
           # failure here must not fail the job.
-          if ! (cd "${RUNNER_TEMP:?}" && npx --yes playwright install-deps chromium); then
+          # Record success in a marker the "Install evidence browser" step
+          # gates on: apt and the Playwright CDN are independent servers with
+          # no shared success signal, so a binary download alone must not
+          # promise chromium to the agent. Rewritten or removed every run so
+          # a stale success on the persistent pool cannot leak through.
+          if (cd "${RUNNER_TEMP:?}" && npx --yes playwright install-deps chromium); then
+            printf 'ok' > "${RUNNER_TEMP:?}/verify-chromium-deps-ok"
+          else
+            rm -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok"
             echo "::warning::Chromium system deps install failed; the verification agent will produce a text-only report."
           fi
 
@@ -2346,21 +2354,31 @@ jobs:
           # Playwright trees: terminal-capture.ts imports `playwright`, but
           # node_modules/.bin/playwright is @playwright/test's CLI, which
           # pins a different chromium revision — so `npx playwright install`
-          # would download a browser the harness cannot launch. Call the
-          # imported package's cli.js directly so the binary always matches
-          # the lockfile. System deps were installed as root in the tools
-          # step; this runs as node so the tree is agent-readable without
-          # chmod. Best-effort: failure degrades to a text-only report.
+          # would download a browser the harness cannot launch. Resolve the
+          # CLI from the harness's own directory: require.resolve runs the
+          # same algorithm as its `from 'playwright'` import, so the binary
+          # matches the lockfile even if npm's hoist layout changes (nothing
+          # pins playwright to the root node_modules). cli.js is not in the
+          # package's exports map, so resolve the exported package.json and
+          # join. Runs as node so the tree is agent-readable without chmod.
+          # Best-effort: failure degrades to a text-only report.
           PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
           mkdir -p "$PW_PATH"
           chown node:node "$PW_PATH"
-          if runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-            PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
-            node ./node_modules/playwright/cli.js install chromium; then
+          PW_CLI="$(runuser -u node -- node -p "require('path').join(require('path').dirname(require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })), 'cli.js')")"
+          # The marker gates QWEN_VERIFY_CHROMIUM in the agent step, so it
+          # requires BOTH halves: the system deps installed as root in the
+          # tools step (which writes verify-chromium-deps-ok) AND the binary
+          # download below. A binary-only success would tell the agent
+          # chromium is ready when every launch still dies on a missing .so.
+          if [ -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok" ] &&
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
+              node "$PW_CLI" install chromium; then
             printf '%s' "$PW_PATH" > "${RUNNER_TEMP:?}/verify-chromium-path"
             echo "Chromium available for evidence screenshots." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::Chromium browser download failed; the verification agent will produce a text-only report."
+            echo "::warning::Chromium unavailable (system deps or browser download failed); the verification agent will produce a text-only report."
           fi
 
       - name: 'Run verification agent'

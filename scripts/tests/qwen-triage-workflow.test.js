@@ -2210,6 +2210,10 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(tools).toContain('install-deps chromium');
     expect(tools).not.toContain('install --with-deps');
     expect(tools).toContain('::warning::Chromium system deps install failed');
+    // Deps success is recorded in a marker the browser step gates on: apt
+    // and the Playwright CDN are independent servers, so a binary download
+    // alone must not promise chromium to the agent.
+    expect(tools).toContain('verify-chromium-deps-ok');
     // No hardcoded Playwright pin here either: the apt list must track
     // current Playwright so it covers the lockfile-matched binary below.
     expect(tools).not.toMatch(/playwright@[\d.]/);
@@ -2219,9 +2223,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     // (M5). This lockfile has TWO Playwright trees: terminal-capture.ts
     // imports `playwright`, but node_modules/.bin/playwright (what `npx
     // playwright` resolves) is @playwright/test's CLI, which pins a
-    // different chromium revision. The install must therefore call the
-    // imported package's cli.js directly; binding this assertion to the
-    // harness's import keeps the two from drifting apart.
+    // different chromium revision. The install must therefore resolve the
+    // imported package's cli.js from the harness's own directory (the same
+    // algorithm as its import), not assume npm hoists `playwright` to the
+    // root — a hoist nothing pins. cli.js is absent from the package's
+    // exports map, so the workflow resolves the exported package.json and
+    // joins; binding this assertion to the harness's import keeps the two
+    // from drifting apart.
     const capture = readFileSync(
       'integration-tests/terminal-capture/terminal-capture.ts',
       'utf8',
@@ -2229,19 +2237,23 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(capture).toMatch(/from 'playwright'/);
     const browser = stepIn('verify', 'Install evidence browser');
     expect(browser).toContain(
-      'node ./node_modules/playwright/cli.js install chromium',
+      "require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })",
     );
+    expect(browser).toContain('node "$PW_CLI" install chromium');
+    expect(browser).not.toContain('./node_modules/playwright/cli.js');
     expect(browser).not.toContain('npx playwright install chromium');
     expect(browser).not.toMatch(/playwright@[\d.]/);
     expect(browser).toContain('PLAYWRIGHT_BROWSERS_PATH');
     // Marker is written ONLY inside the success branch (M6): the if
     // condition must precede the marker write, and the else branch must
-    // carry the warning instead.
-    const ifIdx = browser.indexOf('if runuser');
-    const markerIdx = browser.indexOf('verify-chromium-path');
-    const elseIdx = browser.indexOf(
-      '::warning::Chromium browser download failed',
+    // carry the warning instead. The condition must ALSO require the deps
+    // marker (M6b): a binary download alone is not enough.
+    expect(browser).toContain('verify-chromium-deps-ok');
+    const ifIdx = browser.indexOf(
+      'if [ -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok" ]',
     );
+    const markerIdx = browser.indexOf('verify-chromium-path');
+    const elseIdx = browser.indexOf('::warning::Chromium unavailable');
     expect(ifIdx).toBeGreaterThan(-1);
     expect(markerIdx).toBeGreaterThan(ifIdx);
     expect(elseIdx).toBeGreaterThan(markerIdx);
@@ -2379,6 +2391,43 @@ describe('qwen-triage verify round-3 hardening', () => {
         true,
       );
       expect(res.stdout).toContain('Deleted pr-assets/7999-verify');
+
+      // Delete-FAILURE path: the verify branch probes OK but its DELETE
+      // fails (transient 500, or the PAT lost contents:write). The loop
+      // must set a non-zero exit and surface the warning — without this, a
+      // future edit dropping `exit "$status"` leaves the job green while
+      // the orphaned branch this workflow exists to prevent accumulates.
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GH_CALLS"',
+          // The verify branch probes OK but its DELETE fails; the visuals
+          // branch still 404s on the probe.
+          'case "$*" in',
+          '  *web-shell-visuals*) exit 1 ;;',
+          '  *"-X DELETE"*) exit 1 ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res2 = spawnSync('bash', ['-c', script.replace(/^ {10}/gm, '')], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_CALLS: calls,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '7999',
+        },
+      });
+      expect(res2.status).toBe(1);
+      expect(res2.stdout).toContain(
+        '::warning::Failed to delete pr-assets/7999-verify',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
