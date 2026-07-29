@@ -3962,7 +3962,7 @@ jobs:
                   # failed differently (a gate rejection landing on a window
                   # that already carries the cap — the exact rollout state
                   # of #7929/#7846).
-                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). Re-running the same per-round budget against this PR is not converging; each timeout burns a full agent run with nothing pushed. A human should split or reduce the PR (or raise the agent time budget), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing. A human should split or reduce the PR (or raise the agent time budget), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
                 fi
               fi
             fi

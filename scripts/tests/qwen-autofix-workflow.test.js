@@ -6042,6 +6042,23 @@ describe('qwen-autofix workflow', () => {
         { window: 'new-window', agentTimeout: 'timeout (3000000ms)' },
       ),
     ).toMatchObject({ terminal: false });
+    // A NON-timeout failure landing on an already-capped window still
+    // trips it — the #7929/#7846 rollout state the headline's
+    // parenthetical describes. A plausible "only count when this round
+    // timed out" cleanup (wrapping the block in an AGENT_TIMEOUT check)
+    // would silently delete this documented case.
+    expect(
+      run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD]),
+    ).toMatchObject({ terminal: true });
+    // Inherited from the outer guard, pinned so a refactor that hoists the
+    // timeout block out of it cannot mass-terminate every in-flight PR
+    // during a provider outage.
+    expect(
+      run(Array(5).fill(TIMEOUT_HEAD), {
+        apiErrorDetail: '429 rate limited',
+        apiErrorKind: 'transient',
+      }),
+    ).toMatchObject({ terminal: false });
     // When BOTH breakers would fire, the consecutive one (evaluated first)
     // keeps its headline — a terminal round is never overridden.
     const bothCapped = run(Array(cap - 1).fill(TIMEOUT_HEAD), {
