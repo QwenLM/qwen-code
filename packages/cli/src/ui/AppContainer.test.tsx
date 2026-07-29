@@ -32,7 +32,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { useContext, useState, act } from 'react';
+import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -1127,8 +1127,29 @@ describe('AppContainer State Management', () => {
     it('does not repaint static history after a resize settles (#8004)', () => {
       vi.useFakeTimers();
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
-      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
-      const { rerender } = render(
+      // measureElement must return a real measurement; a bare vi.fn() returns
+      // undefined, the controlsHeight layout effect throws on .height, and
+      // ink's ErrorBoundary silently unmounts the tree — making every
+      // post-mount assertion vacuous.
+      (measureElement as Mock).mockReturnValue({ width: 80, height: 2 });
+
+      // Deliver width changes to the SAME mounted instance. rerender() from
+      // ink-testing-library remounts the tree (ErrorBoundary issue above),
+      // re-seeding useRef(terminalWidth) so a settle debounce never fires.
+      let columns = 80;
+      const resizeListeners = new Set<() => void>();
+      mockedUseTerminalSize.mockImplementation(() => {
+        const [, force] = useReducer((x: number) => x + 1, 0);
+        useEffect(() => {
+          resizeListeners.add(force);
+          return () => {
+            resizeListeners.delete(force);
+          };
+        }, []);
+        return { columns, rows: 24 };
+      });
+
+      render(
         <AppContainer
           config={mockConfig}
           settings={mockSettings}
@@ -1136,21 +1157,18 @@ describe('AppContainer State Management', () => {
           initializationResult={mockInitResult}
         />,
       );
+
+      // Liveness control: fails if the ErrorBoundary unmounted the tree.
+      expect(resizeListeners.size).toBeGreaterThan(0);
+      const remountKeyBefore = capturedUIState.historyRemountKey;
       mockStdout.write.mockClear();
 
-      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 24 });
-      rerender(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+      act(() => {
+        columns = 100;
+        for (const notify of resizeListeners) notify();
+      });
 
       // Advance well past the old RESIZE_REPAINT_SETTLE_MS (200ms) debounce.
-      // The removed settle -> refreshStatic path wrote clearTerminal here; the
-      // new contract never does, so a future re-introduction would fail this.
       act(() => {
         vi.advanceTimersByTime(500);
       });
@@ -1158,7 +1176,10 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
+      expect(capturedUIState.historyRemountKey).toBe(remountKeyBefore);
+
       vi.useRealTimers();
+      (measureElement as Mock).mockReturnValue(undefined);
     });
 
     it('handleClearScreen avoids a second clearTerminal write', () => {
