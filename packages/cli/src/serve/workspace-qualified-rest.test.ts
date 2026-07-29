@@ -49,6 +49,17 @@ function makeBridge(): AcpSessionBridge {
       filesTouched: ['/mem/project/secondary.md'],
       touchedScopes: ['project'],
     })),
+    runWorkspaceMemoryForget: vi.fn(async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: ['project'],
+      touchedScopes: ['project'],
+    })),
+    runWorkspaceMemoryDream: vi.fn(async () => ({
+      summary: 'dreamed',
+      touchedTopics: ['project'],
+      dedupedEntries: 1,
+    })),
     manageMcpServer: vi.fn(async (serverName, action, clientId) => ({
       serverName,
       action,
@@ -1201,6 +1212,30 @@ describe('workspace-qualified core REST', () => {
         status: 'completed',
         result: { touchedScopes: ['project'] },
       });
+
+      const forget = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ query: 'Secondary only' });
+      expect(forget.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(h.secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledWith(
+          { query: 'Secondary only' },
+        );
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+
+      const dream = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(dream.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(h.secondaryBridge.runWorkspaceMemoryDream).toHaveBeenCalled();
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryDream).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

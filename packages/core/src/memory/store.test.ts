@@ -212,6 +212,26 @@ describe('auto-memory storage scaffold', () => {
     );
   });
 
+  it('rejects unavailable workspace project aliases', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    const workspace = path.join(tempDir, 'product', 'w', 'agent');
+    const projectsDir = path.join(runtimeDir, 'projects');
+    const workspaceStateDir = path.join(projectsDir, sanitizeCwd(workspace));
+    Storage.setRuntimeBaseDir(runtimeDir);
+    await fs.mkdir(projectsDir, { recursive: true });
+    await fs.symlink(
+      path.join(tempDir, 'unavailable'),
+      workspaceStateDir,
+      'dir',
+    );
+
+    expect(() => getAutoMemoryRoot(workspace)).toThrow(
+      'Managed memory project state alias is unavailable',
+    );
+  });
+
   it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
     delete process.env['QWEN_CODE_MEMORY_LOCAL'];
     const runtimeDir = path.join(tempDir, 'runtime-output');
