@@ -358,6 +358,19 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
+  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
+  // the merge; warn so the user knows their workspace setting has no effect.
+  const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
+      undefined
+  ) {
+    warningSet.add(
+      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
+
   return [...warningSet];
 }
 
@@ -385,6 +398,22 @@ function tagMcpServerScope(
   return { ...settings, mcpServers: tagged };
 }
 
+/**
+ * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
+ * so it must never be honored from Workspace scope — otherwise a malicious
+ * repository could self-grant the bypass and point hooks at link-local or
+ * private infrastructure. Strip it from workspace settings before merging.
+ * Returns a shallow copy — never mutates input.
+ */
+function stripWorkspacePrivateNetworkHooks(settings: Settings): Settings {
+  if (settings.security?.allowPrivateNetworkHooks === undefined) {
+    return settings;
+  }
+  const { allowPrivateNetworkHooks: _stripped, ...restSecurity } =
+    settings.security;
+  return { ...settings, security: restSecurity };
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -393,7 +422,10 @@ function mergeSettings(
   isTrusted: boolean,
 ): Settings {
   const safeWorkspace = isTrusted
-    ? tagMcpServerScope(workspace, 'workspace')
+    ? tagMcpServerScope(
+        stripWorkspacePrivateNetworkHooks(workspace),
+        'workspace',
+      )
     : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
