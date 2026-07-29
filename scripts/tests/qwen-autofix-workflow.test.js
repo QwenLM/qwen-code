@@ -1984,6 +1984,26 @@ describe('qwen-autofix workflow', () => {
     // continues; only takeover mode (the raised cap) ends.
     expect(workflow).toContain('Takeover mode ended');
     expect(workflow).toContain('STANDARD bot management continues');
+    // The three release acks are duplicated VERBATIM between the command
+    // path (REL_BODY) and the ack job (BODY) — indentation and the variable
+    // name are the only differences. A wording change must land in BOTH, or
+    // users see divergent release messages depending on whether they used
+    // `/takeover stop` or removed the label. No other test guards this
+    // cross-site identity: pin that each of the three variants appears
+    // exactly twice and that the two copies are byte-identical.
+    const releaseBodies =
+      workflow.match(
+        /printf '👋[^']*takeover-ack released[^']*'(?: "\$\{[A-Z_]+\}")+/g,
+      ) ?? [];
+    expect(releaseBodies).toHaveLength(6);
+    const releaseCounts = new Map();
+    for (const body of releaseBodies) {
+      releaseCounts.set(body, (releaseCounts.get(body) ?? 0) + 1);
+    }
+    expect(releaseCounts.size).toBe(3);
+    for (const count of releaseCounts.values()) {
+      expect(count).toBe(2);
+    }
     // Commands are serialized per PR — an older /takeover can never land
     // after a newer /takeover stop read the unlabeled state.
     expect(workflow).toContain(
