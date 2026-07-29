@@ -17,7 +17,11 @@ against this checkout before touching code.
 3. If you selected at least one fix, create the branch from current HEAD:
    `git checkout -b <branch>`.
 4. For each selected finding, one at a time:
-   a. Re-verify the evidence still holds on this checkout.
+   a. Re-verify the evidence still holds on this checkout. If it does not
+   (the base advanced between the scan and fix jobs), move the entry from
+   `fixes` to `reportOnly` in findings.json with `"status": "dropped"` and
+   the reason (evidence stale on this checkout) appended to `minimalFix`,
+   then continue with the next finding.
    b. Make the minimal change. Add or update a focused regression test that
    fails before the fix and passes after it whenever the fix is
    test-coverable. If a test is impossible, the finding must carry static

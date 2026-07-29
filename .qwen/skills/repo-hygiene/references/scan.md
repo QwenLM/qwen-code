@@ -122,8 +122,9 @@ points, schemas, registries, and contracts and builds its own map.
 A partition is a starting boundary, not a fence. A subagent may follow a
 call chain, import graph, or contract reference into another partition to
 build evidence. When a finding's minimal fix would touch more than three
-files or more than one hundred lines of production code, record it under
-`reportOnly`, never under `fixes`.
+production files or more than one hundred lines of production code (tests
+and docs excluded from both counts), record it under `reportOnly`, never
+under `fixes`.
 
 ### Six angles (applied inside each partition)
 
@@ -159,8 +160,10 @@ Do NOT scan GitHub issues as a source. Every finding must be provable from the
 repository itself.
 
 Each finding must record: root cause; evidence location (file + line/quote);
-why this is a real problem and not a style preference; the minimal fix; how to
-prove it fails or misaligns before the fix; how to verify after the fix.
+why this is a real problem and not a style preference; the minimal fix.
+Findings going under `fixes` must additionally record how to prove it fails
+or misaligns before the fix and how to verify after the fix (`failBefore` /
+`verifyAfter`).
 
 ## Steps
 

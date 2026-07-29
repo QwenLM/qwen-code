@@ -89,6 +89,16 @@ function runQwen(options, prompt) {
       detached: true,
     });
 
+    // A cancelled workflow SIGTERMs this script only; without forwarding,
+    // the detached child would keep running (with API credentials) until
+    // the runner VM is reclaimed.
+    for (const sig of ['SIGTERM', 'SIGINT']) {
+      process.on(sig, () => {
+        killQwen(child, 'SIGKILL');
+        process.exit(1);
+      });
+    }
+
     const finish = (result) => {
       if (settled) return;
       settled = true;

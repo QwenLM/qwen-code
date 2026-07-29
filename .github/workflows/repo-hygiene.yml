@@ -241,6 +241,7 @@ jobs:
           echo "Findings: $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
 
       - name: 'Check bot credentials'
+        id: 'creds'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
@@ -391,16 +392,19 @@ jobs:
           git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
 
-          if git diff --quiet origin/main..."${BRANCH}"; then
-            echo 'Branch has no changes against main.'
-            echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
+          # Dirty-tree check must precede the no-diff early exit: an agent
+          # that edited files but never committed has no committed diff, and
+          # that failure must not pass as a clean no-fixes run.
           if [[ -n "$(git status --porcelain)" ]]; then
             echo '❌ Working tree is dirty:'
             git status --short
             exit 1
+          fi
+
+          if git diff --quiet origin/main..."${BRANCH}"; then
+            echo 'Branch has no changes against main.'
+            echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
 
           for f in pr-title.txt pr-body.md; do
@@ -606,10 +610,14 @@ jobs:
           fi
 
       - name: 'File report-only findings as issue'
-        if: '${{ always() && !cancelled() && env.DRY_RUN != ''true'' }}'
+        if: '${{ always() && !cancelled() && steps.creds.outcome == ''success'' && env.DRY_RUN != ''true'' }}'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
+          if [[ -s "${WORKDIR}/failure.md" ]]; then
+            echo 'Scan/fix was blocked — not filing partial findings.'
+            exit 0
+          fi
           if [[ ! -s "${WORKDIR}/findings.json" ]]; then
             echo 'No findings.json — skipping.'
             exit 0
