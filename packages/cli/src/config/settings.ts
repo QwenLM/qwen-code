@@ -367,7 +367,7 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       undefined
   ) {
     warningSet.add(
-      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User or System scope settings.`,
+      `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
     );
   }
 

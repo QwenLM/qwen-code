@@ -8,7 +8,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { interpolateHeaders, interpolateUrl } from './envInterpolator.js';
 import { UrlValidator } from './urlValidator.js';
 import { combineAbortSignals } from '../utils/abortController.js';
-import { isBlockedAddress } from './ssrfGuard.js';
+import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
 import type {
   HttpHookConfig,
@@ -47,14 +47,19 @@ async function validateResolvedHost(
   hostname: string,
   allowPrivateNetworkHosts: boolean = false,
 ): Promise<{ ok: boolean; error?: string }> {
-  // Trusted-scope opt-in: skip the IP-range checks entirely. The URL-level
-  // BLOCKED_HOSTS metadata blocklist in UrlValidator still applies.
-  if (allowPrivateNetworkHosts) {
-    return { ok: true };
-  }
   return new Promise((resolve) => {
+    // Cloud metadata endpoints stay blocked in every configuration, even
+    // when private-network hooks are explicitly allowed (trusted scopes).
+    if (isMetadataAddress(hostname)) {
+      resolve({
+        ok: false,
+        error: `HTTP hook blocked: ${hostname} is a cloud metadata endpoint`,
+      });
+      return;
+    }
+
     // If hostname is already an IP literal, validate directly.
-    if (isBlockedAddress(hostname)) {
+    if (!allowPrivateNetworkHosts && isBlockedAddress(hostname)) {
       resolve({
         ok: false,
         error: `HTTP hook blocked: ${hostname} is in a private/link-local range`,
@@ -62,7 +67,9 @@ async function validateResolvedHost(
       return;
     }
 
-    // For hostnames, resolve DNS and validate all returned IPs.
+    // For hostnames, resolve DNS and validate all returned IPs. This runs
+    // even when private ranges are allowed, so that a hostname resolving
+    // to a metadata endpoint is still caught.
     dnsLookup(hostname, { all: true }, (err, addresses) => {
       if (err) {
         // DNS resolution failure — let the fetch call handle it.
@@ -71,7 +78,14 @@ async function validateResolvedHost(
       }
 
       for (const addr of addresses) {
-        if (isBlockedAddress(addr.address)) {
+        if (isMetadataAddress(addr.address)) {
+          resolve({
+            ok: false,
+            error: `HTTP hook blocked: ${hostname} resolves to ${addr.address} (cloud metadata endpoint)`,
+          });
+          return;
+        }
+        if (!allowPrivateNetworkHosts && isBlockedAddress(addr.address)) {
           resolve({
             ok: false,
             error: `HTTP hook blocked: ${hostname} resolves to ${addr.address} (private/link-local). Loopback (127.0.0.1, ::1) is allowed.`,

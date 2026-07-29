@@ -392,6 +392,80 @@ describe('HttpHookRunner', () => {
       expect(result.error?.message).toContain('blocked');
       expect(mockFetch).not.toHaveBeenCalled();
     });
+
+    it('should still block the Alibaba metadata IP when the flag is on', async () => {
+      const runner = new HttpHookRunner([], true);
+      const config = createMockConfig({
+        url: 'http://100.100.100.200/latest/meta-data',
+      });
+      const input = createMockInput();
+
+      const result = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('blocked');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should still block IPv6-mapped metadata IPs when the flag is on', async () => {
+      const runner = new HttpHookRunner([], true);
+      const config = createMockConfig({
+        url: 'http://[::ffff:a9fe:a9fe]/latest/meta-data',
+      });
+      const input = createMockInput();
+
+      const result = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('blocked');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should block a hostname resolving to a metadata IP when the flag is on', async () => {
+      mockDns.addresses = [{ address: '169.254.169.254', family: 4 }];
+      const runner = new HttpHookRunner([], true);
+      const config = createMockConfig({
+        url: 'http://hooks.internal.example.com/hook',
+      });
+      const input = createMockInput();
+
+      const result = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('metadata');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should block a hostname resolving to the Alibaba metadata IP when the flag is on', async () => {
+      mockDns.addresses = [{ address: '100.100.100.200', family: 4 }];
+      const runner = new HttpHookRunner([], true);
+      const config = createMockConfig({
+        url: 'http://hooks.internal.example.com/hook',
+      });
+      const input = createMockInput();
+
+      const result = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('metadata');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe('resetOnceHooks', () => {

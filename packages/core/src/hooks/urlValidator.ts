@@ -5,7 +5,7 @@
  */
 
 import { isIPv4, isIPv6 } from 'net';
-import { isBlockedAddress } from './ssrfGuard.js';
+import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('URL_VALIDATOR');
@@ -38,8 +38,8 @@ export class UrlValidator {
    * Create a new URL validator
    * @param allowedPatterns - Array of allowed URL patterns (supports * wildcard)
    * @param allowPrivateNetworkHosts - When true, skip the private/link-local
-   *   IP-range check (the BLOCKED_HOSTS metadata blocklist still applies).
-   *   Only enable from trusted settings scopes.
+   *   IP-range check (the metadata endpoint checks — BLOCKED_HOSTS and the
+   *   metadata IPs — still apply). Only enable from trusted settings scopes.
    */
   constructor(
     allowedPatterns: string[] = [],
@@ -105,13 +105,25 @@ export class UrlValidator {
         return true;
       }
 
-      // Check if hostname is an IP address - use ssrfGuard for authoritative check
-      // Skipped when private-network hooks are explicitly allowed (trusted
-      // scopes only); the BLOCKED_HOSTS check above always applies.
-      if (!this.allowPrivateNetworkHosts && this.isIpAddress(hostname)) {
-        // Remove brackets from IPv6 addresses for isBlockedAddress
+      // Check if hostname is an IP address
+      if (this.isIpAddress(hostname)) {
+        // Remove brackets from IPv6 addresses for the IP checks
         const cleanHostname = hostname.replace(/^\[|\]$/g, '');
-        if (isBlockedAddress(cleanHostname)) {
+
+        // Cloud metadata endpoints (169.254.169.254, 100.100.100.200, in
+        // any serialized form including IPv4-mapped IPv6) stay blocked in
+        // every configuration — this check is never relaxed.
+        if (isMetadataAddress(cleanHostname)) {
+          debugLogger.debug(
+            `URL blocked: IP ${hostname} is a cloud metadata endpoint`,
+          );
+          return true;
+        }
+
+        // General private/link-local range check - use ssrfGuard for the
+        // authoritative implementation. Skipped when private-network hooks
+        // are explicitly allowed (trusted scopes only).
+        if (!this.allowPrivateNetworkHosts && isBlockedAddress(cleanHostname)) {
           debugLogger.debug(`URL blocked: IP ${hostname} is blocked`);
           return true;
         }

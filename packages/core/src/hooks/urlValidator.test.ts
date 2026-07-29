@@ -81,6 +81,37 @@ describe('UrlValidator', () => {
           ),
         ).toBe(true);
       });
+
+      it('should still block the Alibaba Cloud metadata IP (CGNAT range)', () => {
+        const validator = new UrlValidator([], true);
+        expect(
+          validator.isBlocked('http://100.100.100.200/latest/meta-data'),
+        ).toBe(true);
+      });
+
+      it('should still block IPv4-mapped IPv6 forms of metadata IPs', () => {
+        const validator = new UrlValidator([], true);
+        // ::ffff:169.254.169.254 (mixed dotted form)
+        expect(
+          validator.isBlocked(
+            'http://[::ffff:169.254.169.254]/latest/meta-data',
+          ),
+        ).toBe(true);
+        // ::ffff:a9fe:a9fe = 169.254.169.254
+        expect(
+          validator.isBlocked('http://[::ffff:a9fe:a9fe]/latest/meta-data'),
+        ).toBe(true);
+        // ::ffff:6464:64c8 = 100.100.100.200
+        expect(
+          validator.isBlocked('http://[::ffff:6464:64c8]/latest/meta-data'),
+        ).toBe(true);
+      });
+
+      it('should allow IPv4-mapped IPv6 forms of ordinary private IPs', () => {
+        const validator = new UrlValidator([], true);
+        // ::ffff:ac10:1 = 172.16.0.1 — private, but not a metadata endpoint
+        expect(validator.isBlocked('http://[::ffff:ac10:1]/api')).toBe(false);
+      });
     });
   });
 
