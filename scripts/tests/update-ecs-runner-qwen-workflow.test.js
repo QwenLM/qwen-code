@@ -13,14 +13,8 @@ describe('ECS runner qwen update workflow', () => {
     'utf8',
   );
 
-  it('updates the npm prefix used by the selected runner', () => {
-    expect(workflow).toContain('global_prefix="$(npm prefix -g)"');
-    expect(workflow).toContain('if [[ -w "${global_prefix}" ]]');
-    expect(workflow).toContain(
-      'sudo env "NPM_CONFIG_PREFIX=${global_prefix}" npm install -g',
-    );
-    expect(workflow).toMatch(
-      /if \[\[ -w "\$\{global_prefix\}" \]\][\s\S]*?then\s*\n\s*npm install -g/,
-    );
+  it('installs without the selected runner npm prefix', () => {
+    expect(workflow).toContain('cd "${RUNNER_TEMP:?}"');
+    expect(workflow).toContain('sudo env -u NPM_CONFIG_PREFIX npm install -g');
   });
 });
