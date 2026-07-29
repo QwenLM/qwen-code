@@ -26,6 +26,7 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "github",
       "token": "$GITHUB_TOKEN",
       "pollInterval": 60000,
+      "reasonFilter": ["mention", "review_requested", "assign"],
       "senderPolicy": "allowlist",
       "allowedUsers": ["your-github-username"],
       "sessionScope": "chat_thread",
@@ -62,6 +63,7 @@ For GitHub Enterprise Server, set `baseUrl`:
 | `token`                   | (required)               | Classic PAT with `notifications` scope                                           |
 | `pollInterval`            | `60000`                  | Poll interval in ms                                                              |
 | `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                           |
+| `reasonFilter`            | all reasons              | Optional list of GitHub notification reasons to process before dispatch          |
 | `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                       |
 | `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                          |
 | `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run |
