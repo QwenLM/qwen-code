@@ -957,6 +957,54 @@ describe('deleteDaemonSessions', () => {
     await lease.release();
   });
 
+  it('reports a gate race per session after another batch item was deleted', async () => {
+    const removedId = '550e8400-e29b-41d4-a716-446655440073';
+    const blockedId = '550e8400-e29b-41d4-a716-446655440074';
+    writeSessionFile(workspaceDir, removedId, 'active');
+    writeSessionFile(workspaceDir, blockedId, 'active');
+    const coordinator = new SessionArchiveCoordinator();
+    let releaseBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseBlocked = resolve;
+    });
+    let competingMaintenance: Promise<void> | undefined;
+
+    try {
+      const result = await deleteDaemonSessions({
+        sessionIds: [removedId, blockedId],
+        service: new SessionService(workspaceDir),
+        bridge: {
+          closeSession: vi.fn(async (sessionId) => {
+            if (sessionId === removedId) {
+              competingMaintenance = coordinator.runExclusiveMany(
+                [blockedId],
+                () => blocked,
+              );
+            }
+          }),
+        },
+        coordinator,
+      });
+
+      expect(result.removed).toEqual([removedId]);
+      expect(result.errors).toEqual([
+        {
+          sessionId: blockedId,
+          error: expect.stringContaining('is being archived or unarchived'),
+        },
+      ]);
+      expect(
+        fs.existsSync(sessionPath(workspaceDir, removedId, 'active')),
+      ).toBe(false);
+      expect(
+        fs.existsSync(sessionPath(workspaceDir, blockedId, 'active')),
+      ).toBe(true);
+    } finally {
+      releaseBlocked();
+      await competingMaintenance;
+    }
+  });
+
   it('skips orphan deletion when a new owner attached', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440072';
     writeSessionFile(workspaceDir, sessionId, 'active');

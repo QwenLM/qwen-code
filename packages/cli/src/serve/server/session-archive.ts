@@ -425,11 +425,7 @@ export async function deleteDaemonSessions(params: {
           return result;
         });
       } catch (error) {
-        if (
-          error instanceof DaemonDrainingError ||
-          (error instanceof SessionArchivingError &&
-            error.lockKind === 'exclusive')
-        ) {
+        if (error instanceof DaemonDrainingError) {
           throw error;
         }
         onError?.({
