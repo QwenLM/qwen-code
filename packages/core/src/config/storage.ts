@@ -43,9 +43,10 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
  * point at the temp worktree. The worktree is deleted on exit (or lost on
  * crash), but the snapshot dir is never removed, so
  * `%TEMP%/qwen-*-sess-*` entries accumulate forever (#7906). Sweep the
- * project dirs whose worktree sidecar points at a path that no longer
- * exists. Anything that cannot prove itself stale (no sidecar, corrupted
- * sidecar, live worktree) is kept; this never touches normal project dirs.
+ * project dirs whose worktree sidecars all point at paths that no longer
+ * exist. Anything that cannot prove itself stale (no sidecar, corrupted
+ * sidecars, at least one live worktree) is kept; this never touches normal
+ * project dirs.
  */
 export async function sweepStaleWorktreeProjects(
   runtimeBaseDir: string,
@@ -61,55 +62,74 @@ export async function sweepStaleWorktreeProjects(
   const removed: string[] = [];
   for (const entry of entries) {
     const chatsDir = path.join(projectsDir, entry, 'chats');
-    let sidecarNames: string[];
+    const worktreePaths = await readWorktreeSidecarPaths(chatsDir);
+    if (worktreePaths.length === 0) continue;
+
+    // One live worktree anywhere in the bucket is enough to keep it; the
+    // snapshot is stale only when every parseable sidecar points at a gone
+    // worktree.
+    if (worktreePaths.some((worktreePath) => fs.existsSync(worktreePath))) {
+      continue;
+    }
+
+    // One unreadable entry must not abort the sweep for the rest.
     try {
-      sidecarNames = (await fsp.readdir(chatsDir)).filter((name) =>
-        name.endsWith('.worktree.json'),
+      await fsp.rm(path.join(projectsDir, entry), {
+        recursive: true,
+        force: true,
+      });
+    } catch (error) {
+      logger.debug(
+        `Failed to remove stale worktree project snapshot ${entry}: ${String(error)}`,
       );
+      continue;
+    }
+    removed.push(entry);
+    logger.debug(
+      `Removed stale worktree project snapshot ${entry} (all worktree sidecars point at removed paths)`,
+    );
+  }
+  return removed;
+}
+
+/**
+ * Collect the worktreePath of every readable sidecar under `chats/` and
+ * `chats/archive/`. A corrupted sidecar proves nothing and is skipped, never
+ * treated as a reason to delete or keep on its own.
+ */
+async function readWorktreeSidecarPaths(chatsDir: string): Promise<string[]> {
+  const sidecars: string[] = [];
+  for (const dir of [chatsDir, path.join(chatsDir, 'archive')]) {
+    let names: string[];
+    try {
+      names = await fsp.readdir(dir);
     } catch {
       continue;
     }
-    if (sidecarNames.length === 0) continue;
+    sidecars.push(
+      ...names
+        .filter((name) => name.endsWith('.worktree.json'))
+        .map((name) => path.join(dir, name)),
+    );
+  }
+  sidecars.sort();
 
-    // Every session under one project dir shares the same worktree root, so
-    // a single valid sidecar is enough to judge.
-    let worktreePath: string | undefined;
+  const worktreePaths: string[] = [];
+  for (const sidecar of sidecars) {
     try {
-      const parsed: unknown = JSON.parse(
-        await fsp.readFile(path.join(chatsDir, sidecarNames[0]!), 'utf-8'),
-      );
+      const parsed: unknown = JSON.parse(await fsp.readFile(sidecar, 'utf-8'));
       if (
         parsed !== null &&
         typeof parsed === 'object' &&
         typeof (parsed as Record<string, unknown>)['worktreePath'] === 'string'
       ) {
-        worktreePath = (parsed as Record<string, string>)['worktreePath'];
+        worktreePaths.push((parsed as Record<string, string>)['worktreePath']);
       }
     } catch {
-      continue;
-    }
-    if (worktreePath === undefined) continue;
-
-    if (!fs.existsSync(worktreePath)) {
-      // One unreadable entry must not abort the sweep for the rest.
-      try {
-        await fsp.rm(path.join(projectsDir, entry), {
-          recursive: true,
-          force: true,
-        });
-      } catch (error) {
-        logger.debug(
-          `Failed to remove stale worktree project snapshot ${entry}: ${String(error)}`,
-        );
-        continue;
-      }
-      removed.push(entry);
-      logger.debug(
-        `Removed stale worktree project snapshot ${entry} (worktree ${worktreePath} no longer exists)`,
-      );
+      // corrupted sidecar: try the next one before judging the bucket
     }
   }
-  return removed;
+  return worktreePaths;
 }
 
 const staleWorktreeSweepStarted = new Set<string>();
