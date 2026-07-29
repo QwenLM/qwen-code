@@ -1336,6 +1336,25 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('uses the configured context window for the preload budget', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 50_000,
+      });
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(5_000);
+    });
+
     it('skips deferred preload when the threshold is 0', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
