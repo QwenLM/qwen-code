@@ -1645,6 +1645,65 @@ describe('environment agent tasks', () => {
       },
     ]);
   });
+
+  it('deduplicates a completed background agent whose live task lost its toolUseId', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-agent-1',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'completed',
+            args: {
+              description: 'Review code',
+              prompt: 'Review the diff for bugs',
+              subagent_type: 'general-purpose',
+              run_in_background: true,
+            },
+            rawOutput: {
+              type: 'task_execution',
+              status: 'completed',
+            },
+          },
+        ],
+      },
+      {
+        id: 'agent-notification',
+        role: 'system',
+        content: 'background agent completed',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          taskId: 'general-purpose-internal-1',
+          status: 'completed',
+        },
+      },
+    ] satisfies Message[];
+    const liveTask = {
+      kind: 'agent' as const,
+      id: 'general-purpose-internal-1',
+      label: 'general-purpose: Review code',
+      description: 'Review code',
+      prompt: 'Review the diff for bugs',
+      subagentType: 'general-purpose',
+      status: 'completed' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: true,
+    };
+
+    expect(getEnvironmentAgentTasks(messages, [liveTask])).toMatchObject([
+      {
+        id: 'general-purpose-internal-1',
+        label: 'Review code',
+        status: 'completed',
+      },
+    ]);
+  });
 });
 
 function renderApp(props: React.ComponentProps<typeof App> = {}): {

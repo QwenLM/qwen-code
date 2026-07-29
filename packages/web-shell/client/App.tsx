@@ -1154,11 +1154,26 @@ export function getEnvironmentAgentTasks(
           : subagentType
             ? `${subagentType}-${tool.callId}`
             : undefined;
+        // Completed background agents can lose their toolUseId / derived-id
+        // linkage (e.g. across a daemon reload); fall back to content matching,
+        // the same signal the daemon's legacy resolver uses.
+        const matchesLiveTaskContent = (
+          task: DaemonSessionAgentTaskStatus,
+        ): boolean => {
+          if (prompt && task.prompt === prompt) return true;
+          return (
+            !!description &&
+            !!subagentType &&
+            task.description === description &&
+            task.subagentType === subagentType
+          );
+        };
         const liveTask = liveAgents.find(
           (task) =>
             task.toolUseId === tool.callId ||
             task.id === taskId ||
-            task.id === derivedTaskId,
+            task.id === derivedTaskId ||
+            (!seenTaskIds.has(task.id) && matchesLiveTaskContent(task)),
         );
         const title = tool.title?.replace(/^Agent:\s*/i, '').trim();
         const meaningfulTitle =
