@@ -1880,6 +1880,82 @@ if (process.argv[2] === 'serve') {
     console.error(`daemons discover: ${(err as Error).message}`);
     process.exit(1);
   });
+} else if (
+  process.argv[2] === 'up' ||
+  process.argv[2] === 'down' ||
+  process.argv[2] === 'status'
+) {
+  // `qwen-rc up|down|status [--json] [--port <n>]` — the local launcher
+  // (add-remote-peers-launcher): bring up (or tear down / report on) the
+  // Tailscale + native-TLS + systemd --user gateway unit on this machine.
+  // Daemon-free glue: all logic lives in ./launcher/orchestrator.js — this
+  // branch only parses argv, wires the real exec boundary, and renders the
+  // result as text or `--json`. Printed/JSON output carries connect metadata
+  // + the pairing code only, never session/tool content.
+  void (async () => {
+    const { up, down, status } = await import('./launcher/orchestrator.js');
+    const { realRunCommand } = await import('./launcher/exec.js');
+    const wantJson = process.argv.includes('--json');
+    const portFlag = (() => {
+      const i = process.argv.indexOf('--port');
+      return i >= 0 ? Number(process.argv[i + 1]) : undefined;
+    })();
+    const deps = {
+      run: realRunCommand,
+      dir: join(homedir(), '.qwen', 'rc'),
+      port: portFlag ?? 8443,
+      unit: 'qwen-rc-gateway',
+      // PATH-independent self-invocation: [node, this cli.js] so the systemd
+      // --user unit can exec qwen-rc even when it isn't on PATH.
+      serveCmd: [process.argv[0], process.argv[1]],
+    };
+    const cmd = process.argv[2];
+    if (cmd === 'up') {
+      const r = await up(deps);
+      if (wantJson) {
+        // eslint-disable-next-line no-console
+        console.log(
+          JSON.stringify({
+            status: r.ok ? 'running' : 'error',
+            url: r.url,
+            host: r.host,
+            port: r.port,
+            unit: r.unit,
+            bootstrapCode: r.bootstrapCode,
+            certExpiry: r.certExpiry,
+            hint: r.hint,
+          }),
+        );
+      } else if (r.ok) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `\nConnect from your phone:\n  ${r.url}\n\nPairing code: ${r.bootstrapCode ?? '(see gateway logs)'}\n\n${r.qr ?? ''}`,
+        );
+      } else {
+        // eslint-disable-next-line no-console
+        console.error(`qwen-rc up: ${r.hint}`);
+      }
+      process.exit(r.ok ? 0 : 1);
+    } else if (cmd === 'down') {
+      const r = await down(deps);
+      if (wantJson)
+        console.log(JSON.stringify({ status: 'stopped' })); // eslint-disable-line no-console
+      else console.log('qwen-rc: stopped'); // eslint-disable-line no-console
+      process.exit(r.ok ? 0 : 1);
+    } else {
+      const r = await status(deps);
+      if (wantJson)
+        console.log(JSON.stringify(r)); // eslint-disable-line no-console
+      else console.log(r.running ? `running\n  ${r.url ?? ''}` : 'stopped'); // eslint-disable-line no-console
+      process.exit(0);
+    }
+  })().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(
+      `qwen-rc ${process.argv[2]} failed: ${(err as Error).message}`,
+    );
+    process.exit(1);
+  });
 } else if (process.argv[2] === 'audit' && process.argv[3] === 'verify') {
   // `qwen-rc audit verify [--dir <path>]` -- walk all retained audit-*.log
   // files in the audit directory and verify the prevHash chain of each file.
