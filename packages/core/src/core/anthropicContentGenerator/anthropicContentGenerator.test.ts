@@ -1696,7 +1696,7 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({
           output_config: { effort: 'max' },
           // 4.6+ uses adaptive thinking; the server controls the budget.
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -1733,7 +1733,7 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           output_config: { effort: 'xhigh' },
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -2169,12 +2169,15 @@ describe('AnthropicContentGenerator', () => {
       it('selects adaptive for claude-opus-4-6 / sonnet-4-6 / opus-4-7', async () => {
         expect(await thinkingFor('claude-opus-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-sonnet-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-opus-4-7')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2182,6 +2185,7 @@ describe('AnthropicContentGenerator', () => {
         // Single-digit character-class regex would have missed haiku entirely.
         expect(await thinkingFor('claude-haiku-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2190,12 +2194,14 @@ describe('AnthropicContentGenerator', () => {
         // invalid `{ type: 'enabled', budget_tokens: ... }` body.
         expect(await thinkingFor('claude-opus-4-10')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
       it('selects adaptive for a future major like claude-opus-5-1', async () => {
         expect(await thinkingFor('claude-opus-5-1')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2204,6 +2210,24 @@ describe('AnthropicContentGenerator', () => {
           type: 'enabled',
           budget_tokens: 32_000,
         });
+      });
+
+      it('never sets display on the budget_tokens shape (pre-4.6 models and the explicit-override escape hatch)', async () => {
+        // display is a field on the 'enabled'/'adaptive' Anthropic thinking
+        // shapes, but the summarized-default-changed-to-omitted problem
+        // documented by Anthropic is scoped to adaptive thinking only
+        // (Opus 4.7+ / every 5.x family). Pre-4.6 models on the manual
+        // budget path, and the explicit reasoning.budget_tokens escape
+        // hatch on models that still accept it, must not carry `display`.
+        expect(await thinkingFor('claude-opus-4-5')).not.toHaveProperty(
+          'display',
+        );
+        expect(
+          await thinkingFor('claude-opus-4-6', {
+            effort: 'medium',
+            budget_tokens: 42_000,
+          }),
+        ).not.toHaveProperty('display');
       });
 
       it('keeps the budget path for dated Opus 4.0 (claude-opus-4-20250514, date suffix is not a minor)', async () => {
@@ -2241,7 +2265,7 @@ describe('AnthropicContentGenerator', () => {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'adaptive' });
+        ).toEqual({ type: 'adaptive', display: 'summarized' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
@@ -2288,6 +2312,7 @@ describe('AnthropicContentGenerator', () => {
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect((req as { thinking?: unknown }).thinking).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(req).toEqual(
           expect.not.objectContaining({ output_config: expect.anything() }),
@@ -2624,7 +2649,10 @@ describe('AnthropicContentGenerator', () => {
         'https://internal-proxy.example/anthropic',
       );
 
-      expect(request.thinking).toEqual({ type: 'adaptive' });
+      expect(request.thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+      });
       expect(request.messages[1]).toEqual({
         role: 'assistant',
         content: [{ type: 'text', text: 'Visible answer' }],

@@ -90,6 +90,35 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Strip a trailing assistant message that would otherwise be sent as an
+   * "assistant-turn prefill" (a request whose final message has
+   * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
+   * family — Fable 5, Mythos 5, …) reject prefill outright:
+   *
+   *   "This model does not support assistant message prefill. The
+   *    conversation must end with a user message."
+   *
+   * Per Anthropic's own migration guidance this is a model-generation
+   * change, not a backend quirk — it 400s identically on the native API,
+   * Vertex AI, and Bedrock for every 4.6+ model.
+   *
+   * A trailing assistant message reaches the converter when Gemini history
+   * ends on a model turn with no follow-up (e.g. context-window trimming
+   * drops the next user turn, or a subagent's transcript is replayed
+   * mid-turn). Two cases are handled:
+   *   - The trailing assistant message is empty/whitespace-only (a
+   *     leftover prefill artifact with no real content) — drop it.
+   *   - The trailing assistant message carries real content (text,
+   *     tool_use, thinking) — keep it in history but append a synthetic
+   *     user turn so the request satisfies "must end with a user message"
+   *     without discarding anything the model already said.
+   *
+   * Only meaningful when the active model requires adaptive thinking
+   * (Claude 4.6+); older models accept prefill on every backend, so this
+   * should be gated on `modelSupportsAdaptiveThinking()` in the caller.
+   */
+  stripTrailingAssistantPrefill?: boolean;
+  /**
    * Per-call override for `enableCacheControl`. Falls back to the value
    * captured at construction. The generator passes the live
    * `contentGeneratorConfig.enableCacheControl` here so a hot
@@ -183,6 +212,9 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -953,6 +985,58 @@ export class AnthropicContentConverter {
       } as unknown as AnthropicContentBlockParam;
       message.content = [emptyThinking, ...blocks];
     }
+  }
+
+  /**
+   * Strip a trailing empty-content assistant message, or append a
+   * synthetic user turn to satisfy Anthropic's "must end with a user
+   * message" requirement (Opus/Sonnet 4.6+, every 5.x family) when the
+   * conversation would otherwise end on a non-empty assistant message.
+   * See {@link ConvertGeminiRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
+   */
+  private stripTrailingAssistantPrefill(
+    messages: AnthropicMessageParam[],
+  ): void {
+    // Phase 1: drop genuinely empty trailing assistant messages (no real
+    // content — a leftover prefill artifact from history trimming/replay).
+    while (messages.length > 0) {
+      const last = messages[messages.length - 1]!;
+      if (last.role !== 'assistant') return;
+      if (!this.isEmptyAssistantMessage(last)) break;
+      messages.pop();
+    }
+
+    // Phase 2: a real-content assistant message is still trailing — keep
+    // it in history (it may carry tool_use/thinking the model needs to see
+    // again) and append a synthetic user turn instead of dropping it.
+    if (
+      messages.length > 0 &&
+      messages[messages.length - 1]!.role === 'assistant'
+    ) {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'Continue.' }],
+      });
+    }
+  }
+
+  private isEmptyAssistantMessage(message: AnthropicMessageParam): boolean {
+    const content = message.content;
+    if (!content) return true;
+    if (typeof content === 'string') return content.trim().length === 0;
+    if (!Array.isArray(content) || content.length === 0) return true;
+
+    for (const block of content) {
+      const type = (block as { type?: string }).type;
+      if (type === 'text') {
+        const text = (block as { text?: string }).text;
+        if (typeof text === 'string' && text.trim().length > 0) return false;
+      } else {
+        // Any non-text block (tool_use, thinking, etc.) is real content.
+        return false;
+      }
+    }
+    return true;
   }
 
   /**

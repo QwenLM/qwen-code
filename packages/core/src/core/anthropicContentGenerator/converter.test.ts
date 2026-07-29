@@ -2099,6 +2099,129 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
+  describe('assistant-turn prefill stripping', () => {
+    it('drops a trailing empty assistant message when stripTrailingAssistantPrefill is set', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: '' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+      ]);
+    });
+
+    it('appends a synthetic user turn when a trailing assistant message has real content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+
+    it('leaves a trailing user message untouched when stripTrailingAssistantPrefill is set', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Hello!' }] },
+            { role: 'user', parts: [{ text: 'How are you?' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Hello!' }] },
+        { role: 'user', content: [{ type: 'text', text: 'How are you?' }] },
+      ]);
+    });
+
+    it('does not strip a trailing assistant message when the option is unset', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        },
+        { enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        },
+      ]);
+    });
+
+    it('keeps a trailing thinking-only assistant message and appends a synthetic user turn', () => {
+      // A thinking block is real content (not text/whitespace-only), so it
+      // must be preserved rather than dropped as an "empty prefill" —
+      // unlike an unanswered tool_use, thinking blocks are never treated
+      // as orphans by the earlier merge/clean passes.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'pondering the answer',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'pondering the answer',
+              signature: 'sig',
+            },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+      ]);
+    });
+  });
+
   describe('convertGeminiToolsToAnthropic', () => {
     it('converts Tool.functionDeclarations to Anthropic tools and runs schema conversion', async () => {
       const tools = [
