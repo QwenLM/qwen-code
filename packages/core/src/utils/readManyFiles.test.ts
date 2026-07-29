@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import sharp from 'sharp';
 import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -192,11 +193,19 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.filePath).toBe(absolutePath);
     });
 
-    it('preserves unsupported images when the bridge handoff flag is set', async () => {
+    it('renders canonical images through the overview pipeline even when the bridge handoff flag is set', async () => {
       const relativePath = 'screenshot.png';
       const absolutePath = path.join(tempRootDir, relativePath);
-      const imageBytes = Buffer.from('fake png data');
-      await fs.writeFile(absolutePath, imageBytes);
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(absolutePath);
       const mockConfig = createMockConfig(tempRootDir);
 
       const result = await readManyFiles(mockConfig, {
@@ -209,13 +218,24 @@ describe('readManyFiles', () => {
       expect(
         (imagePart as { inlineData: { mimeType: string; data: string } })
           .inlineData,
-      ).toEqual({
-        mimeType: 'image/png',
-        data: imageBytes.toString('base64'),
+      ).toMatchObject({
+        mimeType: 'image/jpeg',
+        data: expect.any(String),
         displayName: 'screenshot.png',
       });
+      const parts = result.contentParts as Part[];
+      const imageIndex = parts.indexOf(imagePart!);
+      expect(parts[imageIndex - 2]?.text).toBe(
+        `\nContent from ${absolutePath}:\n`,
+      );
+      expect(parts[imageIndex - 1]?.text).toContain(
+        'Image overview: 20x10; oriented source: 20x10',
+      );
       expect(result.files).toHaveLength(1);
-      expect(result.files[0]!.content).toEqual(imagePart);
+      expect(result.files[0]!.content).toEqual([
+        parts[imageIndex - 1],
+        imagePart,
+      ]);
     });
 
     it('skips unsupported images when the bridge handoff flag is absent', async () => {

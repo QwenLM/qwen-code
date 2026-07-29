@@ -13,6 +13,13 @@ export function artifactKindLabel(kind: string): string {
   }
 }
 
+export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
+  const artifactType = artifact.metadata?.['artifactType'];
+  return typeof artifactType === 'string' && artifactType
+    ? artifactType
+    : artifactKindLabel(artifact.kind);
+}
+
 export function formatArtifactSize(sizeBytes: number | undefined): string {
   if (sizeBytes === undefined) return '';
   if (sizeBytes < 1024) return `${sizeBytes} B`;

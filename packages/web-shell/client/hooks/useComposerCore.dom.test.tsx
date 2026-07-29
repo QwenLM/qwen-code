@@ -31,6 +31,7 @@ function Harness({
   followupState,
   sessionId,
   atWorkspaceCwd,
+  commands,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -44,10 +45,11 @@ function Harness({
   };
   sessionId?: string;
   atWorkspaceCwd?: string;
+  commands?: UseComposerCoreOptions['commands'];
 }) {
   const composer = useComposerCore({
     onSubmit,
-    commands: [],
+    commands: commands ?? [],
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
@@ -72,6 +74,7 @@ async function mount({
   followupState,
   sessionId,
   atWorkspaceCwd,
+  commands,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -85,6 +88,7 @@ async function mount({
   };
   sessionId?: string;
   atWorkspaceCwd?: string;
+  commands?: UseComposerCoreOptions['commands'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -106,6 +110,7 @@ async function mount({
             followupState={followupState}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
+            commands={commands}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -204,6 +209,41 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it('does not serialize the whole document again for a slash menu refresh', async () => {
+    await mount();
+    const doc = latest!.viewRef.current!.state.doc;
+    const textPrototype = Object.getPrototypeOf(
+      Object.getPrototypeOf(doc),
+    ) as typeof doc;
+    const toString = vi.spyOn(textPrototype, 'toString');
+
+    act(() =>
+      latest!.setText(
+        `${Array.from({ length: 10_000 }, () => 'draft').join('\n')}\n/`,
+      ),
+    );
+
+    expect(toString).toHaveBeenCalledOnce();
+  });
+
+  it('keeps slash completion replacement coordinates absolute', async () => {
+    await mount({
+      commands: [
+        {
+          name: 'help',
+          description: 'Show help',
+          source: 'builtin-command',
+        },
+      ],
+    });
+
+    act(() => latest!.setText('context\n/he'));
+
+    expect(latest!.slashMenu).toMatchObject({ from: 8, to: 11 });
+    act(() => latest!.acceptSlashCompletion());
+    expect(latest!.getText()).toBe('context\n/help ');
+  });
+
   it('does not reread history storage on unrelated rerenders', async () => {
     const getItem = vi.spyOn(Storage.prototype, 'getItem');
     const mounted = await mount({
@@ -899,6 +939,27 @@ describe('useComposerCore tags', () => {
       latest!.removeInlineTags();
     });
     expect(latest!.handle.hasAttachments()).toBe(false);
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('updates inline tag state when a document change removes the last tag', async () => {
+    await mount();
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const view = latest!.viewRef.current!;
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: '' },
+      });
+    });
+
     expect(latest!.hasAttachments).toBe(false);
   });
 
