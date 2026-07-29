@@ -824,7 +824,8 @@ export interface PostToolBatchToolCall {
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
-   * response_parts, result_display, error, error_type, and content_length.
+   * response_parts, result_display, error, error_type, content_length, and
+   * vision_bridge_notice when applicable.
    */
   tool_response?: Record<string, unknown>;
 }
@@ -854,6 +855,7 @@ export interface PostToolBatchOutput extends HookOutput {
  */
 export interface UserPromptSubmitInput extends HookInput {
   prompt: string;
+  submitted_prompt?: string;
 }
 
 /**
@@ -1177,7 +1179,7 @@ export interface SubagentStopOutput extends HookOutput {
 
 /**
  * StopFailure error types
- * Fires instead of Stop when an API error ended the turn
+ * Fires instead of Stop when an API error or loop detection ended the turn
  */
 export type StopFailureErrorType =
   | 'rate_limit'
@@ -1186,6 +1188,7 @@ export type StopFailureErrorType =
   | 'invalid_request'
   | 'server_error'
   | 'max_output_tokens'
+  | 'loop_detected'
   | 'unknown';
 
 /**

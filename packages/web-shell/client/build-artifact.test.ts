@@ -109,6 +109,26 @@ describe('build artifact — package boundary', () => {
     );
   });
 
+  it('keeps scrollbar styles available inside component and portal roots', () => {
+    let scrollbarRootRule: Rule | undefined;
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      if (
+        rule.nodes.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === 'scrollbar-color' &&
+            node.value === 'var(--scrollbar-thumb) var(--scrollbar-track)',
+        )
+      ) {
+        scrollbarRootRule = rule;
+      }
+    });
+
+    expect(scrollbarRootRule?.selector).toContain(
+      ':is([data-web-shell-root]:where([data-web-shell-shadcn]),[data-web-shell-portal-root]:where([data-web-shell-shadcn]))',
+    );
+  });
+
   it('keeps component resets and utilities above plain host selectors', () => {
     const root = postcss.parse(readInjectedCss());
     const rules: Rule[] = [];

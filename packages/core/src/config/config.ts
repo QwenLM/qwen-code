@@ -40,6 +40,7 @@ import { resolveInteractionMode } from '../core/prompts.js';
 import {
   AuthType,
   createContentGenerator,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -53,7 +54,6 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import {
   CronScheduler,
@@ -66,6 +66,7 @@ import {
   validateMemoryPressureConfig,
   type MemoryPressureConfig,
 } from '../services/memoryPressureMonitor.js';
+import { findGitRoot } from '../utils/gitUtils.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
@@ -107,6 +108,7 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
@@ -156,6 +158,13 @@ import {
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import {
+  createGoalRuntime,
+  GoalPersistenceUnavailableError,
+  type GoalRuntime,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
+import { createGoalVerifier } from '../goals/goal-verifier.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -165,7 +174,11 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
-import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
+import {
+  loadUndici,
+  setResolvedProxyUrlForRuntimeFetch,
+  redactProxyError,
+} from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -185,6 +198,7 @@ import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
+  type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -212,12 +226,15 @@ import {
 } from '../utils/debugLogger.js';
 import {
   getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
-  readAutoMemoryIndex,
-  readUserAutoMemoryIndex,
+  type AutoMemoryIndexRead,
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
   rebuildTeamAutoMemoryIndex,
@@ -302,6 +319,22 @@ export interface ApprovalModeInfo {
   id: ApprovalMode;
   name: string;
   description: string;
+}
+
+type ManualPlanExitNoticeEventKind = 'clear' | 'manual-exit';
+
+interface ManualPlanExitNoticeEventState {
+  version: number;
+  kind: ManualPlanExitNoticeEventKind;
+}
+
+interface ManualPlanExitNoticeCursorState {
+  seenVersion: number;
+}
+
+export interface ManualPlanExitNotice {
+  version: number;
+  currentMode: ApprovalMode;
 }
 
 /**
@@ -476,6 +509,11 @@ export interface TelemetrySettings {
   /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
+  /**
+   * Stable end-user identifier written to GenAI spans as `gen_ai.user.id`.
+   * This is an ARMS extension and may contain linkable personal data.
+   */
+  userId?: string;
   includeSensitiveSpanAttributes?: boolean;
   sensitiveSpanAttributeMaxLength?: number;
   outfile?: string;
@@ -840,6 +878,10 @@ export interface AgentsCollabSettings {
     /** Model selector for the built-in Explore subagent (default: inherit). */
     exploreModel?: string;
   };
+  /** Maps model grade names exposed to the Agent tool to model selectors. */
+  modelGrades?: Record<string, string>;
+  /** Optional whitelist of model grades exposed to the Agent tool. */
+  allowedGrades?: string[];
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -1024,6 +1066,7 @@ export interface ConfigParameters {
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  sessionWriterLeaseEnabled?: boolean;
   cronEnabled?: boolean;
   /**
    * Days a recurring cron job lives before auto-expiring. `0` disables
@@ -1037,6 +1080,8 @@ export interface ConfigParameters {
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
   artifactOss?: ArtifactOssConfig;
+  /** Image generation model selected through `/model --image`. */
+  imageModel?: string;
   /**
    * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
    * When `true`, the registry-side warning latch is bypassed and the
@@ -1280,6 +1325,12 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+}
+
+export interface ImageGenerationConfig {
+  model: string;
+  baseUrl: string;
+  apiKeyEnv: string;
 }
 
 function normalizeConfigOutputFormat(
@@ -1589,12 +1640,18 @@ export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
 
+class SessionWriterShutdownError extends SessionWriterUnavailableError {}
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
+  private sessionWriterShutdownRequested = false;
+  private sessionWriterActivationPromise: Promise<void> | undefined;
+  private sessionWriterClosePromise: Promise<void> | undefined;
   /**
    * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
    * CLI was launched with `--worktree`. The active entry point (TUI XOR
@@ -1738,6 +1795,23 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  /**
+   * The cross-session-stable prefix of the main-session system prompt —
+   * the stable → context layers `GeminiClient.getMainSessionSystemInstruction()`
+   * assembles before the volatile tails (git status, auto-memory). Recorded
+   * so the Anthropic converter can place an early cache breakpoint on the
+   * stable prefix; consumers match it via `startsWith` and fail open to the
+   * single-block layout when it doesn't match the request's system text.
+   */
+  private staticSystemPrefix: string | undefined;
+  /**
+   * Volatile system-prompt layer: the managed auto-memory section
+   * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
+   * (context files, stable in-session) because it is rewritten on every
+   * memory save — prompt assembly appends it last so a save invalidates
+   * the shortest possible cached prompt prefix.
+   */
+  private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -1745,6 +1819,13 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
+  private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
+    version: 0,
+    kind: 'clear',
+  };
+  private manualPlanExitNoticeCursorState: ManualPlanExitNoticeCursorState = {
+    seenVersion: 0,
+  };
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -1767,6 +1848,11 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
+  private goalRuntime: GoalRuntime | undefined;
+  private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  private goalTurnHost: GoalTurnHost | undefined;
+  private goalTurnHostUnbind: (() => void) | undefined;
+  private goalTurnHostGeneration = 0;
   private readonly chatRecordingFailureListeners =
     new Set<ChatRecordingFailureListener>();
   private fileCheckpointingEnabled: boolean;
@@ -1796,6 +1882,7 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
@@ -1851,6 +1938,12 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private initializationPromise?: Promise<void>;
+  private initializationSucceeded = false;
+  private initializationSettled = false;
+  private shutdownRequested = false;
+  private resourceShutdownAfterInitializationScheduled = false;
+  private resourceShutdownPromise?: Promise<void>;
   private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
@@ -1885,6 +1978,7 @@ export class Config {
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
+  private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
@@ -1992,6 +2086,7 @@ export class Config {
       otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
       otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
+      userId: params.telemetry?.userId?.trim() || undefined,
       includeSensitiveSpanAttributes:
         params.telemetry?.includeSensitiveSpanAttributes ?? false,
       sensitiveSpanAttributeMaxLength: resolveSensitiveSpanAttributeMaxLength(
@@ -2053,6 +2148,9 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.sessionWriterLeaseEnabled =
+      this.experimentalZedIntegration === true &&
+      params.sessionWriterLeaseEnabled === true;
     this.cronEnabled = params.cronEnabled ?? true;
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
@@ -2256,6 +2354,10 @@ export class Config {
               httpsProxy: proxyUrl,
             }),
           );
+          // Paths that pin their own dispatcher off the global one (the MCP
+          // streamable HTTP fetch) read the explicit proxy back from here
+          // (#7195).
+          setResolvedProxyUrlForRuntimeFetch(proxyUrl);
         })
         .catch((error) => {
           // Redact before logging: the error can embed the proxy URL with
@@ -2275,6 +2377,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     this.extensionManager = new ExtensionManager({
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
@@ -2298,6 +2401,7 @@ export class Config {
     this.fastModel = params.fastModel || undefined;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
+    this.imageModel = params.imageModel || undefined;
     // Guard: nothing validates settings.json on the load path, so this is the
     // only real gate. `AbortSignal.timeout()` requires an integer in
     // [0, 2^31-1] — a fractional or out-of-range value (which the number-typed
@@ -2333,9 +2437,33 @@ export class Config {
     if (this.initialized) {
       throw Error('Config was already initialized');
     }
+    if (this.shutdownRequested) {
+      throw Error('Config is shutting down');
+    }
     this.initialized = true;
+    const initialization = this.initializeOnce(options);
+    this.initializationPromise = initialization;
     try {
-      await this.activateChatRecording();
+      await initialization;
+      this.initializationSucceeded = true;
+    } finally {
+      this.initializationSettled = true;
+    }
+  }
+
+  private async initializeOnce(
+    options?: ConfigInitializeOptions,
+  ): Promise<void> {
+    try {
+      const activation = this.activateChatRecording();
+      this.sessionWriterActivationPromise = activation;
+      try {
+        await activation;
+      } finally {
+        if (this.sessionWriterActivationPromise === activation) {
+          this.sessionWriterActivationPromise = undefined;
+        }
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -2345,7 +2473,7 @@ export class Config {
         this.sessionProjectDirRegistered = false;
       }
       try {
-        await this.chatRecordingService?.close();
+        await this.closeSessionWriter();
       } catch (closeError) {
         throw new SessionWriterUnavailableError({
           cause: new AggregateError(
@@ -2438,6 +2566,10 @@ export class Config {
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
                   signal,
+                  typeof input['submitted_prompt'] === 'string' &&
+                    input['submitted_prompt'].trim().length > 0
+                    ? input['submitted_prompt']
+                    : undefined,
                 );
                 break;
               case 'UserPromptExpansion':
@@ -2745,10 +2877,24 @@ export class Config {
     // Also gated on `!options?.skipMcpDiscovery` — the ACP
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
+    //
+    // Safe/bare mode still skip discovery when there's nothing to discover
+    // (the common case: no top-tier servers supplied) — this block predates
+    // the safe-mode `getMcpServers()` fix (PR #7827) and was written when
+    // `getMcpServers()` always returned `{}` under both modes, making the
+    // unconditional skip a harmless no-op regardless. Now that
+    // caller-supplied top-tier servers survive safe mode AND bare mode,
+    // unconditionally skipping discovery in either would silently strand
+    // them: `getMcpServers()` reports them as configured, but nothing ever
+    // connects to them or registers their tools (a live repro of exactly
+    // this — `qwen --bare --mcp-config` with a top-tier server — surfaced
+    // the bare-mode half of this gate was never updated alongside safe
+    // mode's). Checking `getMcpServers()` (not `topTierMcpServers` directly)
+    // also respects the `allowedMcpServers` filter already applied there.
+    const hasMcpServers = Object.keys(this.getMcpServers() ?? {}).length > 0;
     if (
       skipInlineMcpDiscovery &&
-      !this.getBareMode() &&
-      !this.isSafeMode() &&
+      (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
@@ -2781,8 +2927,7 @@ export class Config {
           // subdir, not the repo root) always early-returned and the
           // sweep was permanently a no-op. Fast-bail still happens, just
           // against the *correct* directory.
-          const probe = new GitWorktreeService(this.targetDir);
-          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const root = findGitRoot(this.targetDir) ?? this.targetDir;
           const worktreesDir = path.join(root, '.qwen', 'worktrees');
           try {
             await fsPromises.access(worktreesDir);
@@ -2827,7 +2972,12 @@ export class Config {
   }
 
   private async activateChatRecording(): Promise<void> {
-    if (!this.chatRecordingEnabled || !this.experimentalZedIntegration) return;
+    if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
+      return;
+    }
+    if (this.sessionWriterShutdownRequested) {
+      throw new SessionWriterShutdownError();
+    }
     const recorder = this.chatRecordingService;
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
@@ -2838,14 +2988,21 @@ export class Config {
         transcriptPath: this.getTranscriptPath(),
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
+        reclaimPolicy: this.sessionWriterReclaimPolicy,
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
         },
       });
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
       const location = await this.getSessionService().getSessionLocation(
         this.sessionId,
       );
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
       if (location === 'conflict' || location === 'archived') {
         throw new SessionTranscriptChangedError();
       }
@@ -2862,6 +3019,9 @@ export class Config {
         ? this.getSessionService().getSessionTitleInfo(this.sessionId)
         : undefined;
       await lease.assertOwnedAndUnchanged();
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
       this.sessionData = authoritative;
       recorder.activate(lease, authoritative, persistedTitleInfo);
       this.pendingSessionWriterLease = undefined;
@@ -2879,11 +3039,17 @@ export class Config {
       try {
         const ownedLease = lease ?? this.pendingSessionWriterLease;
         await ownedLease?.release();
-        if (this.pendingSessionWriterLease === ownedLease) {
+        if (
+          this.pendingSessionWriterLease === ownedLease &&
+          (ownedLease?.isReleased ?? true)
+        ) {
           this.pendingSessionWriterLease = undefined;
         }
       } catch (releaseError) {
-        if (releaseError instanceof SessionWriterLostError) {
+        if (
+          releaseError instanceof SessionWriterLostError ||
+          (lease ?? this.pendingSessionWriterLease)?.isReleased
+        ) {
           this.pendingSessionWriterLease = undefined;
         } else {
           failure = new SessionWriterUnavailableError({
@@ -3043,6 +3209,7 @@ export class Config {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
+      this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3154,40 +3321,65 @@ export class Config {
           }
         }
       }
-      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
-        readAutoMemoryIndex(this.getProjectRoot()),
-        readUserAutoMemoryIndex().catch(() => null),
-      ]);
+      const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
+        await Promise.all([
+          readAutoMemoryIndexWithStats(this.getProjectRoot()),
+          readUserAutoMemoryIndexWithStats().catch(() => null),
+        ]);
+      this.recordAutoMemoryIndexRead(
+        getAutoMemoryIndexPath(this.getProjectRoot()),
+        managedAutoMemoryIndexRead,
+      );
+      this.recordAutoMemoryIndexRead(
+        getUserAutoMemoryIndexPath(),
+        userAutoMemoryIndexRead,
+      );
+      const managedAutoMemoryIndex =
+        managedAutoMemoryIndexRead?.content ?? null;
+      const userAutoMemoryIndex = userAutoMemoryIndexRead?.content ?? null;
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
-          getAutoMemoryRoot(this.getProjectRoot()),
-          managedAutoMemoryIndex,
-          {
-            memoryDir: getUserAutoMemoryRoot(),
-            indexContent: userAutoMemoryIndex,
-          },
-          teamMemoryEnabled
-            ? {
-                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-                indexContent: teamAutoMemoryIndex,
-              }
-            : undefined,
-        ),
+      this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
+        getAutoMemoryRoot(this.getProjectRoot()),
+        managedAutoMemoryIndex,
+        {
+          memoryDir: getUserAutoMemoryRoot(),
+          indexContent: userAutoMemoryIndex,
+        },
+        teamMemoryEnabled
+          ? {
+              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+              indexContent: teamAutoMemoryIndex,
+            }
+          : undefined,
       );
     } else {
       this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
     );
+  }
+
+  private recordAutoMemoryIndexRead(
+    indexPath: string,
+    indexRead: AutoMemoryIndexRead | null,
+  ): void {
+    if (indexRead === null || this.getFileReadCacheDisabled()) {
+      return;
+    }
+
+    this.getFileReadCache().recordRead(indexPath, indexRead.stats, {
+      full: true,
+      cacheable: true,
+    });
   }
 
   private buildMemoryContextWarning(memoryContent: string): string | undefined {
@@ -3208,7 +3400,7 @@ export class Config {
     }
 
     return (
-      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ` +
       `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
       `model's ${contextWindowSize.toLocaleString()} token context window. ` +
@@ -3397,8 +3589,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
+    // Both layers are always loaded into the system prompt, so the size
+    // estimate must cover context files and the auto-memory section alike.
     const memoryContextWarning = this.buildMemoryContextWarning(
-      this.getUserMemory(),
+      [this.getUserMemory(), this.autoMemoryPrompt]
+        .filter(Boolean)
+        .join('\n\n'),
     );
     return memoryContextWarning
       ? [...this.warnings, memoryContextWarning]
@@ -3418,6 +3614,11 @@ export class Config {
   ): string {
     if (this.chatRecordingService?.hasWriteOwnership()) {
       throw new SessionWriterUnavailableError();
+    }
+    if (Object.hasOwn(this, 'goalRuntime')) {
+      this.goalTurnHostUnbind?.();
+      this.goalTurnHostUnbind = undefined;
+      this.goalRuntime?.dispose();
     }
     // Finalize the outgoing session before switching.
     const outgoingChatRecordingService = this.chatRecordingService;
@@ -3445,6 +3646,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
     // earlier in the *current* conversation. Carrying entries across
@@ -3641,7 +3843,12 @@ export class Config {
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
-    if (!available.some((m) => m.id === selector.modelId)) {
+    if (
+      !available.some(
+        (model) =>
+          model.id === selector.modelId && !model.voiceOnly && !model.imageOnly,
+      )
+    ) {
       return undefined;
     }
 
@@ -3699,6 +3906,19 @@ export class Config {
    */
   setVisionModel(model: string | undefined): void {
     this.visionModel = model || undefined;
+  }
+
+  /**
+   * Update the image generation model and make the tool available immediately
+   * when the selected provider route is valid.
+   */
+  async setImageModel(model: string | undefined): Promise<void> {
+    this.imageModel = model || undefined;
+    if (!this.initialized || !this.isImageGenerationEnabled()) {
+      return;
+    }
+    await this.registerImageGenerationTool(this.toolRegistry);
+    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
   }
 
   /**
@@ -3828,7 +4048,7 @@ export class Config {
       return undefined;
     }
     // Each guard below silently drops the pin (the hardest failure mode to
-    // debug, hence the warn): skip fast/voice-only models (a `settings.json`
+    // debug, hence the warn): skip selector-only models (a `settings.json`
     // pin can bypass the slash command's filter), and never route the bridge at
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
@@ -3840,6 +4060,7 @@ export class Config {
         (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
         !m.fastOnly &&
         !m.voiceOnly &&
+        !m.imageOnly &&
         !this.isCurrentPrimaryModel(m),
     );
     if (routeMatches.length > 1) {
@@ -3852,7 +4073,7 @@ export class Config {
     if (!match) {
       this.debugLogger.warn(
         `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
-          `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
+          `(removed, mistyped, selector-only, or the primary itself); falling back to auto-select`,
       );
       return undefined;
     }
@@ -4011,6 +4232,7 @@ export class Config {
       if (priorReasoningEffort) {
         this.setReasoningEffort(priorReasoningEffort);
       }
+      resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
@@ -4312,6 +4534,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
@@ -4371,7 +4594,106 @@ export class Config {
    * This method is idempotent and safe to call multiple times.
    * It handles the case where initialization was not completed.
    */
-  async shutdown(options?: { shutdownTelemetry?: boolean }): Promise<void> {
+  async shutdown(options?: {
+    shutdownTelemetry?: boolean;
+    skipSessionWriter?: boolean;
+    strictResourceCleanup?: boolean;
+  }): Promise<void> {
+    this.shutdownRequested = true;
+    this.settingsWatcher?.stopWatching();
+    const closeWriter = () =>
+      this.closeSessionWriter().catch((error) => {
+        this.debugLogger.error(
+          'Failed to release session writer lease:',
+          error,
+        );
+      });
+    const earlyWriterClose =
+      !options?.skipSessionWriter &&
+      this.initializationPromise !== undefined &&
+      !this.initializationSucceeded
+        ? closeWriter()
+        : undefined;
+
+    try {
+      if (!options?.skipSessionWriter && !earlyWriterClose) {
+        try {
+          this.chatRecordingService?.finalize();
+          await this.chatRecordingService?.flush();
+        } catch {
+          // Best-effort — don't block shutdown
+        }
+      }
+
+      try {
+        await this.shutdownResources(options?.strictResourceCleanup === true);
+      } catch (error) {
+        if (options?.strictResourceCleanup) throw error;
+      }
+    } finally {
+      if (!options?.skipSessionWriter) {
+        await (earlyWriterClose ?? closeWriter());
+      }
+      this.chatRecordingFailureListeners.clear();
+      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
+    }
+  }
+
+  private async shutdownResources(
+    waitForInitialization: boolean,
+  ): Promise<void> {
+    if (waitForInitialization) {
+      try {
+        await this.initializationPromise;
+      } catch {
+        // Partial initialization still needs resource cleanup.
+      }
+    } else if (this.initializationPromise && !this.initializationSettled) {
+      this.scheduleResourceShutdownAfterInitialization();
+      return;
+    }
+    return this.runResourceShutdown();
+  }
+
+  private scheduleResourceShutdownAfterInitialization(): void {
+    if (
+      this.resourceShutdownAfterInitializationScheduled ||
+      !this.initializationPromise
+    ) {
+      return;
+    }
+    this.resourceShutdownAfterInitializationScheduled = true;
+    void this.initializationPromise
+      .then(
+        () => this.runResourceShutdown(),
+        () => this.runResourceShutdown(),
+      )
+      .catch((error) => {
+        this.debugLogger.error(
+          'Deferred Config resource cleanup failed:',
+          error,
+        );
+      });
+  }
+
+  private runResourceShutdown(): Promise<void> {
+    if (this.resourceShutdownPromise) {
+      return this.resourceShutdownPromise;
+    }
+    const shutdown = this.shutdownResourcesOnce();
+    this.resourceShutdownPromise = shutdown;
+    const clear = () => {
+      if (this.resourceShutdownPromise === shutdown) {
+        this.resourceShutdownPromise = undefined;
+      }
+    };
+    void shutdown.then(clear, clear);
+    return shutdown;
+  }
+
+  private async shutdownResourcesOnce(): Promise<void> {
     try {
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
@@ -4382,22 +4704,15 @@ export class Config {
         this.sessionProjectDirRegistered = false;
       }
 
-      // Stop the settings watcher regardless of initialization state —
-      // it is started before Config.initialize() and would leak otherwise.
-      this.settingsWatcher?.stopWatching();
+      if (Object.hasOwn(this, 'goalRuntime')) {
+        this.goalTurnHostUnbind?.();
+        this.goalTurnHostUnbind = undefined;
+        this.goalRuntime?.dispose();
+      }
 
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
-      }
-
-      // Finalize the current session's metadata before cleanup, then drain
-      // the async write queue so no records are lost on exit.
-      try {
-        this.chatRecordingService?.finalize();
-        await this.chatRecordingService?.flush();
-      } catch {
-        // Best-effort — don't block shutdown
       }
 
       this.skillManager?.stopWatching();
@@ -4413,36 +4728,8 @@ export class Config {
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
     } catch (error) {
-      // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
-    } finally {
-      await this.chatRecordingService?.close().catch((error) => {
-        this.debugLogger.error(
-          'Failed to release session writer lease:',
-          error,
-        );
-      });
-      const pendingLease = this.pendingSessionWriterLease;
-      if (pendingLease) {
-        try {
-          await pendingLease.release();
-          if (this.pendingSessionWriterLease === pendingLease) {
-            this.pendingSessionWriterLease = undefined;
-          }
-        } catch (error) {
-          if (error instanceof SessionWriterLostError) {
-            this.pendingSessionWriterLease = undefined;
-          }
-          this.debugLogger.error(
-            'Failed to release pending session writer lease:',
-            error,
-          );
-        }
-      }
-      this.chatRecordingFailureListeners.clear();
-      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
-        await shutdownTelemetry();
-      }
+      throw error;
     }
   }
 
@@ -4705,8 +4992,17 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.isSafeMode()) return {};
-    let mcpServers = this.getMergedMcpServers();
+    // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
+    // project `.mcp.json`) — not the caller's own explicit, per-invocation
+    // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
+    // `--mcp-config`) is that explicit request, so it survives safe mode;
+    // everything `getMergedMcpServers()` would otherwise fold in does not.
+    // Still runs through the `allowedMcpServers` filter below like any other
+    // source — safe mode isn't an exemption from a session's own
+    // `--allowed-mcp-server-names` upper bound (Copilot review, PR #7827).
+    let mcpServers = this.isSafeMode()
+      ? { ...this.topTierMcpServers }
+      : this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
@@ -5165,6 +5461,23 @@ export class Config {
     return this.userMemory;
   }
 
+  getStaticSystemPrefix(): string | undefined {
+    return this.staticSystemPrefix;
+  }
+
+  setStaticSystemPrefix(prefix: string | undefined): void {
+    this.staticSystemPrefix = prefix;
+  }
+
+  /**
+   * The managed auto-memory section of the system prompt (volatile layer).
+   * Empty when managed memory is unavailable. Callers assembling a system
+   * prompt must append this after all stable/context content.
+   */
+  getAutoMemoryPrompt(): string {
+    return this.autoMemoryPrompt;
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -5334,12 +5647,48 @@ export class Config {
     return this.approvalModeRevision;
   }
 
+  private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeEventState',
+      ) &&
+      Object.prototype.hasOwnProperty.call(this, 'approvalMode')
+    ) {
+      const inheritedEvent = this.manualPlanExitNoticeEventState;
+      this.manualPlanExitNoticeEventState = inheritedEvent
+        ? { ...inheritedEvent }
+        : { version: 0, kind: 'clear' };
+    }
+    return this.manualPlanExitNoticeEventState;
+  }
+
+  private getOwnManualPlanExitNoticeCursorState(): ManualPlanExitNoticeCursorState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeCursorState',
+      )
+    ) {
+      this.manualPlanExitNoticeCursorState = { seenVersion: 0 };
+    }
+    return this.manualPlanExitNoticeCursorState;
+  }
+
   setApprovalMode(
     mode: ApprovalMode,
-    /** @deprecated Model origin no longer changes plan-exit approval. */
-    options?: { enteredByModel?: boolean },
+    options?: {
+      /** @deprecated Model origin no longer changes plan-exit approval. */
+      enteredByModel?: boolean;
+      /**
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
+       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
+       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
+       * was never told about, and queues a one-shot system reminder.
+       */
+      fromApprovedPlanExit?: boolean;
+    },
   ): void {
-    void options;
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -5366,10 +5715,22 @@ export class Config {
     }
     // Update all mode bookkeeping only after fallible transition work has
     // succeeded, so callers never observe a partially applied mode change.
+    let noticeEvent =
+      Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    if (!Object.prototype.hasOwnProperty.call(this, 'approvalMode')) {
+      noticeEvent = { ...noticeEvent };
+      this.manualPlanExitNoticeEventState = noticeEvent;
+    }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
       this.prePlanMode = fromMode;
+      noticeEvent.version++;
+      noticeEvent.kind = 'clear';
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
+      noticeEvent.version++;
+      noticeEvent.kind = options?.fromApprovedPlanExit
+        ? 'clear'
+        : 'manual-exit';
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -5379,6 +5740,51 @@ export class Config {
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
+  }
+
+  /**
+   * Claims the latest manual plan-exit notice for this conversation.
+   */
+  takePendingManualPlanExitNotice(): ManualPlanExitNotice | undefined {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (event.version <= cursor.seenVersion) {
+      return undefined;
+    }
+
+    cursor.seenVersion = event.version;
+    if (
+      event.kind !== 'manual-exit' ||
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      return undefined;
+    }
+
+    return {
+      version: event.version,
+      currentMode: this.approvalMode,
+    };
+  }
+
+  restorePendingManualPlanExitNotice(version: number): void {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (
+      event.version === version &&
+      event.kind === 'manual-exit' &&
+      this.approvalMode !== ApprovalMode.PLAN &&
+      cursor.seenVersion === version
+    ) {
+      cursor.seenVersion = Math.max(0, version - 1);
+    }
+  }
+
+  consumePendingManualPlanExitNotice(): boolean {
+    return (
+      Config.prototype.takePendingManualPlanExitNotice.call(this) !== undefined
+    );
   }
 
   /**
@@ -5561,6 +5967,10 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
+  getTelemetryUserId(): string | undefined {
+    return this.telemetrySettings.userId;
+  }
+
   getTelemetryIncludeSensitiveSpanAttributes(): boolean {
     return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
   }
@@ -5713,6 +6123,57 @@ export class Config {
 
   getArtifactOssConfig(): ArtifactOssConfig | undefined {
     return this.artifactOss;
+  }
+
+  resolveImageGenerationModel(
+    setting: string | undefined,
+  ): ImageGenerationConfig | undefined {
+    const parsedSetting = parseVisionModelSetting(setting);
+    if (!parsedSetting) return undefined;
+
+    let selector;
+    try {
+      selector = resolveModelId(parsedSetting.selector);
+    } catch {
+      return undefined;
+    }
+    if (!selector) return undefined;
+
+    const routeMatches = this.getAllConfiguredModels().filter(
+      (model) =>
+        model.imageOnly === true &&
+        !model.fastOnly &&
+        !model.voiceOnly &&
+        model.id === selector.modelId &&
+        (!selector.authType || model.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || model.baseUrl === parsedSetting.baseUrl),
+    );
+    if (routeMatches.length !== 1) return undefined;
+
+    const match = routeMatches[0]!;
+    const apiKeyEnv = match.envKey?.trim();
+    const configuredBaseUrl = match.registryBaseUrl?.trim();
+    if (!apiKeyEnv || !configuredBaseUrl) return undefined;
+
+    const baseUrl = normalizeImageGenerationBaseUrl(
+      parsedSetting.baseUrl ?? configuredBaseUrl,
+    );
+    if (!baseUrl) return undefined;
+
+    return {
+      model: match.id,
+      baseUrl,
+      apiKeyEnv,
+    };
+  }
+
+  getImageGenerationConfig(): ImageGenerationConfig | undefined {
+    if (this.bareMode || this.safeMode) return undefined;
+    return this.resolveImageGenerationModel(this.imageModel);
+  }
+
+  isImageGenerationEnabled(): boolean {
+    return this.getImageGenerationConfig() !== undefined;
   }
 
   shouldAutoOpenArtifact(): boolean {
@@ -5888,6 +6349,10 @@ export class Config {
 
   getExperimentalZedIntegration(): boolean {
     return this.experimentalZedIntegration;
+  }
+
+  isSessionWriterLeaseEnabled(): boolean {
+    return this.sessionWriterLeaseEnabled;
   }
 
   getListExtensions(): boolean {
@@ -6418,6 +6883,63 @@ export class Config {
     return this.chatRecordingService;
   }
 
+  getGoalRuntime(): GoalRuntime {
+    if (
+      !Object.hasOwn(this, 'goalRuntime') ||
+      !this.chatRecordingEnabled ||
+      !this.chatRecordingService ||
+      !this.goalRuntime
+    ) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    return this.goalRuntime;
+  }
+
+  getGoalRuntimeReady(): Promise<GoalRuntime> {
+    const runtime = this.getGoalRuntime();
+    if (!Object.hasOwn(this, 'goalRuntimeReady') || !this.goalRuntimeReady) {
+      return Promise.reject(new GoalPersistenceUnavailableError());
+    }
+    return this.goalRuntimeReady.then(() => runtime);
+  }
+
+  async rebaseGoalRuntimeFromActiveTranscript(): Promise<void> {
+    const runtime = this.getGoalRuntime();
+    const recordingService = this.chatRecordingService;
+    if (!recordingService) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const records = await recordingService.readActiveTranscriptChain();
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    runtime.dispose();
+    this.initializeGoalRuntime(records);
+    await this.goalRuntimeReady;
+  }
+
+  bindGoalTurnHost(host: GoalTurnHost): () => void {
+    if (!Object.hasOwn(this, 'goalRuntime')) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const generation = this.goalTurnHostGeneration + 1;
+    this.goalTurnHostGeneration = generation;
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHost = host;
+    this.goalTurnHostUnbind = this.goalRuntime?.bindHost(host);
+
+    return () => {
+      if (
+        this.goalTurnHostGeneration !== generation ||
+        this.goalTurnHost !== host
+      ) {
+        return;
+      }
+      this.goalTurnHostUnbind?.();
+      this.goalTurnHostUnbind = undefined;
+      this.goalTurnHost = undefined;
+    };
+  }
+
   onChatRecordingFailure(listener: ChatRecordingFailureListener): () => void {
     this.chatRecordingFailureListeners.add(listener);
     return () => {
@@ -6431,8 +6953,29 @@ export class Config {
       (event) => {
         this.notifyChatRecordingFailure(event);
       },
-      this.experimentalZedIntegration,
+      this.sessionWriterLeaseEnabled,
     );
+  }
+
+  private initializeGoalRuntime(records?: readonly ChatRecord[]): void {
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    if (!this.chatRecordingService) {
+      this.goalRuntime = undefined;
+      this.goalRuntimeReady = undefined;
+      return;
+    }
+    const runtime = createGoalRuntime({
+      journal: this.chatRecordingService,
+      evidenceSource: this.chatRecordingService,
+      verifier: createGoalVerifier(this),
+    });
+    this.goalRuntime = runtime;
+    if (this.goalTurnHost) {
+      this.goalTurnHostUnbind = runtime.bindHost(this.goalTurnHost);
+    }
+    this.goalRuntimeReady = runtime.restore(records ?? []).then(() => runtime);
+    void this.goalRuntimeReady.catch(() => undefined);
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
@@ -6479,6 +7022,62 @@ export class Config {
       this.pendingSessionWriterLease !== undefined ||
       this.chatRecordingService?.hasWriteOwnership() === true
     );
+  }
+
+  setSessionWriterReclaimPolicy(policy: 'local' | 'never'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterReclaimPolicy = policy;
+  }
+
+  closeSessionWriter(): Promise<void> {
+    this.sessionWriterShutdownRequested = true;
+    this.chatRecordingService?.beginClose();
+    this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
+    return this.sessionWriterClosePromise;
+  }
+
+  private async closeSessionWriterOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await this.sessionWriterActivationPromise;
+    } catch (error) {
+      if (!(error instanceof SessionWriterShutdownError)) {
+        failures.push(error);
+      }
+    }
+    try {
+      await this.chatRecordingService?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    const pendingLease = this.pendingSessionWriterLease;
+    if (pendingLease) {
+      try {
+        await pendingLease.release();
+        if (
+          this.pendingSessionWriterLease === pendingLease &&
+          pendingLease.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+      } catch (error) {
+        if (
+          error instanceof SessionWriterLostError ||
+          pendingLease.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Session writer shutdown failed');
+    }
   }
 
   getSessionRuntimeBaseDir(): string {
@@ -6737,6 +7336,35 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
+  private async registerImageGenerationTool(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    if (
+      !this.isImageGenerationEnabled() ||
+      registry.getAllToolNames().includes(ToolNames.IMAGE_GEN)
+    ) {
+      return;
+    }
+    let enabled = true;
+    try {
+      enabled = this.permissionManager
+        ? await this.permissionManager.isToolEnabled(ToolNames.IMAGE_GEN)
+        : true;
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.IMAGE_GEN}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (!enabled) return;
+
+    registry.registerFactory(ToolNames.IMAGE_GEN, async () => {
+      const { ImageGenTool } = await import('../tools/image-gen.js');
+      return new ImageGenTool(this);
+    });
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
@@ -6804,6 +7432,18 @@ export class Config {
       });
     };
 
+    const registerGoalWorkerTools = async (): Promise<void> => {
+      if (options?.forSubAgent) return;
+      await registerLazy(ToolNames.GET_GOAL, async () => {
+        const { GetGoalTool } = await import('../goals/goal-tools.js');
+        return new GetGoalTool(this);
+      });
+      await registerLazy(ToolNames.UPDATE_GOAL, async () => {
+        const { UpdateGoalTool } = await import('../goals/goal-tools.js');
+        return new UpdateGoalTool(this);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -6821,6 +7461,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerGoalWorkerTools();
       await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
@@ -6829,6 +7470,7 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerGoalWorkerTools();
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);
@@ -6866,6 +7508,10 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
+      const { ZoomImageTool } = await import('../tools/zoom-image.js');
+      return new ZoomImageTool(this);
     });
 
     // --- Grep / RipGrep (conditional) ---
@@ -6981,6 +7627,7 @@ export class Config {
         this.warnings.push(gate.notice);
       }
     }
+    await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
         const { ArtifactTool } = await import(

@@ -22,9 +22,19 @@ const mockTokenizer = {
   calculateTokens: vi.fn(),
   dispose: vi.fn(),
 };
+const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicFollowingRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicResponse = vi.hoisted(() => vi.fn());
+const mockReportAnthropicEvent = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
+}));
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportAnthropicRequest: mockReportAnthropicRequest,
+  reportAnthropicFollowingRequest: mockReportAnthropicFollowingRequest,
+  reportAnthropicResponse: mockReportAnthropicResponse,
+  reportAnthropicEvent: mockReportAnthropicEvent,
 }));
 
 type AnthropicCreateArgs = [
@@ -118,6 +128,7 @@ describe('AnthropicContentGenerator', () => {
       getProxy: vi.fn().mockReturnValue(undefined),
       getTelemetryEnabled: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session'),
+      getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -966,6 +977,58 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    it('splits the system prompt at the Config-recorded static prefix (4-breakpoint layout)', async () => {
+      // End-to-end through the generator: `GeminiClient` records the
+      // gitStatus-free base on Config, the generator reads it per request,
+      // and the converter splits the system prompt there — static prefix
+      // carries scope:'global' (cross-session reuse), volatile suffix stays
+      // per-session. Together with the last-tool and last-user-message
+      // markers this fills all 4 Anthropic breakpoints.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-test',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      (
+        mockConfig.getStaticSystemPrefix as ReturnType<typeof vi.fn>
+      ).mockReturnValue('sys-base');
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, reasoning: false },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: 'Hi',
+        config: {
+          systemInstruction: 'sys-base\n\n# Git Status\nbranch: main',
+        },
+      } as unknown as GenerateContentParameters);
+
+      const [req, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect((req as { system?: unknown }).system).toEqual([
+        {
+          type: 'text',
+          text: 'sys-base',
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        },
+        {
+          type: 'text',
+          text: '\n\n# Git Status\nbranch: main',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+      // The scope entry on the split prefix block is enough for the
+      // body-scan beta gate to fire.
+      const reqHeaders = ((options as { headers?: Record<string, string> })
+        ?.headers || {}) as Record<string, string>;
+      expect(reqHeaders['anthropic-beta']).toContain(
+        'prompt-caching-scope-2026-01-05',
+      );
+    });
+
     it('suppresses scope:"global" when enableCacheControl is false even with forceGlobalCacheScope', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
@@ -1186,6 +1249,8 @@ describe('AnthropicContentGenerator', () => {
         { ...baseConfig, reasoning: { effort: 'medium' } },
         mockConfig,
       );
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const stream = await generator.generateContentStream({
         model: 'models/ignored',
         contents: 'Hi',
@@ -1203,7 +1268,13 @@ describe('AnthropicContentGenerator', () => {
       // fallback (which would double latency + API cost).
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
-      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const [streamingRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(streamingRequest);
+      expect(mockReportAnthropicEvent).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ type: 'message_delta' }),
+      );
       const headers = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
       expect(headers['anthropic-beta']).toContain(
@@ -1386,6 +1457,8 @@ describe('AnthropicContentGenerator', () => {
         },
       };
 
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const result = await generator.generateContent(request);
       expect(result.responseId).toBe('gemini-1');
 
@@ -1412,6 +1485,11 @@ describe('AnthropicContentGenerator', () => {
           thinking: { type: 'enabled', budget_tokens: 1000 },
           output_config: { effort: 'high' },
         }),
+      );
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(anthropicRequest);
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ id: 'anthropic-1' }),
       );
 
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
@@ -3459,8 +3537,71 @@ describe('AnthropicContentGenerator', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
     });
 
+    it('preserves message_start usage when the stream fails after content', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: {
+                input_tokens: 2,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 4,
+              },
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'partial' },
+          };
+          throw new Error('stream interrupted');
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const chunk of stream) chunks.push(chunk);
+      }).rejects.toThrow('stream interrupted');
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.usageMetadata).toEqual({
+        promptTokenCount: 9,
+        cachedContentTokenCount: 3,
+      });
+      expect(getGenAiUsageProvenance(chunks[0]?.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 4,
+      });
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3589,12 +3730,19 @@ describe('AnthropicContentGenerator', () => {
 
       // Usage/finish chunks exist; check the last one.
       const last = chunks[chunks.length - 1]!;
+      expect(
+        chunks.every((chunk) => chunk.modelVersion === 'claude-test'),
+      ).toBe(true);
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
         cachedContentTokenCount: 7,
         promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
+      });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: undefined,
       });
     });
 
@@ -3608,6 +3756,9 @@ describe('AnthropicContentGenerator', () => {
       // dropped from the displayed total and the Footer under-reports by
       // exactly that many tokens.
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3673,6 +3824,55 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the requested model when a stream omits it', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: { id: 'msg-1', usage: { input_tokens: 1 } },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'ok' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'requested-model',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      expect(chunks).not.toHaveLength(0);
+      expect(chunks.every((chunk) => chunk.modelVersion === undefined)).toBe(
+        true,
+      );
     });
 
     it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
@@ -3718,10 +3918,18 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({ stream: true }),
       );
       expect(fallbackRequest).not.toHaveProperty('stream');
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        undefined,
+      );
     });
 
     it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const streamingAttempt = { generation: 1 };
+      const fallbackAttempt = { generation: 2 };
+      mockReportAnthropicRequest.mockReturnValueOnce(streamingAttempt);
+      mockReportAnthropicFollowingRequest.mockReturnValueOnce(fallbackAttempt);
       anthropicState.createImpl
         .mockResolvedValueOnce(
           (async function* () {
@@ -3759,12 +3967,26 @@ describe('AnthropicContentGenerator', () => {
       }
 
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
       expect(chunks).toHaveLength(1);
       expect(chunks[0]?.responseId).toBe('msg-fallback');
       expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
         { text: 'fallback ok' },
       ]);
       expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        streamingAttempt,
+      );
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        fallbackAttempt,
+        expect.objectContaining({ id: 'msg-fallback' }),
+      );
+      expect(mockReportAnthropicResponse).not.toHaveBeenCalledWith(
+        streamingAttempt,
+        expect.anything(),
+      );
     });
   });
 

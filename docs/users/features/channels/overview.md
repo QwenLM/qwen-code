@@ -2,6 +2,8 @@
 
 Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
+Code-hosting platforms (starting with [GitHub](./github)) are also supported via polling adapters — the agent monitors notifications and responds to @mentions on issues and pull requests.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -15,7 +17,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu))
+1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu), [GitHub](./github))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -50,7 +52,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option                   | Required         | Description                                                                                                                                                            |
 | ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                 |
+| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, `github`, or a custom type from an extension (see [Plugins](./plugins))                       |
 | `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                            |
 | `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                           |
 | `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                    |
@@ -61,7 +63,9 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
+| `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                  |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
+| `webhooks`               | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                              |
 | `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
 | `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
 | `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
@@ -140,9 +144,14 @@ Existing legacy `CHANNEL.md` memory is migrated automatically to structured
 standalone channel and daemon-managed channel restarts, and is injected when a
 fresh target-scoped session starts, including after `/clear`.
 
-Memory remains keyed to the current chat or thread. It is not injected into a
-`sessionScope: single` session, because that session is shared across the whole
-channel rather than scoped to one target.
+After that initial injection, each accepted message also recalls up to three
+relevant entries for that message. This keeps durable facts available during a
+long-running session without adding every stored entry to every turn. Recall is
+based on the current message and does not modify the stored memory.
+
+Memory remains keyed to the current chat or thread. It is not injected or
+recalled in a `sessionScope: single` session, because that session is shared
+across the whole channel rather than scoped to one target.
 
 Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
@@ -387,6 +396,48 @@ By default, the agent works for a while and then sends one large response. With 
 
 Only `blockStreaming` is required. The chunk and coalesce settings are optional and have sensible defaults.
 
+## Scheduled Channel Loops
+
+Channels have a persistent scheduler for prompts that should run later and push
+their result back to the same chat. You can ask the agent naturally, for
+example, `Every 15 minutes, check the deployment and report any change`, or use
+the local commands directly:
+
+```text
+/loop add "*/15 * * * *" check the deployment and report any change
+/loop list
+/loop inspect <id>
+/loop cancel <id>
+```
+
+The agent uses the `channel_loop_create`, `channel_loop_list`, and
+`channel_loop_cancel` tools when it manages these jobs for you. Schedules use
+standard five-field cron expressions in the machine's local time. The job runs
+unattended and its final response is delivered automatically to the chat that
+created it.
+
+Channel loops differ from the session-scoped tasks described in
+[Run Prompts on a Schedule](../scheduled-tasks):
+
+- They are stored under `$QWEN_HOME/channels/` — standalone channels use
+  `cron.json` directly, while daemon-managed channels use a per-workspace file
+  under `daemon/`. Both survive channel restarts.
+- They are scoped to the current channel chat or thread. Each target can have up
+  to 10 enabled loops, and each prompt is limited to 4,000 characters.
+- They require an adapter and target that support proactive delivery. Telegram,
+  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
+  restrictions.
+- They are unavailable with `sessionScope: "single"` because that scope is not
+  tied to one chat target.
+- A saved loop is disabled if its target is no longer authorized when it is due.
+
+## Background Agent Results
+
+When the agent delegates work to a background subagent or fork, the completion
+result is delivered back to the channel chat that owns the session. Delivery
+can happen after the original turn has ended, so keep the channel service or
+daemon running while background work is active.
+
 ## Slash Commands
 
 Channels support slash commands. These are handled locally (no agent round-trip):
@@ -394,10 +445,14 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/help` — List available commands
 - `/clear` — Clear your session and start fresh (aliases: `/reset`, `/new`)
 - `/status` — Show session info and access policy
+- `/loop add "<cron>" <prompt>` — Create a persistent scheduled channel loop
+- `/loop list` — List loops for the current chat
+- `/loop inspect <id>` — Show loop status and run details
+- `/loop cancel <id>` — Disable a loop
 
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
 
-These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu).
+These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub), although loop creation also requires proactive delivery support for the current adapter and target.
 
 ## Running
 

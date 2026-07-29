@@ -6,7 +6,9 @@
 
 import React from 'react';
 import { Text, Box } from 'ink';
+import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
@@ -1087,11 +1089,11 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   const isTaskChecked = taskMatch?.[1]?.toLowerCase() === 'x';
   const effectiveItemText = isTaskItem ? taskMatch[2] : itemText;
   const prefix = isTaskItem
-    ? `${isTaskChecked ? '✓' : '○'} `
+    ? `${isTaskChecked ? '✓' : ICON.CIRCLE_EMPTY} `
     : type === 'ol'
       ? `${marker}. `
       : `${marker} `;
-  const prefixWidth = prefix.length;
+  const prefixWidth = stringWidth(prefix);
   const indentation = leadingWhitespace.length;
 
   return (

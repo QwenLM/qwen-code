@@ -137,6 +137,7 @@ export type {
   BugReportInfo,
   SessionChangeEvent,
 } from './App';
+export type { WebShellShadowDom, WebShellShadowDomOptions } from './shadowDom';
 export type { ToastTone } from './components/ToastHost';
 export type {
   WebShellSidebarBranding,
@@ -171,6 +172,7 @@ export type {
   UserMessageContentRenderInfo,
   UserMessageContentParser,
   ComposerHeaderRenderer,
+  ComposerFooterRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellAtItemRenderInfo,
@@ -191,6 +193,8 @@ export type {
   WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  ChatHeaderRenderer,
+  ChatHeaderRenderInfo,
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
@@ -199,6 +203,7 @@ export type {
   WebShellAtProvider,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
+  WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
@@ -219,8 +224,9 @@ export type {
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,
+  createMarkdownChartRegistry,
   createEchartsFullDataRenderer,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';
 export type {
   DatasetCell,
   EchartsFullDataBlockProps,
@@ -232,4 +238,4 @@ export type {
   EchartsInstance,
   EchartsRuntime,
   EchartsRuntimeLoader,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';

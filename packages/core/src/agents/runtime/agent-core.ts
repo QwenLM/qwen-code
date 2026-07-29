@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -57,7 +58,7 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from '../../utils/tool-response-finalizer.js';
-import { FinishReason } from '@google/genai';
+import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
   Part,
@@ -67,6 +68,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
   getProviderToolCallId,
@@ -468,6 +470,9 @@ export class AgentCore {
         generationConfig,
         startHistory,
       );
+      if (options?.interactive) {
+        chat.enableManualPlanExitNotices();
+      }
       // Seed the per-chat token count so the auto-compaction threshold
       // gate sees the inherited history's true size on the first send.
       // Without this, fork subagents start at 0 and the gate NOOPs even
@@ -667,7 +672,9 @@ export class AgentCore {
         abortController,
         options,
       );
-    return this.runInAgentFrames(inner);
+    return runWithInvocationContext(undefined, () =>
+      this.runInAgentFrames(inner),
+    );
   }
 
   /**
@@ -1002,7 +1009,7 @@ export class AgentCore {
           break;
         }
 
-        if (roundText || roundThoughtText) {
+        if (roundText || roundThoughtText || lastUsage) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
             runId,
@@ -2145,13 +2152,13 @@ Important Rules:
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
     }
 
-    // Append user memory (QWEN.md + output-language.md) to ensure subagent respects project conventions
-    const userMemory = this.runtimeContext.getUserMemory();
-    if (userMemory && userMemory.trim().length > 0) {
-      finalPrompt += `\n\n---\n\n${userMemory.trim()}`;
-    }
-
-    return finalPrompt;
+    // Context files (QWEN.md + output-language.md) keep the subagent aligned
+    // with project conventions; the volatile auto-memory section stays last.
+    return assembleSystemPrompt({
+      base: finalPrompt,
+      contextFiles: this.runtimeContext.getUserMemory(),
+      autoMemory: this.runtimeContext.getAutoMemoryPrompt(),
+    });
   }
 
   /**

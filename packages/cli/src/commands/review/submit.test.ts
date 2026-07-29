@@ -13,6 +13,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
+  readFileSync,
+  readdirSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -24,9 +26,10 @@ import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
+const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
 vi.mock('./lib/gh.js', () => ({
   ghWithInput: ghMock,
-  gh: vi.fn(() => ''),
+  gh: ghViewMock,
   setGhHost: vi.fn(),
 }));
 
@@ -82,6 +85,7 @@ function args(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
   ghMock.mockClear();
+  ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -702,5 +706,93 @@ describe('what the reviewer caught in this change', () => {
     );
     expect(out.event).toBe('COMMENT');
     expect(out.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('strips a caller-supplied prBodyFetcher — a state JSON cannot suppress the Chinese fold', () => {
+    // submit is the only boundary that posts, and its strip is the one with no
+    // test. Deleting `prBodyFetcher: _droppedFetcher` from the destructure
+    // leaves every other test green. Without the strip, `null` is invoked as
+    // a function, throws, and the fail-safe catch drops the fold — the exact
+    // regression this PR closes, through the door that publishes.
+    ghViewMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const planPath = file('plan.json', {
+      chunks: [],
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: '6771',
+    });
+    runSubmit(
+      authorized({
+        review: file('fetcher-strip.json', {
+          commit_id: 'abc123',
+          comments: [],
+          state: { modelId: 'm', planPath, prBodyFetcher: null },
+        }),
+      }),
+    );
+    const body = (
+      JSON.parse(ghMock.mock.calls[0][0] as string) as { body: string }
+    ).body;
+    expect(body).toContain('中文说明');
+  });
+});
+
+// The submit receipt is the WRITE half of cleanup's bypass-audit contract:
+// cleanup reads the review ids it records to tell a sanctioned review from a
+// bypass. Every other test here leaves ghMock returning '' (so JSON.parse of
+// the response throws and the receipt block hits its catch), which means the
+// happy path where a receipt is actually written was never exercised. These
+// run the command from inside the fixture dir so the relative .qwen/tmp
+// receipt lands there.
+describe('submit receipt (producer half of the audit contract)', () => {
+  const receiptPath = () =>
+    join(dir, '.qwen', 'tmp', 'qwen-review-pr-6771-submit-receipt.json');
+
+  const authorizedPost = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+
+  let savedCwd: string;
+  beforeEach(() => {
+    savedCwd = process.cwd();
+    process.chdir(dir);
+  });
+  afterEach(() => process.chdir(savedCwd));
+
+  it('writes the posted review id, event and a timestamp', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([42]);
+    expect(receipt.event).toBe('COMMENT');
+    expect(typeof receipt.postedAt).toBe('string');
+  });
+
+  it('accumulates ids across two submits in the same window (drift restart)', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 43 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([42, 43]);
+  });
+
+  it('migrates a legacy single-id receipt on the next submit', () => {
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewId: 7, event: 'COMMENT', postedAt: 'x' }),
+    );
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 8 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([7, 8]);
+  });
+
+  it('writes atomically, leaving no .tmp sibling behind', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    expect(readFileSync(receiptPath(), 'utf8')).toContain('"reviewIds"');
+    const tmpDir = join(dir, '.qwen', 'tmp');
+    const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
+    expect(leftovers).toEqual([]);
   });
 });

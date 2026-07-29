@@ -110,6 +110,18 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
+   * to 10 000. Must be a positive safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. Threaded into
+   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
+   * safe integer.
+   */
+  maxJournalBytes?: number;
+  /**
    * Absolute workspace path this daemon binds as its primary workspace.
    * The CLI parser accepts repeated `--workspace` values to register isolated
    * runtimes, but this public option remains the primary workspace string so

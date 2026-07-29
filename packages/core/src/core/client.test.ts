@@ -456,6 +456,10 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    // The client concatenates these with the auto-memory suffix, so the
+    // default mock must return a string, not undefined.
+    vi.mocked(getCoreSystemPrompt).mockReturnValue('');
+    vi.mocked(getCustomSystemPrompt).mockReturnValue('');
     sessionStartProfilerMocks.profilers.length = 0;
     sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
       () => {
@@ -550,8 +554,11 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
+      setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProxy: vi.fn().mockReturnValue(undefined),
@@ -566,6 +573,8 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
+      restorePendingManualPlanExitNotice: vi.fn(),
       getSdkMode: vi.fn().mockReturnValue(false),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -967,6 +976,21 @@ describe('Gemini Client (client.ts)', () => {
     beforeEach(() => {
       sessionStartProfilerMocks.createSessionStartProfiler.mockClear();
       sessionStartProfilerMocks.profilers.length = 0;
+    });
+
+    it('enables manual plan-exit notices on every main chat', async () => {
+      const enableSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'enableManualPlanExitNotices',
+      );
+
+      await client.startChat();
+      await client.startChat(
+        [{ role: 'user', parts: [{ text: 'resumed' }] }],
+        SessionStartSource.Compact,
+      );
+
+      expect(enableSpy).toHaveBeenCalledTimes(2);
     });
 
     it('passes startup, resume, and clear sources to the profiler', async () => {
@@ -1485,6 +1509,27 @@ describe('Gemini Client (client.ts)', () => {
         'test-model',
         PermissionMode.AutoEdit,
       );
+    });
+
+    it('appends the auto-memory section after all stable/context content', async () => {
+      // The auto-memory section is the volatile layer and must be the last
+      // block of the main-session system instruction (after the base prompt
+      // and git status). Guard the append with a non-empty getAutoMemoryPrompt
+      // so a future refactor dropping it fails here instead of silently
+      // shipping a prompt without managed memory.
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        '# auto memory\nMEMORY_INDEX_MARKER',
+      );
+
+      await client.startChat();
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).toBe(
+        'Base instruction\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
+      );
+      expect(systemInstruction.endsWith('MEMORY_INDEX_MARKER')).toBe(true);
     });
   });
 
@@ -2038,6 +2083,26 @@ describe('Gemini Client (client.ts)', () => {
       await client.addHistory(newContent);
 
       expect(mockChat.addHistory).toHaveBeenCalledWith(newContent);
+    });
+  });
+
+  describe('getMainSessionSystemInstruction', () => {
+    it('records the gitStatus-free base as the static system prefix on Config', () => {
+      vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
+      vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
+
+      const instruction = (
+        client as unknown as { getMainSessionSystemInstruction: () => string }
+      ).getMainSessionSystemInstruction();
+
+      // The recorded prefix must be exactly the instruction minus the
+      // volatile git tail — that's the boundary the Anthropic converter's
+      // startsWith split relies on for the early cache breakpoint.
+      const recorded = vi
+        .mocked(client['config'].setStaticSystemPrefix)
+        .mock.calls.at(-1)?.[0];
+      expect(recorded).toBeTruthy();
+      expect(instruction).toBe(`${recorded}\n\nGit snapshot A`);
     });
   });
 
@@ -5659,6 +5724,258 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    it('should fire StopFailure hook on always-on loop detection', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-always',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+    });
+
+    it('should fire StopFailure hook on heuristic loop detection', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-heuristic',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('should pass undefined error_details when loopType is null', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-null',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        undefined,
+      );
+    });
+
+    it('should not fire StopFailure hook on loop detection when hooks are disabled', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-disabled',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).not.toHaveBeenCalled();
+    });
+
+    it('should not fire StopFailure hook on loop detection when no StopFailure hooks configured', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-no-hooks',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).not.toHaveBeenCalled();
+    });
+
+    it('should swallow StopFailure hook rejection on loop detection', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi
+        .fn()
+        .mockRejectedValue(new Error('hook boom'));
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-reject',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain — must not throw
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+    });
+
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
       // skipLoopDetection defaults true, so this also confirms the consecutive
       // guard halts via the always-on path on a mixed batch (distinct calls
@@ -9051,6 +9368,137 @@ Other open files:
 
         // messageBus.request SHOULD be called for UserPromptSubmit
         expect(mockMessageBus.request).toHaveBeenCalled();
+        const hookRequest = mockMessageBus.request.mock.calls[0][0] as {
+          input: Record<string, unknown>;
+        };
+        expect(hookRequest.input).toEqual({ prompt: 'Hi' });
+      });
+
+      it('passes a non-empty submitted prompt for UserQuery hooks', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'expanded model prompt' }],
+            new AbortController().signal,
+            'prompt-submitted-prompt',
+            {
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'raw @file prompt',
+            },
+          ),
+        );
+
+        const hookRequest = mockMessageBus.request.mock.calls[0][0] as {
+          input: Record<string, unknown>;
+        };
+        expect(hookRequest.input).toEqual({
+          prompt: 'expanded model prompt',
+          submitted_prompt: 'raw @file prompt',
+        });
+      });
+
+      it.each([
+        {
+          name: 'empty UserQuery value',
+          type: SendMessageType.UserQuery,
+          submittedPrompt: '',
+        },
+        {
+          name: 'whitespace-only UserQuery value',
+          type: SendMessageType.UserQuery,
+          submittedPrompt: ' \n\t ',
+        },
+        {
+          name: 'invalid UserQuery value',
+          type: SendMessageType.UserQuery,
+          submittedPrompt: 42 as unknown as string,
+        },
+        {
+          name: 'non-user ToolResult value',
+          type: SendMessageType.ToolResult,
+          submittedPrompt: 'must not propagate',
+        },
+        {
+          name: 'non-user Hook value',
+          type: SendMessageType.Hook,
+          submittedPrompt: 'must not propagate',
+        },
+      ])(
+        'omits submitted prompt for $name',
+        async ({ type, submittedPrompt }) => {
+          const mockMessageBus = {
+            request: vi.fn().mockResolvedValue({ output: undefined }),
+            response: vi.fn(),
+          };
+          vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+          vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+            mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+            (event: string) => event === 'UserPromptSubmit',
+          );
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'model prompt' }],
+              new AbortController().signal,
+              `prompt-${type}`,
+              { type, submittedPrompt },
+            ),
+          );
+
+          const hookRequest = mockMessageBus.request.mock.calls[0][0] as {
+            input: Record<string, unknown>;
+          };
+          expect(hookRequest.input).toEqual({ prompt: 'model prompt' });
+        },
+      );
+
+      it('clears submitted prompt before a Steer continuation', async () => {
+        const sendSpy = vi.spyOn(client, 'sendMessageStream');
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'steer prompt' }],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          })
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'model prompt' }],
+            new AbortController().signal,
+            'prompt-clear-steer-submitted',
+            {
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'submitted prompt',
+              getSteerInput,
+            },
+          ),
+        );
+
+        expect(sendSpy.mock.calls).toHaveLength(2);
+        expect(sendSpy.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Steer,
+          submittedPrompt: undefined,
+        });
       });
 
       it('does not run UserPromptSubmit hooks for same-turn steer input', async () => {
@@ -9425,6 +9873,7 @@ Other open files:
         const { checkNextSpeaker } = await import(
           '../utils/nextSpeakerChecker.js'
         );
+        const sendSpy = vi.spyOn(client, 'sendMessageStream');
         vi.mocked(checkNextSpeaker)
           .mockResolvedValueOnce({
             next_speaker: 'model',
@@ -9451,13 +9900,22 @@ Other open files:
             [{ text: 'start the analysis' }],
             new AbortController().signal,
             'prompt-steer-during-next-speaker',
-            { type: SendMessageType.UserQuery, getSteerInput },
+            {
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'submitted prompt',
+              getSteerInput,
+            },
           ),
         );
 
         expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
         expect(getLastTurnRequestText()).toContain('focus on the failing test');
         expect(getLastTurnRequestText()).not.toContain('Please continue.');
+        expect(sendSpy.mock.calls).toHaveLength(2);
+        expect(sendSpy.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Steer,
+          submittedPrompt: undefined,
+        });
       });
 
       it('does not drain steer input without another model-turn budget', async () => {
@@ -9547,6 +10005,44 @@ Other open files:
         expect(restore).not.toHaveBeenCalled();
       });
 
+      it('settles an attached steer before content events reach the consumer', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation(() => {
+          pushCount = 1;
+          return (async function* () {
+            yield { type: GeminiEventType.Content, value: 'first' };
+            yield { type: GeminiEventType.Content, value: 'second' };
+          })();
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        const stream = client.sendMessageStream(
+          [{ text: 'tool result plus steer' }],
+          new AbortController().signal,
+          'prompt-steer-ordering',
+          {
+            type: SendMessageType.ToolResult,
+            steerInput: {
+              parts: [{ text: 'steer' }],
+              accept,
+              restore,
+            },
+          },
+        );
+
+        const iter = stream[Symbol.asyncIterator]();
+        expect(accept).not.toHaveBeenCalled();
+
+        const first = await iter.next();
+        expect(first.done).toBe(false);
+        expect(accept).toHaveBeenCalledOnce();
+
+        await iter.return(undefined as never);
+        expect(accept).toHaveBeenCalledOnce();
+      });
+
       it('restores an attached ToolResult steer when history never accepts it', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
         mockTurnRunFn.mockImplementationOnce(() => {
@@ -9614,6 +10110,136 @@ Other open files:
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('forwards steerInput through the Steer continuation for early settling', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+
+        let turnCall = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          turnCall++;
+          pushCount = turnCall;
+          return (async function* () {
+            yield {
+              type: GeminiEventType.Content,
+              value: `response ${turnCall}`,
+            };
+          })();
+        });
+
+        const accept = vi.fn();
+        const restore = vi.fn();
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'steer text' }],
+            accept,
+            restore,
+          })
+          .mockResolvedValue(undefined);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'initial query' }],
+          new AbortController().signal,
+          'prompt-steer-forward-early',
+          { type: SendMessageType.UserQuery, getSteerInput },
+        );
+
+        const iter = stream[Symbol.asyncIterator]();
+
+        // First turn's content event — steer not yet taken
+        const first = await iter.next();
+        expect(first.done).toBe(false);
+        expect(accept).not.toHaveBeenCalled();
+
+        // Next event comes from the recursive Steer continuation.
+        // steerInput must be forwarded so it settles on this first event.
+        const second = await iter.next();
+        expect(second.done).toBe(false);
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+
+        await iter.return(undefined as never);
+      });
+
+      it('forwards steerInput through the Hook continuation for early settling', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep going' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(4);
+
+        let turnCall = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          turnCall++;
+          pushCount = turnCall;
+          return (async function* () {
+            yield {
+              type: GeminiEventType.Content,
+              value: `response ${turnCall}`,
+            };
+          })();
+        });
+
+        const accept = vi.fn();
+        const restore = vi.fn();
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          // 1st call: end-of-turn steer (before Stop hook) — no steer pending
+          .mockResolvedValueOnce(undefined)
+          // 2nd call: Hook continuation's takeSteerInput — steer pending
+          .mockResolvedValueOnce({
+            parts: [{ text: 'steer via hook' }],
+            accept,
+            restore,
+          })
+          .mockResolvedValue(undefined);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'initial query' }],
+          new AbortController().signal,
+          'prompt-hook-forward-early',
+          { type: SendMessageType.UserQuery, getSteerInput },
+        );
+
+        const iter = stream[Symbol.asyncIterator]();
+
+        // Consume all events, tracking when accept fires relative to events
+        const events: Array<{ done: boolean; acceptCalls: number }> = [];
+        for (;;) {
+          const result = await iter.next();
+          events.push({
+            done: !!result.done,
+            acceptCalls: accept.mock.calls.length,
+          });
+          if (result.done) break;
+        }
+
+        // accept must have been called exactly once, and it must have fired
+        // before the stream ended (i.e., during the Hook continuation turn,
+        // not deferred to the finally block after all events were consumed).
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+        // The accept call should appear on an event before the last one
+        const acceptEventIndex = events.findIndex((e) => e.acceptCalls > 0);
+        expect(acceptEventIndex).toBeLessThan(events.length - 1);
       });
     });
 
@@ -9931,6 +10557,80 @@ Other open files:
       );
     });
 
+    it('appends the auto-memory section to a per-call systemInstruction override', async () => {
+      // The truthy `generationConfig.systemInstruction` branch composes
+      // getCustomSystemPrompt(...) + the volatile auto-memory suffix. Guard it
+      // with a non-empty getAutoMemoryPrompt so a regression that drops the
+      // append — silently stripping managed memory from side queries (session
+      // recap, title/summary, fast-model queries) — fails here.
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Custom side-query prompt',
+      );
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        '# auto memory\nMEMORY_INDEX_MARKER',
+      );
+
+      await client.generateContent(
+        contents,
+        { systemInstruction: 'Custom side-query prompt' },
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const systemInstruction = request?.config?.systemInstruction as string;
+      expect(systemInstruction).toBe(
+        'Custom side-query prompt\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
+      );
+    });
+
+    it('includes context and auto-memory but omits appendPrompt/gitStatus in the per-call systemInstruction branch', async () => {
+      // The side-query branch assembles only base + contextFiles + autoMemory.
+      // It deliberately omits the appendPrompt and gitStatus layers so a
+      // configured --append-system-prompt (and the repo snapshot) do not leak
+      // into side queries (title generation, session recap, fast-model
+      // queries). Lock that layer selection in: a change that starts wiring
+      // appendPrompt/gitStatus into this branch fails here.
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce('Side query base');
+      vi.mocked(mockConfig.getUserMemory).mockReturnValue(
+        'CONTEXT_FILES_MARKER',
+      );
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        'AUTO_MEMORY_MARKER',
+      );
+      vi.mocked(mockConfig.getAppendSystemPrompt).mockReturnValue(
+        'APPEND_PROMPT_MARKER',
+      );
+
+      await client.generateContent(
+        contents,
+        { systemInstruction: 'Side query base' },
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const systemInstruction = request?.config?.systemInstruction as string;
+      expect(systemInstruction).toContain('CONTEXT_FILES_MARKER');
+      expect(systemInstruction).toContain('AUTO_MEMORY_MARKER');
+      expect(systemInstruction).not.toContain('APPEND_PROMPT_MARKER');
+      // Exact shape: base + contextFiles + autoMemory, in that order, with no
+      // appendPrompt or gitStatus segment between them.
+      expect(systemInstruction).toBe(
+        'Side query base\n\n---\n\nCONTEXT_FILES_MARKER\n\n---\n\nAUTO_MEMORY_MARKER',
+      );
+    });
+
     it('should use config system prompt override when provided', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
@@ -9952,15 +10652,14 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
-        'Override prompt',
-        'Saved memory',
-        undefined,
-      );
+      // The override is the stable base only; user memory flows through
+      // assembleSystemPrompt as the context layer.
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith('Override prompt');
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
           config: expect.objectContaining({
-            systemInstruction: 'Override prompt with memory',
+            systemInstruction:
+              'Override prompt with memory\n\n---\n\nSaved memory',
           }),
         }),
         'test-session-id',
@@ -9983,11 +10682,21 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
+      // The core prompt is requested as the stable base only; the append
+      // prompt flows through assembleSystemPrompt as a context-layer slot.
       expect(getCoreSystemPrompt).toHaveBeenCalledWith(
-        '',
+        undefined,
         'test-model',
-        'Be extra concise.',
+        undefined,
         'headless',
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: '\n\n---\n\nBe extra concise.',
+          }),
+        }),
+        'test-session-id',
       );
     });
 
@@ -10015,7 +10724,7 @@ Other open files:
         );
 
         expect(getCoreSystemPrompt).toHaveBeenCalledWith(
-          '',
+          undefined,
           'test-model',
           undefined,
           mode,
@@ -10047,15 +10756,15 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
-        'Override prompt',
-        'Saved memory',
-        'Focus on findings only.',
-      );
+      // The override is the stable base; memory and append flow through
+      // assembleSystemPrompt in canonical layer order (context files before
+      // the append prompt).
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith('Override prompt');
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
           config: expect.objectContaining({
-            systemInstruction: 'Override prompt with memory and append',
+            systemInstruction:
+              'Override prompt with memory and append\n\n---\n\nSaved memory\n\n---\n\nFocus on findings only.',
           }),
         }),
         'test-session-id',

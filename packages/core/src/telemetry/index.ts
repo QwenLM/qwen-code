@@ -51,6 +51,7 @@ export {
   logExtensionDisable,
   logExtensionUpdateEvent,
   logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
@@ -81,6 +82,7 @@ export {
   KittySequenceOverflowEvent,
   ToolOutputTruncatedEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   NextSpeakerCheckEvent,
   AuthEvent,
   SkillLaunchEvent,
@@ -172,6 +174,7 @@ export {
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,
+  StartLLMRequestSpanOptions,
   EndInteractionOptions,
   InteractionSpanResultStatus,
   LLMRequestMetadata,
@@ -238,6 +241,8 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';

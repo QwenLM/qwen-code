@@ -70,6 +70,28 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     return { stripDangerousRulesForAutoMode, restoreDangerousRules };
   }
 
+  it('copies the current plan-exit event before isolating approval mode', async () => {
+    const parent = await createParentWithRegistry();
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
+    );
+
+    const childNotice = child.takePendingManualPlanExitNotice();
+    const parentNotice = parent.takePendingManualPlanExitNotice();
+    expect(childNotice?.version).toBe(parentNotice?.version);
+    expect(childNotice?.currentMode).toBe(ApprovalMode.AUTO_EDIT);
+    expect(parentNotice?.currentMode).toBe(ApprovalMode.DEFAULT);
+
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    parent.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+    expect(parent.takePendingManualPlanExitNotice()).toBeDefined();
+  });
+
   it('returns a Config whose registry is a distinct instance from the parent', async () => {
     const parent = new Config(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
@@ -412,17 +434,29 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     await parentRegistry.warmAll();
 
     const childNames = child.getToolRegistry().getAllToolNames().sort();
+    const topLevelOnlyTools = new Set<string>([
+      ToolNames.GET_GOAL,
+      ToolNames.UPDATE_GOAL,
+    ]);
+    const expectedChildNames = parentRegistry
+      .getAllToolNames()
+      .filter((name) => !topLevelOnlyTools.has(name))
+      .sort();
 
-    // After warmAll the core tool sets must match — the child registry
-    // is built from the same Config (just the override), and we copied
-    // any discovered tools across. So the name set should equal parent's.
-    expect(childNames).toEqual(parentRegistry.getAllToolNames().sort());
+    // The child registry copies discovered tools and rebuilds the same core
+    // toolset, except for session-owned tools intentionally excluded from
+    // subagent contexts.
+    expect(childNames).toEqual(expectedChildNames);
     // And the parent's pre-warm names must be a subset of the post-warm
     // names — sanity check that warmAll didn't lose anything.
-    const beforeSet = new Set(beforeNames);
+    const beforeSet = new Set(
+      beforeNames.filter((name) => !topLevelOnlyTools.has(name)),
+    );
     for (const name of beforeSet) {
       expect(childNames).toContain(name);
     }
+    expect(childNames).not.toContain(ToolNames.GET_GOAL);
+    expect(childNames).not.toContain(ToolNames.UPDATE_GOAL);
 
     // Sanity: WriteFile is registered in non-bare mode only, so bare mode
     // should NOT have it.

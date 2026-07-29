@@ -18,11 +18,12 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
+import { ICON } from '../../constants.js';
 import { wrapToVisualLines } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
-export const THINKING_ICON = '∴ ';
-export const THINKING_ICON_PENDING = '∵ ';
+export const THINKING_ICON = `${ICON.THEREFORE} `;
+export const THINKING_ICON_PENDING = `${ICON.BECAUSE} `;
 
 export const toggleKeyHint =
   process.platform === 'darwin' ? 'option+t' : 'alt+t';
@@ -129,7 +130,7 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
       marginTop={marginTop}
       alignSelf={alignSelf}
     >
-      <Box width={prefixWidth}>
+      <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor} aria-label={ariaLabel}>
           {prefix}
         </Text>
@@ -158,7 +159,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
 
   return (
     <Box flexDirection="row">
-      <Box width={prefixWidth}>
+      <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor} aria-label={ariaLabel}>
           {prefix}
         </Text>
@@ -240,7 +241,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="◆"
+    prefix={ICON.DIAMOND}
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
     isPending={isPending}
@@ -264,7 +265,7 @@ export const AssistantMessageContent: React.FC<
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="◆"
+    basePrefix={ICON.DIAMOND}
     sourceCopyIndexOffsets={sourceCopyIndexOffsets}
   />
 );

@@ -13,6 +13,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "serve": {
+      "description": "Persistent qwen serve settings.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "modelProviders": {
       "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
       "type": "object",
@@ -375,9 +380,9 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "showScrollbar": {
           "description": "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
@@ -500,6 +505,10 @@
     "telemetry": {
       "type": "object",
       "properties": {
+        "userId": {
+          "description": "Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.",
+          "type": "string"
+        },
         "includeSensitiveSpanAttributes": {
           "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
           "type": "boolean",
@@ -555,6 +564,11 @@
     },
     "visionModel": {
       "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+      "type": "string",
+      "default": ""
+    },
+    "imageModel": {
+      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.",
       "type": "string",
       "default": ""
     },
@@ -670,6 +684,16 @@
             "maxRetries": {
               "description": "Maximum number of retries for failed requests.",
               "type": "number"
+            },
+            "retryInitialDelayMs": {
+              "description": "Initial delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
+            },
+            "retryMaxDelayMs": {
+              "description": "Maximum delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
             },
             "enableCacheControl": {
               "description": "Enable cache control for DashScope providers.",
@@ -878,6 +902,20 @@
       "properties": {
         "disabled": {
           "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultDisabled": {
+          "description": "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. skills.disabled always wins.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "description": "Explicit opt-ins that override matching skills.defaultDisabled entries. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled.",
           "type": "array",
           "items": {
             "type": "string"
@@ -1349,6 +1387,20 @@
             }
           }
         },
+        "modelGrades": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Maps semantic model grade names exposed to the Agent tool to concrete model selectors."
+        },
+        "allowedGrades": {
+          "description": "Optional whitelist of model grade names the Agent tool may use.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,
@@ -1626,6 +1678,109 @@
         },
         "Stop": {
           "description": "Hooks that execute after agent processing. Can post-process responses or log interactions.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "StopFailure": {
+          "description": "Hooks that execute when a turn ends due to an API error or loop detection, instead of the normal Stop hooks. Receives error type and details.",
           "type": "array",
           "items": {
             "description": "A hook definition with an optional matcher and a list of hook configurations.",
@@ -2976,6 +3131,11 @@
         },
         "todoStopGuard": {
           "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionWriterLease": {
+          "description": "Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
           "type": "boolean",
           "default": false
         },

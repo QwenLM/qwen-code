@@ -31,6 +31,7 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -973,9 +974,13 @@ export class BackgroundAgentResumeService {
           recovery.forkBootstrap!,
         );
       } else {
+        const resumeSubagentConfig =
+          launchModel && meta.persistedCliFlags?.authType
+            ? { ...target.subagentConfig!, model: 'inherit' }
+            : target.subagentConfig!;
         const result = await this.config
           .getSubagentManager()
-          .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
+          .createAgentHeadless(resumeSubagentConfig, bgConfig as Config, {
             eventEmitter: bgEventEmitter,
             promptConfigOverrides: {
               initialMessages: resumeHistory,
@@ -1334,9 +1339,11 @@ export class BackgroundAgentResumeService {
             () => runBody(turnContextState, turnAbortController, fireStartHook),
             normalizeResumedAgentDepth(meta.depth),
           );
+        const invocationRunBody = () =>
+          runWithInvocationContext(undefined, framedRunBody);
         return target.isFork
-          ? runInForkContext(framedRunBody)
-          : framedRunBody();
+          ? runInForkContext(invocationRunBody)
+          : invocationRunBody();
       };
 
       const reportUnexpectedBackgroundError = (error: unknown) => {

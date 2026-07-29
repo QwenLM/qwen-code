@@ -59,8 +59,10 @@ function parseRange(raw: unknown): UsageRange {
 
 /** Parse + clamp `?heatmapDays=`; anything invalid falls back to the default. */
 function parseHeatmapDays(raw: unknown): number {
-  const value = typeof raw === 'string' ? Number.parseInt(raw, 10) : Number.NaN;
-  if (!Number.isFinite(value)) return DEFAULT_HEATMAP_DAYS;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    return DEFAULT_HEATMAP_DAYS;
+  }
+  const value = Number.parseInt(raw, 10);
   return Math.min(MAX_HEATMAP_DAYS, Math.max(MIN_HEATMAP_DAYS, value));
 }
 

@@ -41,6 +41,8 @@ import type {
   ToolArtifact,
   VisionBridgeResult,
   MemoryWriteCandidate,
+  CronTaskDelivery,
+  InvocationContextV1,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -125,6 +127,8 @@ import {
   SessionWriterError,
   startToolSpan,
   endToolSpan,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
@@ -139,6 +143,7 @@ import {
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
+  promptIdContext,
   dedupeToolCallsById,
   getProviderToolCallId,
   parsePositiveIntegerEnv,
@@ -146,6 +151,7 @@ import {
   hasImageParts,
   normalizeParts,
   runVisionBridge,
+  bridgeToolResultImages,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
   formatFullTurnVisionNotice,
@@ -153,14 +159,22 @@ import {
   splitImageParts,
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
+  getInvocationContext,
+  runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
-import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
+  MID_TURN_QUEUE_DRAIN_METHOD,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
+import { normalizeChannelDeliveryText } from '../../serve/channel-delivery.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -265,6 +279,7 @@ import {
 
 const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
@@ -353,7 +368,10 @@ type RunToolResult = {
 type MidTurnDrainResult = {
   parts: Part[];
   hasQueuedPrompt: boolean;
+  reliable: boolean;
 };
+
+type TodoStopGuardClaimResult = 'claimed' | 'queued' | 'unavailable';
 
 type NextMessageAfterToolRun = {
   message: Content | null;
@@ -748,10 +766,48 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
     .map((message) => ({ kind: 'text', message }));
 }
 
+function isValidMidTurnDrainResponse(
+  response: unknown,
+  requireQueuedPromptState: boolean,
+): boolean {
+  if (
+    !isRecord(response) ||
+    (requireQueuedPromptState &&
+      typeof response['hasQueuedPrompt'] !== 'boolean')
+  ) {
+    return false;
+  }
+
+  if (Array.isArray(response['items'])) {
+    return response['items'].every(
+      (item) =>
+        isRecord(item) &&
+        Array.isArray(item['content']) &&
+        item['content'].length > 0 &&
+        item['content'].every(isContentBlock),
+    );
+  }
+
+  return (
+    Array.isArray(response['messages']) &&
+    response['messages'].every(
+      (message) => typeof message === 'string' && message.trim().length > 0,
+    )
+  );
+}
+
 class MidTurnDrainTimeoutError extends Error {
   constructor() {
     super(
       `mid-turn queue drain got no response within ${MID_TURN_QUEUE_DRAIN_TIMEOUT_MS}ms`,
+    );
+  }
+}
+
+class TodoStopGuardClaimTimeoutError extends Error {
+  constructor() {
+    super(
+      `Todo Stop Guard continuation claim got no response within ${MID_TURN_QUEUE_DRAIN_TIMEOUT_MS}ms`,
     );
   }
 }
@@ -762,6 +818,7 @@ interface BackgroundNotificationQueueItem {
   taskId: string;
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
+  continuesTodoStopGuardWorkChain: boolean;
   toolUseId?: string;
 }
 
@@ -776,12 +833,81 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  delivery?: CronTaskDelivery;
 }
 
 interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
   taskId?: string;
+  firedAt?: number;
+  delivery?: CronTaskDelivery;
+}
+
+interface PromptChannelDelivery {
+  deliveryId: string;
+  target: CronTaskDelivery['target'];
+}
+
+interface ChannelDeliveryCapture {
+  finalText: string;
+}
+
+function beginChannelDeliveryResponseBlock(
+  capture: ChannelDeliveryCapture | undefined,
+): string[] | undefined {
+  if (!capture) return undefined;
+  capture.finalText = '';
+  return [];
+}
+
+function commitChannelDeliveryResponseBlock(
+  capture: ChannelDeliveryCapture | undefined,
+  responseBlock: string[] | undefined,
+  hasFunctionCalls: boolean,
+): void {
+  if (capture && responseBlock && !hasFunctionCalls) {
+    capture.finalText = responseBlock.join('');
+  }
+}
+
+function parsePromptChannelDelivery(
+  params: PromptRequest,
+): PromptChannelDelivery | undefined {
+  const meta = (params as { _meta?: Record<string, unknown> })._meta;
+  const value = meta?.[DAEMON_CHANNEL_DELIVERY_META_KEY];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const delivery = value as Record<string, unknown>;
+  const target = delivery['target'];
+  if (
+    typeof delivery['deliveryId'] !== 'string' ||
+    delivery['deliveryId'].length === 0 ||
+    typeof target !== 'object' ||
+    target === null ||
+    Array.isArray(target)
+  ) {
+    return undefined;
+  }
+  const targetRecord = target as Record<string, unknown>;
+  if (
+    typeof targetRecord['channelName'] !== 'string' ||
+    targetRecord['channelName'].length === 0 ||
+    (targetRecord['type'] !== 'user' && targetRecord['type'] !== 'chat') ||
+    typeof targetRecord['id'] !== 'string' ||
+    targetRecord['id'].length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    deliveryId: delivery['deliveryId'],
+    target: {
+      channelName: targetRecord['channelName'],
+      type: targetRecord['type'],
+      id: targetRecord['id'],
+    },
+  };
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -1123,7 +1249,6 @@ export class Session implements SessionContext {
     apiTimeMs: 0,
   };
   private readonly runtimeBaseDir: string;
-
   // Cron scheduling state
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
@@ -1152,7 +1277,12 @@ export class Session implements SessionContext {
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
   private readonly todoStopGuard: DaemonTodoStopGuard;
   private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
+  private readonly relatedAgentIds = new Set<string>();
+  private readonly provisionalRelatedAgentCounts = new Map<string, number>();
   private todoStopGuardQueuedPromptPriority = false;
+  private todoStopGuardQueuedPromptOwnerPromptId?: string;
+  private readonly todoStopGuardClaimOwnerCounts = new Map<string, number>();
+  private readonly todoStopGuardReleasedDuringClaim = new Set<string>();
   private todoStopGuardDrainAutomaticQueuesWhenIdle = false;
 
   // Background notification drain state. ACP does not have the TUI's idle
@@ -1256,7 +1386,7 @@ export class Session implements SessionContext {
       this.todoStopGuardQueuedPromptPriority;
 
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-      this.todoStopGuardQueuedPromptPriority = false;
+      this.#clearTodoStopGuardQueuedPromptWait();
       this.todoStopGuard.blockUntilOrdinaryPromptStarts();
       return {
         startsWorkChain: false,
@@ -1270,7 +1400,7 @@ export class Session implements SessionContext {
       metadata?.[DAEMON_RETRY_META_KEY] === true;
     const isContinue = metadata?.[DAEMON_CONTINUE_META_KEY] === true;
     if (isRetry || isContinue) {
-      this.todoStopGuardQueuedPromptPriority = false;
+      this.#clearTodoStopGuardQueuedPromptWait();
       if (this.todoStopGuard.hasTrustedUnfinishedState) {
         this.todoStopGuard.resumeTrustedPrompt();
         return {
@@ -1285,7 +1415,7 @@ export class Session implements SessionContext {
       };
     }
 
-    this.todoStopGuardQueuedPromptPriority = false;
+    this.#clearTodoStopGuardQueuedPromptWait();
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
     return {
       startsWorkChain: true,
@@ -1301,7 +1431,7 @@ export class Session implements SessionContext {
       this.todoStopGuard.blockUntilOrdinaryPromptStarts();
       return;
     }
-    if (continuesCurrentWorkChain && this.todoStopGuard.isHardSuspended) {
+    if (this.todoStopGuard.isHardSuspended) {
       return;
     }
     if (
@@ -1313,8 +1443,7 @@ export class Session implements SessionContext {
     }
 
     this.todoStopGuard.clearTrust();
-    this.todoStopGuardBackgroundBaseline =
-      this.#captureTodoStopGuardBackgroundBaseline();
+    this.#resetTodoStopGuardBackgroundLineage();
   }
 
   #clearTodoStopGuardTrustAndDrainAutomaticQueues(): void {
@@ -1333,43 +1462,141 @@ export class Session implements SessionContext {
     void this.#drainNotificationQueue();
   }
 
-  releaseTodoStopGuardQueuedPromptWait(): boolean {
-    if (!this.todoStopGuardQueuedPromptPriority) return false;
-    this.todoStopGuardQueuedPromptPriority = false;
+  releaseTodoStopGuardQueuedPromptWait(promptId: string): boolean {
+    const matchesCurrentWait =
+      this.todoStopGuardQueuedPromptPriority &&
+      this.todoStopGuardQueuedPromptOwnerPromptId === promptId;
+    if (!matchesCurrentWait) {
+      if ((this.todoStopGuardClaimOwnerCounts.get(promptId) ?? 0) === 0) {
+        return false;
+      }
+      this.todoStopGuardReleasedDuringClaim.add(promptId);
+      if (!this.todoStopGuardQueuedPromptPriority) {
+        this.#finishTodoStopGuardQueuedPromptRelease();
+      }
+      return true;
+    }
+    this.#clearTodoStopGuardQueuedPromptWait(promptId);
+    this.#finishTodoStopGuardQueuedPromptRelease();
+    return true;
+  }
+
+  #finishTodoStopGuardQueuedPromptRelease(): void {
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
     if (this.pendingPrompt) {
       this.todoStopGuardDrainAutomaticQueuesWhenIdle = true;
-      return true;
+      return;
     }
     void this.#drainCronQueue();
     void this.#drainNotificationQueue();
-    return true;
   }
 
   clearTodoStopGuardTrust(): void {
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
-  #beginTodoStopGuardQueuedPromptCheck(): void {
-    this.todoStopGuardQueuedPromptPriority =
-      this.todoStopGuard.awaitQueuedPrompt();
+  hardSuspendTodoStopGuard(): void {
+    this.#clearTodoStopGuardQueuedPromptWait();
+    this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
+    this.todoStopGuard.blockUntilOrdinaryPromptStarts();
   }
 
-  #finishTodoStopGuardQueuedPromptCheck(hasQueuedPrompt: boolean): boolean {
-    const shouldWait =
-      hasQueuedPrompt && this.todoStopGuardQueuedPromptPriority;
-    this.todoStopGuardQueuedPromptPriority = shouldWait;
-    if (!shouldWait) this.todoStopGuard.resumeTrustedPrompt();
-    return shouldWait;
+  #clearTodoStopGuardQueuedPromptWait(expectedOwner?: string): void {
+    if (
+      expectedOwner !== undefined &&
+      this.todoStopGuardQueuedPromptOwnerPromptId !== expectedOwner
+    ) {
+      return;
+    }
+    this.todoStopGuardQueuedPromptPriority = false;
+    this.todoStopGuardQueuedPromptOwnerPromptId = undefined;
+  }
+
+  #awaitTodoStopGuardQueuedPrompt(promptId: string): void {
+    this.todoStopGuard.awaitQueuedPrompt();
+    this.todoStopGuardQueuedPromptPriority = true;
+    this.todoStopGuardQueuedPromptOwnerPromptId = promptId;
+  }
+
+  async #claimTodoStopGuardContinuation(
+    abortSignal: AbortSignal,
+  ): Promise<TodoStopGuardClaimResult> {
+    const context = getInvocationContext();
+    const ownerPromptId =
+      context?.sessionId === this.sessionId ? context.promptId : undefined;
+    if (ownerPromptId) {
+      this.todoStopGuardClaimOwnerCounts.set(
+        ownerPromptId,
+        (this.todoStopGuardClaimOwnerCounts.get(ownerPromptId) ?? 0) + 1,
+      );
+    }
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    try {
+      const claimPromise = this.client.extMethod(
+        TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+        {
+          sessionId: this.sessionId,
+          ...(ownerPromptId ? { promptId: ownerPromptId } : {}),
+        },
+      );
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new TodoStopGuardClaimTimeoutError()),
+          MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
+        );
+      });
+      const response = await Promise.race([claimPromise, timeoutPromise]);
+      if (abortSignal.aborted || !isRecord(response)) {
+        return 'unavailable';
+      }
+      if (
+        ownerPromptId &&
+        response['claimed'] === false &&
+        response['hasQueuedPrompt'] === true
+      ) {
+        if (this.closing || this.disposed) return 'unavailable';
+        if (this.todoStopGuardReleasedDuringClaim.has(ownerPromptId)) {
+          return 'unavailable';
+        }
+        this.#awaitTodoStopGuardQueuedPrompt(ownerPromptId);
+        return 'queued';
+      }
+      if (this.todoStopGuard.isHardSuspended) return 'unavailable';
+      if (
+        response['claimed'] === true &&
+        response['hasQueuedPrompt'] === false
+      ) {
+        if (ownerPromptId) {
+          this.#clearTodoStopGuardQueuedPromptWait(ownerPromptId);
+        }
+        this.todoStopGuard.resumeTrustedPrompt();
+        return 'claimed';
+      }
+      return 'unavailable';
+    } catch (error) {
+      debugLogger.warn(
+        `Todo Stop Guard continuation claim unavailable [session ${this.sessionId}]: ${this.#formatError(error)}`,
+      );
+      return 'unavailable';
+    } finally {
+      clearTimeout(timeoutHandle);
+      if (ownerPromptId) {
+        const remaining =
+          (this.todoStopGuardClaimOwnerCounts.get(ownerPromptId) ?? 1) - 1;
+        if (remaining > 0) {
+          this.todoStopGuardClaimOwnerCounts.set(ownerPromptId, remaining);
+        } else {
+          this.todoStopGuardClaimOwnerCounts.delete(ownerPromptId);
+          this.todoStopGuardReleasedDuringClaim.delete(ownerPromptId);
+        }
+      }
+    }
   }
 
   #notificationContinuesTodoStopGuardWorkChain(
     item: BackgroundNotificationQueueItem,
   ): boolean {
-    const baseline = this.todoStopGuardBackgroundBaseline;
-    if (item.kind === 'agent') return !baseline.agents.has(item.taskId);
-    if (item.kind === 'shell') return !baseline.shells.has(item.taskId);
-    return !baseline.monitors.has(item.taskId);
+    return item.continuesTodoStopGuardWorkChain;
   }
 
   #cronContinuesTodoStopGuardWorkChain(item: CronQueueItem): boolean {
@@ -1418,6 +1645,50 @@ export class Session implements SessionContext {
     };
   }
 
+  #resetTodoStopGuardBackgroundLineage(): void {
+    this.relatedAgentIds.clear();
+    this.provisionalRelatedAgentCounts.clear();
+    this.todoStopGuardBackgroundBaseline =
+      this.#captureTodoStopGuardBackgroundBaseline();
+    for (const item of this.notificationQueue) {
+      item.continuesTodoStopGuardWorkChain = false;
+    }
+  }
+
+  #agentContinuesTodoStopGuardWorkChain(
+    taskId: string,
+    visiting = new Set<string>(),
+  ): boolean {
+    if (
+      this.relatedAgentIds.has(taskId) ||
+      (this.provisionalRelatedAgentCounts.get(taskId) ?? 0) > 0
+    ) {
+      return true;
+    }
+    if (this.todoStopGuardBackgroundBaseline.agents.has(taskId)) return false;
+    if (visiting.has(taskId)) return false;
+    const task = this.config.getBackgroundTaskRegistry?.()?.get?.(taskId);
+    if (!task) return false;
+    if (!task.parentAgentId) return true;
+    visiting.add(taskId);
+    const related = this.#agentContinuesTodoStopGuardWorkChain(
+      task.parentAgentId,
+      visiting,
+    );
+    visiting.delete(taskId);
+    return related;
+  }
+
+  #monitorContinuesTodoStopGuardWorkChain(
+    monitorId: string,
+    ownerAgentId?: string,
+  ): boolean {
+    if (ownerAgentId) {
+      return this.#agentContinuesTodoStopGuardWorkChain(ownerAgentId);
+    }
+    return !this.todoStopGuardBackgroundBaseline.monitors.has(monitorId);
+  }
+
   #hasRelevantTodoStopGuardBackgroundInput(): boolean {
     if (
       this.notificationQueue.some((item) =>
@@ -1435,7 +1706,7 @@ export class Session implements SessionContext {
     if (
       agents.some(
         (task) =>
-          !baseline.agents.has(task.id) &&
+          this.#agentContinuesTodoStopGuardWorkChain(task.id) &&
           task.isBackgrounded &&
           (task.status === 'running' ||
             task.status === 'paused' ||
@@ -1457,7 +1728,11 @@ export class Session implements SessionContext {
     const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
     if (
       monitors.some(
-        (task) => !baseline.monitors.has(task.id) && task.status === 'running',
+        (task) =>
+          this.#monitorContinuesTodoStopGuardWorkChain(
+            task.id,
+            task.ownerAgentId,
+          ) && task.status === 'running',
       )
     ) {
       return true;
@@ -1615,12 +1890,19 @@ export class Session implements SessionContext {
   }
 
   async waitForActiveTurnsToSettle(): Promise<void> {
-    const pending = [
-      this.pendingPromptCompletion,
-      this.cronCompletion,
-      this.notificationCompletion,
-    ].filter((completion): completion is Promise<void> => completion !== null);
-    await Promise.allSettled(pending);
+    while (this.#hasActiveTurn()) {
+      const pending = [
+        this.pendingPromptCompletion,
+        this.cronCompletion,
+        this.notificationCompletion,
+      ].filter(
+        (completion): completion is Promise<void> => completion !== null,
+      );
+      if (pending.length > 0) {
+        await Promise.allSettled(pending);
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
 
   #deferAutomaticQueueDrainUntilTurnsSettle(): boolean {
@@ -1654,12 +1936,12 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
+    this.pendingPrompt = null;
     this.resolveCloseGate?.();
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
-    this.todoStopGuardQueuedPromptPriority = false;
-    this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
-    this.todoStopGuard.clearTrust();
+    this.hardSuspendTodoStopGuard();
     this.notificationQueue = [];
     this.cronQueue = [];
     this.notificationAbortController?.abort();
@@ -1980,11 +2262,21 @@ export class Session implements SessionContext {
     }
   }
 
-  async prompt(params: PromptRequest): Promise<PromptResponse> {
+  async prompt(
+    params: PromptRequest,
+    invocationContext?: InvocationContextV1,
+    admissionCancellation?: AbortSignal,
+  ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
     await this.assertCanStartTurn();
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (admissionCancellation?.aborted) {
+      return { stopReason: 'cancelled' };
+    }
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
     // After writer admission, install this prompt's AbortController before
@@ -1992,7 +2284,20 @@ export class Session implements SessionContext {
     // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
+    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    if (admissionCancellation) {
+      admissionCancellation.addEventListener('abort', cancelPendingSend, {
+        once: true,
+      });
+      if (admissionCancellation.aborted) cancelPendingSend();
+    }
     this.pendingPrompt = pendingSend;
+    const releasePendingSend = () => {
+      admissionCancellation?.removeEventListener('abort', cancelPendingSend);
+      if (this.pendingPrompt === pendingSend) {
+        this.pendingPrompt = null;
+      }
+    };
 
     // Abort the previous turn's in-flight follow-up suggestion
     // generation (if any). Mirrors `pendingPrompt?.abort()` above —
@@ -2046,17 +2351,22 @@ export class Session implements SessionContext {
 
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
+      releasePendingSend();
+      this.todoStopGuard.suspend();
       return { stopReason: 'cancelled' };
     }
 
     if (todoStopGuardPreparation.startsWorkChain) {
-      this.todoStopGuardQueuedPromptPriority = false;
+      this.#clearTodoStopGuardQueuedPromptWait();
       this.todoStopGuard.startOrdinaryPrompt();
-      this.todoStopGuardBackgroundBaseline =
-        this.#captureTodoStopGuardBackgroundBaseline();
+      this.#resetTodoStopGuardBackgroundLineage();
     }
 
     this.duplicateProviderToolCallResponseIds.clear();
+    const channelDelivery = parsePromptChannelDelivery(params);
+    const channelDeliveryCapture = channelDelivery
+      ? { finalText: '' }
+      : undefined;
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -2065,12 +2375,29 @@ export class Session implements SessionContext {
     });
 
     try {
-      const result = await this.#executePrompt(params, pendingSend);
-      this.pendingPrompt = null;
+      const result = await this.#executePrompt(
+        params,
+        pendingSend,
+        channelDeliveryCapture,
+        invocationContext,
+      );
+      releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
+      if (channelDelivery && result.stopReason === 'end_turn') {
+        this.#scheduleChannelDelivery({
+          sessionId: this.sessionId,
+          deliveryId: channelDelivery.deliveryId,
+          source: 'prompt',
+          target: channelDelivery.target,
+          text: normalizeChannelDeliveryText(
+            channelDeliveryCapture?.finalText ?? '',
+          ),
+          promptId: channelDelivery.deliveryId,
+        });
+      }
       return result;
     } catch (error) {
       if (error instanceof SessionWriterError) {
@@ -2080,14 +2407,17 @@ export class Session implements SessionContext {
       }
       throw error;
     } finally {
-      this.pendingPrompt = null;
+      const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
+      releasePendingSend();
       const shouldDrainAutomaticQueues =
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
         this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
         this.todoStopGuard.hasCommittedContinuation ||
         this.todoStopGuardQueuedPromptPriority;
-      this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
+      if (stillOwnsPendingPrompt) {
+        this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
+      }
       if (shouldDrainAutomaticQueues) {
         void this.#drainCronQueue();
         void this.#drainNotificationQueue();
@@ -2264,19 +2594,34 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
+    invocationContext?: InvocationContextV1,
   ): Promise<PromptResponse> {
+    const sessionId = this.config.getSessionId();
+    if (
+      invocationContext !== undefined &&
+      invocationContext.sessionId !== sessionId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invocation context session does not match the active session',
+      );
+    }
     // Bind this turn to the session's ID via AsyncLocalStorage so shell
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executePromptInner(params, pendingSend),
+    return runWithInvocationContext(invocationContext, () =>
+      sessionIdContext.run(sessionId, () =>
+        this.#executePromptInner(params, pendingSend, channelDeliveryCapture),
+      ),
     );
   }
 
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -2290,6 +2635,16 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        // Bind the prompt ID for the remainder of this turn, mirroring the
+        // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
+        // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
+        // it, `qwen review fetch-pr` cannot record its worktree lease and an
+        // interrupted /review leaves the review worktree behind. TUI and
+        // headless enter this context at their prompt entry points
+        // (useGeminiStream.ts / nonInteractiveCli.ts); ACP had no equivalent.
+        // enterWith (not run) so the 500-line turn body below stays unnested;
+        // the binding dies with this async scope.
+        promptIdContext.enterWith(promptId);
         const parentContext = extractDaemonTraceContext(params);
 
         return await withInteractionSpan(
@@ -2406,6 +2761,9 @@ export class Session implements SessionContext {
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
             const onFullTurnModel = (model: string) => {
+              if (fullTurnModelOverride === model) {
+                return true;
+              }
               if (fullTurnModelOverride) {
                 return false;
               }
@@ -2605,6 +2963,7 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
                 );
+                let channelDeliveryResponseBlock: string[] | undefined;
 
                 try {
                   const sendResult =
@@ -2629,6 +2988,10 @@ export class Session implements SessionContext {
                   }
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
+                  channelDeliveryResponseBlock =
+                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                  const channelDeliveryCheckpoint =
+                    channelDeliveryResponseBlock?.length ?? 0;
 
                   let streamFailed = false;
                   try {
@@ -2655,6 +3018,7 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
+                            channelDeliveryResponseBlock?.push(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -2678,6 +3042,15 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.RETRY ||
                         resp.type === StreamEventType.MODEL_FALLBACK
                       ) {
+                        if (
+                          resp.type === StreamEventType.MODEL_FALLBACK ||
+                          !resp.isContinuation
+                        ) {
+                          if (channelDeliveryResponseBlock) {
+                            channelDeliveryResponseBlock.length =
+                              channelDeliveryCheckpoint;
+                          }
+                        }
                         await finalizeToolCallPreparations(
                           preparationTracker,
                           true,
@@ -2714,14 +3087,15 @@ export class Session implements SessionContext {
                     strippedOrphanEntries = null;
                   }
 
-                  // Only explicit user cancellation maps to a normal
-                  // cancelled turn. Other aborts/errors should surface so
-                  // infra failures are not hidden as successful cancels.
-                  if (
+                  // Explicit user cancellation and session disposal are
+                  // controlled aborts. Other AbortErrors still surface so
+                  // infrastructure failures are not hidden as cancellations.
+                  const isControlledCancellation =
                     pendingSend.signal.aborted &&
-                    pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
-                    this.#isAbortError(error)
-                  ) {
+                    (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
+                      pendingSend.signal.reason ===
+                        SESSION_DISPOSE_ABORT_REASON);
+                  if (isControlledCancellation) {
                     this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
                   }
@@ -2769,6 +3143,12 @@ export class Session implements SessionContext {
                   await messageDisplay?.finish();
                 }
 
+                commitChannelDeliveryResponseBlock(
+                  channelDeliveryCapture,
+                  channelDeliveryResponseBlock,
+                  functionCalls.length > 0,
+                );
+
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
@@ -2793,6 +3173,7 @@ export class Session implements SessionContext {
                         promptId,
                         functionCalls,
                         toolLoopState,
+                        onFullTurnModel,
                       ),
                   );
                   if (toolRun.stopAfterPermissionCancel) {
@@ -2843,6 +3224,7 @@ export class Session implements SessionContext {
                 messageBus,
                 true,
                 fullTurnModelOverride,
+                channelDeliveryCapture,
               );
             } finally {
               logConversationFinishedEvent(
@@ -2852,6 +3234,19 @@ export class Session implements SessionContext {
                   turnCount,
                 ),
               );
+              // Remove review worktrees leased during this prompt and not
+              // released by the skill's own cleanup step — a cancelled or
+              // errored /review otherwise leaves `.qwen/tmp/review-pr-<n>`
+              // and its branch behind. Unconditional like the headless
+              // finally (nonInteractiveCli.ts): the ACP turn loop runs
+              // whole turns, so unlike the TUI's per-continuation
+              // submitQuery this can never fire mid-review. No-op when the
+              // lease was already cleared by `qwen review cleanup`.
+              cleanupReviewWorktreeLeases({
+                sessionId: this.config.getSessionId(),
+                promptId,
+                repositoryRoot: this.config.getProjectRoot(),
+              });
             }
           },
           (result: { stopReason: PromptResponse['stopReason'] }) =>
@@ -2868,11 +3263,15 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
     const onFullTurnModel = (model: string) => {
+      if (modelOverride === model) {
+        return true;
+      }
       if (modelOverride) {
         return false;
       }
@@ -2882,6 +3281,9 @@ export class Session implements SessionContext {
     let midTurnContinuationCount = 0;
 
     while (true) {
+      if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
+        return { stopReason: 'cancelled' };
+      }
       if (pendingSend.signal.aborted) {
         this.todoStopGuard.suspend();
         return { stopReason: 'cancelled' };
@@ -2896,15 +3298,26 @@ export class Session implements SessionContext {
       }
 
       if (this.todoStopGuard.needsStopInspection) {
-        this.#beginTodoStopGuardQueuedPromptCheck();
         const drained = await this.#drainMidTurnInput(pendingSend.signal, {
           watchQueuedPromptForTodoStopGuard: true,
           onFullTurnModel,
         });
-        const waitsForQueuedPrompt = this.#finishTodoStopGuardQueuedPromptCheck(
-          drained.hasQueuedPrompt,
-        );
         if (drained.parts.length > 0) {
+          if (drained.hasQueuedPrompt) {
+            const claim = await this.#claimTodoStopGuardContinuation(
+              pendingSend.signal,
+            );
+            if (claim === 'queued') {
+              this.#preserveUnsentMessageHistory(
+                { role: 'user', parts: drained.parts },
+                true,
+              );
+              return { stopReason: 'end_turn' };
+            }
+            if (claim === 'unavailable') {
+              this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+            }
+          }
           this.todoStopGuard.acceptMidTurnUserInput();
           const continuation = await this.#runStopContinuation(
             pendingSend,
@@ -2915,6 +3328,7 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
+              channelDeliveryCapture,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -2922,14 +3336,23 @@ export class Session implements SessionContext {
           }
           continue;
         }
-        if (waitsForQueuedPrompt) {
-          return { stopReason: 'end_turn' };
+        if (!drained.reliable) {
+          this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+        } else if (drained.hasQueuedPrompt) {
+          const claim = await this.#claimTodoStopGuardContinuation(
+            pendingSend.signal,
+          );
+          if (claim === 'queued') {
+            return { stopReason: 'end_turn' };
+          }
+          if (claim === 'unavailable') {
+            this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+          }
         }
       }
 
       let externalReason: string | null = null;
       let stopHookCount = 1;
-      let queuedPromptArrivedDuringStopHook = false;
       if (
         allowExternalHooks &&
         hooksEnabled &&
@@ -2974,15 +3397,26 @@ export class Session implements SessionContext {
         }
 
         if (this.todoStopGuard.needsStopInspection) {
-          this.#beginTodoStopGuardQueuedPromptCheck();
           const drained = await this.#drainMidTurnInput(pendingSend.signal, {
             watchQueuedPromptForTodoStopGuard: true,
             onFullTurnModel,
           });
-          const waitsForQueuedPrompt =
-            this.#finishTodoStopGuardQueuedPromptCheck(drained.hasQueuedPrompt);
-          queuedPromptArrivedDuringStopHook = waitsForQueuedPrompt;
           if (drained.parts.length > 0) {
+            if (drained.hasQueuedPrompt) {
+              const claim = await this.#claimTodoStopGuardContinuation(
+                pendingSend.signal,
+              );
+              if (claim === 'queued') {
+                this.#preserveUnsentMessageHistory(
+                  { role: 'user', parts: drained.parts },
+                  true,
+                );
+                return { stopReason: 'end_turn' };
+              }
+              if (claim === 'unavailable') {
+                this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+              }
+            }
             this.todoStopGuard.acceptMidTurnUserInput();
             const continuation = await this.#runStopContinuation(
               pendingSend,
@@ -2993,13 +3427,26 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
+                channelDeliveryCapture,
               },
             );
             if (continuation.kind === 'terminal') {
               return { stopReason: continuation.stopReason };
             }
-            // The hook already completed. Process its output below so its
-            // message and cap accounting survive the mid-turn continuation.
+            continue;
+          }
+          if (!drained.reliable) {
+            this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+          } else if (drained.hasQueuedPrompt) {
+            const claim = await this.#claimTodoStopGuardContinuation(
+              pendingSend.signal,
+            );
+            if (claim === 'queued') {
+              return { stopReason: 'end_turn' };
+            }
+            if (claim === 'unavailable') {
+              this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+            }
           }
         }
 
@@ -3020,16 +3467,22 @@ export class Session implements SessionContext {
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
+        } else {
+          // Bounded: the guard's TODO_STOP_GUARD_MAX_ATTEMPTS caps total guard
+          // continuations, and after exhaustion a non-blocking allow exits the
+          // loop (!externalReason && !guardContinuation), so the reset cannot
+          // remove the ceiling on consecutive Stop-hook blocks.
+          stopHookIterationCount = 0;
+          stopHookReasons = [];
+          stopHookCount = 1;
         }
       }
 
-      const guardDecision = queuedPromptArrivedDuringStopHook
-        ? null
-        : this.todoStopGuard.decide(
-            this.todoStopGuard.needsStopInspection
-              ? this.#hasRelevantTodoStopGuardBackgroundInput()
-              : false,
-          );
+      const guardDecision = this.todoStopGuard.decide(
+        this.todoStopGuard.needsStopInspection
+          ? this.#hasRelevantTodoStopGuardBackgroundInput()
+          : false,
+      );
       const guardContinuation =
         guardDecision?.kind === 'continue' ? guardDecision : null;
 
@@ -3051,10 +3504,6 @@ export class Session implements SessionContext {
         this.todoStopGuard.suspend();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);
-        return { stopReason: 'end_turn' };
-      }
-
-      if (queuedPromptArrivedDuringStopHook) {
         return { stopReason: 'end_turn' };
       }
 
@@ -3103,6 +3552,7 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
+          channelDeliveryCapture,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -3127,6 +3577,7 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      channelDeliveryCapture?: ChannelDeliveryCapture;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -3135,9 +3586,32 @@ export class Session implements SessionContext {
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
+    const preservePendingMessage = (message: Content) => {
+      if (initialSend) return;
+      const preservedParts = (message.parts ?? []).filter(
+        (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+      );
+      this.#preserveUnsentMessageHistory(
+        preservedParts.length > 0
+          ? { ...message, parts: preservedParts }
+          : null,
+        true,
+      );
+    };
 
     while (nextMessage !== null) {
+      if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
+        preservePendingMessage(nextMessage);
+        return {
+          kind: 'terminal',
+          stopReason: 'cancelled',
+          ...(supersededAutomaticContinuation
+            ? { supersededAutomaticContinuation: true }
+            : {}),
+        };
+      }
       if (pendingSend.signal.aborted) {
+        preservePendingMessage(nextMessage);
         this.todoStopGuard.suspend();
         return {
           kind: 'terminal',
@@ -3158,6 +3632,12 @@ export class Session implements SessionContext {
       let guardForThisSend = nextGuardContinuation;
       let preserveGuardOnSkippedSend = false;
       let messageForPreservation = nextMessage;
+      let preparedMessage = nextMessage.parts ?? [];
+      let preservePreparedMessageOnSkippedSend =
+        !guardForThisSend &&
+        preparedMessage.some(
+          (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+        );
       const externalParts = initialSend ? options.externalParts : undefined;
       const promptIdForSend =
         guardForThisSend &&
@@ -3167,6 +3647,9 @@ export class Session implements SessionContext {
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
       );
+      let channelDeliveryResponseBlock: string[] | undefined;
+      let providerSendChat: GeminiChat | undefined;
+      let userContentPushCountBeforeSend = 0;
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -3177,140 +3660,256 @@ export class Session implements SessionContext {
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
             getModelOverride: options.getModelOverride,
-            beforeSend:
-              guardForThisSend ||
-              (!automaticContinuationValidated &&
-                options.onAutomaticContinuationValidated)
-                ? async ({ compressionFailed }) => {
-                    const inspectGuardPriority = guardForThisSend !== undefined;
-                    const guardCompressionFailed =
-                      inspectGuardPriority && compressionFailed;
-
-                    if (inspectGuardPriority) {
-                      this.#beginTodoStopGuardQueuedPromptCheck();
-                      const drained = await this.#drainMidTurnInput(
+            prepareBeforeCompression: guardForThisSend
+              ? async () => {
+                  const drained = await this.#drainMidTurnInput(
+                    pendingSend.signal,
+                    {
+                      watchQueuedPromptForTodoStopGuard: true,
+                      onFullTurnModel: options.onFullTurnModel,
+                    },
+                  );
+                  if (drained.parts.length > 0) {
+                    if (drained.hasQueuedPrompt) {
+                      const claim = await this.#claimTodoStopGuardContinuation(
                         pendingSend.signal,
-                        {
-                          watchQueuedPromptForTodoStopGuard: true,
-                          onFullTurnModel: options.onFullTurnModel,
-                        },
                       );
-                      const waitsForQueuedPrompt =
-                        this.#finishTodoStopGuardQueuedPromptCheck(
-                          drained.hasQueuedPrompt,
-                        );
-                      if (drained.parts.length > 0) {
-                        this.todoStopGuard.acceptMidTurnUserInput();
-                        guardForThisSend = undefined;
-                        nextGuardContinuation = undefined;
-                        if (initialSend) {
-                          supersededAutomaticContinuation = true;
-                        }
-                        const replacementMessage = initialSend
-                          ? drained.parts
-                          : [
-                              ...(nextMessage?.parts ?? []).filter(
-                                (part) =>
-                                  !(
-                                    'text' in part &&
-                                    isTodoStopGuardPromptText(part.text)
-                                  ),
-                              ),
-                              ...drained.parts,
-                            ];
-                        messageForPreservation = {
-                          role: 'user',
-                          parts: replacementMessage,
-                        };
-                        return {
-                          kind: 'send',
-                          message: replacementMessage,
-                        };
-                      }
-                      if (waitsForQueuedPrompt) {
+                      if (claim === 'queued') {
                         guardForThisSend = undefined;
                         nextGuardContinuation = undefined;
                         preserveGuardOnSkippedSend = true;
+                        preservePreparedMessageOnSkippedSend = true;
+                        messageForPreservation = {
+                          role: 'user',
+                          parts: drained.parts,
+                        };
                         if (initialSend) {
                           supersededAutomaticContinuation = true;
                         }
                         return { kind: 'stop', stopReason: 'end_turn' };
                       }
-
-                      if (guardCompressionFailed) {
-                        this.todoStopGuard.suspend();
-                        guardForThisSend = undefined;
-                        nextGuardContinuation = undefined;
-                        if (!externalParts || externalParts.length === 0) {
-                          preserveGuardOnSkippedSend = true;
-                          return { kind: 'stop', stopReason: 'end_turn' };
-                        }
+                      if (claim === 'unavailable') {
+                        this.todoStopGuard.blockUntilOrdinaryPromptStarts();
                       }
-
-                      if (
-                        guardForThisSend &&
-                        this.config.getApprovalMode() === ApprovalMode.PLAN
-                      ) {
-                        this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
-                      }
-                      if (guardForThisSend) {
-                        const hasRelevantBackgroundInput =
-                          this.#hasRelevantTodoStopGuardBackgroundInput();
-                        const refreshedDecision = guardForThisSend.toolClosure
-                          ? this.todoStopGuard.decideToolClosure(
-                              guardForThisSend.attempt - 1,
-                              hasRelevantBackgroundInput,
-                            )
-                          : this.todoStopGuard.decide(
-                              hasRelevantBackgroundInput,
-                            );
-                        if (
-                          refreshedDecision.kind !== 'continue' ||
-                          refreshedDecision.attempt !== guardForThisSend.attempt
-                        ) {
-                          guardForThisSend = undefined;
-                          nextGuardContinuation = undefined;
-                          if (!options.externalParts) {
-                            preserveGuardOnSkippedSend = true;
-                            return { kind: 'stop', stopReason: 'end_turn' };
-                          }
-                          if (!initialSend && nextMessage) {
-                            nextMessage = {
-                              ...nextMessage,
-                              parts: (nextMessage.parts ?? []).filter(
-                                (part) =>
-                                  !(
-                                    'text' in part &&
-                                    isTodoStopGuardPromptText(part.text)
-                                  ),
+                    }
+                    preservePreparedMessageOnSkippedSend = true;
+                    this.todoStopGuard.acceptMidTurnUserInput();
+                    guardForThisSend = undefined;
+                    nextGuardContinuation = undefined;
+                    if (initialSend) {
+                      supersededAutomaticContinuation = true;
+                    }
+                    preparedMessage = initialSend
+                      ? drained.parts
+                      : [
+                          ...(nextMessage?.parts ?? []).filter(
+                            (part) =>
+                              !(
+                                'text' in part &&
+                                isTodoStopGuardPromptText(part.text)
                               ),
-                            };
-                          }
-                        }
-                      }
-                    }
-
-                    if (
-                      !automaticContinuationValidated &&
-                      options.onAutomaticContinuationValidated
-                    ) {
-                      await options.onAutomaticContinuationValidated();
-                      automaticContinuationValidated = true;
-                    }
-                    const selectedMessage =
-                      guardForThisSend || !externalParts
-                        ? (nextMessage?.parts ?? [])
-                        : externalParts;
+                          ),
+                          ...drained.parts,
+                        ];
                     messageForPreservation = {
                       role: 'user',
-                      parts: selectedMessage,
+                      parts: preparedMessage,
                     };
-                    return {
-                      kind: 'send',
-                      message: selectedMessage,
-                    };
+                    return { kind: 'send', message: preparedMessage };
                   }
-                : undefined,
+
+                  if (!drained.reliable) {
+                    this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+                    guardForThisSend = undefined;
+                    nextGuardContinuation = undefined;
+                    if (!options.externalParts) {
+                      preserveGuardOnSkippedSend = true;
+                      return { kind: 'stop', stopReason: 'end_turn' };
+                    }
+                    if (!initialSend && nextMessage) {
+                      nextMessage = {
+                        ...nextMessage,
+                        parts: (nextMessage.parts ?? []).filter(
+                          (part) =>
+                            !(
+                              'text' in part &&
+                              isTodoStopGuardPromptText(part.text)
+                            ),
+                        ),
+                      };
+                    }
+                  } else if (drained.hasQueuedPrompt) {
+                    const probe = await this.#claimTodoStopGuardContinuation(
+                      pendingSend.signal,
+                    );
+                    if (probe === 'queued') {
+                      guardForThisSend = undefined;
+                      nextGuardContinuation = undefined;
+                      preserveGuardOnSkippedSend = true;
+                      if (initialSend) {
+                        supersededAutomaticContinuation = true;
+                      }
+                      return { kind: 'stop', stopReason: 'end_turn' };
+                    }
+                    if (probe === 'unavailable') {
+                      this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+                      guardForThisSend = undefined;
+                      nextGuardContinuation = undefined;
+                      if (!options.externalParts) {
+                        preserveGuardOnSkippedSend = true;
+                        return { kind: 'stop', stopReason: 'end_turn' };
+                      }
+                      if (!initialSend && nextMessage) {
+                        nextMessage = {
+                          ...nextMessage,
+                          parts: (nextMessage.parts ?? []).filter(
+                            (part) =>
+                              !(
+                                'text' in part &&
+                                isTodoStopGuardPromptText(part.text)
+                              ),
+                          ),
+                        };
+                      }
+                    }
+                  }
+
+                  if (
+                    guardForThisSend &&
+                    this.config.getApprovalMode() === ApprovalMode.PLAN
+                  ) {
+                    this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+                  }
+                  if (guardForThisSend) {
+                    const hasRelevantBackgroundInput =
+                      this.#hasRelevantTodoStopGuardBackgroundInput();
+                    const refreshedDecision = guardForThisSend.toolClosure
+                      ? this.todoStopGuard.decideToolClosure(
+                          guardForThisSend.attempt - 1,
+                          hasRelevantBackgroundInput,
+                        )
+                      : this.todoStopGuard.decide(hasRelevantBackgroundInput);
+                    if (
+                      refreshedDecision.kind !== 'continue' ||
+                      refreshedDecision.attempt !== guardForThisSend.attempt
+                    ) {
+                      guardForThisSend = undefined;
+                      nextGuardContinuation = undefined;
+                      if (!options.externalParts) {
+                        preserveGuardOnSkippedSend = true;
+                        return { kind: 'stop', stopReason: 'end_turn' };
+                      }
+                      if (!initialSend && nextMessage) {
+                        nextMessage = {
+                          ...nextMessage,
+                          parts: (nextMessage.parts ?? []).filter(
+                            (part) =>
+                              !(
+                                'text' in part &&
+                                isTodoStopGuardPromptText(part.text)
+                              ),
+                          ),
+                        };
+                      }
+                    }
+                  }
+
+                  if (guardForThisSend) {
+                    const claim = await this.#claimTodoStopGuardContinuation(
+                      pendingSend.signal,
+                    );
+                    if (claim === 'queued') {
+                      guardForThisSend = undefined;
+                      nextGuardContinuation = undefined;
+                      preserveGuardOnSkippedSend = true;
+                      if (initialSend) {
+                        supersededAutomaticContinuation = true;
+                      }
+                      return { kind: 'stop', stopReason: 'end_turn' };
+                    }
+                    if (claim === 'unavailable') {
+                      this.todoStopGuard.blockUntilOrdinaryPromptStarts();
+                      guardForThisSend = undefined;
+                      nextGuardContinuation = undefined;
+                      if (!options.externalParts) {
+                        preserveGuardOnSkippedSend = true;
+                        return { kind: 'stop', stopReason: 'end_turn' };
+                      }
+                      if (!initialSend && nextMessage) {
+                        nextMessage = {
+                          ...nextMessage,
+                          parts: (nextMessage.parts ?? []).filter(
+                            (part) =>
+                              !(
+                                'text' in part &&
+                                isTodoStopGuardPromptText(part.text)
+                              ),
+                          ),
+                        };
+                      }
+                    }
+                  }
+
+                  if (
+                    !automaticContinuationValidated &&
+                    options.onAutomaticContinuationValidated
+                  ) {
+                    await options.onAutomaticContinuationValidated();
+                    automaticContinuationValidated = true;
+                  }
+                  preparedMessage =
+                    guardForThisSend || !externalParts
+                      ? (nextMessage?.parts ?? [])
+                      : externalParts;
+                  messageForPreservation = {
+                    role: 'user',
+                    parts: preparedMessage,
+                  };
+                  preservePreparedMessageOnSkippedSend = preparedMessage.some(
+                    (part) =>
+                      !('text' in part && isTodoStopGuardPromptText(part.text)),
+                  );
+                  return { kind: 'send', message: preparedMessage };
+                }
+              : undefined,
+            beforeSend: async ({ compressionFailed }) => {
+              if (guardForThisSend && compressionFailed) {
+                this.todoStopGuard.suspend();
+                guardForThisSend = undefined;
+                nextGuardContinuation = undefined;
+                if (!options.externalParts) {
+                  preserveGuardOnSkippedSend = true;
+                  return { kind: 'stop', stopReason: 'end_turn' };
+                }
+                preparedMessage =
+                  initialSend && externalParts
+                    ? externalParts
+                    : preparedMessage.filter(
+                        (part) =>
+                          !(
+                            'text' in part &&
+                            isTodoStopGuardPromptText(part.text)
+                          ),
+                      );
+                preservePreparedMessageOnSkippedSend = true;
+              }
+
+              if (
+                !automaticContinuationValidated &&
+                options.onAutomaticContinuationValidated
+              ) {
+                await options.onAutomaticContinuationValidated();
+                automaticContinuationValidated = true;
+              }
+              messageForPreservation = {
+                role: 'user',
+                parts: preparedMessage,
+              };
+              providerSendChat = this.#getCurrentChat();
+              userContentPushCountBeforeSend =
+                providerSendChat.getUserContentPushCount?.() ?? 0;
+              return { kind: 'send', message: preparedMessage };
+            },
           },
         );
         if (!sendResult.responseStream) {
@@ -3332,7 +3931,8 @@ export class Session implements SessionContext {
             preservedParts.length > 0
               ? { ...messageForPreservation, parts: preservedParts }
               : null,
-            sendResult.stopReason === 'cancelled',
+            sendResult.stopReason === 'cancelled' ||
+              preservePreparedMessageOnSkippedSend,
           );
           return {
             kind: 'terminal',
@@ -3345,6 +3945,11 @@ export class Session implements SessionContext {
 
         const responseStream = sendResult.responseStream;
         nextMessage = null;
+        channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
+          options.channelDeliveryCapture,
+        );
+        const channelDeliveryCheckpoint =
+          channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -3353,7 +3958,7 @@ export class Session implements SessionContext {
           if (guardCommitted) {
             await this.#emitTodoStopGuardContinuation(guardForThisSend);
           }
-          if (!guardCommitted && externalParts) {
+          if (!guardCommitted && options.externalParts) {
             guardForThisSend = undefined;
           }
         }
@@ -3383,7 +3988,10 @@ export class Session implements SessionContext {
                 'assistant',
                 part.thought,
               );
-              if (!part.thought) messageDisplay?.addChunk(part.text);
+              if (!part.thought) {
+                channelDeliveryResponseBlock?.push(part.text);
+                messageDisplay?.addChunk(part.text);
+              }
             }
           }
 
@@ -3404,6 +4012,14 @@ export class Session implements SessionContext {
             response.type === StreamEventType.RETRY ||
             response.type === StreamEventType.MODEL_FALLBACK
           ) {
+            if (
+              response.type === StreamEventType.MODEL_FALLBACK ||
+              !response.isContinuation
+            ) {
+              if (channelDeliveryResponseBlock) {
+                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
+              }
+            }
             await finalizeToolCallPreparations(
               preparationTracker,
               true,
@@ -3414,6 +4030,34 @@ export class Session implements SessionContext {
         }
       } catch (error) {
         streamFailed = true;
+        const preservedParts = (messageForPreservation.parts ?? []).filter(
+          (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+        );
+        if (
+          preservedParts.length > 0 &&
+          (!providerSendChat ||
+            (providerSendChat.getUserContentPushCount?.() ?? 0) <=
+              userContentPushCountBeforeSend)
+        ) {
+          this.#preserveUnsentMessageHistory(
+            { ...messageForPreservation, parts: preservedParts },
+            true,
+          );
+        }
+        const isControlledCancellation =
+          pendingSend.signal.aborted &&
+          (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
+            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+        if (isControlledCancellation) {
+          this.todoStopGuard.suspend();
+          return {
+            kind: 'terminal',
+            stopReason: 'cancelled',
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
         const errorMessage =
@@ -3450,6 +4094,12 @@ export class Session implements SessionContext {
         }
       }
 
+      commitChannelDeliveryResponseBlock(
+        options.channelDeliveryCapture,
+        channelDeliveryResponseBlock,
+        functionCalls.length > 0,
+      );
+
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata);
         const durationMs = Date.now() - streamStartTime;
@@ -3469,6 +4119,7 @@ export class Session implements SessionContext {
               toolPromptId,
               functionCalls,
               toolLoopState,
+              options.onFullTurnModel,
             ),
         );
         if (toolRun.stopAfterPermissionCancel || toolRun.loopDetected) {
@@ -3602,6 +4253,26 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
   }
 
+  #scheduleChannelDelivery(params: Record<string, unknown>): void {
+    // Best-effort: the unref'd timer means delivery is silently dropped
+    // if the process exits before the next tick — consistent with the
+    // no-retry delivery contract.
+    const timer = setTimeout(() => {
+      void this.client
+        .extMethod(SERVE_CONTROL_EXT_METHODS.channelDelivery, params)
+        .catch((error) => {
+          try {
+            debugLogger.warn(
+              `Channel delivery submission failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          } catch {
+            // Delivery diagnostics must not create an unhandled rejection.
+          }
+        });
+    }, 0);
+    timer.unref();
+  }
+
   #getCurrentChat(): GeminiChat {
     return this.config.getGeminiClient()!.getChat();
   }
@@ -3664,12 +4335,28 @@ export class Session implements SessionContext {
       skipCompression?: boolean;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
+      prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
+    if (options.prepareBeforeCompression) {
+      const decision = await options.prepareBeforeCompression();
+      if (decision.kind === 'stop') {
+        return { responseStream: null, stopReason: decision.stopReason };
+      }
+      message = decision.message;
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after pre-compression preparation for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+
     let compressionDiagnostic: string | null = null;
     let compressionInfo: ChatCompressionInfo | null = null;
     let compressionFailed = false;
@@ -3704,9 +4391,12 @@ export class Session implements SessionContext {
             `${compressed.newTokenCount ?? 'unknown'} tokens).`;
         }
       } catch (compressionError) {
-        if (abortSignal.aborted || this.#isAbortError(compressionError)) {
+        if (abortSignal.aborted) {
           debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
           return { responseStream: null, stopReason: 'cancelled' };
+        }
+        if (this.#isAbortError(compressionError)) {
+          throw compressionError;
         }
         debugLogger.warn(
           `Auto-compression failed for prompt ${promptId}; proceeding without compression: ` +
@@ -4008,6 +4698,7 @@ export class Session implements SessionContext {
       return {
         parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
+        reliable: false,
       };
     }
 
@@ -4033,6 +4724,10 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
+      const reliable = isValidMidTurnDrainResponse(
+        response,
+        options.watchQueuedPromptForTodoStopGuard === true,
+      );
       return {
         parts: await this.#buildMidTurnParts(
           [...recovered, ...parseMidTurnDrainResponse(response)],
@@ -4041,6 +4736,7 @@ export class Session implements SessionContext {
         ),
         hasQueuedPrompt:
           isRecord(response) && response['hasQueuedPrompt'] === true,
+        reliable,
       };
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
@@ -4094,6 +4790,7 @@ export class Session implements SessionContext {
       return {
         parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
+        reliable: false,
       };
     }
   }
@@ -4249,6 +4946,8 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+        ...(job.delivery ? { delivery: job.delivery } : {}),
       });
       void this.#drainCronQueue();
     });
@@ -4271,12 +4970,13 @@ export class Session implements SessionContext {
   }
 
   #enqueueCronPrompt(item: CronQueueItem): void {
-    if (
-      (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
-        this.todoStopGuardQueuedPromptPriority) &&
-      !this.#cronContinuesTodoStopGuardWorkChain(item)
-    ) {
-      if (item.taskId) {
+    const automaticWorkDeferred =
+      this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+      this.todoStopGuardQueuedPromptPriority;
+    if (automaticWorkDeferred) {
+      const incomingIsRelated = this.#cronContinuesTodoStopGuardWorkChain(item);
+      let shouldAppend = true;
+      if (!incomingIsRelated && item.taskId) {
         const duplicateIndex = this.cronQueue.findIndex(
           (queued) =>
             queued.taskId === item.taskId &&
@@ -4284,22 +4984,32 @@ export class Session implements SessionContext {
         );
         if (duplicateIndex >= 0) {
           this.cronQueue[duplicateIndex] = item;
-          return;
+          shouldAppend = false;
         }
       }
 
-      const unrelatedIndices = this.cronQueue
-        .map((queued, index) =>
-          this.#cronContinuesTodoStopGuardWorkChain(queued) ? -1 : index,
-        )
-        .filter((index) => index >= 0);
-      if (unrelatedIndices.length >= MAX_DEFERRED_UNRELATED_CRON_QUEUE) {
-        const evictedIndex = unrelatedIndices[0]!;
+      const maxBeforeAppend =
+        MAX_DEFERRED_UNRELATED_CRON_QUEUE -
+        (shouldAppend && !incomingIsRelated ? 1 : 0);
+      let unrelatedCount = this.cronQueue.filter(
+        (queued) => !this.#cronContinuesTodoStopGuardWorkChain(queued),
+      ).length;
+      const evictedTaskIds: string[] = [];
+      while (unrelatedCount > maxBeforeAppend) {
+        const evictedIndex = this.cronQueue.findIndex(
+          (queued) => !this.#cronContinuesTodoStopGuardWorkChain(queued),
+        );
+        if (evictedIndex < 0) break;
         const [evicted] = this.cronQueue.splice(evictedIndex, 1);
+        evictedTaskIds.push(evicted?.taskId ?? 'unknown');
+        unrelatedCount--;
+      }
+      if (evictedTaskIds.length > 0) {
         debugLogger.warn(
-          `Cron queue overflow while automatic work is deferred: evicting task=${evicted?.taskId ?? 'unknown'}`,
+          `Cron queue overflow while automatic work is deferred: evicted ${evictedTaskIds.length} unrelated task(s): ${evictedTaskIds.join(', ')}`,
         );
       }
+      if (!shouldAppend) return;
     }
 
     this.cronQueue.push(item);
@@ -4415,8 +5125,10 @@ export class Session implements SessionContext {
    */
   async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(item),
+    return runWithInvocationContext(undefined, () =>
+      sessionIdContext.run(this.config.getSessionId(), () =>
+        this.#executeCronPromptInner(item),
+      ),
     );
   }
 
@@ -4434,6 +5146,10 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
+        let cronCompleted = false;
+        const channelDeliveryCapture = item.delivery
+          ? { finalText: '' }
+          : undefined;
         await withInteractionSpan(
           this.config,
           {
@@ -4617,6 +5333,10 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                const channelDeliveryResponseBlock =
+                  beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                const channelDeliveryCheckpoint =
+                  channelDeliveryResponseBlock?.length ?? 0;
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -4651,6 +5371,7 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          channelDeliveryResponseBlock?.push(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -4674,6 +5395,15 @@ export class Session implements SessionContext {
                       resp.type === StreamEventType.RETRY ||
                       resp.type === StreamEventType.MODEL_FALLBACK
                     ) {
+                      if (
+                        resp.type === StreamEventType.MODEL_FALLBACK ||
+                        !resp.isContinuation
+                      ) {
+                        if (channelDeliveryResponseBlock) {
+                          channelDeliveryResponseBlock.length =
+                            channelDeliveryCheckpoint;
+                        }
+                      }
                       await finalizeToolCallPreparations(
                         preparationTracker,
                         true,
@@ -4698,6 +5428,12 @@ export class Session implements SessionContext {
                     await messageDisplay?.finish();
                   }
                 }
+
+                commitChannelDeliveryResponseBlock(
+                  channelDeliveryCapture,
+                  channelDeliveryResponseBlock,
+                  functionCalls.length > 0,
+                );
 
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
@@ -4737,6 +5473,7 @@ export class Session implements SessionContext {
                   }
                 }
               }
+              let stopReason: PromptResponse['stopReason'] = 'end_turn';
               if (this.todoStopGuard.needsStopInspection) {
                 const guardStop = await this.#handleStopHookLoop(
                   ac,
@@ -4744,11 +5481,15 @@ export class Session implements SessionContext {
                   false,
                   undefined,
                   false,
+                  undefined,
+                  channelDeliveryCapture,
                 );
+                stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
                   this.#stopCronAfterTokenLimit();
                 }
               }
+              cronCompleted = stopReason === 'end_turn' && !ac.signal.aborted;
             } catch (error) {
               if (ac.signal.aborted) {
                 this.todoStopGuard.suspend();
@@ -4781,6 +5522,24 @@ export class Session implements SessionContext {
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
         );
+        if (
+          cronCompleted &&
+          item.delivery &&
+          item.taskId &&
+          item.firedAt !== undefined
+        ) {
+          this.#scheduleChannelDelivery({
+            sessionId: this.sessionId,
+            deliveryId: `${item.taskId}:${item.firedAt}`,
+            source: 'scheduled',
+            target: item.delivery.target,
+            text: normalizeChannelDeliveryText(
+              channelDeliveryCapture?.finalText ?? '',
+            ),
+            taskId: item.taskId,
+            firedAt: item.firedAt,
+          });
+        }
       },
     );
   }
@@ -4810,6 +5569,8 @@ export class Session implements SessionContext {
           taskId: meta.agentId,
           status: meta.status,
           kind: 'agent',
+          continuesTodoStopGuardWorkChain:
+            this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
           toolUseId: meta.toolUseId,
         });
       },
@@ -4827,6 +5588,11 @@ export class Session implements SessionContext {
         taskId: meta.monitorId,
         status: meta.status,
         kind: 'monitor',
+        continuesTodoStopGuardWorkChain:
+          this.#monitorContinuesTodoStopGuardWorkChain(
+            meta.monitorId,
+            meta.ownerAgentId,
+          ),
         toolUseId: meta.toolUseId,
       });
     });
@@ -4839,6 +5605,8 @@ export class Session implements SessionContext {
         taskId: meta.shellId,
         status: meta.status,
         kind: 'shell',
+        continuesTodoStopGuardWorkChain:
+          !this.todoStopGuardBackgroundBaseline.shells.has(meta.shellId),
       });
     });
 
@@ -4972,8 +5740,10 @@ export class Session implements SessionContext {
         if (nextIndex < 0) break;
         const [item] = this.notificationQueue.splice(nextIndex, 1);
         if (!item) break;
-        await sessionIdContext.run(this.config.getSessionId(), () =>
-          this.#executeBackgroundNotificationPromptInner(item),
+        await runWithInvocationContext(undefined, () =>
+          sessionIdContext.run(this.config.getSessionId(), () =>
+            this.#executeBackgroundNotificationPromptInner(item),
+          ),
         );
       }
     } finally {
@@ -5025,7 +5795,12 @@ export class Session implements SessionContext {
           const notificationParts: Part[] = [{ text: item.modelText }];
           this.config
             .getChatRecordingService()
-            ?.recordNotification(notificationParts, item.displayText);
+            ?.recordNotification(notificationParts, item.displayText, {
+              taskId: item.taskId,
+              status: item.status,
+              kind: item.kind,
+              toolUseId: item.toolUseId,
+            });
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();
@@ -5609,6 +6384,7 @@ export class Session implements SessionContext {
     promptId: string,
     functionCalls: FunctionCall[],
     toolLoopState?: DaemonToolLoopState,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     const generatedCallIdBase = randomUUID();
@@ -5950,6 +6726,7 @@ export class Session implements SessionContext {
             recordSkippedToolCall,
             queueToolResultRecord,
             executionCallIds.get(calls[i]),
+            onFullTurnModel,
           );
           results[i] = r;
           if (r.loopDetected) {
@@ -5984,6 +6761,7 @@ export class Session implements SessionContext {
           recordSkippedToolCall,
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
+          onFullTurnModel,
         )
           .then((r) => {
             results[idx] = r;
@@ -6116,6 +6894,7 @@ export class Session implements SessionContext {
               recordSkippedToolCall,
               queueToolResultRecord,
               executionCallIds.get(fc),
+              onFullTurnModel,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -6199,6 +6978,7 @@ export class Session implements SessionContext {
     ) => Promise<Part>,
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -6333,14 +7113,20 @@ export class Session implements SessionContext {
         ? structuredClone(args)
         : args;
 
-    const toolSpan = startToolSpan(policyToolName, {
-      'tool.call_id': callId,
-      // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
-      // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
-      // matching daemon/ACP tool spans during the migration window.
-      call_id: callId,
-      tool_name: policyToolName,
-    });
+    const toolSpan = startToolSpan(
+      policyToolName,
+      {
+        'tool.call_id': callId,
+        'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
+        // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
+        // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
+        // matching daemon/ACP tool spans during the migration window.
+        call_id: callId,
+        tool_name: policyToolName,
+      },
+      tool.description,
+      promptId,
+    );
     let spanSuccess = false;
 
     try {
@@ -6392,6 +7178,12 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
+          if (policyToolName === ToolNames.MONITOR) {
+            const callIdAware = invocation as {
+              setCallId?: (id: string) => void;
+            };
+            callIdAware.setCallId?.(callId);
+          }
           toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its
@@ -7114,6 +7906,48 @@ export class Session implements SessionContext {
             }
           }
 
+          const continuedAgentId =
+            toolName === ToolNames.SEND_MESSAGE &&
+            typeof args['task_id'] === 'string' &&
+            args['task_id'].length > 0
+              ? args['task_id']
+              : undefined;
+          const provisionalRelatedAgent =
+            continuedAgentId !== undefined &&
+            !this.relatedAgentIds.has(continuedAgentId);
+          if (provisionalRelatedAgent) {
+            this.provisionalRelatedAgentCounts.set(
+              continuedAgentId,
+              (this.provisionalRelatedAgentCounts.get(continuedAgentId) ?? 0) +
+                1,
+            );
+          }
+          let relatedAgentSettled = false;
+          const settleRelatedAgent = (succeeded: boolean) => {
+            if (
+              relatedAgentSettled ||
+              !provisionalRelatedAgent ||
+              !continuedAgentId
+            ) {
+              return;
+            }
+            relatedAgentSettled = true;
+            const remaining =
+              (this.provisionalRelatedAgentCounts.get(continuedAgentId) ?? 1) -
+              1;
+            if (remaining > 0) {
+              this.provisionalRelatedAgentCounts.set(
+                continuedAgentId,
+                remaining,
+              );
+            } else {
+              this.provisionalRelatedAgentCounts.delete(continuedAgentId);
+            }
+            if (succeeded) {
+              this.relatedAgentIds.add(continuedAgentId);
+            }
+          };
+
           const execSpan = startToolExecutionSpan();
           let toolResult: ToolResult;
           let isExecutionTimeout = false;
@@ -7161,6 +7995,17 @@ export class Session implements SessionContext {
               `Qwen Code is executing tool ${toolName}`,
             );
             try {
+              try {
+                addToolArgumentsAttributes(
+                  this.config,
+                  toolSpan,
+                  invocation.params,
+                );
+              } catch {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to record tool arguments telemetry',
+                );
+              }
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
@@ -7172,6 +8017,7 @@ export class Session implements SessionContext {
             isExecutionTimeout =
               toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
             aborted = activeToolAbortSignal.aborted && !isExecutionTimeout;
+            settleRelatedAgent(!toolResult.error && !aborted);
             endToolExecutionSpan(execSpan, {
               success: !toolResult.error && !aborted,
               error: aborted
@@ -7185,6 +8031,7 @@ export class Session implements SessionContext {
               ...heartbeatSpanAttributes(),
             });
           } catch (execError) {
+            settleRelatedAgent(false);
             endToolExecutionSpan(execSpan, {
               success: false,
               error: activeToolAbortSignal.aborted
@@ -7213,7 +8060,7 @@ export class Session implements SessionContext {
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
-          const responseParts = toolResult.error
+          let responseParts = toolResult.error
             ? convertToFunctionErrorResponse(
                 toolName,
                 callId,
@@ -7334,6 +8181,22 @@ export class Session implements SessionContext {
             });
           }
 
+          const visionBridgeNotices: string[] = [];
+          responseParts = await bridgeToolResultImages({
+            config: this.config,
+            responseParts,
+            signal: activeToolAbortSignal,
+            onFullTurnModel,
+            onVisionBridgeNotice: (notice) => visionBridgeNotices.push(notice),
+          });
+          const visionBridgeNotice =
+            visionBridgeNotices.length > 0
+              ? visionBridgeNotices.join('\n')
+              : undefined;
+          if (visionBridgeNotice) {
+            await this.messageEmitter.emitAgentMessage(visionBridgeNotice);
+          }
+
           // Handle TodoWriteTool: extract todos and send plan update
           if (isTodoWriteTool) {
             const todos = this.planEmitter.extractTodos(
@@ -7389,6 +8252,9 @@ export class Session implements SessionContext {
               callId,
               status,
               resultDisplay: toolResult.returnDisplay,
+              ...(visionBridgeNotice !== undefined
+                ? { visionBridgeNotice }
+                : {}),
               error: toolResult.error
                 ? new Error(toolResult.error.message)
                 : undefined,
@@ -7397,6 +8263,20 @@ export class Session implements SessionContext {
           });
 
           spanSuccess = succeeded;
+          if (succeeded && !nestedPermissionCancelled) {
+            const result = responseParts.find(
+              (part) => part.functionResponse !== undefined,
+            )?.functionResponse?.response;
+            if (result !== undefined) {
+              try {
+                addToolCallResultAttributes(this.config, toolSpan, result);
+              } catch {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to record tool result telemetry',
+                );
+              }
+            }
+          }
           if (toolResult.error) {
             spanError = toolResult.error.message;
           } else if (aborted) {

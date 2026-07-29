@@ -500,7 +500,9 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
-          trap 'rm -f "$LOG_PATH"' EXIT
+          # Set by configure_qwen_network once the wrapper dir exists.
+          PROXY_BIN=""
+          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -535,8 +537,16 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
-            mkdir -p "$proxy_bin"
+            # A fixed path is a landmine on the shared self-hosted runner:
+            # RUNNER_TEMP survives across jobs, and the triage workflow's
+            # containerised jobs write this same path as root through the
+            # RUNNER_TEMP bind mount. This job runs as the unprivileged runner
+            # user, so once that happens it can neither overwrite the wrapper
+            # nor remove the root-owned directory holding it, and every review
+            # landing on that runner dies here with EACCES. Use a private
+            # directory per run, cleaned up by the EXIT trap.
+            proxy_bin="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-network-bin.XXXXXX")"
+            PROXY_BIN="$proxy_bin"
 
             if command -v gh >/dev/null 2>&1; then
               local real_gh
@@ -827,25 +837,25 @@ jobs:
           }
 
           # Retry budget: all attempts SHARE QWEN_TIMEOUT, so two tries can never
-          # exceed the single-review budget (nor the job timeout). The first
-          # attempt gets the whole remaining budget; a retry is capped at 5 min —
-          # a transient that has cleared succeeds fast, and a still-failing retry
-          # can't burn another hour. Retry only a `retryable` outcome, only once,
-          # and only with real budget left.
+          # exceed the single-review budget (nor the job timeout), and that
+          # shared budget is the only thing that needs to bound them. A retry
+          # re-runs the whole review from scratch rather than resuming the failed
+          # one, so on a large PR it spends minutes re-fetching, re-chunking and
+          # re-launching agents before the first finding exists — a short retry
+          # cap makes the retry die on the clock instead of clearing the
+          # transient it was meant to clear. Every attempt therefore gets the
+          # whole remaining budget. Retry only a `retryable` outcome, only once,
+          # and only when enough budget is left for the retry to plausibly
+          # finish; below that, report the transient failure so the next run
+          # starts over with a full budget.
           BUDGET_SECONDS=$(( QWEN_TIMEOUT * 60 ))
-          RETRY_CAP_SECONDS=300
           RETRY_BACKOFF_SECONDS=60
+          RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
           START_TS="$(date +%s)"
           attempt=1
           while :; do
-            remaining=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
-            if [ "$attempt" -eq 1 ]; then
-              attempt_timeout="$remaining"
-            else
-              attempt_timeout="$RETRY_CAP_SECONDS"
-              [ "$remaining" -lt "$attempt_timeout" ] && attempt_timeout="$remaining"
-            fi
+            attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
@@ -854,7 +864,7 @@ jobs:
               break
             fi
             if [ "$OUTCOME" = "retryable" ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ] \
-              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_CAP_SECONDS ))" ]; then
+              && [ "$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))" -gt "$(( RETRY_BACKOFF_SECONDS + RETRY_MIN_SECONDS ))" ]; then
               echo "::warning::Transient review failure (${REASON}) — retrying once after ${RETRY_BACKOFF_SECONDS}s."
               sleep "$RETRY_BACKOFF_SECONDS"
               attempt=$(( attempt + 1 ))

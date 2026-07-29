@@ -21,6 +21,7 @@ export const ToolNames = {
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
+  ZOOM_IMAGE: 'zoom_image',
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
@@ -32,6 +33,7 @@ export const ToolNames = {
   ENTER_PLAN_MODE: 'enter_plan_mode',
   WEB_FETCH: 'web_fetch',
   WEB_SEARCH: 'web_search',
+  IMAGE_GEN: 'image_gen',
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
@@ -65,6 +67,8 @@ export const ToolNames = {
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  GET_GOAL: 'get_goal',
+  UPDATE_GOAL: 'update_goal',
 } as const;
 
 /**
@@ -76,6 +80,7 @@ export const ToolDisplayNames = {
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
+  ZOOM_IMAGE: 'ZoomImage',
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
@@ -87,6 +92,7 @@ export const ToolDisplayNames = {
   ENTER_PLAN_MODE: 'EnterPlanMode',
   WEB_FETCH: 'WebFetch',
   WEB_SEARCH: 'WebSearch',
+  IMAGE_GEN: 'ImageGen',
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
@@ -115,6 +121,8 @@ export const ToolDisplayNames = {
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  GET_GOAL: 'Goal',
+  UPDATE_GOAL: 'UpdateGoal',
 } as const;
 
 // Migration from old tool names to new tool names
