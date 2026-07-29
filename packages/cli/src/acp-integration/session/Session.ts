@@ -8634,7 +8634,6 @@ export class Session implements SessionContext {
     );
     const mcpServerParts =
       this.#resolveMcpServerMentionParts(mcpServerMentions);
-    const filteringOptions = this.config.getFileFilteringOptions();
     const revalidatedTextPaths: string[] = [];
     const validatedPathIdentities = new Map<
       string,
@@ -8649,6 +8648,10 @@ export class Session implements SessionContext {
         return canonicalPath ? [[canonicalPath, fileUri] as const] : [];
       }),
     ];
+    const filteringOptions =
+      candidatePathsToRead.length > 0
+        ? this.config.getFileFilteringOptions()
+        : undefined;
     const displayPaths = new Map<string, string>();
     const acceptedFileUris = new Set<string>();
     for (const [textPath, displayPath] of candidatePathsToRead) {
@@ -8656,6 +8659,8 @@ export class Session implements SessionContext {
         if (
           resolveExistingFile(textPath) !== textPath ||
           !this.config.getWorkspaceContext().isPathWithinWorkspace(textPath) ||
+          (textPathSpecsToRead.has(textPath) &&
+            !getSpecificMimeType(textPath)?.startsWith('image/')) ||
           this.config
             .getFileService()
             .shouldIgnoreFile(displayPath, filteringOptions) ||

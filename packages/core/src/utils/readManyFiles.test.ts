@@ -184,6 +184,28 @@ describe('readManyFiles', () => {
       expect(result.files).toHaveLength(0);
     });
 
+    it('drops a validated read when the identity map has no matching path key', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const approvedStats = await fs.stat(absolutePath);
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [
+            path.join(tempRootDir, 'other.txt'),
+            { dev: approvedStats.dev, ino: approvedStats.ino },
+          ],
+        ]),
+      });
+
+      expect(contentToString(result.contentParts)).not.toContain(
+        'Content of approved.txt',
+      );
+      expect(result.files).toHaveLength(0);
+    });
+
     it('reads a validated file from its approved handle during an ABA path swap', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from '../core/inlineMediaLimit.js';
+import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError } from './errors.js';
 import type { ProcessedFileReadResult } from './fileUtils.js';
 import {
@@ -105,6 +106,7 @@ export interface ReadManyFilesResult {
 
 const DEFAULT_OUTPUT_HEADER = '\n--- Content from referenced files ---';
 const DEFAULT_OUTPUT_TERMINATOR = '\n--- End of content ---';
+const debugLogger = createDebugLogger('READ_MANY_FILES');
 
 /**
  * Reads content from multiple files and directories specified by paths.
@@ -145,10 +147,15 @@ export async function readManyFiles(
       const fullPath = path.resolve(projectRoot, normalizedPattern);
       const displayPath = displayPaths?.get(fullPath) ?? fullPath;
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
+      if (validatedPathIdentities && !validatedIdentity) {
+        debugLogger.debug(`Skipping ${fullPath}: missing validated identity.`);
+        continue;
+      }
       if (
         validatedIdentity &&
         !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
       ) {
+        debugLogger.debug(`Skipping ${fullPath}: identity changed.`);
         continue;
       }
       const stats = fs.existsSync(fullPath) ? fs.statSync(fullPath) : null;
@@ -164,6 +171,7 @@ export async function readManyFiles(
           validatedIdentity &&
           !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
         ) {
+          debugLogger.debug(`Skipping ${fullPath}: identity changed.`);
           continue;
         }
         contentParts.push(...dirParts);
@@ -178,7 +186,10 @@ export async function readManyFiles(
         const snapshot = needsSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
           : undefined;
-        if (needsSnapshot && !snapshot) continue;
+        if (needsSnapshot && !snapshot) {
+          debugLogger.debug(`Skipping ${fullPath}: snapshot failed.`);
+          continue;
+        }
         let readResult;
         try {
           readResult = await readFileContent(
@@ -258,7 +269,7 @@ async function snapshotValidatedFile(
     signal?.throwIfAborted();
     const source = await fs.promises.open(
       filePath,
-      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+      (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
     );
     try {
       const stats = await source.stat();
@@ -267,6 +278,7 @@ async function snapshotValidatedFile(
         stats.dev !== expected.dev ||
         stats.ino !== expected.ino
       ) {
+        debugLogger.debug(`Skipping ${filePath}: snapshot identity changed.`);
         return undefined;
       }
 
@@ -319,6 +331,9 @@ async function snapshotValidatedFile(
       await fs.promises.rm(snapshotDir, { recursive: true, force: true });
     }
     if (signal?.aborted || isAbortError(error)) throw error;
+    debugLogger.debug(
+      `Skipping ${filePath}: snapshot failed: ${getErrorMessage(error)}`,
+    );
     return undefined;
   }
 }
