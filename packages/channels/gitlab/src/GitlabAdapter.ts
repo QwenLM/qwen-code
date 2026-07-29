@@ -74,6 +74,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
 
+    if (cfg.groupPolicy !== 'open') {
+      process.stderr.write(
+        `[Channel:${this.name}] warning: groupPolicy is "${cfg.groupPolicy ?? 'disabled'}"; must be "open" for todos to be dispatched\n`,
+      );
+    }
+
     this.api = new Gitlab({
       host: this.apiHost,
       token: cfg.token,

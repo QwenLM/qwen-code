@@ -134,7 +134,11 @@ Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public pr
 
 ## Mention Detection
 
-The adapter always sets `isMentioned = true` on dispatched envelopes, because GitLab has already determined the mention when creating the todo. The `action_prompt_template` config is the real event filter — only actions with a configured template are processed. The `GroupGate` `requireMention` setting has no effect on this adapter (it is effectively bypassed). The `@bot` mention is stripped from the message text before dispatch via `stripBotMention`.
+The adapter always sets `isMentioned = true` on dispatched envelopes, because GitLab has already determined the mention when creating the todo. The `action_prompt_template` config is the real event filter — only actions with a configured template are processed. The `@bot` mention is stripped from the message text before dispatch via `stripBotMention`.
+
+### ⚠️ groupPolicy Must Be "open"
+
+`groupPolicy` **must be set to `"open"`** for todos to be processed. The default value `"disabled"` silently drops all mentions: todos are marked done and the cursor advances, but no dispatch occurs and no error is logged. If your bot is not responding to mentions, check that `groupPolicy` is not `"disabled"`.
 
 ## How It Works
 
@@ -147,7 +151,7 @@ The adapter uses GitLab's Todos API as the message source:
 5. **Detect mention type** via `target_url` anchor:
    - `#note_123` present → comment mention → text is `todo.body` (the comment)
    - No anchor → description mention → text is the issue/MR description
-6. **Dispatch** the envelope through `handleInbound` (GroupGate runs but always passes since `isMentioned` is forced true)
+6. **Dispatch** the envelope through `handleInbound` (requires `groupPolicy: "open"`)
 7. **Advance cursor** and **mark todo done** (best-effort)
 
 The cursor (`lastProcessedId`) advances regardless of dispatch success or failure. Failed dispatches post a ⚠️ error comment on the issue/MR and are not retried — the user can re-mention the bot to trigger a new todo.
