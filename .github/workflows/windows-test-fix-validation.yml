@@ -20,7 +20,7 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
 
-      - run: 'npm ci --prefer-offline --no-audit --progress=false'
+      - run: 'npm ci --ignore-scripts --prefer-offline --no-audit --progress=false'
 
       - name: 'Run tests'
         env:
