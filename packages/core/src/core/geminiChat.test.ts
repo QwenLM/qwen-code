@@ -12713,6 +12713,7 @@ describe('GeminiChat', async () => {
         c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
       );
       expect(syntheticChunk).toBeDefined();
+      expect(syntheticChunk!.functionCalls).toHaveLength(1);
       const fc =
         syntheticChunk!.candidates![0]!.content!.parts![0]!.functionCall!;
       expect(fc.name).toBe('read_file');
