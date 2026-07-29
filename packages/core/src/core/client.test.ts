@@ -1727,7 +1727,10 @@ describe('Gemini Client (client.ts)', () => {
         })(),
       );
       const stream = client.sendMessageStream(
-        [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+        [
+          { functionResponse: { name: 'read_file', response: { ok: true } } },
+          'user changed priority mid-turn',
+        ],
         new AbortController().signal,
         'prompt-tool-result',
         { type: SendMessageType.ToolResult },
@@ -1745,6 +1748,9 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(functionResponseIndex).toBeGreaterThanOrEqual(0);
       expect(request.indexOf(reminder)).toBeGreaterThan(functionResponseIndex);
+      expect(request.indexOf(reminder)).toBeLessThan(
+        request.indexOf('user changed priority mid-turn'),
+      );
       expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
         'prompt-tool-result',
       );

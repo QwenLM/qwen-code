@@ -2930,7 +2930,17 @@ export class GeminiClient {
         const activeTodoReminder =
           this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
-          requestToSend = [...requestToSend, activeTodoReminder];
+          const insertAt = requestToSend.findIndex(
+            (part) =>
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part),
+          );
+          requestToSend.splice(
+            insertAt < 0 ? requestToSend.length : insertAt,
+            0,
+            activeTodoReminder,
+          );
         }
         await this.microcompactHistoryBeforeSend(null, {
           sizeOnly: true,
