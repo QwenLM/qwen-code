@@ -3237,7 +3237,7 @@ describe('qwen-autofix workflow', () => {
     // a broken filter): extract the real jq and run it against fixture
     // ic.json shapes.
     const censusSrc = prepareBranchAndFeedbackStep.match(
-      /PRIOR_TIMEOUTS="\$\(jq -r[\s\S]*?ic\.json"\)"/,
+      /PRIOR_TIMEOUTS="\$\(jq -r[\s\S]*?ic\.json" 2> \/dev\/null \|\| true\)"/,
     )?.[0];
     expect(censusSrc).toBeTruthy();
     const TIMEOUT_HEADLINE =
@@ -5558,13 +5558,18 @@ describe('qwen-autofix workflow', () => {
     expect(decision).toBeTruthy();
     const SENTINEL = '9999-12-31T23:59:59Z';
     const NEWEST = '2026-07-20T10:00:00Z';
-    const run = (env) => {
+    const run = (env, { gateRejection = false } = {}) => {
       // The gate-rejection branch (OUTCOME=failed, no crash/timeout) now probes
       // whether the PR is behind main and, if so, updates the base — so stub gh:
       // commits/<main> → a SHA, compare → CMP_STATUS_STUB (default 'ahead', i.e.
       // NOT behind, so the existing rejection cases still hand off), and
       // update-branch → UPDATE_OK_STUB (default success).
       const dir = mkdtempSync(join(tmpdir(), 'decision-'));
+      // reject_fix is the ONLY writer of gate-rejection.md, so its presence is
+      // the exact "the gate actually ran" discriminator the headline keys on.
+      if (gateRejection) {
+        writeFileSync(join(dir, 'gate-rejection.md'), '**build failed**');
+      }
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
@@ -5590,6 +5595,7 @@ describe('qwen-autofix workflow', () => {
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
             REPO: 'o/r',
             PR: '1',
             REPORT_HEAD: 'prhead123',
@@ -5612,10 +5618,24 @@ describe('qwen-autofix workflow', () => {
 
     // Declared rejection, PR up to date ('ahead') -> a genuine fix failure ->
     // advance the watermark and hand off to a human.
-    const rejected = run({ OUTCOME: 'failed' });
+    // A genuine gate rejection: reject_fix wrote gate-rejection.md, so the
+    // headline names the gate.
+    const rejected = run({ OUTCOME: 'failed' }, { gateRejection: true });
     expect(rejected.split('|')[0]).toBe(NEWEST);
     expect(rejected).toContain('Could not produce a passing fix');
+    expect(rejected).toContain('the verification gate rejected the attempt');
     expect(rejected).toContain('stays engaged');
+    // outcome=failed WITHOUT a gate decision (failure.md abort, dirty tree,
+    // unchanged branch, or missing summary) must NOT claim the gate rejected:
+    // gate-rejection.md is written only by reject_fix, so its absence is the
+    // exact discriminator. A blanket clause would repeat the
+    // wording-doesn't-match-behaviour bug this PR fixes.
+    const failedNoGate = run({ OUTCOME: 'failed' });
+    expect(failedNoGate.split('|')[0]).toBe(NEWEST);
+    expect(failedNoGate).toContain('Could not produce a passing fix');
+    expect(failedNoGate).not.toContain(
+      'the verification gate rejected the attempt',
+    );
 
     // #7471: the gate rejected the fix, but the PR was BEHIND main — the build
     // failed on a stale base (a dependency main already removed), not the fix.
@@ -6058,6 +6078,14 @@ describe('qwen-autofix workflow', () => {
         apiErrorDetail: '429 rate limited',
         apiErrorKind: 'transient',
       }),
+    ).toMatchObject({ terminal: false });
+    // The timeout breaker ALSO inherits the stale-base exemption from the
+    // outer guard: a stale-base retry on a window already carrying the
+    // timeout cap must not terminate (the base was just updated, the next
+    // round builds fresh). Pinned so the same hoist that would delete the
+    // API-error exemption above cannot silently delete this one either.
+    expect(
+      run(Array(5).fill(TIMEOUT_HEAD), { staleBaseRetry: true }),
     ).toMatchObject({ terminal: false });
     // When BOTH breakers would fire, the consecutive one (evaluated first)
     // keeps its headline — a terminal round is never overridden.

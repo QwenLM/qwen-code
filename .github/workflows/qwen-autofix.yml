@@ -3015,8 +3015,10 @@ jobs:
             # two — each a full agent run with nothing pushed). From the
             # second attempt on, tell the agent to narrow. Counted since
             # the last pushed/no-change round, NOT cumulatively: a push
-            # falsifies "not converging", and a single old timeout must not
-            # degrade every later round in a 100-round window. (The
+            # falsifies "not converging" and resets the count, so a recovered
+            # PR stops seeing the warning; until a round pushes or no-ops it
+            # fires on every failing round (gate rejections included) —
+            # correctly, since nothing has converged yet. (The
             # BREAKER in the report step stays cumulative — a push does not
             # make the next timeout cheaper in budget terms.) Window-scoped
             # like every other census (LIVE_REARM_KEY is the live window),
@@ -3032,7 +3034,7 @@ jobs:
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
-              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing")) ] | length' "${WORKDIR}/ic.json")"
+              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing")) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
             if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]; then
               echo
               echo '## Budget warning: previous round(s) ran out of time'
@@ -3834,7 +3836,15 @@ jobs:
                   # management continues for new feedback and base conflicts
                   # — #7929 posted the old wording and then kept pushing
                   # rounds, which read as a contradiction.
-                  HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS}) — the verification gate rejected the attempt. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
+                  # Name the gate ONLY when it actually ran: this branch is
+                  # reached for every outcome=failed verdict, but reject_fix
+                  # is the sole writer of gate-rejection.md — the failure.md /
+                  # dirty-tree / unchanged-branch / missing-summary paths made
+                  # no gate decision, so a blanket clause would repeat the very
+                  # wording-doesn't-match-behaviour bug this PR fixes.
+                  GATE_CLAUSE=''
+                  [[ -s "${WORKDIR}/gate-rejection.md" ]] && GATE_CLAUSE=' — the verification gate rejected the attempt'
+                  HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
