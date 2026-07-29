@@ -51,18 +51,20 @@ jobs:
           VERSION: '${{ steps.version.outputs.version }}'
         run: |-
           set -euo pipefail
-          global_prefix="$(npm prefix -g)"
-          if [[ -w "${global_prefix}" ]]; then
-            npm install -g "@qwen-code/qwen-code@${VERSION}"
-          else
-            sudo env "NPM_CONFIG_PREFIX=${global_prefix}" npm install -g "@qwen-code/qwen-code@${VERSION}"
-          fi
+          # The runner service resolves the system-wide qwen binary. Do not
+          # carry a runner user's custom npm prefix into the sudo install.
+          (
+            cd "${RUNNER_TEMP:?}"
+            sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
+          )
 
       - name: 'Verify version'
         env:
           VERSION: '${{ steps.version.outputs.version }}'
         run: |-
           set -euo pipefail
-          actual="$(qwen --version)"
+          qwen_path="$(command -v qwen)"
+          actual="$("${qwen_path}" --version)"
+          echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           test "${actual}" = "${VERSION}"
