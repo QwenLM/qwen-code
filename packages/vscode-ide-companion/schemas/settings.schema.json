@@ -705,6 +705,15 @@
               "type": "boolean",
               "default": false
             },
+            "cacheRetention": {
+              "description": "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire) and '1h' requests the extended cache tier (ttl: '1h').",
+              "type": "string"
+            },
+            "cacheRetentionByBlock": {
+              "description": "Optional per-anchor override for Anthropic cache retention. Keys (system, tool, user.last) override generationConfig.cacheRetention when present.",
+              "type": "object",
+              "additionalProperties": true
+            },
             "splitToolMedia": {
               "description": "When true, media (images / audio / video / files) returned by tool calls — including the built-in read_file and MCP tools — is split into a follow-up user message instead of being embedded in the `role: \"tool\"` message. The OpenAI Chat Completions spec only permits text on tool messages, so strict OpenAI-compatible servers (e.g., doubao / new-api / LM Studio) silently drop or reject embedded media and the model never sees an image read via read_file (QwenLM/qwen-code#4876, #3616). Default true is spec-compliant and safe for permissive providers; set false only to restore the legacy embed-in-tool-message behavior.",
               "type": "boolean",

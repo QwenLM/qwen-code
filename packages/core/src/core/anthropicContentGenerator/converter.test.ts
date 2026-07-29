@@ -2637,5 +2637,140 @@ describe('AnthropicContentConverter', () => {
         expect(result[0].cache_control).toEqual({ type: 'ephemeral' });
       });
     });
+
+    describe('cacheRetention', () => {
+      it('omits ttl on the system block when cacheRetention is unset (ephemeral default)', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: 'hi',
+          config: { systemInstruction: 'sys' },
+        });
+        expect(system).toEqual([
+          { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+        ]);
+      });
+
+      it("sets ttl:'1h' on system, last tool, and trailing user message when cacheRetention is '1h'", async () => {
+        const { system, messages } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          { cacheRetention: '1h' },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        });
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          { cacheRetention: '1h' },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it('composes ttl with scope:"global" on the same cache_control entry', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          { cacheRetention: '1h', useGlobalCacheScope: true },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: {
+              type: 'ephemeral',
+              scope: 'global',
+              ttl: '1h',
+            },
+          },
+        ]);
+      });
+
+      it('honors a per-anchor cacheRetentionByBlock override over the top-level default', async () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { system: '1h' },
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+
+        // tool anchor falls back to the top-level 'ephemeral' (no ttl).
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { system: '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({ type: 'ephemeral' });
+      });
+
+      it('carries ttl on both halves of a split system prompt (staticSystemPrefix)', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'stable prefixvolatile suffix' },
+          },
+          { cacheRetention: '1h', staticSystemPrefix: 'stable prefix' },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'stable prefix',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+          {
+            type: 'text',
+            text: 'volatile suffix',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+      });
+    });
   });
 });
