@@ -117,6 +117,11 @@ describe('Interactive file system', () => {
         }
         expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
+        // The interactive UI renders a successful read_file as a one-line
+        // summary, not its content, so '1.0.0' here matches the fake model's
+        // scripted echo (requestIndex 1), not the read result. The write-side
+        // poll below still grounds the test in the real filesystem, and
+        // read_file correctness is covered by its own unit tests.
         const containsExpectedVersion = await rig.waitForText('1.0.0');
         if (!containsExpectedVersion) {
           printDebugInfo(rig, rig._interactiveOutput, {
@@ -155,6 +160,14 @@ describe('Interactive file system', () => {
           printDebugInfo(rig, rig._interactiveOutput, { toolCall });
         }
         expect(updated, 'Expected file content to contain 1.0.1').toBe(true);
+
+        // The file is mutated before the final model turn (requestIndex 3)
+        // completes, so wait for that turn's rendered text before counting
+        // requests. The exact count catches a spurious extra request that
+        // would otherwise silently shift the requestIndex-based dispatch.
+        const done = await rig.waitForText('Done. The version is now 1.0.1.');
+        expect(done, 'Expected final assistant message to render').toBe(true);
+        expect(fakeServer.requests).toHaveLength(4);
       } finally {
         ptyProcess.kill();
         await promise;
