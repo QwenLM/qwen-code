@@ -196,8 +196,20 @@ jobs:
 
       - name: 'Validate findings'
         run: |-
+          # The scan runner exits 0 on an agent-written failure.md (blocked is
+          # a reportable outcome, not an infra error), so the gate lives here:
+          # never fix from a scan that said it could not complete.
+          if [[ -s "${WORKDIR}/failure.md" ]]; then
+            echo '::error::Scan phase reported it was blocked:'
+            cat "${WORKDIR}/failure.md"
+            exit 1
+          fi
           if [[ ! -s "${WORKDIR}/findings.json" ]]; then
             echo '::error::findings.json not found or empty.'
+            exit 1
+          fi
+          if ! jq -e . "${WORKDIR}/findings.json" > /dev/null; then
+            echo '::error::findings.json is not valid JSON.'
             exit 1
           fi
           echo "Findings: $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
