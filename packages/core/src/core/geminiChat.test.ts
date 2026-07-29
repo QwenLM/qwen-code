@@ -12730,6 +12730,49 @@ describe('GeminiChat', async () => {
       expect(hasRawXml).toBe(false);
     });
 
+    it('retains a short text prefix in history when recovering XML tool calls', async () => {
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      const text = 'Sure.\n' + xml;
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield xmlChunk(text, 'STOP');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-prefix',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      // The recovered tool call is still executed despite the prefix.
+      const syntheticChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      );
+      expect(syntheticChunk).toBeDefined();
+
+      // History keeps the short prefix as a text part ahead of the recovered
+      // functionCall and drops the raw XML (--resume fidelity).
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+      const textIndex = parts.findIndex((p) => p.text === 'Sure.');
+      const callIndex = parts.findIndex((p) => p.functionCall);
+      expect(textIndex).toBeGreaterThanOrEqual(0);
+      expect(callIndex).toBeGreaterThan(textIndex);
+      expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
+        false,
+      );
+    });
+
     it('does not recover when a structured tool call is already present', async () => {
       const xml =
         '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
