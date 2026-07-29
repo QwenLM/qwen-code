@@ -146,6 +146,50 @@ describe('GET /file', () => {
     });
   });
 
+  it('returns a bounded line window for text above MAX_READ_BYTES', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const content = lines.join('\n');
+    expect(Buffer.byteLength(content)).toBeGreaterThan(MAX_READ_BYTES);
+    await fsp.writeFile(path.join(h.workspace, 'large.txt'), content);
+
+    const res = await request(h.app)
+      .get('/file?path=large.txt&line=3&limit=20')
+      .set('Host', loopbackHost());
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      kind: 'file',
+      path: 'large.txt',
+      content: lines.slice(2, 22).join('\n'),
+      sizeBytes: Buffer.byteLength(content),
+      truncated: true,
+      originalLineCount: null,
+    });
+    expect(res.body.hash).toBeUndefined();
+  });
+
+  it.each(['', '&line=2', '&maxBytes=1024', '&line=2&maxBytes=1024'])(
+    'keeps oversized reads without a finite limit behind the snapshot cap (%s)',
+    async (query) => {
+      const { MAX_READ_BYTES } = await import('../fs/policy.js');
+      await fsp.writeFile(
+        path.join(h.workspace, 'large-no-limit.txt'),
+        'x'.repeat(MAX_READ_BYTES + 1),
+      );
+
+      const res = await request(h.app)
+        .get(`/file?path=large-no-limit.txt${query}`)
+        .set('Host', loopbackHost());
+
+      expect(res.status).toBe(413);
+      expect(res.body.errorKind).toBe('file_too_large');
+    },
+  );
+
   it('attaches Cache-Control: no-store and X-Content-Type-Options: nosniff', async () => {
     await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'x');
     const res = await request(h.app)

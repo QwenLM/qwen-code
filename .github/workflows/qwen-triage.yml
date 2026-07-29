@@ -3080,10 +3080,13 @@ jobs:
             esac
           done
           git worktree prune -v || true
-          # Restore workspace ownership to the runner user so the next job's
-          # checkout step can clean the tree without EACCES. The prepare step
-          # chowned everything to node:node; without this, node_modules and
-          # .qwen/ remain node-owned and the next checkout's rm -rf fails.
+          # The verifier was deliberately made root-owned and read-only before
+          # the node-owned agent ran. Restore its owner write bits while this
+          # container still has root, then return the whole workspace to the
+          # runner user so every later checkout can clean it.
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"
+          fi
           RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
