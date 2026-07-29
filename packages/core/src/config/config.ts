@@ -251,6 +251,9 @@ const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
+/** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
+const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
+
 import {
   ModelsConfig,
   type ModelProvidersConfig,
@@ -1837,6 +1840,7 @@ export class Config {
   private readonly fileReadCacheDisabled: boolean;
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
+  private activeTodoReminderTurns = new Map<string, number>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -3645,6 +3649,7 @@ export class Config {
     this.pendingRecoveredAgentsNotice = null;
     this.getOwnActiveTodoReminders().clear();
     this.getOwnActiveTodoWorkChainOwners().clear();
+    this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -6056,6 +6061,15 @@ export class Config {
     return this.activeTodoWorkChainOwners;
   }
 
+  private getOwnActiveTodoReminderTurns(): Map<string, number> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoReminderTurns')
+    ) {
+      this.activeTodoReminderTurns = new Map();
+    }
+    return this.activeTodoReminderTurns;
+  }
+
   getActiveTodoWorkChainOwner(
     promptId: string,
     fallbackOwner = promptId,
@@ -6071,13 +6085,38 @@ export class Config {
     );
   }
 
+  /**
+   * Reads the reminder for injection, re-issuing it only every
+   * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
+   * chat history permanently, so per-turn injection would grow the context
+   * linearly with tool turns. `force` is for turn-start injections (retry /
+   * related automatic turns), which always need the context and reset the
+   * cadence.
+   */
+  takeActiveTodoReminder(promptId: string, force = false): string | undefined {
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    const reminder = this.getOwnActiveTodoReminders().get(owner);
+    if (!reminder) return undefined;
+    const turns = this.getOwnActiveTodoReminderTurns();
+    const elapsed = (turns.get(owner) ?? 0) + 1;
+    if (!force && elapsed < ACTIVE_TODO_REMINDER_REFRESH_TURNS) {
+      turns.set(owner, elapsed);
+      return undefined;
+    }
+    turns.set(owner, 0);
+    return reminder;
+  }
+
   setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
     const reminders = this.getOwnActiveTodoReminders();
     const owner = this.getActiveTodoWorkChainOwner(promptId);
     if (reminder) {
       reminders.set(owner, reminder);
+      // The todo_write result itself just presented the full state.
+      this.getOwnActiveTodoReminderTurns().set(owner, 0);
     } else {
       reminders.delete(owner);
+      this.getOwnActiveTodoReminderTurns().delete(owner);
     }
   }
 
@@ -6087,6 +6126,7 @@ export class Config {
     if (!continuedFrom) {
       reminders.clear();
       owners.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
       owners.set(promptId, promptId);
       return;
     }

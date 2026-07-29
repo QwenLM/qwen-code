@@ -2886,7 +2886,10 @@ export class GeminiClient {
         messageType === SendMessageType.Notification ||
         messageType === SendMessageType.Teammate
       ) {
-        const activeTodoReminder = this.config.getActiveTodoReminder(prompt_id);
+        const activeTodoReminder = this.config.takeActiveTodoReminder(
+          prompt_id,
+          true,
+        );
         const alreadyHasActiveTodoReminder = requestToSend.some(
           (part) =>
             part === activeTodoReminder ||
@@ -2924,7 +2927,8 @@ export class GeminiClient {
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
         }
-        const activeTodoReminder = this.config.getActiveTodoReminder(prompt_id);
+        const activeTodoReminder =
+          this.config.takeActiveTodoReminder(prompt_id);
         if (activeTodoReminder) {
           requestToSend = [...requestToSend, activeTodoReminder];
         }

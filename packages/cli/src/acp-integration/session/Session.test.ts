@@ -569,7 +569,7 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
-      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -801,7 +801,7 @@ describe('Session', () => {
   it('includes active Todo context on the first retry request', async () => {
     const reminder =
       '<system-reminder>unfinished todo: run tests</system-reminder>';
-    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
     mockChat.sendMessageStream = vi
       .fn()
       .mockImplementation(async () => createEmptyStream());
@@ -835,7 +835,7 @@ describe('Session', () => {
     vi.mocked(mockConfig.startAutomaticActiveTodoWorkChain).mockClear();
     const reminder =
       '<system-reminder>unfinished todo: wait for agent</system-reminder>';
-    vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+    vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
     const internals = session as unknown as {
       relatedAgentIds: Set<string>;
     };
@@ -6217,7 +6217,7 @@ describe('Session', () => {
         const todoReminder =
           '<system-reminder>unfinished todo: check tests</system-reminder>';
         const activeTodoReminders = new Map<string, string>();
-        vi.mocked(mockConfig.getActiveTodoReminder).mockImplementation(
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
           (promptId) => activeTodoReminders.get(promptId),
         );
         vi.mocked(mockConfig.setActiveTodoReminder).mockImplementation(

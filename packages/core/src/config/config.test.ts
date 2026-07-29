@@ -8953,6 +8953,42 @@ describe('Model Switching and Config Updates', () => {
     expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
   });
 
+  it('clears stale Todo reminders when a new ordinary work chain starts', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-old');
+    config.setActiveTodoReminder('prompt-old', 'old work');
+
+    config.startActiveTodoWorkChain('prompt-new');
+
+    expect(config.getActiveTodoReminder('prompt-new')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-old')).toBeUndefined();
+  });
+
+  it('re-issues the active Todo reminder only every third tool turn', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished work');
+
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+
+    config.setActiveTodoReminder('prompt-user', 'updated work');
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+  });
+
   it('moves related automatic work without clearing unrelated reminders', () => {
     const config = Object.create(Config.prototype) as Config;
     config.startActiveTodoWorkChain('prompt-user');

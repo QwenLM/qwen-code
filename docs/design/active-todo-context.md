@@ -18,7 +18,15 @@ automatic turn; unrelated cron and notification turns use an isolated owner
 that is removed when the turn ends. Inject the reminder on the first request of
 a retry or related automatic turn and after function responses on later tool
 turns. Clear it when all todos complete, a new ordinary work chain starts, or
-the session changes. The repeated reminder is capped at 4,000 characters.
+the session changes.
+
+Every injected copy is recorded permanently in chat history, so per-turn
+injection would grow the live context linearly with tool turns. Tool-turn
+injection therefore re-issues the reminder only every third tool turn since
+the last time the state was presented (the `todo_write` result itself counts);
+turn-start injections always fire and reset that cadence. The payload is a
+compact `- [status] content` line list capped at 800 characters. History stays
+append-only, so provider prefix caching is unaffected.
 
 This does not change stop semantics or enable `todoStopGuard`. The guard remains
 an optional bounded recovery after a model has already tried to stop; this

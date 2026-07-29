@@ -22,7 +22,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
-const MAX_ACTIVE_TODO_CONTEXT_CHARS = 4000;
+const MAX_ACTIVE_TODO_CONTEXT_CHARS = 800;
 
 export interface TodoWriteParams {
   todos: TodoItem[];
@@ -259,7 +259,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const promptId = promptIdContext.getStore();
       if (promptId) {
         const serializedTodos = escapeSystemReminderTags(
-          JSON.stringify(unfinishedTodos),
+          unfinishedTodos
+            .map((todo) => `- [${todo.status}] ${todo.content}`)
+            .join('\n'),
         );
         const todoContext = serializedTodos.slice(
           0,

@@ -2948,8 +2948,10 @@ export class Session implements SessionContext {
               this.pendingRecoveredAgentsNotice = null;
             }
 
-            const activeTodoReminder =
-              this.config.getActiveTodoReminder(promptId);
+            const activeTodoReminder = this.config.takeActiveTodoReminder(
+              promptId,
+              true,
+            );
             if (
               activeTodoReminder &&
               !parts.some((part) => part.text === activeTodoReminder)
@@ -4589,7 +4591,7 @@ export class Session implements SessionContext {
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
     }
-    const activeTodoReminder = this.config.getActiveTodoReminder(promptId);
+    const activeTodoReminder = this.config.takeActiveTodoReminder(promptId);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
@@ -5336,8 +5338,10 @@ export class Session implements SessionContext {
               // Prepend session-level system reminders (same rationale as the
               // user-query path in #executePrompt).
               const cronReminders = await this.#buildInitialSystemReminders();
-              const activeTodoReminder =
-                this.config.getActiveTodoReminder(promptId);
+              const activeTodoReminder = this.config.takeActiveTodoReminder(
+                promptId,
+                true,
+              );
               let nextMessage: Content | null = {
                 role: 'user',
                 parts: [
@@ -5861,8 +5865,10 @@ export class Session implements SessionContext {
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();
-          const activeTodoReminder =
-            this.config.getActiveTodoReminder(promptId);
+          const activeTodoReminder = this.config.takeActiveTodoReminder(
+            promptId,
+            true,
+          );
           let nextMessage: Content | null = {
             role: 'user',
             parts: [
@@ -6451,6 +6457,13 @@ export class Session implements SessionContext {
     toolLoopState?: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
+    // The daemon executes tools directly rather than through
+    // CoreToolScheduler, so the ALS bindings the scheduler would provide must
+    // happen here. `enterWith` (not `run`) is deliberate: background
+    // task/shell/monitor registration can occur in async continuations of
+    // this batch after runToolCalls resolves, and those must still observe
+    // this prompt's work-chain owner. The turn loop rebinds on the next
+    // runToolCalls, and turn starts re-enter via #executePrompt.
     promptIdContext.enterWith(promptId);
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),

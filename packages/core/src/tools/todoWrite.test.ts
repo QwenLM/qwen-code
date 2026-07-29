@@ -199,7 +199,7 @@ describe('TodoWriteTool', () => {
       const reminder = vi.mocked(mockConfig.setActiveTodoReminder).mock
         .lastCall?.[1];
       expect(reminder).toContain('[truncated]');
-      expect(reminder?.length).toBeLessThan(4300);
+      expect(reminder?.length).toBeLessThan(1100);
     });
 
     it('skips active Todo reminder when no prompt id is active', async () => {

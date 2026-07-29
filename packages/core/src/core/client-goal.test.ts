@@ -210,7 +210,7 @@ function setupGoalClient() {
     startActiveTodoWorkChain: vi.fn(),
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),
-    getActiveTodoReminder: vi.fn(() => undefined),
+    takeActiveTodoReminder: vi.fn(() => undefined),
     getContentGeneratorConfig: vi.fn(() => undefined),
     hasHooksForEvent: vi.fn(() => false),
     getStopHookBlockingCap: vi.fn(() => 8),

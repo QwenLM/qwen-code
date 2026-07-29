@@ -561,7 +561,7 @@ describe('Gemini Client (client.ts)', () => {
       setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
-      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -1719,7 +1719,7 @@ describe('Gemini Client (client.ts)', () => {
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder =
         '<system-reminder>unfinished todo: run tests</system-reminder>';
-      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
@@ -1745,7 +1745,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(functionResponseIndex).toBeGreaterThanOrEqual(0);
       expect(request.indexOf(reminder)).toBeGreaterThan(functionResponseIndex);
-      expect(mockConfig.getActiveTodoReminder).toHaveBeenCalledWith(
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
         'prompt-tool-result',
       );
 
@@ -1776,7 +1776,7 @@ describe('Gemini Client (client.ts)', () => {
     it('includes active Todo context on the first retry request', async () => {
       const reminder =
         '<system-reminder>unfinished todo: run tests</system-reminder>';
-      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
 
       await runTurn(SendMessageType.UserQuery);
       await runTurn(SendMessageType.Retry);
@@ -1785,10 +1785,36 @@ describe('Gemini Client (client.ts)', () => {
       expect(request).toContain(reminder);
     });
 
+    it('continues the carried Todo work chain for related notifications', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'related notification' }],
+        new AbortController().signal,
+        'prompt-related-notification',
+        {
+          type: SendMessageType.Notification,
+          todoWorkChainId: 'prompt-owner',
+        },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.startAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-related-notification',
+        'prompt-owner',
+      );
+    });
+
     it('keeps automatic Todo ownership through its tool-result turns', async () => {
       const reminder =
         '<system-reminder>unfinished todo: finish automatic work</system-reminder>';
-      vi.mocked(mockConfig.getActiveTodoReminder).mockReturnValue(reminder);
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
       mockTurnRunFn
         .mockReturnValueOnce(
           (async function* () {
@@ -1823,7 +1849,7 @@ describe('Gemini Client (client.ts)', () => {
         // drain
       }
 
-      expect(mockConfig.getActiveTodoReminder).toHaveBeenCalledWith(
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
         'prompt-automatic',
       );
       expect(mockConfig.endAutomaticActiveTodoWorkChain).toHaveBeenCalledWith(
