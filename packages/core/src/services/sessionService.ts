@@ -46,6 +46,11 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import {
+  SessionWriterLease,
+  SessionWriterUnavailableError,
+  type SessionWriterProcessKind,
+} from './session-writer-lease.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -337,6 +342,25 @@ export class SessionService {
    * scheduled-tasks file without re-plumbing the workspace path. */
   getProjectRoot(): string {
     return this.projectRoot;
+  }
+
+  async acquireSessionWriterLease(
+    sessionId: string,
+    options: {
+      processKind: SessionWriterProcessKind;
+      qwenVersion?: string | null;
+      reclaimPolicy: 'local' | 'never';
+    },
+  ): Promise<SessionWriterLease> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      throw new SessionWriterUnavailableError();
+    }
+    return SessionWriterLease.acquire({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      transcriptPath: this.getSessionFilePath(sessionId, 'active'),
+      ...options,
+    });
   }
 
   private warn(message: string): void {

@@ -125,6 +125,7 @@ describe('VirtualSubagentSessions', () => {
     const runtime = {
       workspaceId: 'workspace-1',
       workspaceCwd: '/workspace',
+      sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       env: { mode: 'parent-process', overlayKeys: [] },
       bridge: {
         getSessionTasksStatus: async () => ({
@@ -248,6 +249,7 @@ describe('VirtualSubagentSessions', () => {
     const runtime = {
       workspaceId: 'workspace-refresh-error',
       workspaceCwd: '/workspace',
+      sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       env: { mode: 'parent-process', overlayKeys: [] },
       bridge: {
         getSessionTasksStatus: async () => ({
@@ -306,6 +308,7 @@ describe('VirtualSubagentSessions', () => {
       return {
         workspaceId,
         workspaceCwd: `/workspace/${workspaceId}`,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
         env: { mode: 'parent-process', overlayKeys: [] },
         bridge: {
           getSessionTasksStatus: async () => ({
@@ -373,6 +376,7 @@ describe('VirtualSubagentSessions', () => {
     const runtime = {
       workspaceId: 'workspace-batch',
       workspaceCwd: '/workspace',
+      sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       env: { mode: 'parent-process', overlayKeys: [] },
       bridge: {
         getSessionTasksStatus: async () => ({
@@ -441,6 +445,7 @@ describe('VirtualSubagentSessions', () => {
     const runtime = {
       workspaceId: 'workspace-reload',
       workspaceCwd: '/workspace',
+      sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       env: { mode: 'parent-process', overlayKeys: [] },
       bridge: {
         getSessionTasksStatus: async () => ({
@@ -552,6 +557,7 @@ describe('VirtualSubagentSessions', () => {
     const runtime = {
       workspaceId: 'running-workspace',
       workspaceCwd,
+      sessionRuntimeBaseDir: runtimeDir,
       env: {
         mode: 'runtime-overlay',
         overlayKeys: ['QWEN_RUNTIME_DIR'],
@@ -728,6 +734,7 @@ describe('VirtualSubagentSessions', () => {
     const runtime = {
       workspaceId: 'legacy-workspace',
       workspaceCwd,
+      sessionRuntimeBaseDir: runtimeDir,
       env: {
         mode: 'runtime-overlay',
         overlayKeys: ['QWEN_RUNTIME_DIR'],

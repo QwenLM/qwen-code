@@ -10,6 +10,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   createDebugLogger,
   GROUP_COLOR_OPTIONS,
+  Storage,
   SessionService,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
@@ -102,7 +103,9 @@ import { createSessionOrganizationService } from '../session-organization-helper
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
+  DaemonDrainingError,
   logSessionArchiveWarning,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
@@ -560,11 +563,18 @@ function pickSessionArtifactInput(
  * the operator-facing message is not a cross-tenant leak), and anything
  * unrecognized collapses to a generic INTERNAL_ERROR string.
  */
-function toRpcError(err: unknown): {
+export function toRpcError(err: unknown): {
   code: number;
   message: string;
   data?: Record<string, unknown>;
 } {
+  if (err instanceof DaemonDrainingError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: 'daemon_draining' },
+    };
+  }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
@@ -807,6 +817,7 @@ export class AcpDispatcher {
     private readonly captureGenerationAssertion: () =>
       | (() => void)
       | undefined = () => undefined,
+    private readonly sessionRuntimeBaseDir: string = Storage.getRuntimeBaseDir(),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -815,20 +826,21 @@ export class AcpDispatcher {
     sessionId: string,
     removePersistedSession = false,
   ): void {
-    void this.bridge
-      .killSession(sessionId, { requireZeroAttaches: true })
-      .then(async (killed) => {
-        if (killed && removePersistedSession) {
-          await new SessionService(this.boundWorkspace).removeSession(
-            sessionId,
-          );
-        }
-      })
-      .catch((err) =>
-        writeStderrLine(
-          `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
-        ),
-      );
+    const cleanup = removePersistedSession
+      ? deleteDaemonSessionIfOrphan({
+          sessionId,
+          service: new SessionService(this.boundWorkspace, {
+            runtimeBaseDir: this.sessionRuntimeBaseDir,
+          }),
+          bridge: this.bridge,
+          coordinator: this.archiveCoordinator,
+        })
+      : this.bridge.killSession(sessionId, { requireZeroAttaches: true });
+    void cleanup.catch((err) =>
+      writeStderrLine(
+        `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+      ),
+    );
   }
 
   /**
@@ -1158,6 +1170,18 @@ export class AcpDispatcher {
    * (it mints the connection) and never reaches here.
    */
   async handle(
+    conn: AcpConnection,
+    msg: JsonRpcInbound,
+    sessionHeader?: string,
+    reqLoopback?: boolean,
+  ): Promise<void> {
+    return Storage.runWithResolvedRuntimeBaseDir(
+      this.sessionRuntimeBaseDir,
+      () => this.handleInRuntime(conn, msg, sessionHeader, reqLoopback),
+    );
+  }
+
+  private async handleInRuntime(
     conn: AcpConnection,
     msg: JsonRpcInbound,
     sessionHeader?: string,

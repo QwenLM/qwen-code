@@ -922,6 +922,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ? createSingleWorkspaceRegistry({
           workspaceId: 'primary',
           workspaceCwd: boundWorkspace,
+          sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
           primary: true,
           trusted: opts.primaryTrusted ?? true,
           env: { mode: 'parent-process', overlayKeys: [] },

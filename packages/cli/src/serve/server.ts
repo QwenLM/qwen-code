@@ -9,6 +9,7 @@ import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
+  Storage,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -171,7 +172,10 @@ import {
 } from './server/error-handlers.js';
 import { installRateLimiter } from './server/rate-limiter-setup.js';
 import { createServeFeatures } from './server/serve-features.js';
-import { SessionArchiveCoordinator } from './server/session-archive.js';
+import {
+  deleteDaemonSessionIfOrphan,
+  SessionArchiveCoordinator,
+} from './server/session-archive.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
@@ -181,6 +185,10 @@ import {
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from './workspace-runtime-storage.js';
 import {
   isScratchRootCompatible,
   type ManagedScratchRoot,
@@ -935,6 +943,11 @@ export function createServeApp(
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
+  (
+    app.locals as {
+      sessionArchiveCoordinator?: SessionArchiveCoordinator;
+    }
+  ).sessionArchiveCoordinator = archiveCoordinator;
 
   installSelfOriginStripMiddleware(app, getPort);
 
@@ -1038,6 +1051,7 @@ export function createServeApp(
       {
         workspaceId: hashDaemonWorkspace(boundWorkspace),
         workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
         primary: true,
         trusted: deps.primaryWorkspaceTrusted ?? false,
         env: primaryRuntimeEnvMetadata ?? {
@@ -1852,6 +1866,15 @@ export function createServeApp(
       workspaceRegistry.primaryEntry.state === 'active'
         ? workspaceRegistry.primaryEntry.current?.runtime
         : undefined,
+    cleanupSession: (runtime, sessionId) =>
+      runWithWorkspaceRuntimeStorage(runtime, () =>
+        deleteDaemonSessionIfOrphan({
+          sessionId,
+          service: createWorkspaceRuntimeSessionService(runtime),
+          bridge: runtime.bridge,
+          coordinator: archiveCoordinator,
+        }),
+      ),
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
@@ -1875,6 +1898,15 @@ export function createServeApp(
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+    cleanupSession: (runtime, sessionId) =>
+      runWithWorkspaceRuntimeStorage(runtime, () =>
+        deleteDaemonSessionIfOrphan({
+          sessionId,
+          service: createWorkspaceRuntimeSessionService(runtime),
+          bridge: runtime.bridge,
+          coordinator: archiveCoordinator,
+        }),
+      ),
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -1918,28 +1950,27 @@ export function createServeApp(
     // restart (a bound task fires only in its own session, which nothing else
     // reloads). Fire-and-forget so it never delays the server coming up; a
     // no-op when there are no bound tasks. Deliberately not awaited.
-    const rehydrateWorkspace = (
-      taskBridge: AcpSessionBridge,
-      workspaceCwd: string,
-    ) => {
-      void rehydrateScheduledTaskSessions({
-        bridge: taskBridge,
-        boundWorkspace: workspaceCwd,
-        onTasksRead: (tasks) =>
-          registerScheduledTaskAuthorizations(workspaceCwd, tasks),
-        onError: (sessionId, err) => {
-          process.stderr.write(
-            `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`,
-          );
-        },
-        // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
-        // catches readCronTasks failures and per-session load errors internally
-        // (returning { loaded, failed }), so this only guards an unexpected throw
-        // from the function entry itself. Log rather than swallow it — a silent
-        // failure here leaves every bound task dormant with no diagnostic.
-      }).catch((err) => {
+    const rehydrateWorkspace = (runtime: WorkspaceRuntime) => {
+      void runWithWorkspaceRuntimeStorage(runtime, () =>
+        rehydrateScheduledTaskSessions({
+          bridge: runtime.bridge,
+          boundWorkspace: runtime.workspaceCwd,
+          onTasksRead: (tasks) =>
+            registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
+          onError: (sessionId, err) => {
+            process.stderr.write(
+              `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          },
+          // Outer catch is defense-in-depth: rehydrateScheduledTaskSessions already
+          // catches readCronTasks failures and per-session load errors internally
+          // (returning { loaded, failed }), so this only guards an unexpected throw
+          // from the function entry itself. Log rather than swallow it — a silent
+          // failure here leaves every bound task dormant with no diagnostic.
+        }),
+      ).catch((err) => {
         process.stderr.write(
           `qwen serve: unexpected scheduled-task rehydration failure: ${
             err instanceof Error ? err.message : String(err)
@@ -1961,10 +1992,20 @@ export function createServeApp(
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        cleanupSession: (sessionId) =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            deleteDaemonSessionIfOrphan({
+              sessionId,
+              service: createWorkspaceRuntimeSessionService(runtime),
+              bridge: runtime.bridge,
+              coordinator: archiveCoordinator,
+            }),
+          ),
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
+      rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
     for (const runtime of workspaceRegistry.list()) {
