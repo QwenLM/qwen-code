@@ -129,6 +129,53 @@ describe('readTextRange', () => {
     }
   });
 
+  it('reads a handle-bound range beyond 10 MiB with a byte cap', async () => {
+    const content = largeUtf8Lines(65_000);
+    const marker = 'line-60001';
+    expect(
+      Buffer.byteLength(content.slice(0, content.indexOf(marker))),
+    ).toBeGreaterThan(10 * 1024 * 1024);
+    const filePath = await writeFile('deep-handle.log', content);
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const result = await readTextRangeFromHandle(fileHandle, {
+        offset: 60_000,
+        limit: 3,
+        maxOutputBytes: 256,
+      });
+
+      expect(result.content).toMatch(/^line-60001 /);
+      expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(256);
+      expect(result.content).not.toContain('\uFFFD');
+      expect(result.truncatedByBytes).toBe(true);
+      expect(result.originalLineCountExact).toBe(false);
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('accepts handle-bound UTF-8 when the encoding sample splits an emoji', async () => {
+    const firstLine = `${'a'.repeat(8191)}🙂`;
+    const filePath = await writeFile(
+      'split-encoding-sample.log',
+      `${firstLine}\n${'b'.repeat(300_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const result = await readTextRangeFromHandle(fileHandle, {
+        offset: 0,
+        limit: 1,
+        maxOutputBytes: 16_384,
+      });
+
+      expect(result.content).toBe(firstLine);
+      expect(result.encoding).toBe('utf-8');
+      expect(result.content).not.toContain('\uFFFD');
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
   it('reads the pinned inode after the path is replaced underneath it', async () => {
     // The handle variant takes no path, so "read the wrong file" is no longer
     // representable. What is still worth pinning down is the property that
