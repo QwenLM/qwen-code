@@ -48,8 +48,10 @@ nothing worth fixing is a valid, silent outcome.
   packages, and `npm run generate:settings-schema` when a settings source
   changed (see the generated-artifact rule below). Do **not** batch multiple
   fixes without intermediate verification. If any command fails, fix the cause
-  and rerun it; if you cannot make the checks pass confidently, write
-  `<workdir>/failure.md` and do not commit.
+  and rerun it. When a single finding's verification cannot be made to pass,
+  drop that finding per the fix-phase steps and continue with the rest;
+  reserve `<workdir>/failure.md` for blockers that stop the whole run, such
+  as phase-level verification you cannot fix.
 - Regenerate committed generated artifacts when you change their source. If
   you edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated

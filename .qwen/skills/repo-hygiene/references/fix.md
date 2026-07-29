@@ -24,7 +24,10 @@ against this checkout before touching code.
    proof (every caller, read/write point, default-value chain, or a
    docs-vs-behavior contradiction, all grep-able in the repo) — otherwise
    drop it.
-   c. Run focused verification for the touched package. If it fails and you
+   c. Run focused verification for the touched package, plus
+   `npm run generate:settings-schema` when the fix touched a settings
+   source — the regenerated schema belongs in the same commit (Shared
+   Rules). If it fails and you
    cannot make it pass confidently, revert this finding's edits
    (`git checkout -- <paths>`; delete untracked files you created), move
    the entry from `fixes` to `reportOnly` in findings.json with
