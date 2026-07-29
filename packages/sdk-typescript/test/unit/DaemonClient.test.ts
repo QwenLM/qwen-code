@@ -7341,6 +7341,9 @@ describe('DaemonClient', () => {
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        senderId: 'sender-1',
+      });
     });
   });
 });
