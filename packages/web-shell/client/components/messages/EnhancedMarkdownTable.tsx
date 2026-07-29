@@ -253,6 +253,24 @@ function densityClassName(density: TableDensity): string {
   }
 }
 
+function findVerticalScrollContainer(
+  element: HTMLElement | null,
+): HTMLElement | null {
+  let current = element;
+  while (current) {
+    const overflowY = window.getComputedStyle(current).overflowY;
+    if (
+      overflowY === 'auto' ||
+      overflowY === 'scroll' ||
+      overflowY === 'overlay'
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
 function getTextContent(node: ReactNode): string {
   if (node === null || node === undefined || typeof node === 'boolean') {
     return '';
@@ -1500,6 +1518,11 @@ export function EnhancedTable({
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
+  const detailToggleAnchorRef = useRef<{
+    element: HTMLElement;
+    scrollContainer: HTMLElement | null;
+    top: number;
+  } | null>(null);
   const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
   const cellDialogRef = useRef<HTMLDivElement | null>(null);
   const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
@@ -1871,6 +1894,19 @@ export function EnhancedTable({
     }
   }, [cellDialog, detailRowKey, visibleRows]);
 
+  useLayoutEffect(() => {
+    const anchor = detailToggleAnchorRef.current;
+    detailToggleAnchorRef.current = null;
+    if (!anchor?.element.isConnected) return;
+    const offset = anchor.element.getBoundingClientRect().top - anchor.top;
+    if (offset === 0) return;
+    if (anchor.scrollContainer) {
+      anchor.scrollContainer.scrollTop += offset;
+    } else {
+      window.scrollBy(0, offset);
+    }
+  }, [detailRowKey]);
+
   useEffect(() => {
     if (!cellDialog) return;
     return registerInteractionBlocker();
@@ -2029,7 +2065,16 @@ export function EnhancedTable({
     });
   };
 
-  const toggleRowDetail = (rowKey: string) => {
+  const toggleRowDetail = (rowKey: string, rowElement: HTMLElement | null) => {
+    if (detailRowKey !== rowKey && rowElement) {
+      detailToggleAnchorRef.current = {
+        element: rowElement,
+        scrollContainer: findVerticalScrollContainer(
+          shellRef.current?.parentElement ?? null,
+        ),
+        top: rowElement.getBoundingClientRect().top,
+      };
+    }
     setSelection(null);
     setCellDialog(null);
     resetCopiedCellDialog();
@@ -2852,7 +2897,12 @@ export function EnhancedTable({
                       <button
                         className={styles.rowDetailButton}
                         type="button"
-                        onClick={() => toggleRowDetail(row.key)}
+                        onClick={(event) =>
+                          toggleRowDetail(
+                            row.key,
+                            event.currentTarget.closest('tr'),
+                          )
+                        }
                         aria-expanded={detailOpen}
                         aria-controls={detailId}
                         aria-label={t(
