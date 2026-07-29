@@ -294,9 +294,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
 
     let description: string;
     if (targetType === 'mr') {
-      // gitbeaker types require numeric projectId; GitLab API accepts path strings at runtime
-      const pid = chatId as unknown as number;
-      const mr = await this.api.MergeRequests.show(pid, iid);
+      const mr = await this.api.MergeRequests.show(chatId, iid);
       description = (mr as { description?: string }).description || '';
     } else {
       const issue = await this.api.Issues.show(iid, { projectId: chatId });
