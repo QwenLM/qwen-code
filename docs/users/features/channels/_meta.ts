@@ -7,5 +7,6 @@ export default {
   feishu: 'Feishu',
   qqbot: 'QQ Bot',
   github: 'GitHub',
+  gitlab: 'GitLab',
   plugins: 'Plugins',
 };
