@@ -2427,13 +2427,13 @@ describe('qwen-autofix workflow', () => {
     // Slotting quantum is the SCAN TICK (600s, same quantum as ROT_OFF),
     // not the hour: an hourly slot against a */10 cron means 6 back-to-back
     // inspections then a ~3h blind window — same 25% average, terrible
-    // shape. With 600s the gap is bounded at ~30 minutes, which is what
+    // shape. With 600s the gap is bounded at ~40 minutes, which is what
     // the operator-facing strings promise.
     expect(reviewScanJob).toContain(
       'IDLE_SLOT_NOW="$(( ($(date -u +%s) / 600) % 4 ))"',
     );
     expect(reviewScanJob).not.toMatch(/IDLE_SLOT_NOW[^\n]*\/ 3600/);
-    expect(reviewScanJob).toContain('gap ≤30m');
+    expect(reviewScanJob).toContain('gap ≤40m');
     // Fail-open on the forced-dispatch path: it never builds the list
     // files, so the set stays empty and a forced PR is always inspected.
     expect(reviewScanJob).toContain("IDLE_PRS=' '");
@@ -2448,6 +2448,10 @@ describe('qwen-autofix workflow', () => {
       /IDLE_PRS=" \$\(jq -rs[\s\S]*?\) "/,
     )?.[0];
     expect(setSrc).toBeTruthy();
+    const predSrc = reviewScanJob.match(
+      /if \[\[ "\$\{IDLE_PRS\}" == \*" \$\{PR\} "\* &&[^\n]*\]\]; then/,
+    )?.[0];
+    expect(predSrc).toBeTruthy();
     const runBackoff = ({ pr, updatedAt, slotNow, listed = true }) => {
       const dir = mkdtempSync(join(tmpdir(), 'idle-backoff-'));
       try {
@@ -2467,7 +2471,7 @@ describe('qwen-autofix workflow', () => {
               setSrc,
               `IDLE_SLOT_NOW='${slotNow}'`,
               `PR='${pr}'`,
-              'if [[ "${IDLE_PRS}" == *" ${PR} "* && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then printf skip; else printf inspect; fi',
+              `${predSrc} printf skip; else printf inspect; fi`,
             ].join('\n'),
           ],
           { encoding: 'utf8' },

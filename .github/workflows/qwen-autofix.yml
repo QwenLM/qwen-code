@@ -1831,11 +1831,11 @@ jobs:
           # pushes all bump updatedAt or route in real time; the two
           # scan-only signals that do NOT bump it — a base conflict
           # appearing when main moves, and still-red checks awaiting the
-          # redcheck marker — wait at most the backoff gap (~30 min) on a
+          # redcheck marker — wait at most the backoff gap (~40 min) on a
           # PR nobody touched in a day, and self-correct (the eventual
           # address run comments/pushes). Slotting is deterministic — one
           # eligible 10-minute tick in every four, keyed by PR number, the
-          # same 600s quantum as ROT_OFF — so the gap is bounded at ~30
+          # same 600s quantum as ROT_OFF — so the gap is bounded at ~40
           # minutes and no PR is unlucky forever. The forced-dispatch path
           # never builds the list files, so a forced PR is always
           # inspected (fail-open, like a PR missing from the set).
@@ -1864,7 +1864,7 @@ jobs:
             # not consume inspection budget either.
             if [[ "${IDLE_PRS}" == *" ${PR} "* && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then
               echo "😴 #${PR}: idle >24h — deferring to its rotation slot (slot $(( PR % 4 )), current ${IDLE_SLOT_NOW}, next eligible tick ≤30m away)"
-              fleet_row "${PR}" 'idle-backoff' 'idle >24h; inspected roughly every 4th scan (gap ≤30m)'
+              fleet_row "${PR}" 'idle-backoff' 'idle >24h; inspected roughly every 4th scan (gap ≤40m)'
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
