@@ -101,6 +101,7 @@ beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
   git(repo, 'init', '-q', '-b', 'main', '.');
+  git(repo, 'config', 'core.autocrlf', 'false');
 
   // A fake `vitest` on the up-tree bin path so `npx vitest` in the probe tree
   // resolves locally — fast, deterministic, no network. It echoes each test
@@ -109,7 +110,10 @@ beforeEach(() => {
   // probe tree is a direct child of `repo`, so this bin is what it finds.
   mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
   const binDir = join(repo, 'node_modules', '.bin');
-  const script = join(binDir, 'vitest.js');
+  const script = join(
+    binDir,
+    process.platform === 'win32' ? 'vitest.cjs' : 'vitest.js',
+  );
   writeFileSync(
     script,
     `#!/usr/bin/env node
@@ -128,7 +132,7 @@ process.stdout.write(JSON.stringify({
   if (process.platform === 'win32') {
     writeFileSync(
       join(binDir, 'vitest.cmd'),
-      '@node "%~dp0\\vitest.js" %*\r\n',
+      '@node "%~dp0\\vitest.cjs" %*\r\n',
     );
   } else {
     const bin = join(binDir, 'vitest');

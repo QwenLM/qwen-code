@@ -110,7 +110,12 @@ describe('background shell status sidecar (integration, real spawn)', () => {
       registry.getAll().every((task) => task.status !== 'running'),
     );
     for (const dir of tmpDirs) {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
     }
     tmpDirs = [];
   });

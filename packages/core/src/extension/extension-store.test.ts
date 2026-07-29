@@ -183,7 +183,11 @@ describe('ExtensionStore', () => {
   it('uses an inherit mask when clearing an override matched by a legacy rule', async () => {
     await fsp.writeFile(
       enablementPath,
-      JSON.stringify({ demo: { overrides: ['!/workspace/*'] } }),
+      JSON.stringify({
+        demo: {
+          overrides: [`!${legacyWorkspaceRule(workspacePath())}*`],
+        },
+      }),
     );
     const store = makeStore();
     const id = 'c'.repeat(64);

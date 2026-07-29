@@ -51,6 +51,9 @@ vi.mock('../utils/yaml-parser.js', () => ({
   stringify: vi.fn(),
 }));
 
+const TEST_HOME = path.resolve('/home/user');
+const TEST_PROJECT_ROOT = path.resolve('/test/project');
+
 describe('SkillManager', () => {
   let manager: SkillManager;
   let mockConfig: Config;
@@ -58,14 +61,14 @@ describe('SkillManager', () => {
   beforeEach(() => {
     // Mock os.homedir before makeFakeConfig, since Config constructor
     // calls Storage.getGlobalQwenDir() which needs os.homedir()
-    vi.mocked(os.homedir).mockReturnValue('/home/user');
+    vi.mocked(os.homedir).mockReturnValue(TEST_HOME);
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
 
     // Create mock Config object using test utility
     mockConfig = makeFakeConfig({});
 
     // Mock the project root method
-    vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/test/project');
+    vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue(TEST_PROJECT_ROOT);
 
     // Reset and setup mocks
     vi.clearAllMocks();
@@ -652,11 +655,11 @@ You are a helpful assistant.
       // Mock directory listing based on path to handle multiple base dirs per level.
       // Use path.join to construct expected paths so separators match on all platforms.
       const projectQwenSkillsDir = path.join(
-        '/test/project',
+        TEST_PROJECT_ROOT,
         '.qwen',
         'skills',
       );
-      const userQwenSkillsDir = path.join('/home/user', '.qwen', 'skills');
+      const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
@@ -766,7 +769,7 @@ Skill 3 content`);
         yaml.parse(yamlString),
       );
       const projectQwenSkillsDir = path.join(
-        '/test/project',
+        TEST_PROJECT_ROOT,
         '.qwen',
         'skills',
       );
@@ -863,8 +866,8 @@ Body`);
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
       // Override readdir to return the same skill name from both .qwen and .agents dirs
       vi.mocked(fs.readdir).mockReset();
-      const projectQwenDir = path.join('/test/project', '.qwen', 'skills');
-      const projectAgentDir = path.join('/test/project', '.agents', 'skills');
+      const projectQwenDir = path.join(TEST_PROJECT_ROOT, '.qwen', 'skills');
+      const projectAgentDir = path.join(TEST_PROJECT_ROOT, '.agents', 'skills');
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
@@ -946,9 +949,11 @@ Body`);
       const baseDirs = manager.getSkillsBaseDirs('project');
 
       expect(baseDirs).toHaveLength(2);
-      expect(baseDirs).toContain(path.join('/test/project', '.qwen', 'skills'));
       expect(baseDirs).toContain(
-        path.join('/test/project', '.agents', 'skills'),
+        path.join(TEST_PROJECT_ROOT, '.qwen', 'skills'),
+      );
+      expect(baseDirs).toContain(
+        path.join(TEST_PROJECT_ROOT, '.agents', 'skills'),
       );
     });
 
@@ -956,8 +961,8 @@ Body`);
       const baseDirs = manager.getSkillsBaseDirs('user');
 
       expect(baseDirs).toHaveLength(2);
-      expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
-      expect(baseDirs).toContain(path.join('/home/user', '.agents', 'skills'));
+      expect(baseDirs).toContain(path.join(TEST_HOME, '.qwen', 'skills'));
+      expect(baseDirs).toContain(path.join(TEST_HOME, '.agents', 'skills'));
     });
 
     it('should return bundled-level base dir', () => {
@@ -977,7 +982,9 @@ Body`);
       const customConfig = makeFakeConfig({
         customSkillDirs: ['~/custom-skills', '/abs/skills'],
       });
-      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue(
+        TEST_PROJECT_ROOT,
+      );
       const customManager = new SkillManager(customConfig);
 
       const baseDirs = customManager.getSkillsBaseDirs('user');
@@ -995,7 +1002,9 @@ Body`);
       const customConfig = makeFakeConfig({
         customSkillDirs: [defaultDirs[0], '/unique/dir'],
       });
-      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue(
+        TEST_PROJECT_ROOT,
+      );
       const customManager = new SkillManager(customConfig);
 
       const baseDirs = customManager.getSkillsBaseDirs('user');
@@ -1007,7 +1016,7 @@ Body`);
 
     it('should not crash when config lacks getCustomSkillDirs', () => {
       const partialConfig = {
-        getProjectRoot: () => '/test/project',
+        getProjectRoot: () => TEST_PROJECT_ROOT,
       } as Config;
       const partialManager = new SkillManager(partialConfig);
 
@@ -1020,7 +1029,9 @@ Body`);
       const customConfig = makeFakeConfig({
         customSkillDirs: ['./relative-skills'],
       });
-      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue(
+        TEST_PROJECT_ROOT,
+      );
       const customManager = new SkillManager(customConfig);
 
       const baseDirs = customManager.getSkillsBaseDirs('user');
@@ -1033,8 +1044,8 @@ Body`);
     const bundledDirSegment = path.join('skills', 'bundled');
     const projectDirSegment = path.join('.qwen', 'skills');
     const userDirSegment = path.join('.qwen', 'skills');
-    const projectPrefix = path.join('/test/project');
-    const userPrefix = path.join('/home/user');
+    const projectPrefix = path.join(TEST_PROJECT_ROOT);
+    const userPrefix = path.join(TEST_HOME);
 
     const reviewDirEntry = {
       name: 'review',
@@ -1501,11 +1512,11 @@ Body.
       // skill, even when the touched file is outside the project skill's
       // declared paths.
       const projectQwenSkillsDir = path.join(
-        '/test/project',
+        TEST_PROJECT_ROOT,
         '.qwen',
         'skills',
       );
-      const userQwenSkillsDir = path.join('/home/user', '.qwen', 'skills');
+      const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
         const pathStr = String(dirPath);
@@ -1760,7 +1771,7 @@ Symlinked skill content`);
 
   describe('file watchers', () => {
     it('should pass ignored function and shallow depth to chokidar', async () => {
-      const projectSkillsDir = path.join('/test/project', '.qwen', 'skills');
+      const projectSkillsDir = path.join(TEST_PROJECT_ROOT, '.qwen', 'skills');
       vi.mocked(fsSync.existsSync).mockImplementation(
         (p) => String(p) === projectSkillsDir,
       );
@@ -1955,7 +1966,7 @@ Skill content`;
   describe('safe mode', () => {
     it('refreshCache only loads bundled skills', async () => {
       const safeConfig = makeFakeConfig({ safeMode: true });
-      vi.spyOn(safeConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      vi.spyOn(safeConfig, 'getProjectRoot').mockReturnValue(TEST_PROJECT_ROOT);
       const safeManager = new SkillManager(safeConfig);
 
       // Mock project/user skill files that should be ignored

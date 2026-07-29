@@ -249,7 +249,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts aggregates active and archived membership', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
-        if (dir.toString().endsWith(`${path.sep}archive`)) {
+        if (dir.toString().endsWith('/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
         return [
@@ -282,7 +282,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts excludes sessions from other projects', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        path.basename(dir.toString()) === 'archive'
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
       );
@@ -320,7 +320,7 @@ describe('SessionService', () => {
 
     it('marks counts truncated when a candidate session cannot be read', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
               fs.Dirent<Buffer>

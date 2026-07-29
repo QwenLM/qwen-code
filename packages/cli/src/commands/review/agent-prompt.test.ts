@@ -1931,7 +1931,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     const p = buildRoleBrief(local, '7', { planPath });
     expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review build-test');
     expect(p).toContain(`--plan ${planPath}`);
-    expect(p).toContain('--worktree /'); // absolute (the resolved cwd), not `.`
+    expect(p).toContain(`--worktree ${resolve('.')}`);
     expect(p).not.toContain('undefined');
   });
 
