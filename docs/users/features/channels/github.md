@@ -92,6 +92,20 @@ The comment window is `(previousCursor, currentMaxUpdatedAt]` — comments alrea
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
 
+## Response Feedback
+
+For an accepted issue or pull-request comment, the channel first adds GitHub's `👀` reaction to that comment, then posts the agent response as a regular comment in the same thread. The reaction is best-effort: an unavailable reaction API or missing reaction permission is logged but does not prevent the agent response.
+
+Set `blockStreaming` to `"on"` to publish long responses progressively as separate comments. Blocks flush at paragraph boundaries after 400 characters by default, force-split at 1000 characters, and flush after 1.5 seconds of model silence. This gives visible progress, but GitHub cannot edit one comment in place; a single final response is the default.
+
+```json
+{
+  "blockStreaming": "on",
+  "blockStreamingChunk": { "minChars": 400, "maxChars": 1000 },
+  "blockStreamingCoalesce": { "idleMs": 1500 }
+}
+```
+
 ## Known Limitations
 
 - **First start skips existing unread notifications.** The cursor initializes to "now" on first launch. Notifications created before the bot starts are not processed unless the thread receives new activity afterwards.

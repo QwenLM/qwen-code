@@ -187,6 +187,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     );
   }
 
+  /**
+   * Adds GitHub's eyes reaction to accepted comment prompts. It is deliberately
+   * best-effort: an acknowledgement failure must never block the agent reply.
+   */
+  protected override onPromptStart(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId || !/^\d+$/.test(messageId)) return;
+    const [owner, repo] = chatId.split('/');
+    if (!owner || !repo) return;
+    void this.githubApi(
+      () =>
+        this.octokit.rest.reactions.createForIssueComment({
+          owner,
+          repo,
+          comment_id: Number(messageId),
+          content: 'eyes',
+        }),
+      `acknowledgeComment(${messageId})`,
+    ).catch((err) => {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to acknowledge comment ${messageId}: ${err}\n`,
+      );
+    });
+  }
+
   protected async pollOnce(): Promise<void> {
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
     const since = new Date(
@@ -346,7 +374,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       senderName: trigger.actor,
       chatId: ctx.chatId,
       threadId: ctx.threadId,
-      messageId: String(trigger.id),
+      // GitHub issue-event IDs are not comment IDs. Prefix them so lifecycle
+      // acknowledgements only target real comment messages.
+      messageId: `event-${trigger.id}`,
       text:
         reason === 'review_requested'
           ? 'Review this pull request and report any actionable findings.'

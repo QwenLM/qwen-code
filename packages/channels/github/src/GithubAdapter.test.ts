@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +31,9 @@ vi.mock('@octokit/rest', () => {
         listEvents: vi.fn(),
         createComment: vi.fn(),
         get: vi.fn(),
+      },
+      reactions: {
+        createForIssueComment: vi.fn(),
       },
       pulls: {
         get: vi.fn(),
@@ -64,6 +75,9 @@ const mockOctokit = (
       listEvents: ReturnType<typeof vi.fn>;
       createComment: ReturnType<typeof vi.fn>;
       get: ReturnType<typeof vi.fn>;
+    };
+    reactions: {
+      createForIssueComment: Mock;
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
@@ -166,6 +180,16 @@ class TestableGithubChannel extends GithubChannel {
   }
 }
 
+class LiveGithubChannel extends GithubChannel {
+  setCursorForTest(lastProcessedAt: string): void {
+    this.cursor = { lastProcessedAt };
+  }
+
+  async pollForTest(): Promise<void> {
+    await this.pollOnce();
+  }
+}
+
 describe('GithubChannel', () => {
   let channel: TestableGithubChannel;
   let savedQwenHome: string | undefined;
@@ -184,6 +208,7 @@ describe('GithubChannel', () => {
     });
     mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
     mockOctokit.rest.issues.createComment.mockResolvedValue({});
+    mockOctokit.rest.reactions.createForIssueComment.mockResolvedValue({});
   });
 
   afterEach(() => {
@@ -696,7 +721,7 @@ describe('GithubChannel', () => {
 
       expect(
         channel.inboundEnvelopes.map((envelope) => envelope.messageId),
-      ).toEqual(['2001', '2002']);
+      ).toEqual(['event-2001', 'event-2002']);
       expect(channel.cursor.dispatchedEvents).toEqual(['E_2001', 'E_2002']);
     });
 
@@ -1351,6 +1376,97 @@ describe('GithubChannel', () => {
         '1003',
       ]);
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1003']);
+    });
+  });
+
+  describe('working reaction', () => {
+    it('acknowledges an accepted comment with an eyes reaction', async () => {
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await liveChannel.pollForTest();
+
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        content: 'eyes',
+      });
+    });
+
+    it('does not wait for the acknowledgment before replying', async () => {
+      let resolveReaction: () => void = () => {};
+      const reactionPending = new Promise<void>((resolve) => {
+        resolveReaction = resolve;
+      });
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await liveChannel.pollForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'response' }),
+      );
+      resolveReaction();
+    });
+
+    it('does not react to a synthetic direct review-request trigger', async () => {
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'review_requested',
+            subject: {
+              title: 'Review me',
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeIssueEvent()])
+        .mockResolvedValueOnce([]);
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: { title: 'Review me', user: { login: 'alice' } },
+      });
+
+      await liveChannel.pollForTest();
+
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).not.toHaveBeenCalled();
     });
   });
 
