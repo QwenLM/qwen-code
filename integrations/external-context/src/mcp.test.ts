@@ -6,14 +6,26 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createExternalContextMcpServer } from './mcp.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConfigurationError } from './config.js';
+import { createExternalContextMcpServer, runMcp } from './mcp.js';
 import type {
   ExternalContextConfig,
   ExternalContextProvider,
 } from './types.js';
 
+const loadConfig = vi.hoisted(() => vi.fn());
+
+vi.mock('./config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config.js')>()),
+  loadConfig,
+}));
+
 const cleanups: Array<() => Promise<void>> = [];
+
+beforeEach(() => {
+  loadConfig.mockReset();
+});
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -178,6 +190,27 @@ describe('external context MCP server', () => {
       'Search query must not be empty.',
     );
     expect(search).not.toHaveBeenCalled();
+  });
+});
+
+describe('runMcp', () => {
+  it('rejects a non-version-1 config at startup', async () => {
+    loadConfig.mockResolvedValue({
+      version: 2,
+      timeoutMs: 5000,
+      autoRecall: { repositoryRoot: '/tmp', timeoutMs: 1500 },
+      provider: {
+        type: 'generic-http-search-v1',
+        baseUrl: 'https://context.example.com',
+        tokenEnv: 'TOKEN',
+        token: 'secret',
+      },
+    } satisfies ExternalContextConfig);
+
+    await expect(runMcp()).rejects.toThrow(ConfigurationError);
+    await expect(runMcp()).rejects.toThrow(
+      'External context MCP server requires a version 1 configuration.',
+    );
   });
 });
 
