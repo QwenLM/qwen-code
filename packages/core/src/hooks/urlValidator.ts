@@ -32,13 +32,21 @@ const BLOCKED_HOSTS = [
 export class UrlValidator {
   private readonly allowedPatterns: string[];
   private readonly compiledPatterns: RegExp[];
+  private readonly allowPrivateNetworkHosts: boolean;
 
   /**
    * Create a new URL validator
    * @param allowedPatterns - Array of allowed URL patterns (supports * wildcard)
+   * @param allowPrivateNetworkHosts - When true, skip the private/link-local
+   *   IP-range check (the BLOCKED_HOSTS metadata blocklist still applies).
+   *   Only enable from trusted settings scopes.
    */
-  constructor(allowedPatterns: string[] = []) {
+  constructor(
+    allowedPatterns: string[] = [],
+    allowPrivateNetworkHosts: boolean = false,
+  ) {
     this.allowedPatterns = allowedPatterns;
+    this.allowPrivateNetworkHosts = allowPrivateNetworkHosts;
     this.compiledPatterns = allowedPatterns.map((pattern) =>
       this.compilePattern(pattern),
     );
@@ -98,7 +106,9 @@ export class UrlValidator {
       }
 
       // Check if hostname is an IP address - use ssrfGuard for authoritative check
-      if (this.isIpAddress(hostname)) {
+      // Skipped when private-network hooks are explicitly allowed (trusted
+      // scopes only); the BLOCKED_HOSTS check above always applies.
+      if (!this.allowPrivateNetworkHosts && this.isIpAddress(hostname)) {
         // Remove brackets from IPv6 addresses for isBlockedAddress
         const cleanHostname = hostname.replace(/^\[|\]$/g, '');
         if (isBlockedAddress(cleanHostname)) {
@@ -157,6 +167,9 @@ export class UrlValidator {
  * @param allowedUrls - Array of allowed URL patterns from config
  * @returns Configured URL validator
  */
-export function createUrlValidator(allowedUrls?: string[]): UrlValidator {
-  return new UrlValidator(allowedUrls || []);
+export function createUrlValidator(
+  allowedUrls?: string[],
+  allowPrivateNetworkHosts?: boolean,
+): UrlValidator {
+  return new UrlValidator(allowedUrls || [], allowPrivateNetworkHosts);
 }

@@ -45,7 +45,13 @@ export type StatusMessageCallback = (message: string) => void;
  */
 async function validateResolvedHost(
   hostname: string,
+  allowPrivateNetworkHosts: boolean = false,
 ): Promise<{ ok: boolean; error?: string }> {
+  // Trusted-scope opt-in: skip the IP-range checks entirely. The URL-level
+  // BLOCKED_HOSTS metadata blocklist in UrlValidator still applies.
+  if (allowPrivateNetworkHosts) {
+    return { ok: true };
+  }
   return new Promise((resolve) => {
     // If hostname is already an IP literal, validate directly.
     if (isBlockedAddress(hostname)) {
@@ -84,11 +90,16 @@ async function validateResolvedHost(
  */
 export class HttpHookRunner {
   private urlValidator: UrlValidator;
+  private readonly allowPrivateNetworkHosts: boolean;
   private readonly executedOnceHooks: Set<string> = new Set();
   private statusMessageCallback?: StatusMessageCallback;
 
-  constructor(allowedUrls?: string[]) {
-    this.urlValidator = new UrlValidator(allowedUrls);
+  constructor(
+    allowedUrls?: string[],
+    allowPrivateNetworkHosts: boolean = false,
+  ) {
+    this.allowPrivateNetworkHosts = allowPrivateNetworkHosts;
+    this.urlValidator = new UrlValidator(allowedUrls, allowPrivateNetworkHosts);
   }
 
   /**
@@ -170,7 +181,10 @@ export class HttpHookRunner {
       // DNS-level SSRF protection: validate resolved IPs
       // It checks that the hostname resolves to non-private IPs.
       const parsed = new URL(url);
-      const hostValidation = await validateResolvedHost(parsed.hostname);
+      const hostValidation = await validateResolvedHost(
+        parsed.hostname,
+        this.allowPrivateNetworkHosts,
+      );
       if (!hostValidation.ok) {
         return {
           hookConfig,
@@ -421,6 +435,9 @@ export class HttpHookRunner {
    */
   updateAllowedUrls(allowedUrls: string[]): void {
     // Create new validator with updated patterns
-    this.urlValidator = new UrlValidator(allowedUrls);
+    this.urlValidator = new UrlValidator(
+      allowedUrls,
+      this.allowPrivateNetworkHosts,
+    );
   }
 }
