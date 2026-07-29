@@ -21,10 +21,25 @@ const workflowPath = join(
   'qwen-triage.yml',
 );
 const doc = parse(readFileSync(workflowPath, 'utf8'));
+const prWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '.qwen',
+  'skills',
+  'triage',
+  'references',
+  'pr-workflow.md',
+);
+const prSkill = readFileSync(prWorkflowPath, 'utf8');
 const triageJob = doc.jobs.triage;
 const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
+const verifyJob = doc.jobs.verify;
+const verifyCleanupStep = verifyJob.steps.find(
+  (s) => s.name === 'Clean up runner workspace',
+);
 
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
@@ -43,7 +58,10 @@ describe('qwen-triage: agent tool/permission settings', () => {
   it('settings is valid JSON that restricts the toolset', () => {
     const settings = JSON.parse(triageStep.with.settings);
     const core = settings.tools?.core;
-    assert.ok(Array.isArray(core), 'tools.core must be an array (registration allowlist)');
+    assert.ok(
+      Array.isArray(core),
+      'tools.core must be an array (registration allowlist)',
+    );
     for (const t of [
       'run_shell_command',
       'read_file',
@@ -222,9 +240,13 @@ describe('qwen-triage: git exec-vector cleanup', () => {
     after(() => dir && rmSync(dir, { recursive: true, force: true }));
 
     const remaining = () =>
-      spawnSync('git', ['-C', dir, 'config', '--local', '--name-only', '--list'], {
-        encoding: 'utf8',
-      }).stdout.toLowerCase();
+      spawnSync(
+        'git',
+        ['-C', dir, 'config', '--local', '--name-only', '--list'],
+        {
+          encoding: 'utf8',
+        },
+      ).stdout.toLowerCase();
 
     for (const vec of [
       'hookspath',
@@ -257,5 +279,55 @@ describe('qwen-triage: git exec-vector cleanup', () => {
         assert.match(remaining(), new RegExp(kept.replace(/\./g, '\\.')));
       });
     }
+  });
+});
+
+describe('qwen-triage: verify workspace cleanup', () => {
+  it('restores write permission before returning the workspace to the runner', () => {
+    assert.ok(verifyCleanupStep, 'verify cleanup step must exist');
+    assert.match(
+      verifyCleanupStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE\/\.qwen"/,
+      'verify makes .qwen read-only before the agent runs, so cleanup must restore its owner write bits',
+    );
+
+    const chmodIndex = verifyCleanupStep.run.indexOf(
+      'chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"',
+    );
+    const chownIndex = verifyCleanupStep.run.indexOf(
+      'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
+    );
+    assert.ok(
+      chmodIndex < chownIndex,
+      'the root-owned read-only tree must be made writable before ownership is returned',
+    );
+  });
+});
+
+describe('qwen-triage: Stage 1e revert-pattern signals', () => {
+  it('includes high-risk path detection', () => {
+    assert.ok(prSkill.includes('1e. High-risk path'));
+    assert.ok(prSkill.includes('openaiContentGenerator'));
+    assert.ok(prSkill.includes('streamingToolCallParser'));
+    assert.ok(prSkill.includes('geminiChat'));
+    assert.ok(prSkill.includes('acpConnection'));
+    assert.ok(prSkill.includes('(^|/)shell\\.ts$'));
+    assert.ok(prSkill.includes('shellExecutionService'));
+    assert.ok(prSkill.includes('mcp-client'));
+    assert.ok(prSkill.includes('mcp-pool'));
+    assert.ok(prSkill.includes('LspServer'));
+    assert.ok(prSkill.includes('acp-integration'));
+    assert.ok(prSkill.includes('(^|/)relaunch\\.ts$'));
+    assert.ok(prSkill.includes('(^|/)sandbox\\.ts$'));
+    assert.ok(prSkill.includes('electron-run-as-node'));
+    assert.ok(prSkill.includes('p = 0.006'));
+    assert.ok(prSkill.includes('do not skip any Stage 2 enrichment'));
+    assert.ok(prSkill.includes('gh api --paginate'));
+    assert.ok(prSkill.includes('|| true'));
+    assert.ok(prSkill.includes('WARNING: could not fetch PR files'));
+  });
+
+  it('includes Risk field in the Stage 1 comment template', () => {
+    assert.ok(prSkill.includes('Risk: <if Stage 1e matched'));
   });
 });

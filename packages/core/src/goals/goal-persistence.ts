@@ -133,7 +133,7 @@ export function createMigratedGoalState(
         goalId: input.goalId,
         revision: 1,
         objective,
-        status: 'active',
+        status: 'paused',
         evidenceCursor: { recordId: input.recordUuid },
         turnCount: 0,
         activeTimeMs: 0,

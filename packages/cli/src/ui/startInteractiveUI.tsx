@@ -36,6 +36,10 @@ import {
 import { setTerminalTeardown } from './utils/terminal-teardown.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
 import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
@@ -110,9 +114,16 @@ export async function startInteractiveUI(
       ? installSynchronizedOutput(process.stdout)
       : () => {};
   const pressureMonitor = config.getMemoryPressureMonitor?.();
-  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  );
   const stdoutMaxListeners = process.stdout.getMaxListeners();
   if (useVP) {
+    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
+    // Node's default warning writes into the alternate screen and shifts mouse
+    // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
 
@@ -245,6 +256,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>

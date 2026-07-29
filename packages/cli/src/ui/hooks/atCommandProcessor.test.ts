@@ -167,6 +167,7 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays).toBeDefined();
     expect(result.toolDisplays).toHaveLength(1);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    expect(result.toolDisplays![0].description).toBe('@file.txt');
   });
 
   it('should attach a truncated text file larger than 10MB', async () => {
@@ -312,6 +313,9 @@ describe('handleAtCommand', () => {
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       `Path ${dirPath} resolved to directory.`,
     );
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].description).toBe('@to');
   });
 
   it('should inject MCP server context for @mcp mentions', async () => {
@@ -1322,7 +1326,7 @@ describe('handleAtCommand', () => {
 
       expect(result.toolDisplays).toBeDefined();
       expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
-      expect(result.toolDisplays![0].description).toContain('file.txt');
+      expect(result.toolDisplays![0].description).toBe('@specific-file.txt');
     });
 
     it('should mark per-file failures as Error status, not Success', async () => {

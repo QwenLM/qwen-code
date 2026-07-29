@@ -19,14 +19,22 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
         type: string;
         displayName: string;
         manageable: boolean;
-        fields: never[];
+        fields: Array<{
+          key: string;
+          label: string;
+          kind: 'string' | 'secret';
+          required?: boolean;
+        }>;
       }>,
       channels: {} as Record<
         string,
         {
           name: string;
           config: { type: string };
-          secrets: Record<string, never>;
+          secrets: Record<
+            string,
+            { present: boolean; source?: 'literal' | 'environment' }
+          >;
           startsWithServe: boolean;
           runtime: {
             state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -46,10 +54,16 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
       loading: false,
       error: undefined as Error | undefined,
       reload: vi.fn(),
+      createOrUpdate: vi.fn(),
+      remove: vi.fn(),
       setStartup: vi.fn(),
       start: vi.fn(),
       stop: vi.fn(),
       restart: vi.fn(),
+      pairing: {
+        list: vi.fn(),
+        approve: vi.fn(),
+      },
     },
   },
   useChannelsMock: vi.fn(),
@@ -109,7 +123,20 @@ beforeEach(() => {
       type: 'dingtalk',
       displayName: 'DingTalk',
       manageable: true,
-      fields: [],
+      fields: [
+        {
+          key: 'clientId',
+          label: 'Client ID',
+          kind: 'string',
+          required: true,
+        },
+        {
+          key: 'clientSecret',
+          label: 'Client Secret',
+          kind: 'secret',
+          required: true,
+        },
+      ],
     },
     {
       type: 'wecom',
@@ -141,10 +168,17 @@ beforeEach(() => {
   channelState.current.loading = false;
   channelState.current.error = undefined;
   useChannelsMock.mockReset();
+  channelState.current.reload.mockReset().mockResolvedValue(undefined);
+  channelState.current.createOrUpdate.mockReset().mockResolvedValue(undefined);
+  channelState.current.remove.mockReset().mockResolvedValue(undefined);
   channelState.current.setStartup.mockReset().mockResolvedValue(undefined);
   channelState.current.start.mockReset().mockResolvedValue(undefined);
   channelState.current.stop.mockReset().mockResolvedValue(undefined);
   channelState.current.restart.mockReset().mockResolvedValue(undefined);
+  channelState.current.pairing.list
+    .mockReset()
+    .mockResolvedValue({ requests: [] });
+  channelState.current.pairing.approve.mockReset();
   workspaceState.current = {
     workspaceCwd: '/workspace/demo',
     token: 'secret',
@@ -203,6 +237,112 @@ describe('ChannelsManagerPage', () => {
         enabled: true,
       },
     );
+  });
+
+  it('opens the typed editor from an available platform', async () => {
+    await renderPage();
+
+    const platform = container.querySelector<HTMLButtonElement>(
+      '[data-testid="channel-platform-dingtalk"]',
+    );
+    expect(platform?.tagName).toBe('BUTTON');
+    await act(async () => {
+      platform?.click();
+    });
+
+    expect(document.body.textContent).toContain('Configure DingTalk');
+    expect(document.body.textContent).toContain('Client ID (AppKey)');
+    expect(document.body.textContent).toContain('Client Secret (AppSecret)');
+  });
+
+  it('opens an existing Channel for editing', async () => {
+    channelState.current.channels.ding = {
+      ...channelState.current.channels.ding,
+      config: {
+        type: 'dingtalk',
+        clientId: 'stored-id',
+        senderPolicy: 'pairing',
+      },
+      secrets: {
+        clientSecret: { present: true, source: 'literal' },
+      },
+    };
+    channelState.current.pairing.list.mockResolvedValue({
+      requests: [
+        {
+          senderId: 'user-42',
+          senderName: 'Ada',
+          code: 'ABCD1234',
+          createdAt: Date.now(),
+        },
+      ],
+    });
+    await renderPage();
+
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === 'Edit DingTalk Bot',
+    );
+    await act(async () => {
+      edit?.click();
+    });
+
+    expect(document.body.textContent).toContain('Edit DingTalk');
+    const name = Array.from(document.querySelectorAll('input')).find(
+      (input) => input.value === 'DingTalk Bot',
+    );
+    expect(name?.disabled).toBe(true);
+    expect(channelState.current.pairing.list).toHaveBeenCalledWith(
+      'DingTalk Bot',
+    );
+    expect(document.body.textContent).toContain('ABCD1234');
+  });
+
+  it('deletes a Channel with the current revision', async () => {
+    await renderPage();
+
+    const remove = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.getAttribute('aria-label') === 'Delete DingTalk Bot',
+    );
+    await act(async () => {
+      remove?.click();
+    });
+    expect(document.body.textContent).toContain('Delete DingTalk Bot?');
+
+    const dialog = document.querySelector('[role="alertdialog"]');
+    const confirm = Array.from(dialog?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(channelState.current.remove).toHaveBeenCalledWith('DingTalk Bot', {
+      expectedRevision: '1',
+    });
+  });
+
+  it('closes an editor when the selected workspace changes', async () => {
+    await renderPage();
+    const platform = container.querySelector<HTMLButtonElement>(
+      '[data-testid="channel-platform-dingtalk"]',
+    );
+    await act(async () => {
+      platform?.click();
+    });
+    expect(document.body.textContent).toContain('Configure DingTalk');
+
+    workspaceState.current = {
+      ...workspaceState.current,
+      workspaceCwd: '/workspace/other',
+    };
+    channelState.current.snapshot = {
+      revision: 'other-1',
+      instances: {},
+    };
+    channelState.current.channels = {};
+    await renderPage();
+
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('disables lifecycle controls without a bearer token', async () => {

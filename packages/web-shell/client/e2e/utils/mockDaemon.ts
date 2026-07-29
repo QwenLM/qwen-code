@@ -4,6 +4,7 @@ import {
   type DaemonApprovalMode,
   type DaemonCapabilities,
   type DaemonChannelsSnapshot,
+  type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
   type DaemonEvent,
   type DaemonRestoredSession,
@@ -54,6 +55,7 @@ export interface WebShellDaemonScenario {
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
+  pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -68,6 +70,14 @@ export interface WebShellDaemonScenario {
    * empty pull-request list.
    */
   gitHubPrs?: DaemonGitHubPullRequestList;
+  /** Response for `GET /workspaces/:cwd/git/branches`. */
+  gitBranches?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/diff`. */
+  gitDiff?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/log`. */
+  gitLog?: unknown;
+  /** Response for `POST /session/:id/btw`. */
+  btwAnswer?: string;
 }
 
 export interface MockDaemonController {
@@ -94,6 +104,7 @@ type ScenarioOverrides = Partial<
     | 'extensionUpdateCheck'
     | 'channelTypes'
     | 'channels'
+    | 'pairingRequests'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -109,6 +120,7 @@ type ScenarioOverrides = Partial<
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
+  pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -322,12 +334,17 @@ export function createWebShellDaemonScenario(
     extensionUpdateCheck,
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
+    pairingRequests: overrides.pairingRequests ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
+    gitBranches: overrides.gitBranches,
+    gitDiff: overrides.gitDiff,
+    gitLog: overrides.gitLog,
+    btwAnswer: overrides.btwAnswer,
   };
 }
 
@@ -525,14 +542,26 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    ) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
+    /^\/workspace\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
     /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
+    /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -594,6 +623,55 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (
+    (method === 'PUT' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspace\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspace\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/github\/default-branch\/?$/.test(path)
+  )
+    return true;
+  if (method === 'GET' && /^\/workspace\/github\/default-branch\/?$/.test(path))
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/github\/prs\/create\/?$/.test(path)
+  )
+    return true;
+  if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
+    return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -760,6 +838,91 @@ async function handleDaemonRoute(
     await json(route, scenario.channels);
     return;
   }
+  const pairingMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/pairing-requests(\/approve)?\/?$/,
+  );
+  if (pairingMatch) {
+    const name = decodeURIComponent(pairingMatch[1]);
+    const requests = scenario.pairingRequests[name] ?? [];
+    if (method === 'GET' && !pairingMatch[2]) {
+      await json(route, { requests });
+      return;
+    }
+    if (method === 'POST' && pairingMatch[2]) {
+      const code = String(getRecordValue(body, 'code') ?? '').toUpperCase();
+      const approved = requests.find((request) => request.code === code);
+      if (!approved) {
+        await json(route, { error: 'Pairing request not found.' }, 404);
+        return;
+      }
+      const remaining = requests.filter((request) => request.code !== code);
+      scenario.pairingRequests = {
+        ...scenario.pairingRequests,
+        [name]: remaining,
+      };
+      await json(route, { approved, requests: remaining });
+      return;
+    }
+  }
+  const channelMutationMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/?$/,
+  );
+  if (channelMutationMatch && (method === 'PUT' || method === 'DELETE')) {
+    const name = decodeURIComponent(channelMutationMatch[1]);
+    if (
+      !isRecord(body) ||
+      body['expectedRevision'] !== scenario.channels.revision
+    ) {
+      await json(route, { error: 'Channel settings changed.' }, 409);
+      return;
+    }
+    const revision = nextRevision(scenario.channels.revision);
+    if (method === 'DELETE') {
+      const instances = { ...scenario.channels.instances };
+      delete instances[name];
+      scenario.channels = { revision, instances };
+      await json(route, {
+        snapshot: scenario.channels,
+        instance: {
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      });
+      return;
+    }
+    if (!isRecord(body['config'])) {
+      await badRequest(route, 'Invalid Channel configuration.');
+      return;
+    }
+    const previous = scenario.channels.instances[name];
+    const secrets = { ...(previous?.secrets ?? {}) };
+    if (isRecord(body['secrets'])) {
+      for (const [key, update] of Object.entries(body['secrets'])) {
+        if (!isRecord(update)) continue;
+        if (update['operation'] === 'clear') {
+          delete secrets[key];
+        } else if (update['operation'] === 'replace') {
+          secrets[key] = { present: true, source: 'literal' };
+        }
+      }
+    }
+    const instance = {
+      name,
+      config: body['config'],
+      secrets,
+      startsWithServe: previous?.startsWithServe ?? false,
+      runtime: previous?.runtime ?? ({ state: 'stopped' } as const),
+    };
+    scenario.channels = {
+      revision,
+      instances: { ...scenario.channels.instances, [name]: instance },
+    };
+    await json(route, { snapshot: scenario.channels, instance });
+    return;
+  }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
     await json(
       route,
@@ -781,6 +944,179 @@ async function handleDaemonRoute(
         pullRequests: [],
       },
     );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/branches\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitBranches ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        local: [
+          {
+            name: 'main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'feat/demo',
+            isHead: true,
+            ahead: 3,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        remote: [
+          {
+            name: 'origin/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'origin/develop',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'upstream/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        tags: [{ name: 'v1.0.0', date: 0, subject: 'Release 1.0' }],
+        recent: ['main', 'develop'],
+        head: 'feat/demo',
+        detached: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/diff\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitDiff ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        files: [
+          {
+            path: 'src/foo.ts',
+            added: 10,
+            removed: 3,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+          },
+          {
+            path: 'src/bar.ts',
+            added: 5,
+            removed: 0,
+            isBinary: false,
+            isUntracked: true,
+            isDeleted: false,
+          },
+        ],
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/log\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitLog ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        entries: [
+          {
+            sha: 'abc1234',
+            shortSha: 'abc1234',
+            subject: 'feat: add branch picker',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            refs: 'HEAD -> feat/demo',
+            parents: [],
+          },
+          {
+            sha: 'def5678',
+            shortSha: 'def5678',
+            subject: 'fix: resolve session per workspace',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            parents: [],
+          },
+        ],
+        hasMore: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/(checkout|branch|push|pull|commit)\/?$/.test(
+      path,
+    )
+  ) {
+    const action = path.replace(/\/$/, '').split('/').pop();
+    if (action === 'commit') {
+      await json(route, { sha: 'abc1234', subject: 'test commit' });
+    } else if (action === 'checkout' || action === 'branch') {
+      await json(route, { branch: 'feat/demo', detached: false });
+    } else {
+      await json(route, { success: true, output: '' });
+    }
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/default-branch\/?$/.test(path)
+  ) {
+    await json(route, { branch: 'origin/main' });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/prs\/create\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      { url: 'https://github.com/example/repo/pull/42', number: 42 },
+      201,
+    );
+    return;
+  }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
+    await json(route, {
+      sessionId: path.split('/')[2],
+      answer:
+        scenario.btwAnswer ??
+        'feat(web-shell): add git branch picker and commit dialog\n\n## What this PR does\nAdds branch picker, commit dialog, and create PR flow to the web shell.\n\n## Why it is needed\nCompletes the git workflow in the browser.',
+    });
     return;
   }
   if (method === 'POST' && path === '/session') {
@@ -980,6 +1316,13 @@ function readStringField(body: unknown, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value
     : undefined;
+}
+
+function nextRevision(revision: string): string {
+  const numeric = Number(revision);
+  return Number.isSafeInteger(numeric) && numeric >= 0
+    ? String(numeric + 1)
+    : `${revision}-next`;
 }
 
 function isApprovalMode(mode: string): mode is DaemonApprovalMode {

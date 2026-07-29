@@ -1405,6 +1405,15 @@ function checkResponsePartsForError(
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (response.visionBridgeNotice) {
+    const content = toolResultContent({
+      ...response,
+      visionBridgeNotice: undefined,
+    });
+    return content
+      ? `${response.visionBridgeNotice}\n${content}`
+      : response.visionBridgeNotice;
+  }
   if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
     const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
     if (response.error) {
