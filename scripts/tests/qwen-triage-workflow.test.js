@@ -1537,6 +1537,29 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
+  // expected A/B base-cell failures proving the tests are load-bearing"
+  // while assertions.json said fail:7 — so the publisher's trust rule
+  // (merge-ready requires fail==0) correctly refused it and the headline
+  // degraded to "no usable structured verdict". Both sides told the truth
+  // about different questions. The fix is the counting semantics: a control
+  // cell that fails AS PREDICTED is a passed assertion.
+  it('defines expected failures as passes in the assertion contract', () => {
+    const rules = verifySkill
+      .slice(verifySkill.indexOf('## Hard rules'))
+      .replace(/\s+/g, ' ');
+    expect(rules).toContain('Expected failures are passes');
+    expect(rules).toContain('assert the control goes red');
+    expect(rules).toContain('counts only UNEXPECTED outcomes');
+    // The rule must state the publisher-side consequence, or an agent has no
+    // reason to believe the count semantics are load-bearing.
+    expect(rules).toContain('cannot be `merge-ready`');
+    // And it must sit in Hard rules, not in narrative prose.
+    expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
+      verifySkill.indexOf('## Hard rules'),
+    );
+  });
+
   // The whole report is already inside a <details> on the PR. With the
   // Chinese summary as the last item, reaching it meant expanding that fold
   // and scrolling the entire English report — ~90 lines on a real one.
@@ -1719,59 +1742,112 @@ describe('qwen-triage verify publish fidelity', () => {
   // lane shipped, but the verdict itself — the one line a reader acts on —
   // was English-only. A Chinese reader got the caveat and not the
   // conclusion.
-  it('renders every verdict headline in both languages', () => {
+  it('leads every verdict with a distinct qualitative call, bilingually', () => {
+    // "merge-ready (agent verdict)" is lane jargon; the maintainer asked for
+    // pass/no-pass. Every arm now leads with a qualitative call, and only
+    // agent verdicts may claim passed/not-passed — a crashed, timed-out, or
+    // verdict-less run says nothing about the PR and must render as
+    // incomplete/inconclusive, never as a pass or a fail.
     const dir = fixture();
     try {
       const ARMS = [
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' },
-          'merge-ready (agent verdict)',
-          '可合入（agent 判定）',
+          '\u2705 passed \u2014 merge-ready (agent verdict)',
+          '\u2705 \u901a\u8fc7 \u00b7 \u53ef\u5408\u5165\uff08agent \u5224\u5b9a\uff09',
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
-          'findings reported (agent verdict)',
-          '报告了发现（agent 判定）',
+          '\u274c not passed \u2014 findings reported (agent verdict)',
+          '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u62a5\u544a\u4e86\u53d1\u73b0\uff08agent \u5224\u5b9a\uff09',
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
-          'blocked (agent verdict)',
-          '阻塞（agent 判定）',
+          '\u274c not passed \u2014 blocked (agent verdict)',
+          '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u963b\u585e\uff08agent \u5224\u5b9a\uff09',
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
-          'inconclusive (agent verdict)',
-          '结论不足（agent 判定）',
+          '\u26a0\ufe0f inconclusive \u2014 inconclusive (agent verdict)',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u7ed3\u8bba\u4e0d\u8db3\uff08agent \u5224\u5b9a\uff09',
         ],
         [
           { VERDICT: 'pass' },
-          'completed (no usable structured verdict)',
-          '已完成（无可用的结构化判定）',
+          '\u26a0\ufe0f inconclusive \u2014 completed without a usable structured verdict',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u5df2\u5b8c\u6210\u4f46\u65e0\u53ef\u7528\u7684\u7ed3\u6784\u5316\u5224\u5b9a',
         ],
-        [{ VERDICT: 'fail' }, 'agent run failed', 'agent 运行失败'],
+        [
+          { VERDICT: 'fail' },
+          '\u26a0\ufe0f incomplete \u2014 the agent run failed',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 agent \u8fd0\u884c\u5931\u8d25',
+        ],
         [
           { VERDICT: 'timeout' },
-          'timeout — partial evidence',
-          '超时——证据不完整',
+          '\u26a0\ufe0f incomplete \u2014 timeout \u2014 partial evidence',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u8d85\u65f6\u2014\u2014\u8bc1\u636e\u4e0d\u5b8c\u6574',
         ],
-        [
-          { VERDICT: 'infra-error' },
-          'infra-error (crash, OOM, or unwritable results)',
-          '基础设施故障（崩溃、OOM 或结果不可写）',
-        ],
-        [{ VERDICT: 'bogus' }, 'unknown', '未知'],
       ];
+      const seenEn = new Set();
       const seenZh = new Set();
       ARMS.forEach(([env, en, zh], i) => {
         const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
         expect(body).toContain(`**Sandboxed verification: ${en}**`);
-        expect(body).toContain(`**沙箱验证：${zh}**`);
+        expect(body).toContain(
+          `<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a${zh}</summary>`,
+        );
+        // Only agent verdicts judge the code: every process-outcome arm must
+        // carry \u26a0\ufe0f, and never the pass/fail glyphs.
+        if (!env.AGENT_VERDICT) {
+          const head = body.slice(0, body.indexOf('<details>'));
+          expect(head).toContain('\u26a0\ufe0f');
+          expect(head).not.toContain('\u2705');
+          expect(head).not.toContain('\u274c');
+        }
+        seenEn.add(en);
         seenZh.add(zh);
       });
-      // Distinct per arm. A single hardcoded Chinese string — or one that
-      // renders the English text twice — satisfies a per-arm containment
-      // check, so the pairing has to be pinned as a bijection.
+      // Distinct per arm, both sides. A single hardcoded string — or one
+      // that echoes the English — satisfies per-arm containment, so the
+      // pairing is pinned as a bijection.
+      expect(seenEn.size).toBe(ARMS.length);
       expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps English unfolded and folds the Chinese into one details', () => {
+    // The maintainer asked for the repo PR-body convention: English default,
+    // Chinese collapsed. The fold summary must carry the qualitative verdict
+    // so a collapsed block still shows a conclusion, not just a label.
+    const dir = fixture();
+    try {
+      const body = render(dir, {
+        NAME: 'fold',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      const details = body.indexOf(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a',
+      );
+      const detailsEnd = body.indexOf('</details>');
+      expect(details).toBeGreaterThan(-1);
+      // English scope + assertion line sit BEFORE the fold...
+      expect(body.indexOf('Ran the PR in an isolated')).toBeLessThan(details);
+      expect(body.indexOf('Scripted assertions:')).toBeLessThan(details);
+      // ...and every Chinese body line sits INSIDE it.
+      const scopeZh = body.indexOf(
+        '\u6c99\u7bb1\u9a8c\u8bc1\u5728\u9694\u79bb',
+      );
+      const assertZh = body.indexOf('\u811a\u672c\u65ad\u8a00\uff1a');
+      expect(scopeZh).toBeGreaterThan(details);
+      expect(scopeZh).toBeLessThan(detailsEnd);
+      expect(assertZh).toBeGreaterThan(details);
+      expect(assertZh).toBeLessThan(detailsEnd);
+      // The report block stays outside the Chinese fold.
+      expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
+        detailsEnd,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
