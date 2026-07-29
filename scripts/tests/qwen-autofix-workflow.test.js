@@ -1960,13 +1960,15 @@ describe('qwen-autofix workflow', () => {
     // one lost Chinese section against a duplicate elsewhere): engage,
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
-    // the non-main base refusal, the cap pause, and the scan-side
-    // first-pickup engage ack (fork label events carry no secrets, so the
-    // scan anchors the window itself).
+    // the label-path non-main base refusal, the command-path non-main base
+    // refusal, the cap pause, the command-path direct engage ack (the
+    // labeled event has been observed to not fire — #7999, #8002 — so the
+    // command acks itself), and the scan-side first-pickup engage ack (fork
+    // label events carry no secrets, so the scan anchors the window itself).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(12);
+    expect(ackBodies).toHaveLength(14);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -2322,8 +2324,12 @@ describe('qwen-autofix workflow', () => {
       'cap notice skipped: consent changed since the snapshot',
     );
     // The queued toggle re-verifies state and base, and author privilege is
-    // LIVE (triage+ today), never durable authorship alone.
-    expect(workflow).toContain('no longer an open main-targeting PR');
+    // LIVE (triage+ today), never durable authorship alone. A closed PR
+    // drops silently; a non-main base refuses out loud (engage side only).
+    expect(workflow).toContain('no longer an open PR');
+    expect(workflow).toContain(
+      `takeover command refused: PR #\${PR} targets '\${CMD_BASE_REF}' not 'main'`,
+    );
     expect(routeStep).toContain('admin|maintain|write|triage)');
     expect(reviewScanJob).toContain('"${ROUND}" -ge "${EFF_MAX_ROUNDS}"');
     // The effective cap travels in the matrix target and SHADOWS the
@@ -2440,7 +2446,7 @@ describe('qwen-autofix workflow', () => {
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
             `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
-            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $4" >> '${join(dir, 'writes.log')}'; cat > /dev/null <<< "$6";`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
         );
@@ -2473,11 +2479,15 @@ describe('qwen-autofix workflow', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    // add + absent → label applied, no ack from this job.
+    // add + absent → label applied AND the engage ack posted directly from
+    // this job: the labeled event has been observed to not fire at all
+    // (#7999, #8002), so the user-visible ack cannot depend on that
+    // round-trip. In-repo PRs get no fork note.
     const addAbsent = runToggle({ cmd: 'add' });
     expect(addAbsent.writes).toContain('EDIT pr edit 7165');
     expect(addAbsent.writes).toContain('--add-label');
-    expect(addAbsent.writes).not.toContain('COMMENT');
+    expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
+    expect(addAbsent.writes).not.toContain('next scheduled scan');
     // add + present → re-arm ack, label untouched.
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
@@ -2504,7 +2514,11 @@ describe('qwen-autofix workflow', () => {
     expect(forkRefused.writes).not.toContain('EDIT');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
     expect(forkManaged.writes).toContain('--add-label');
-    expect(forkManaged.writes).not.toContain('COMMENT');
+    // Fork label events carry no secrets, so no other job could ever ack a
+    // fork engage — the command's own ack is the ONLY one, and it sets the
+    // expectation that the first round comes from the next scheduled scan.
+    expect(forkManaged.writes).toContain('<!-- takeover-ack engaged -->');
+    expect(forkManaged.writes).toContain('next scheduled scan');
     // A below-write fork author would be a ghost engagement (label sticks,
     // nothing ever manages it) — the command refuses with the adoption ask.
     const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
@@ -2520,6 +2534,25 @@ describe('qwen-autofix workflow', () => {
       labels: ['autofix/takeover'],
     });
     expect(forkStop.writes).toContain('--remove-label');
+    // A /takeover on a stacked PR refuses OUT LOUD (the silent drop made it
+    // indistinguishable from a lost event) and never applies the label.
+    const stacked = runToggle({ cmd: 'add', base: 'feat/base-pr' });
+    expect(stacked.writes).toContain('<!-- takeover-ack base-refused -->');
+    expect(stacked.writes).toContain('`feat/base-pr`');
+    expect(stacked.writes).not.toContain('EDIT');
+    // …but a stop on a non-main PR PROCEEDS: removing a stuck label is
+    // harmless and matches the latest intent (previously dropped, leaving a
+    // manually-applied label with no command able to remove it).
+    const stackedStop = runToggle({
+      cmd: 'remove',
+      base: 'feat/base-pr',
+      labels: ['autofix/takeover'],
+    });
+    expect(stackedStop.writes).toContain('--remove-label');
+    // A closed PR still drops silently for both directions.
+    const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
+    expect(closed.writes.trim()).toBe('');
+    expect(closed.log).toContain('no longer an open PR');
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
@@ -3058,6 +3091,7 @@ describe('qwen-autofix workflow', () => {
       action = 'labeled',
       headRepo = 'QwenLM/qwen-code',
       label = 'autofix/takeover',
+      sender = 'wenshao',
     }) =>
       // The block also logs its reasoning; only the trailing summary is asserted.
       execFileSync(
@@ -3085,7 +3119,8 @@ describe('qwen-autofix workflow', () => {
             PR_STATE: state,
             PR_BASE_REF: base,
             PR_NUMBER_EVENT: '7368',
-            SENDER_LOGIN: 'wenshao',
+            SENDER_LOGIN: sender,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
           },
           encoding: 'utf8',
         },
@@ -3102,6 +3137,11 @@ describe('qwen-autofix workflow', () => {
     // Unchanged: a main-targeting in-repo PR still engages, and engagement
     // carries no base (the field exists only to name a refusal).
     expect(run({})).toBe('ack=engaged base= review=true');
+    // A label applied BY THE BOT came from takeover-command, which posts the
+    // engage ack itself (the labeled event has been observed to not fire —
+    // #7999, #8002 — so the ack cannot depend on this round-trip). Only the
+    // ack is suppressed; the immediate scan still routes.
+    expect(run({ sender: 'qwen-code-dev-bot' })).toBe('ack= base= review=true');
     // Still deliberately silent — these were never engaged and a comment on
     // them would be noise, not information: a closed PR, a fork (whose label
     // event carries no secrets to comment with), a non-takeover label, and
