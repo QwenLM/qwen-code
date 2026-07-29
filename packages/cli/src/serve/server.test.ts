@@ -8730,7 +8730,7 @@ describe('createServeApp', () => {
         attached: false,
         clientId: 'client-0',
       });
-      expect(bridge.calls).toMatchObject([
+      expect(bridge.calls).toEqual([
         { workspaceCwd: WORK_A, modelServiceId: 'qwen-prod' },
       ]);
     });
@@ -8748,7 +8748,7 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: '/work/a', sessionScope: scope });
         expect(res.status).toBe(200);
-        expect(bridge.calls).toMatchObject([
+        expect(bridge.calls).toEqual([
           { workspaceCwd: WORK_A, sessionScope: scope },
         ]);
       }
@@ -8771,7 +8771,7 @@ describe('createServeApp', () => {
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(200);
       expect(res.body.clientId).toBe('client-existing');
-      expect(bridge.calls).toMatchObject([
+      expect(bridge.calls).toEqual([
         { workspaceCwd: WORK_A, clientId: 'client-existing' },
       ]);
     });
@@ -8832,8 +8832,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(200);
-      expect(bridge.calls).toMatchObject([{ workspaceCwd: WORK_A }]);
-      expect(bridge.calls[0]).not.toHaveProperty('sessionScope');
+      expect(bridge.calls).toEqual([{ workspaceCwd: WORK_A }]);
     });
 
     it('500 when bridge throws', async () => {
