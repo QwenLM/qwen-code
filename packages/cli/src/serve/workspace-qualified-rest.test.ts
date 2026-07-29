@@ -1206,6 +1206,31 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('rejects managed-memory tasks for an untrusted workspace', async () => {
+    const h = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Do not save' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).not.toHaveBeenCalled();
+      expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('rejects global and user scope on workspace-qualified memory routes', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
