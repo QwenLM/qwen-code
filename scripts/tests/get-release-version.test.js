@@ -86,6 +86,23 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
+    it.each([
+      ['matches', '0.8.0', '0.8.1-preview.0'],
+      ['is ahead of', '0.9.0', '0.9.1-preview.0'],
+    ])(
+      'should bump the preview base when the latest stable %s it',
+      (_, latestStable, expected) => {
+        vi.mocked(execSync).mockImplementation((command) => {
+          if (command.includes('npm view') && command.includes('--tag=latest'))
+            return latestStable;
+          return mockExecSync(command);
+        });
+
+        const result = getVersion({ type: 'preview' });
+        expect(result.releaseVersion).toBe(expected);
+      },
+    );
+
     it('should calculate the next nightly version from package.json', () => {
       vi.mocked(execSync).mockImplementation(mockExecSync);
       const result = getVersion({ type: 'nightly' });

@@ -343,11 +343,10 @@ function getPreviewVersion(args) {
     if (
       latestStable &&
       semver.valid(latestStable) &&
+      semver.valid(baseVersion) &&
       semver.gte(latestStable, baseVersion)
     ) {
-      const parts = baseVersion.split('.');
-      parts[2] = String(parseInt(parts[2] || '0', 10) + 1);
-      const bumped = parts.join('.');
+      const bumped = semver.inc(latestStable, 'patch');
       console.error(
         `Nightly base ${baseVersion} already released as stable (${latestStable}); bumping preview base to ${bumped}.`,
       );
