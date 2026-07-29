@@ -21,7 +21,10 @@ import {
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core/goalWire';
-import { isUserPromptSubmitContextPartText } from '@qwen-code/qwen-code-core';
+// Narrow path — the helper is Node-free. Importing the core package barrel
+// here would pull the whole Node-bound core graph into the browser
+// transcript bundle (sdk-typescript daemon/transcript).
+import { isUserPromptSubmitContextPartText } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
