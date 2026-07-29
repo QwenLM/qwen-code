@@ -26,7 +26,7 @@
 // reached a verdict" from "blocking verdict" (opt-in via --fail-on).
 
 import type { CommandModule } from 'yargs';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
@@ -74,6 +74,23 @@ export interface RunReviewResult {
   timedOut: boolean;
   durationMs: number;
 }
+
+/** The composed verdict `compose-review` writes and Step 9 cleanup sweeps. */
+const COMPOSED_PATTERN = /^qwen-review-.*composed\.json$/;
+
+// How often to poll for the composed verdict while the child runs. The verdict
+// sits on disk from Step 6 (compose-review) until Step 9 (cleanup) — a window
+// spanning the model's between-step narration and the report write, i.e.
+// seconds — so a quarter-second poll catches it with a wide margin.
+const COMPOSED_POLL_MS = 250;
+
+// Conventional exit codes for a run cancelled by a signal (128 + signum).
+const SIGNAL_EXIT_CODES: Record<string, number> = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+const PARENT_SIGNALS = Object.keys(SIGNAL_EXIT_CODES) as NodeJS.Signals[];
 
 /** The /review invocation the child runs — built from flags, never hand-typed. */
 export function buildReviewPrompt(args: {
@@ -161,16 +178,59 @@ function readComposed(path: string): ComposedVerdict | null {
   }
 }
 
+/**
+ * Terminate the child's process group — the detached relaunch wrapper AND the
+ * real review it spawned. On POSIX a negative pid names the group; on Windows
+ * there are no POSIX process groups and a negative pid is meaningless, so fall
+ * back to `taskkill /T`, which walks the tree the detached child spawned. Both
+ * are best-effort: killing a group that is already gone throws, and that is
+ * fine.
+ */
+export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+      });
+    } catch {
+      // Already dead, or taskkill unavailable.
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // Already dead.
+  }
+}
+
 async function runReview(args: RunReviewArgs): Promise<void> {
   const startMs = Date.now();
   const prompt = buildReviewPrompt(args);
 
+  // The verdict cutoff carries slack: a coarse filesystem clock can stamp a
+  // file a moment BEFORE the Date.now() captured at run start, and a review's
+  // own verdict must not be discarded over clock granularity. Artifacts from a
+  // previous review are minutes old, far outside any slack.
+  const cutoffMs = startMs - 2_000;
+
   // Re-enter THIS build's CLI, not whatever `qwen` PATH resolves to — the same
   // version-skew rule the skill's own subprocesses follow via QWEN_CODE_CLI.
   // process.argv[1] is the entry that is already running this command.
+  // --expose-gc comes first, exactly as the relaunch wrapper passes it
+  // (cli-entry.js): a full review is the longest, most memory-hungry session
+  // the CLI runs, and spawning argv[1] directly would silently drop the flag
+  // the memory-pressure monitor's critical tier needs to call global.gc().
   const child = spawn(
     process.execPath,
-    [process.argv[1], '--prompt', prompt, '--approval-mode', args.approvalMode],
+    [
+      '--expose-gc',
+      process.argv[1],
+      '--prompt',
+      prompt,
+      '--approval-mode',
+      args.approvalMode,
+    ],
     {
       // stdin CLOSED, not inherited: piped input would be prepended to the
       // prompt and the leading `/` would no longer be the first character —
@@ -201,6 +261,30 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     child.stderr?.resume();
   }
 
+  // The composed verdict is transient: the child's Step 9 `cleanup` sweeps
+  // every `.qwen/tmp/qwen-review-<target>-*` file — including it — before the
+  // child exits. Reading it only AFTER `close` therefore sees nothing and
+  // reports a review that completed as one that failed. Snapshot it the moment
+  // compose-review writes it: the first verdict newer than the run start is
+  // this run's, and caching it in memory survives the sweep.
+  let capturedPath: string | null = null;
+  let capturedVerdict: ComposedVerdict | null = null;
+  const captureTimer = setInterval(() => {
+    if (capturedVerdict !== null) return;
+    const path = newestArtifactSince(
+      REVIEW_TMP_DIR,
+      COMPOSED_PATTERN,
+      cutoffMs,
+    );
+    if (path === null) return;
+    // A half-written file fails to parse; the next tick retries it.
+    const verdict = readComposed(path);
+    if (verdict !== null) {
+      capturedPath = path;
+      capturedVerdict = verdict;
+    }
+  }, COMPOSED_POLL_MS);
+
   let timedOut = false;
   const timeoutMs = args.timeoutMinutes * 60_000;
   const timer = setTimeout(() => {
@@ -215,20 +299,30 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     // and still burning API calls.
     const pid = child.pid;
     if (pid !== undefined) {
-      try {
-        process.kill(-pid, 'SIGTERM');
-      } catch {
-        // Already dead.
-      }
-      setTimeout(() => {
-        try {
-          process.kill(-pid, 'SIGKILL');
-        } catch {
-          // Already dead.
-        }
-      }, 10_000).unref();
+      killProcessGroup(pid, 'SIGTERM');
+      setTimeout(() => killProcessGroup(pid, 'SIGKILL'), 10_000).unref();
     }
   }, timeoutMs);
+
+  // The child is detached (its own process group) so the timeout kill can reach
+  // the relaunch wrapper's grandchild — but that also puts it outside the
+  // foreground group a terminal's Ctrl+C signals, and a cancelled CI job sends
+  // the parent SIGTERM. Without forwarding, the parent dies and the review is
+  // reparented to PID 1, burning model API calls for up to the full timeout
+  // (and, with --comment, can still post after the job that spawned it is
+  // gone). Terminate the group on the way out, mirroring the timeout path.
+  const onParentSignal = (signal: NodeJS.Signals): void => {
+    clearTimeout(timer);
+    clearInterval(captureTimer);
+    const pid = child.pid;
+    if (pid !== undefined) {
+      // SIGTERM's default action terminates the node group; the parent exits
+      // immediately, so there is no later moment to escalate to SIGKILL.
+      killProcessGroup(pid, 'SIGTERM');
+    }
+    process.exit(SIGNAL_EXIT_CODES[signal] ?? 1);
+  };
+  for (const signal of PARENT_SIGNALS) process.on(signal, onParentSignal);
 
   const childOutcome = await new Promise<{
     code: number | null;
@@ -245,22 +339,27 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   const childExitCode = childOutcome.code;
   const childSignal = childOutcome.signal;
   clearTimeout(timer);
+  clearInterval(captureTimer);
+  for (const signal of PARENT_SIGNALS) process.off(signal, onParentSignal);
 
   // The verdict is what compose-review wrote, not what the child printed. A
   // clean child exit without a composed artifact means the run wandered off
-  // before Step 7 — that is "no verdict", not "approve".
-  //
-  // The cutoff carries slack: a coarse filesystem clock can stamp a file a
-  // moment BEFORE the Date.now() captured at run start, and a review's own
-  // verdict must not be discarded over clock granularity. Artifacts from a
-  // previous review are minutes old, far outside any slack.
-  const cutoffMs = startMs - 2_000;
-  const composedPath = newestArtifactSince(
-    REVIEW_TMP_DIR,
-    /^qwen-review-.*composed\.json$/,
-    cutoffMs,
-  );
-  const composed = composedPath ? readComposed(composedPath) : null;
+  // before Step 7 — that is "no verdict", not "approve". Prefer the verdict
+  // captured during the run (Step 9 cleanup has usually swept the file by now);
+  // fall back to a disk scan for a child that died before cleanup ran.
+  // Annotated, not inferred: capturedPath/capturedVerdict are mutated only
+  // inside the poll closure, so control-flow analysis would narrow them to
+  // their `null` initializer and reject the fallback reassignment below.
+  let composedPath: string | null = capturedPath;
+  let composed: ComposedVerdict | null = capturedVerdict;
+  if (composed === null) {
+    composedPath = newestArtifactSince(
+      REVIEW_TMP_DIR,
+      COMPOSED_PATTERN,
+      cutoffMs,
+    );
+    composed = composedPath ? readComposed(composedPath) : null;
+  }
   const reportPath = newestArtifactSince(REVIEWS_DIR, /\.md$/, cutoffMs);
 
   const completed = composed !== null && !timedOut;
@@ -281,26 +380,34 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     durationMs: Date.now() - startMs,
   };
 
-  if (args.json) {
-    writeStdoutLine(JSON.stringify(result, null, 2));
-  } else if (completed) {
-    writeStdoutLine(result.verdictLine ?? `Event: ${result.event}`);
-    if (result.reportPath) writeStdoutLine(`Report: ${result.reportPath}`);
-  } else {
-    const detail =
-      composedPath !== null
-        ? `a composed verdict was found at ${resolve(composedPath)} but could not be parsed`
-        : 'no composed verdict was produced';
-    writeStdoutLine(
-      timedOut
-        ? 'Review did not complete: timed out.'
-        : `Review did not complete: ${detail}` +
-            `${childExitCode !== null ? ` (CLI exit ${childExitCode})` : ''}` +
-            `${childSignal !== null ? ` (killed by ${childSignal})` : ''}.`,
-    );
-  }
-
+  // Assign the exit code BEFORE writing the result: a stdout write can throw
+  // (EPIPE once the pipe reader exits), and the exit code — not the prose — is
+  // the contract a CI gate reads. A throw must not downgrade a blocking verdict
+  // (exit 3) to yargs' generic failure (exit 1).
   process.exitCode = exitCodeFor(completed, result.event, args.failOn);
+
+  try {
+    if (args.json) {
+      writeStdoutLine(JSON.stringify(result, null, 2));
+    } else if (completed) {
+      writeStdoutLine(result.verdictLine ?? `Event: ${result.event}`);
+      if (result.reportPath) writeStdoutLine(`Report: ${result.reportPath}`);
+    } else {
+      const detail =
+        composedPath !== null
+          ? `a composed verdict was found at ${resolve(composedPath)} but could not be parsed`
+          : 'no composed verdict was produced';
+      writeStdoutLine(
+        timedOut
+          ? 'Review did not complete: timed out.'
+          : `Review did not complete: ${detail}` +
+              `${childExitCode !== null ? ` (CLI exit ${childExitCode})` : ''}` +
+              `${childSignal !== null ? ` (killed by ${childSignal})` : ''}.`,
+      );
+    }
+  } catch {
+    // stdout is gone; the exit code above is the contract, not this prose.
+  }
 }
 
 export const runCommand: CommandModule = {
@@ -312,7 +419,7 @@ export const runCommand: CommandModule = {
       .positional('target', {
         type: 'string',
         describe:
-          'What to review: a PR number, or omit to review the local working tree',
+          'What to review: a PR number, a PR URL, or a file path; omit to review the local working tree',
       })
       .option('effort', {
         type: 'string',
@@ -364,7 +471,12 @@ export const runCommand: CommandModule = {
       comment: Boolean(argv['comment']),
       json: Boolean(argv['json']),
       failOn: (argv['fail-on'] as 'none' | 'request-changes') ?? 'none',
-      timeoutMinutes: Math.max(1, Number(argv['timeout-minutes']) || 120),
+      // `|| 120` would treat an explicit `--timeout-minutes 0` as falsy and
+      // silently substitute the default; decide default-vs-value by finiteness
+      // so 0 still reaches the 1-minute floor.
+      timeoutMinutes: Number.isFinite(Number(argv['timeout-minutes']))
+        ? Math.max(1, Number(argv['timeout-minutes']))
+        : 120,
       approvalMode: String(argv['approval-mode'] ?? 'yolo'),
       quiet: Boolean(argv['quiet']),
     });

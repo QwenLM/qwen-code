@@ -32,18 +32,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const execFileSyncMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    default: { ...actual, spawn: spawnMock },
+    default: { ...actual, spawn: spawnMock, execFileSync: execFileSyncMock },
     spawn: spawnMock,
+    execFileSync: execFileSyncMock,
   };
 });
 
-const { buildReviewPrompt, newestArtifactSince, exitCodeFor, runCommand } =
-  await import('./run.js');
+const {
+  buildReviewPrompt,
+  newestArtifactSince,
+  exitCodeFor,
+  killProcessGroup,
+  runCommand,
+} = await import('./run.js');
 const { REVIEW_TMP_DIR, REVIEWS_DIR } = await import('./lib/paths.js');
+// The real cleanup, not a mock: the regression test below must prove the parent
+// captures the verdict before Step 9's actual sweep deletes it.
+const { runCleanup } = await import('./cleanup.js');
 
 describe('buildReviewPrompt', () => {
   it('reviews the local tree when no target is given', () => {
@@ -133,10 +143,43 @@ describe('exitCodeFor', () => {
   });
 });
 
+describe('killProcessGroup', () => {
+  let processKill: MockInstance<typeof process.kill>;
+
+  beforeEach(() => {
+    processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    execFileSyncMock.mockReset();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('kills the POSIX process group with a negative pid', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    killProcessGroup(12345, 'SIGTERM');
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('kills the process tree via taskkill on Windows', () => {
+    // A negative pid is not a process group on win32; the group kill must fall
+    // back to a tree kill or the timeout/cancel termination silently no-ops.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    killProcessGroup(12345, 'SIGTERM');
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'taskkill',
+      ['/pid', '12345', '/T', '/F'],
+      { stdio: 'ignore' },
+    );
+    expect(processKill).not.toHaveBeenCalled();
+  });
+});
+
 describe('review run (handler)', () => {
   let dir: string;
   let cwd: string;
   let outs: string[];
+  let errs: string[];
   let exitCode: number | undefined;
   let processKill: MockInstance<typeof process.kill>;
 
@@ -152,12 +195,16 @@ describe('review run (handler)', () => {
     cwd = process.cwd();
     process.chdir(dir);
     outs = [];
+    errs = [];
     exitCode = process.exitCode as number | undefined;
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       outs.push(String(chunk));
       return true;
     });
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      errs.push(String(chunk));
+      return true;
+    });
     processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
     spawnMock.mockReset();
   });
@@ -245,6 +292,43 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('captures the verdict before Step 9 cleanup sweeps it', async () => {
+    // The regression this command shipped with: the child runs the bundled
+    // skill through Step 9, whose `cleanup` deletes the composed verdict before
+    // the child exits. A parent that reads only after `close` sees nothing and
+    // reports a completed review as a failure. The capture poll must snapshot
+    // the verdict while the child still runs.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      // Step 6: compose-review writes the composed verdict.
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler();
+    // The capture poll snapshots the verdict while the child still runs...
+    await vi.advanceTimersByTimeAsync(1_000);
+    // ...then Step 9 runs the REAL cleanup, which sweeps the verdict...
+    runCleanup('local');
+    outs.length = 0; // drop cleanup's "Removed temp file" stdout noise
+    // ...and only then does the child exit.
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('APPROVE');
+    expect(result.composedPath).toContain('qwen-review-local-composed.json');
+    expect(process.exitCode).toBe(0);
+  });
+
   it('closes the child stdin so piped input cannot defeat slash detection', async () => {
     armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
     await runHandler();
@@ -256,6 +340,10 @@ describe('review run (handler)', () => {
     ];
     expect(opts.stdio[0]).toBe('ignore');
     expect(opts.detached).toBe(true);
+    // --expose-gc must lead the argv: spawning argv[1] directly would drop the
+    // flag the memory-pressure monitor's critical tier needs (cli-entry.js
+    // passes it for exactly this relaunch path).
+    expect(argvUsed[0]).toBe('--expose-gc');
     expect(argvUsed).toContain('--prompt');
     expect(argvUsed).toContain('/review');
   });
@@ -282,6 +370,40 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('reports a launch failure when the child emits an error', async () => {
+    // A missing CLI binary or an OS that cannot fork emits `error`, not
+    // `close`; the handler must still settle and report "no verdict".
+    spawnMock.mockImplementation(() => {
+      const child = new FakeChild();
+      setImmediate(() => child.emit('error', new Error('spawn ENOENT')));
+      return child;
+    });
+    await runHandler();
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.childExitCode).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(errs.join('')).toContain('failed to launch the CLI');
+  });
+
+  it('streams child progress to stderr, never stdout, when not quiet', async () => {
+    // The contract: stdout carries only the result. If progress leaked to
+    // stdout it would interleave with the JSON a CI consumer parses.
+    spawnMock.mockImplementation(() => {
+      const child = new FakeChild();
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from('progress noise'));
+        child.emit('close', 0);
+      });
+      return child;
+    });
+    await runHandler({ quiet: false });
+
+    expect(errs.join('')).toContain('progress noise');
+    expect(outs.join('')).not.toContain('progress noise');
+  });
+
   it('reports a timed-out run as incomplete and kills the process group', async () => {
     vi.useFakeTimers();
     const child = new FakeChild();
@@ -289,6 +411,10 @@ describe('review run (handler)', () => {
 
     const done = runHandler({ 'timeout-minutes': 1 });
     await vi.advanceTimersByTimeAsync(60_000); // fire the timeout
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+    // A child that ignores SIGTERM is escalated to SIGKILL after 10 s.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGKILL');
     child.emit('close', null, 'SIGTERM'); // the kill takes effect
     await done;
 
@@ -298,7 +424,6 @@ describe('review run (handler)', () => {
     expect(result.childExitCode).toBeNull();
     expect(result.childSignal).toBe('SIGTERM');
     expect(process.exitCode).toBe(1);
-    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
   });
 
   it('prints the verdict line and report path in human-readable mode', async () => {
@@ -333,6 +458,23 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('preserves the exit code when writing the result to stdout throws', async () => {
+    // The pipe reader can go away (EPIPE) mid-write. The exit code is the
+    // contract a CI gate reads, so it must be set before — and survive — the
+    // write, not downgraded to yargs' generic exit 1 by the throw.
+    armChild(0, {
+      event: 'REQUEST_CHANGES',
+      verdictLine: 'Verdict: Request changes',
+    });
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+      throw new Error('EPIPE');
+    });
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    expect(process.exitCode).toBe(3);
+  });
+
   it('clamps a negative timeout to the 1-minute floor', async () => {
     vi.useFakeTimers();
     const child = new FakeChild();
@@ -344,6 +486,26 @@ describe('review run (handler)', () => {
     expect(processKill).not.toHaveBeenCalled();
     // Crossing the floor fires the timeout.
     await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', null, 'SIGTERM');
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.timedOut).toBe(true);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('floors a zero timeout to 1 minute rather than the 120-minute default', async () => {
+    // `|| 120` treats 0 as falsy and would silently substitute the default;
+    // an explicit 0 must still reach the Math.max(1, …) floor.
+    vi.useFakeTimers();
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => child);
+
+    const done = runHandler({ 'timeout-minutes': 0 });
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(processKill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
     child.emit('close', null, 'SIGTERM');
     await done;
 
