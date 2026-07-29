@@ -4,12 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage, sweepStaleWorktreeProjects } from './storage.js';
+
+// The sweep must treat a failed removal as skippable. Simulate the failure by
+// mocking rm for the stuck entry only: chmod-based DAC failure is silently
+// bypassed when the runner is root (Docker CI, devcontainers).
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rm: async (target: fs.PathLike, options?: fs.RmOptions) => {
+      if (String(target).includes('aaa-stuck')) {
+        const err = new Error('Permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return actual.rm(target, options);
+    },
+  };
+});
 
 function makeProjectSnapshot(
   base: string,
@@ -161,15 +179,12 @@ describe('sweepStaleWorktreeProjects', () => {
       worktreePath: path.join(base, 'gone-2'),
       originalCwd: '/repo',
     });
-    fs.chmodSync(stuck, 0o000);
-    try {
-      const removed = await sweepStaleWorktreeProjects(base);
-      expect(removed).toEqual(['-tmp-qwen-exit-sess-bbb-gone']);
-      expect(fs.existsSync(stuck)).toBe(true);
-      expect(fs.existsSync(gone)).toBe(false);
-    } finally {
-      fs.chmodSync(stuck, 0o755);
-    }
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual(['-tmp-qwen-exit-sess-bbb-gone']);
+    expect(fs.existsSync(stuck)).toBe(true);
+    expect(fs.existsSync(gone)).toBe(false);
   });
 
   it('the Storage constructor schedules the sweep once per base dir', async () => {
