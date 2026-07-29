@@ -1011,6 +1011,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When a session is ending',
     matcherKind: 'sessionTrigger',
   },
+  SessionDelete: {
+    description: 'After an explicitly selected session is deleted',
+  },
   PermissionRequest: {
     description: 'When a permission dialog is displayed',
     matcherKind: 'toolName',
