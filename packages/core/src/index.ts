@@ -263,6 +263,7 @@ export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
 } from './utils/sync-file-encoding.js';
+export { LargeNonUtf8TextError } from './utils/read-text-range.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';

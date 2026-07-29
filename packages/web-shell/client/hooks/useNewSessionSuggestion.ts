@@ -66,7 +66,6 @@ export interface NewSessionSuggestionState {
 
 export interface UseNewSessionSuggestionOptions {
   enabled: boolean;
-  inputText: string;
   messages: Message[];
   sessionId?: string;
   contextUsageRatio: number;
@@ -78,6 +77,7 @@ export interface UseNewSessionSuggestionOptions {
 
 export interface UseNewSessionSuggestionReturn {
   suggestion: NewSessionSuggestionState | null;
+  updateInput: (inputText: string) => void;
   dismiss: () => void;
   suppress: () => void;
 }
@@ -192,7 +192,6 @@ function parseDecision(text: string): ComposerSuggestionDecision | null {
 
 export function useNewSessionSuggestion({
   enabled,
-  inputText,
   messages,
   sessionId,
   contextUsageRatio,
@@ -206,9 +205,31 @@ export function useNewSessionSuggestion({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const suppressUntilRef = useRef(0);
+  const currentInputRef = useRef('');
+  const suggestionRef = useRef<NewSessionSuggestionState | null>(null);
   const latestSessionIdRef = useRef(sessionId);
 
   const recentMessages = useMemo(() => summarizeMessages(messages), [messages]);
+  const optionsRef = useRef({
+    enabled,
+    recentMessages,
+    sessionId,
+    contextUsageRatio,
+    isRunning,
+    dialogOpen,
+    hasAttachments,
+    generateContent,
+  });
+  optionsRef.current = {
+    enabled,
+    recentMessages,
+    sessionId,
+    contextUsageRatio,
+    isRunning,
+    dialogOpen,
+    hasAttachments,
+    generateContent,
+  };
 
   const clearPending = useCallback(() => {
     if (timerRef.current) {
@@ -219,135 +240,170 @@ export function useNewSessionSuggestion({
     abortRef.current = null;
   }, []);
 
-  const dismiss = useCallback(() => {
+  const clearSuggestion = useCallback(() => {
+    if (suggestionRef.current === null) return;
+    suggestionRef.current = null;
     setSuggestion(null);
+  }, []);
+
+  const dismiss = useCallback(() => {
+    clearSuggestion();
     clearPending();
-  }, [clearPending]);
+  }, [clearPending, clearSuggestion]);
 
   const suppress = useCallback(() => {
     suppressUntilRef.current = Date.now() + SUPPRESS_MS;
-    setSuggestion(null);
+    clearSuggestion();
     clearPending();
-  }, [clearPending]);
+  }, [clearPending, clearSuggestion]);
+
+  const scheduleInput = useCallback(
+    (inputText: string) => {
+      clearPending();
+      const {
+        enabled: currentEnabled,
+        recentMessages: currentRecentMessages,
+        sessionId: currentSessionId,
+        contextUsageRatio: currentContextUsageRatio,
+        isRunning: currentIsRunning,
+        dialogOpen: currentDialogOpen,
+        hasAttachments: currentHasAttachments,
+        generateContent: currentGenerateContent,
+      } = optionsRef.current;
+      if (!currentEnabled || !currentGenerateContent || !currentSessionId) {
+        clearSuggestion();
+        return;
+      }
+      const trimmed = inputText.trim();
+      if (trimmed.length < MIN_PROMPT_LENGTH) {
+        clearSuggestion();
+        return;
+      }
+      const explicitNewTaskCue = hasExplicitNewTaskCue(trimmed);
+      if (currentIsRunning || currentDialogOpen) {
+        clearSuggestion();
+        return;
+      }
+      const allowBtw =
+        currentHasAttachments === false &&
+        currentRecentMessages.length >= MIN_BTW_MESSAGE_COUNT;
+      const allowNewSession =
+        !isFollowupLike(trimmed) &&
+        (explicitNewTaskCue
+          ? currentRecentMessages.length >= MIN_EXPLICIT_CUE_MESSAGE_COUNT ||
+            currentContextUsageRatio >= MIN_EXPLICIT_CUE_CONTEXT_USAGE_RATIO
+          : currentRecentMessages.length >= MIN_MESSAGE_COUNT ||
+            currentContextUsageRatio >= MIN_CONTEXT_USAGE_RATIO);
+      if (!allowBtw && !allowNewSession) {
+        clearSuggestion();
+        return;
+      }
+      if (Date.now() < suppressUntilRef.current) {
+        clearSuggestion();
+        return;
+      }
+
+      clearSuggestion();
+      timerRef.current = setTimeout(() => {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const prompt = buildPrompt({
+          recentMessages: currentRecentMessages,
+          currentInput: trimmed,
+          contextUsageRatio: currentContextUsageRatio,
+          messageCount: currentRecentMessages.length,
+          allowBtw,
+          allowNewSession,
+        });
+        void (async () => {
+          let text = '';
+          try {
+            for await (const event of currentGenerateContent(prompt, {
+              signal: controller.signal,
+            })) {
+              if (abortRef.current !== controller) return;
+              if (event.type === 'delta') {
+                text += event.text;
+              } else if (event.type === 'error') {
+                if (abortRef.current === controller) {
+                  clearSuggestion();
+                }
+                return;
+              }
+            }
+            if (abortRef.current !== controller) return;
+            const decision = parseDecision(text.trim());
+            if (
+              decision &&
+              decision.suggestion !== 'none' &&
+              ((decision.suggestion === 'btw' && allowBtw) ||
+                (decision.suggestion === 'new_session' && allowNewSession)) &&
+              decision.confidence >= MIN_CONFIDENCE
+            ) {
+              const nextSuggestion = {
+                suggestion: decision.suggestion,
+                classifiedInput: trimmed,
+                sourceSessionId: currentSessionId,
+              } satisfies NewSessionSuggestionState;
+              suggestionRef.current = nextSuggestion;
+              setSuggestion(nextSuggestion);
+              return;
+            }
+            clearSuggestion();
+          } catch {
+            if (!controller.signal.aborted) {
+              clearSuggestion();
+            }
+          } finally {
+            if (abortRef.current === controller) {
+              abortRef.current = null;
+            }
+          }
+        })();
+      }, REQUEST_DEBOUNCE_MS);
+    },
+    [clearPending, clearSuggestion],
+  );
+
+  const updateInput = useCallback(
+    (inputText: string) => {
+      currentInputRef.current = inputText;
+      scheduleInput(inputText);
+    },
+    [scheduleInput],
+  );
 
   useEffect(() => {
     if (latestSessionIdRef.current !== sessionId) {
-      setSuggestion(null);
-      clearPending();
       latestSessionIdRef.current = sessionId;
-    }
-  }, [clearPending, sessionId]);
-
-  useEffect(() => {
-    clearPending();
-    if (!enabled || !generateContent || !sessionId) {
-      setSuggestion(null);
-      return;
-    }
-    const trimmed = inputText.trim();
-    if (trimmed.length < MIN_PROMPT_LENGTH) {
-      setSuggestion(null);
-      return;
-    }
-    const explicitNewTaskCue = hasExplicitNewTaskCue(trimmed);
-    if (isRunning || dialogOpen) {
-      setSuggestion(null);
-      return;
-    }
-    const allowBtw =
-      hasAttachments === false &&
-      recentMessages.length >= MIN_BTW_MESSAGE_COUNT;
-    const allowNewSession =
-      !isFollowupLike(trimmed) &&
-      (explicitNewTaskCue
-        ? recentMessages.length >= MIN_EXPLICIT_CUE_MESSAGE_COUNT ||
-          contextUsageRatio >= MIN_EXPLICIT_CUE_CONTEXT_USAGE_RATIO
-        : recentMessages.length >= MIN_MESSAGE_COUNT ||
-          contextUsageRatio >= MIN_CONTEXT_USAGE_RATIO);
-    if (!allowBtw && !allowNewSession) {
-      setSuggestion(null);
-      return;
-    }
-    if (Date.now() < suppressUntilRef.current) {
-      setSuggestion(null);
-      return;
-    }
-
-    setSuggestion(null);
-    timerRef.current = setTimeout(() => {
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const prompt = buildPrompt({
-        recentMessages,
-        currentInput: trimmed,
-        contextUsageRatio,
-        messageCount: recentMessages.length,
-        allowBtw,
-        allowNewSession,
-      });
-      void (async () => {
-        let text = '';
-        try {
-          for await (const event of generateContent(prompt, {
-            signal: controller.signal,
-          })) {
-            if (abortRef.current !== controller) return;
-            if (event.type === 'delta') {
-              text += event.text;
-            } else if (event.type === 'error') {
-              if (abortRef.current === controller) {
-                setSuggestion(null);
-              }
-              return;
-            }
-          }
-          if (abortRef.current !== controller) return;
-          const decision = parseDecision(text.trim());
-          if (
-            decision &&
-            decision.suggestion !== 'none' &&
-            ((decision.suggestion === 'btw' && allowBtw) ||
-              (decision.suggestion === 'new_session' && allowNewSession)) &&
-            decision.confidence >= MIN_CONFIDENCE
-          ) {
-            setSuggestion({
-              suggestion: decision.suggestion,
-              classifiedInput: trimmed,
-              sourceSessionId: sessionId,
-            });
-            return;
-          }
-          setSuggestion(null);
-        } catch {
-          if (!controller.signal.aborted) {
-            setSuggestion(null);
-          }
-        } finally {
-          if (abortRef.current === controller) {
-            abortRef.current = null;
-          }
-        }
-      })();
-    }, REQUEST_DEBOUNCE_MS);
-
-    return () => {
       clearPending();
-    };
+      clearSuggestion();
+    }
+    scheduleInput(currentInputRef.current);
   }, [
     clearPending,
+    clearSuggestion,
     contextUsageRatio,
     dialogOpen,
     enabled,
     generateContent,
     hasAttachments,
-    inputText,
     isRunning,
     recentMessages,
+    scheduleInput,
     sessionId,
   ]);
 
+  useEffect(
+    () => () => {
+      clearPending();
+    },
+    [clearPending],
+  );
+
   return {
     suggestion,
+    updateInput,
     dismiss,
     suppress,
   };
