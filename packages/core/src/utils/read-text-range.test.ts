@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -89,6 +89,244 @@ describe('readTextRange', () => {
     expect(result.encoding).toBe('utf-8');
     expect(result.bom).toBe(false);
     expect(result.truncatedByBytes).toBe(false);
+  });
+
+  it('streams a requested range from a caller-owned file handle', async () => {
+    const filePath = await writeFile('handle.log', largeUtf8Lines(2_000));
+    const fileHandle = await fs.open(filePath, 'r');
+    const readSpy = vi.spyOn(fileHandle, 'read');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        offset: 1_500,
+        limit: 3,
+        maxOutputBytes: 10_000,
+      });
+
+      expect(result.content.split('\n')).toEqual([
+        expect.stringContaining('line-1501'),
+        expect.stringContaining('line-1502'),
+        expect.stringContaining('line-1503'),
+      ]);
+      expect(result.originalLineCountExact).toBe(false);
+
+      const beyondEof = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        offset: 10_000,
+        limit: 3,
+        maxOutputBytes: 10_000,
+      });
+      expect(beyondEof.content).toBe('');
+      expect(beyondEof.originalLineCount).toBe(2_000);
+      expect(beyondEof.originalLineCountExact).toBe(true);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+      expect(
+        readSpy.mock.calls.some(
+          ([buffer]) => Buffer.isBuffer(buffer) && buffer.length === 512 * 1024,
+        ),
+      ).toBe(true);
+    } finally {
+      readSpy.mockRestore();
+      await fileHandle.close();
+    }
+  });
+
+  it('bounds handle reads to the supplied snapshot and reuses the chunk buffer', async () => {
+    const original = Buffer.from(`${'x'.repeat(99)}\n`.repeat(7_000));
+    let current = original;
+    let appended = false;
+    const streamBuffers: Buffer[] = [];
+    const streamReads: Array<{ position: number; length: number }> = [];
+    const stats = { size: original.length } as import('node:fs').Stats;
+    const fileHandle = {
+      stat: vi.fn(async () => stats),
+      read: vi.fn(
+        async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          const available = Math.max(0, current.length - position);
+          const bytesRead = Math.min(length, available);
+          current.copy(buffer, offset, position, position + bytesRead);
+          if (buffer.length === 512 * 1024) {
+            streamBuffers.push(buffer);
+            streamReads.push({ position, length });
+            if (!appended) {
+              appended = true;
+              current = Buffer.concat([
+                current,
+                Buffer.from('APPENDED-AFTER-OPEN\n'),
+              ]);
+            }
+          }
+          return { bytesRead, buffer };
+        },
+      ),
+    } as unknown as import('node:fs/promises').FileHandle;
+
+    const result = await readTextRange({
+      path: '/snapshot.log',
+      fileHandle,
+      stats,
+      offset: 7_000,
+      limit: 1,
+      maxOutputBytes: 10_000,
+    });
+
+    expect(result.content).toBe('');
+    expect(streamBuffers.length).toBeGreaterThan(1);
+    expect(streamBuffers.every((buffer) => buffer === streamBuffers[0])).toBe(
+      true,
+    );
+    expect(
+      streamReads.every(
+        ({ position, length }) => position + length <= original.length,
+      ),
+    ).toBe(true);
+  });
+
+  it('reads a handle-bound range beyond 10 MiB with a byte cap', async () => {
+    const content = largeUtf8Lines(65_000);
+    const marker = 'line-60001';
+    expect(
+      Buffer.byteLength(content.slice(0, content.indexOf(marker))),
+    ).toBeGreaterThan(10 * 1024 * 1024);
+    const filePath = await writeFile('deep-handle.log', content);
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        offset: 60_000,
+        limit: 3,
+        maxOutputBytes: 256,
+      });
+
+      expect(result.content).toMatch(/^line-60001 /);
+      expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(256);
+      expect(result.content).not.toContain('\uFFFD');
+      expect(result.truncatedByBytes).toBe(true);
+      expect(result.originalLineCountExact).toBe(false);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('accepts handle-bound UTF-8 when the encoding sample splits an emoji', async () => {
+    const firstLine = `${'a'.repeat(8191)}🙂`;
+    const filePath = await writeFile(
+      'split-encoding-sample.log',
+      `${firstLine}\n${'b'.repeat(300_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    try {
+      const stats = await fileHandle.stat();
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle,
+        stats,
+        offset: 0,
+        limit: 1,
+        maxOutputBytes: 16_384,
+      });
+
+      expect(result.content).toBe(firstLine);
+      expect(result.encoding).toBe('utf-8');
+      expect(result.content).not.toContain('\uFFFD');
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('does not read bytes appended past the supplied handle stats', async () => {
+    const filePath = await writeFile(
+      'growing.log',
+      `${'a'.repeat(500_000)}\n${'b'.repeat(50_000)}`,
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    const stats = await fileHandle.stat();
+    let appended = false;
+    const boundedHandle = {
+      read: async (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        const result = await fileHandle.read(buffer, offset, length, position);
+        if (!appended && length === 512 * 1024 && position === 0) {
+          appended = true;
+          await fs.appendFile(filePath, '\nAPPENDED');
+        }
+        return result;
+      },
+    } as unknown as import('node:fs/promises').FileHandle;
+
+    try {
+      const result = await readTextRange({
+        path: filePath,
+        fileHandle: boundedHandle,
+        stats,
+        offset: 1,
+        limit: 2,
+        maxOutputBytes: 100_000,
+      });
+
+      expect(appended).toBe(true);
+      expect(result.content).toBe('b'.repeat(50_000));
+      expect(result.content).not.toContain('APPENDED');
+      expect(result.originalLineCount).toBe(2);
+      expect(result.originalLineCountExact).toBe(true);
+      await expect(fileHandle.stat()).resolves.toMatchObject({
+        size: stats.size + 9,
+      });
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('uses only the supplied file handle when the path names another file', async () => {
+    const originalPath = await writeFile(
+      'original.log',
+      'safe-one\nsafe-two\nsafe-three\n',
+    );
+    const replacementPath = await writeFile(
+      'replacement.log',
+      'secret-one\nsecret-two\n',
+    );
+    const fileHandle = await fs.open(originalPath, 'r');
+    try {
+      const result = await readTextRange({
+        path: replacementPath,
+        fileHandle,
+        stats: await fileHandle.stat(),
+        offset: 0,
+        limit: 2,
+        maxOutputBytes: 1_024,
+      });
+
+      expect(result.content).toBe('safe-one\nsafe-two');
+      expect(result.content).not.toContain('secret');
+    } finally {
+      await fileHandle.close();
+    }
   });
 
   it('streams a large UTF-8 file from the beginning when no range is provided', async () => {

@@ -59,10 +59,10 @@ jobs:
           - '22.x'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js ${{ matrix.node-version }}'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
           cache: 'npm'
@@ -139,9 +139,9 @@ jobs:
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
-            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --shard='${{ matrix.shard }}'
+            npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --shard='${{ matrix.shard }}'
+            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           fi
 
   e2e-test-macos:
@@ -160,10 +160,10 @@ jobs:
           - '2/2'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -198,23 +198,28 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --shard="${{ matrix.shard }}"'
+        run: 'npx cross-env VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --shard="${{ matrix.shard }}"'
 
-  cron-interactive-nightly:
-    name: 'cron-interactive E2E (nightly)'
+  isolated-nightly:
+    name: '${{ matrix.label }} (nightly)'
     runs-on: 'ubuntu-latest'
     if: |-
       ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    # This test is inherently timing-flaky (wall-clock cron fire + real model
-    # latency). Run it nightly only so flakes do not turn push CI red.
-    # continue-on-error prevents this job from marking the workflow as failed.
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 'cron-interactive E2E'
+            test_file: 'interactive/cron-interactive.test.ts'
+          - label: 'channel-plugin E2E'
+            test_file: 'channel-plugin.test.ts'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -244,14 +249,14 @@ jobs:
         run: |-
           npm run bundle
 
-      - name: 'Run cron-interactive E2E tests'
+      - name: 'Run ${{ matrix.label }} tests'
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
-        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive/cron-interactive.test.ts'
+        run: 'npx cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests "${{ matrix.test_file }}"'
 
   web-shell-browser-regression:
     name: 'web-shell Browser Regression'
