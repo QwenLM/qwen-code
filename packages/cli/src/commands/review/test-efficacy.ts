@@ -393,12 +393,15 @@ export interface MutantSourceFile {
 /**
  * Deterministic mutant selection: among the diff's added lines, the complete
  * single-line safety-verb statements, capped at {@link MAX_MUTANTS} — files
- * with new tests first, then diff order, then line order.
+ * with new tests first, then diff order, then line order. Candidates the cap
+ * cannot fit are counted in `skippedForCap`, not silently lost — a report that
+ * omits them lets a capped `survived: 0` read as "every safety statement is
+ * covered", the same false assurance `skippedForBudget` exists to prevent.
  */
 export function selectMutants(
   files: MutantSourceFile[],
   cap: number = MAX_MUTANTS,
-): MutantCandidate[] {
+): { selected: MutantCandidate[]; skippedForCap: number } {
   const preferred: MutantCandidate[] = [];
   const rest: MutantCandidate[] = [];
   for (const f of files) {
@@ -418,7 +421,11 @@ export function selectMutants(
       });
     }
   }
-  return [...preferred, ...rest].slice(0, cap);
+  const eligible = [...preferred, ...rest];
+  return {
+    selected: eligible.slice(0, cap),
+    skippedForCap: Math.max(0, eligible.length - cap),
+  };
 }
 
 /**
@@ -928,6 +935,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   let cleanupFailure: string | undefined;
   const mutantResults: MutantResult[] = [];
   let mutantsSkippedForBudget = 0;
+  let mutantsSkippedForCap = 0;
   let mutantsNote: string | undefined;
 
   if (probes.length > 0 && revert.length > 0) {
@@ -971,7 +979,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             ...mutantFiles,
           ),
         );
-        candidates = selectMutants(
+        const selection = selectMutants(
           mutantFiles
             .filter((p) => (added.get(p) ?? []).length > 0)
             .map((p) => ({
@@ -981,6 +989,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               hasNewTests: hasCollocatedNewTest(p, probes),
             })),
         );
+        candidates = selection.selected;
+        mutantsSkippedForCap = selection.skippedForCap;
       }
     } catch (e) {
       // Selection is bookkeeping, not evidence: a diff that will not parse or a
@@ -1025,9 +1035,17 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // And its measured duration is the unit the budget check prices a
         // suite run at.
         const baseline = runProbeSuite(probeTree, probes);
-        if (baseline.perFile.some((r) => r.verdict !== 'inert')) {
+        // A mutant is only evidence against a probe file that is green WITHOUT
+        // it: against a file already red the mutant is "killed" by failures it
+        // did not cause, and a file that collected nothing proves nothing. Gate
+        // PER FILE, not on the whole suite — one unrelated quarantined (all-skip)
+        // file is `inconclusive`, not red, and must not take the whole probe down.
+        const greenProbes = baseline.perFile
+          .filter((r) => r.verdict === 'inert')
+          .map((r) => r.file);
+        if (greenProbes.length === 0) {
           mutantsNote =
-            'mutants not run: the unmutated suite run is not cleanly green, so a red mutant run would prove nothing';
+            'mutants not run: no probe file was green in the unmutated baseline (every file was red or collected nothing), so a red mutant run would prove nothing';
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
           for (const c of candidates) {
@@ -1037,7 +1055,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 candidates.length - mutantResults.length;
               break;
             }
-            mutantResults.push(runOneMutant(probeTree, c, probes));
+            mutantResults.push(runOneMutant(probeTree, c, greenProbes));
           }
         }
       } catch (e) {
@@ -1133,7 +1151,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       .map((m) => ({
         file: m.file,
         kind: 'mutant-survived' as const,
-        message: `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed, so the invariant it enforces ships unprotected — a regression that drops or skips this statement would not be caught.`,
+        message: `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
       })),
   ];
 
@@ -1149,6 +1167,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       survived: count('survived'),
       inconclusive: count('inconclusive'),
       skippedForBudget: mutantsSkippedForBudget,
+      skippedForCap: mutantsSkippedForCap,
       ...(mutantsNote ? { note: mutantsNote } : {}),
     },
     findings,
@@ -1161,6 +1180,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   );
   for (const f of findings) {
     writeStdoutLine(`  [test] ${f.kind}: ${f.file}`);
+  }
+  if (mutantsSkippedForCap > 0) {
+    writeStdoutLine(
+      `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the cap of ${MAX_MUTANTS}`,
+    );
   }
   if (mutantsSkippedForBudget > 0) {
     writeStdoutLine(

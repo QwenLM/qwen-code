@@ -482,7 +482,7 @@ describe('selectMutants', () => {
       '}',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       {
         file: 'src/todo.ts',
         content,
@@ -507,7 +507,7 @@ describe('selectMutants', () => {
       'this.subs = new Map<string, Sub>();',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: all(8), hasNewTests: false },
     ]);
     expect(got.map((c) => c.line)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -534,7 +534,7 @@ describe('selectMutants', () => {
       'this.map = new Map(entries);', // not reassignment-to-empty either
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: all(13), hasNewTests: false },
     ]);
     expect(got).toEqual([]);
@@ -553,7 +553,7 @@ describe('selectMutants', () => {
       'live.clear();',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: all(7), hasNewTests: false },
     ]);
     expect(got).toEqual([
@@ -575,7 +575,7 @@ describe('selectMutants', () => {
       'after.clear();',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: all(5), hasNewTests: false },
     ]);
     expect(got).toEqual([
@@ -597,7 +597,7 @@ describe('selectMutants', () => {
       'after.clear();',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: all(5), hasNewTests: false },
     ]);
     expect(got).toEqual([
@@ -617,7 +617,7 @@ describe('selectMutants', () => {
       '}',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: [2, 3], hasNewTests: false },
     ]);
     expect(got).toEqual([
@@ -636,7 +636,7 @@ describe('selectMutants', () => {
       '}',
       '',
     ]);
-    const got = selectMutants([
+    const { selected: got } = selectMutants([
       { file: 'src/s.ts', content, addedLines: [2, 3], hasNewTests: false },
     ]);
     expect(got).toEqual([
@@ -647,7 +647,7 @@ describe('selectMutants', () => {
   it('caps at MAX_MUTANTS, preferring files that also have new tests', () => {
     const line = (i: number) => `store${i}.clear();`;
     const content = src([...all(5).map(line), '']);
-    const got = selectMutants([
+    const { selected: got, skippedForCap } = selectMutants([
       // Diff order says untested first; the preference must still put every
       // candidate from the tested file ahead of it, and the cap then keeps
       // the untested file's EARLIEST lines.
@@ -661,6 +661,7 @@ describe('selectMutants', () => {
     ]);
     expect(MAX_MUTANTS).toBe(8);
     expect(got).toHaveLength(8);
+    expect(skippedForCap).toBe(2);
     expect(got.slice(0, 5).map((c) => c.file)).toEqual(
       Array(5).fill('src/tested.ts'),
     );

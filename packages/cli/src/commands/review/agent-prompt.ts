@@ -876,14 +876,15 @@ export function buildRoleBrief(
           'a test that **still passed with the change reverted**: it is green whether or not ' +
           'the feature exists, so it cannot catch a regression in it. `kind: "mutant-survived"` ' +
           'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
-          'reset-to-empty) that was **deleted and every affected test stayed green** — the ' +
-          'invariant it enforces has no test that would fail without it, which the whole-file ' +
+          'reset-to-empty) that was **deleted and every affected test stayed green** — no ' +
+          'test in the diff fails when it is removed, which the whole-file ' +
           "revert cannot see when the file's other, tested behaviours mask it. Report each as a " +
-          '**Suggestion** with `Source: [test]`, saying plainly which behaviour ships ' +
-          'unprotected. **`inconclusive` is not a finding** — for probes and mutants alike, ' +
+          '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
+          'test in this diff that would catch its removal. **`inconclusive` is not a ' +
+          'finding** — for probes and mutants alike, ' +
           "reverting or mutating the source often breaks the test's own compile, and that is " +
-          'not the test catching anything. Mutants counted in `mutants.skippedForBudget` never ' +
-          'ran — not findings either. Note them and move on.',
+          'not the test catching anything. Mutants counted in `mutants.skippedForBudget` ' +
+          'or `mutants.skippedForCap` never ran — not findings either. Note them and move on.',
       );
     }
   }

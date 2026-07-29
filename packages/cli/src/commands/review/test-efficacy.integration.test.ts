@@ -121,6 +121,30 @@ process.stdout.write(JSON.stringify({
   chmodSync(bin, 0o755);
 }
 
+/**
+ * Swap the fake runner for one that reports a file whose path contains "skip"
+ * as all-skipped (collected, but no assertion executed) and every other file as
+ * PASSED. Drives the per-file baseline gate: an unrelated all-skip file is
+ * `inconclusive`, not red, and must not disable the mutant phase.
+ */
+function installMixedVitest(): void {
+  const bin = join(repo, 'node_modules', '.bin', 'vitest');
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env node
+const path = require('path');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: f.includes('skip') ? 'skipped' : 'passed' }],
+  })),
+}));
+`,
+  );
+  chmodSync(bin, 0o755);
+}
+
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
@@ -332,7 +356,7 @@ describe('test-efficacy probe isolation (#6832)', () => {
   it('skips the mutants wholesale when the unmutated baseline is not green', async () => {
     // A mutant is only evidence against a suite that is green WITHOUT it: against
     // a baseline that already fails, every mutant would be "killed" by failures
-    // it did not cause. So when the unmutated run is not cleanly green, the whole
+    // it did not cause. So when no probe file is green in the unmutated run, the whole
     // mutant phase is skipped and the report says so — no probed mutants and no
     // survivor finding, even though the diff adds an ungated safety statement.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
@@ -379,12 +403,79 @@ describe('test-efficacy probe isolation (#6832)', () => {
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
     expect(out.mutants.probed).toEqual([]);
-    expect(out.mutants.note).toContain('not cleanly green');
+    expect(out.mutants.note).toContain('no probe file was green');
     expect(
       (out.findings as Array<{ kind: string }>).some(
         (f) => f.kind === 'mutant-survived',
       ),
     ).toBe(false);
+  });
+
+  it('still probes when an UNRELATED probe file is all-skipped (per-file gate)', async () => {
+    // Finding 2's shape: a quarantined suite that is entirely `it.skip`
+    // classifies `inconclusive` — not red, not a failure. The old whole-suite
+    // gate read that as "not cleanly green" and took the ENTIRE mutant phase
+    // down with it, losing the survivor finding below. The gate is per file:
+    // the mutant runs against the probe files that ARE green in the baseline,
+    // so an unrelated all-skip file no longer disables it.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    // An unrelated suite that collects but runs nothing (all skipped).
+    write(
+      'packages/lib/src/skipped.test.ts',
+      'import { it } from "vitest"; it.skip("quarantined", () => {});\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+          { path: 'packages/lib/src/skipped.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // Baseline: f.test.ts passes (inert), skipped.test.ts collects but runs
+    // nothing (inconclusive). The mutant must still run against the green file.
+    installMixedVitest();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.note).toBeUndefined();
+    expect(out.mutants.survived).toBe(1);
+    expect(out.mutants.probed).toEqual([
+      {
+        file: 'packages/lib/src/f.ts',
+        line: 3,
+        statement: 'state.clear();',
+        verdict: 'survived',
+        detail: expect.stringContaining('still PASSED'),
+      },
+    ]);
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
