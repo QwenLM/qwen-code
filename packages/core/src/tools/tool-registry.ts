@@ -870,7 +870,7 @@ export class ToolRegistry {
     let revealed = 0;
     for (const name of candidates) {
       if (!this.revealedDeferred.has(name)) {
-        this.revealedDeferred.add(name);
+        this.revealDeferredTool(name);
         revealed++;
       }
     }

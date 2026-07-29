@@ -682,6 +682,35 @@ describe('ToolRegistry', () => {
           expect.arrayContaining([visibleTool.name, deferredTool.name]),
         );
       });
+
+      it('excludes always-loaded tools from the preload budget', () => {
+        const alwaysLoadedTool = new MockTool({
+          name: 'always-loaded',
+          description: 'x'.repeat(CHARS_PER_TOKEN * 10),
+          shouldDefer: true,
+          alwaysLoad: true,
+        });
+        const deferredTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+        });
+        toolRegistry.registerTool(alwaysLoadedTool);
+        toolRegistry.registerTool(deferredTool);
+
+        const revealed = toolRegistry.preloadDeferredToolsWithinBudget(
+          tokensFor(deferredTool),
+        );
+
+        expect(revealed).toBe(1);
+        expect(toolRegistry.isDeferredToolRevealed(deferredTool.name)).toBe(
+          true,
+        );
+        expect(
+          toolRegistry.getFunctionDeclarations().map((d) => d.name),
+        ).toEqual(
+          expect.arrayContaining([alwaysLoadedTool.name, deferredTool.name]),
+        );
+      });
     });
 
     it('getDeferredToolSummary includes MCP server names', () => {
