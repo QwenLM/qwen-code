@@ -1961,7 +1961,8 @@ describe('qwen-autofix workflow', () => {
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
     // the label-path non-main base refusal, the command-path non-main base
-    // refusal, the cap pause, the command-path direct engage ack (the
+    // refusal, the takeover cap pause, the standard-mode cap pause, the
+    // forced-dispatch cap refusal, the command-path direct engage ack (the
     // labeled event has been observed to not fire — #7999, #8002 — so the
     // command acks itself), the command-path direct release acks (all three
     // variants, mirroring the ack job — a loud add next to a mute stop
@@ -1971,7 +1972,7 @@ describe('qwen-autofix workflow', () => {
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(17);
+    expect(ackBodies).toHaveLength(19);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -2392,6 +2393,41 @@ describe('qwen-autofix workflow', () => {
     // guidance in the body.
     expect(reviewScanJob).toContain('<!-- takeover-cap-reached -->');
     expect(reviewScanJob).toContain('Takeover paused');
+    // The cap notice covers ALL managed PRs, not just takeover: standard
+    // bot PRs used to cap in silence (#7836 hit 10/10 with zero PR-visible
+    // notice), which let the shepherd's conflict dispatch die silently on
+    // a cap the PR page never mentioned. Same marker → same
+    // once-per-window dedup for both variants.
+    expect(reviewScanJob).toContain('AutoFix paused');
+    // Three sites: the dedup census read + BOTH notice bodies — the shared
+    // marker is what gives the two variants one once-per-window dedup.
+    expect(
+      reviewScanJob.split('<!-- takeover-cap-reached -->').length - 1,
+    ).toBe(3);
+    // A FORCED dispatch (shepherd conflict lever or a human) refused at the
+    // cap gate answers on the PR — observed on #7836: '🐑 dispatched the
+    // autofix loop' followed by a green run that did nothing, with the
+    // refusal visible only in the Actions log. No dedup: the shepherd
+    // sends at most one dispatch per head, and a human asking twice
+    // deserves two answers.
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" ]]; then',
+    );
+    expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
+    expect(reviewScanJob).toContain('Dispatch refused');
+    expect(reviewScanJob).toContain('DRY-RUN: would post cap-refused notice');
+    expect(reviewScanJob).toContain(
+      'cap-refused notice skipped: PAT authenticates as',
+    );
+    // The standard-mode pause and the refusal both point at the actual
+    // recovery command as a printf ARG (the takeover variant keeps its
+    // takeover-command-only wording).
+    const capBodies =
+      reviewScanJob.match(/printf '[^']*takeover-cap-re[^']*'[^\n]*/g) ?? [];
+    expect(capBodies).toHaveLength(3);
+    expect(
+      capBodies.filter((b) => b.includes('"${RETRY_COMMAND}"')),
+    ).toHaveLength(2);
     expect(reviewScanJob).toMatch(
       /CAP_NOTICED=[\s\S]*?contains\("<!-- takeover-cap-reached -->"\)[\s\S]*?> \$rt/,
     );

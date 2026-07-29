@@ -2201,43 +2201,80 @@ jobs:
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
               fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
-              # A MANAGED PR pausing at its cap deserves a visible reminder —
-              # maintainers otherwise learn about it only from workflow logs.
-              # Once per counting window: re-arming opens a fresh window and,
-              # if the cap is hit again, a fresh reminder. A failed post
-              # retries naturally on the next scan (marker still absent).
-              if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                # Dedup boundary = the current window key; with no engage ack
-                # yet (key 'none') fall back to LIFETIME dedup — created_at is
-                # never > 'none' lexically, which would flip this into posting
-                # every scan.
-                NOTICE_RT="${REARM_KEY}"
-                [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
-                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
-                  [ .[] | select((.user.login // "") == $ab)
-                    | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
-                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              # A FORCED dispatch refused here answers OUT LOUD. Observed on
+              # #7836: the fleet shepherd detected a merge conflict, posted
+              # "dispatched the autofix loop to resolve it", and the dispatch
+              # died right here with only the log line above — the PR page
+              # showed a promise, the run showed green, and the conflict sat
+              # unhandled for hours. The shepherd also dedups per head SHA,
+              # and a capped PR gets no pushes, so its head never changes:
+              # silence here freezes conflict handling until a human notices
+              # by accident. Every forced dispatch is explicit intent (the
+              # shepherd lever or a human), so every refusal is answered —
+              # no dedup: the shepherd sends at most one dispatch per head,
+              # and a human asking twice deserves two answers.
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
-                  echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
-                elif [[ "${CAP_NOTICED}" == "0" ]]; then
-                  # Consent may have moved since PR_META: a takeover label
-                  # removed (or skip added) moments ago must not receive a
-                  # stale 'paused' notice.
-                  LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
-                  if [[ " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* || " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]]; then
-                    echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
-                    continue
-                  fi
-                  # Convention: verify the PAT identity before ANY write. A
-                  # rotated PAT would post under a foreign login the dedup
-                  # (which counts AUTOFIX_BOT comments only) can never see —
-                  # reposting the notice every scan. Memoized per scan run.
+                  echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
+                else
                   if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
                     SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
                   fi
                   if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
-                    echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-refused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-refused notice failed for #${PR}"
+                  fi
+                fi
+              fi
+              # A MANAGED PR pausing at its cap deserves a visible reminder —
+              # maintainers otherwise learn about it only from workflow logs.
+              # ALL managed PRs, not just takeover: the takeover-only gate
+              # left standard bot PRs capping in silence (#7836 hit 10/10
+              # with zero PR-visible notice), which is the root of the
+              # frozen-conflict chain above. Once per counting window:
+              # re-arming opens a fresh window and, if the cap is hit again,
+              # a fresh reminder. A failed post retries naturally on the
+              # next scan (marker still absent).
+              # Dedup boundary = the current window key; with no engage ack
+              # or re-arm yet (key 'none') fall back to LIFETIME dedup —
+              # created_at is never > 'none' lexically, which would flip
+              # this into posting every scan.
+              NOTICE_RT="${REARM_KEY}"
+              [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
+              CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                  | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              if [[ "${DRY_RUN}" == "true" ]]; then
+                echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
+              elif [[ "${CAP_NOTICED}" == "0" ]]; then
+                # Consent may have moved since PR_META: skip wins everywhere,
+                # and a takeover notice additionally requires the label to
+                # still be present — a label removed (or skip added) moments
+                # ago must not receive a stale 'paused' notice.
+                LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]] \
+                  || [[ "${HAS_TAKEOVER}" == "true" && " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* ]]; then
+                  echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
+                  continue
+                fi
+                # Convention: verify the PAT identity before ANY write. A
+                # rotated PAT would post under a foreign login the dedup
+                # (which counts AUTOFIX_BOT comments only) can never see —
+                # reposting the notice every scan. Memoized per scan run.
+                if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                  SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                fi
+                if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                  echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                else
+                  if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                    CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                  else
+                    CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                  fi
+                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
                     echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
                   fi
                 fi
