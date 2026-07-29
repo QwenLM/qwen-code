@@ -823,6 +823,45 @@ describe('GithubChannel', () => {
       },
     );
 
+    it('skips notifications whose reason is not in reasonFilter', async () => {
+      await initWithoutLoop({
+        reasonFilter: ['mention', 'review_requested', 'assign'],
+      });
+      mockOctokit.paginate.mockClear();
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'author',
+          last_read_at: '2026-07-01T12:00:00.000Z',
+        }),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('normalizes configured reasonFilter entries before matching', async () => {
+      await initWithoutLoop({
+        reasonFilter: [' COMMENT ', 123, ''],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'allowed comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('allowed comment');
+    });
+
     it('excludes comments from disallowed senders when aggregating', async () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
