@@ -451,6 +451,32 @@ describe('package scripts', () => {
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
 
+  it('skips npm packages whose release version is already published', () => {
+    const workflow = readWorkflow('.github/workflows/release.yml');
+    const publishJob = getWorkflowJob(workflow, 'publish');
+
+    for (const stepName of [
+      'Publish @qwen-code/audio-capture',
+      'Publish @qwen-code/qwen-code',
+      'Publish @qwen-code/channel-base',
+      'Publish remaining channel packages',
+    ]) {
+      const publishStep = getWorkflowStep(publishJob, stepName);
+      expect(publishStep).toContain(
+        "RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'",
+      );
+      expect(publishStep).toContain(
+        'PACKAGE_NAME="$(node -p "require(\'./package.json\').name")"',
+      );
+      expect(publishStep).toContain('PUBLISH_ARGS+=(--dry-run)');
+      expect(publishStep).toContain(
+        'npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version',
+      );
+      expect(publishStep).toContain('already published; skipping');
+      expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
+    }
+  });
+
   it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
     const issueJob = getWorkflowJob(workflow, 'issue-autofix');
