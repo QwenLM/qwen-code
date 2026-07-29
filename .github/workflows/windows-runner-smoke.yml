@@ -2,9 +2,6 @@ name: 'Windows Self-Hosted Runner Validation'
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 'cx/windows-runner-smoke'
 
 permissions:
   contents: 'read'
