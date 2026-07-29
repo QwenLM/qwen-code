@@ -1,7 +1,8 @@
 # Fix Phase
 
 You are the fix phase. A previous scan-phase job already wrote
-`<workdir>/findings.json` and `<workdir>/report-only.md`. Read the findings,
+`<workdir>/findings.json` (and `<workdir>/report-only.md` when report-only
+findings exist). Read the findings,
 apply the accepted fixes on one branch, and write the PR files. Do NOT
 re-scan — trust the existing findings, but re-verify each one's evidence
 against this checkout before touching code.
@@ -48,8 +49,8 @@ against this checkout before touching code.
    "Why it's needed" must state these are real test gaps, behavior
    inconsistencies, or contract mismatches — not style cleanup. No issue
    number applies; omit the `Fixes #` line.
-8. If zero commits: stay on the base HEAD, keep findings.json and
-   report-only.md, and do NOT write pr-title.txt or pr-body.md.
+8. If zero commits: stay on the base HEAD, keep the scan outputs untouched,
+   and do NOT write pr-title.txt or pr-body.md.
 
 Update `<workdir>/findings.json` to its final state (per-finding statuses
 included) as your last write.

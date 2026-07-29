@@ -50,7 +50,7 @@ points, schemas, registries, and contracts and builds its own map.
 
 - **cli/ui** — the Ink TUI (`packages/cli/src/ui/`).
   - `App.tsx` / `AppContainer.tsx` are the root containers.
-  - `DialogManager.tsx` is the global dialog router driven by `uiState`.
+  - `components/DialogManager.tsx` is the global dialog router driven by `uiState`.
   - Domain subpackages: `agent-view/` (chat), `arena/` (multi-model compare),
     `extensions/` (install wizard + tabs), `mcp/` (server approval),
     `hooks/`, `subagents/{create,manage}/`, `background-view/`.
@@ -58,12 +58,13 @@ points, schemas, registries, and contracts and builds its own map.
     `text-buffer`, `vim-buffer-actions`), `messages/` (history item renderers).
   - Global layers: `contexts/`, `themes/`, `state/`, `layouts/`, `hooks/`, `voice/`,
     `selection/`, `editors/`, `daemon/`, `models/`, `noninteractive/`.
-  - Correct: portals go through `useWebShellPortalRoot` where applicable,
-    themes flow through semantic tokens, dialogs never double-mount.
+  - Correct: themes flow through semantic tokens, dialogs never double-mount.
 
 - **core** — the shared runtime package (`packages/core/src/`).
   - Consumed by every CLI frontend; does not depend on business-layer code.
-  - Key subdirs: `agents/` (agent abstractions), `models/` (provider adapters),
+  - Key subdirs: `core/` (base LLM client, per-provider content generators,
+    tool scheduler, turn management, permission flow, session recovery),
+    `agents/` (agent abstractions), `models/` (provider adapters),
     `providers/` (model provider implementations), `tools/` (tool definitions),
     `services/`, `prompts/`, `utils/` (LruCache, retry, filesearch, git,
     shell, terminal, request-tokenizer), `hooks/`, `memory/`, `skills/`,
@@ -176,6 +177,6 @@ prove it fails or misaligns before the fix; how to verify after the fix.
    `"status": "pending"`; everything else goes under `reportOnly`.
 3. Write `<workdir>/report-only.md` (bilingual per Shared Rules): every
    report-only finding with root cause, evidence, and suggested fix. When
-   there are none, write "No report-only findings." plus the Chinese
-   translation.
+   there are none, do NOT write the file — the workflow posts any non-empty
+   file as a PR comment, and a sentinel would post as noise.
 4. STOP. Do not create a branch, edit code, or write PR files.

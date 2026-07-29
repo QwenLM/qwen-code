@@ -129,7 +129,8 @@ nothing worth fixing is a valid, silent outcome.
 ## Output Contract
 
 - `<workdir>/findings.json` — always; the run's audit trail.
-- `<workdir>/report-only.md` — always; posted as a PR comment when a PR opens.
+- `<workdir>/report-only.md` — only when report-only findings exist; posted
+  as a PR comment when a PR opens.
 - `<workdir>/pr-title.txt`, `<workdir>/pr-body.md` — fix phase only, and only
   when the branch has commits.
 - `<workdir>/failure.md` — only when blocked; English-only.
