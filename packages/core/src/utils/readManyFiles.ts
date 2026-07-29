@@ -10,9 +10,11 @@ import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from '../core/inlineMediaLimit.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { getErrorMessage, isAbortError } from './errors.js';
 import type { ProcessedFileReadResult } from './fileUtils.js';
 import {
+  detectFileType,
   isCacheableReadResult,
   processSingleFileContent,
 } from './fileUtils.js';
@@ -174,12 +176,15 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const needsSnapshot =
-          validatedIdentity && stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES;
-        const snapshot = needsSnapshot
+        const shouldSnapshot =
+          validatedIdentity &&
+          stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES &&
+          (config.getFileSystemService() instanceof StandardFileSystemService ||
+            (await detectFileType(fullPath)) !== 'text');
+        const snapshot = shouldSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
           : undefined;
-        if (needsSnapshot && !snapshot) continue;
+        if (shouldSnapshot && !snapshot) continue;
         let readResult;
         try {
           readResult = await readFileContent(
@@ -192,6 +197,13 @@ export async function readManyFiles(
           );
         } finally {
           await snapshot?.cleanup();
+        }
+        if (
+          validatedIdentity &&
+          !snapshot &&
+          !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
+        ) {
+          continue;
         }
         if (readResult) {
           contentParts.push(...readResult.contentParts);

@@ -252,6 +252,39 @@ describe('readManyFiles', () => {
       }
     });
 
+    it('keeps validated text reads on custom file systems on the original path', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const stats = await fs.stat(absolutePath);
+      const readTextFile = vi.fn(async () => ({
+        content: 'unsaved buffer',
+        _meta: {
+          originalLineCount: 1,
+          originalLineCountExact: true,
+        },
+      }));
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => ({
+          readTextFile,
+          writeTextFile: vi.fn(),
+          findFiles: vi.fn(),
+        }),
+      } as unknown as Config;
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [relativePath],
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: stats.dev, ino: stats.ino }],
+        ]),
+      });
+
+      expect(readTextFile).toHaveBeenCalledWith(
+        expect.objectContaining({ path: absolutePath }),
+      );
+      expect(contentToString(result.contentParts)).toContain('unsaved buffer');
+    });
+
     it('should include truncated large text files instead of reporting a size error', async () => {
       const relativePath = 'large.log';
       const absolutePath = path.join(tempRootDir, relativePath);
