@@ -253,6 +253,111 @@ describe('SubagentManager', () => {
     manager = new SubagentManager(mockConfig);
   });
 
+  describe('resolveModelGrade', () => {
+    const builtinConfig: SubagentConfig = {
+      name: 'Explore',
+      description: 'Explore files',
+      systemPrompt: 'Explore.',
+      level: 'builtin',
+      isBuiltin: true,
+      model: 'fast',
+    };
+
+    it('resolves only available grades and preserves custom defaults', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { small: 'fast', high: 'qwen-max' },
+            allowedGrades: ['high'],
+          },
+        }),
+      );
+
+      expect(configuredManager.getAvailableModelGrades()).toEqual(
+        new Map([['high', 'qwen-max']]),
+      );
+      expect(configuredManager.resolveModelGrade('high', builtinConfig)).toBe(
+        'qwen-max',
+      );
+      expect(
+        configuredManager.resolveModelGrade('small', builtinConfig),
+      ).toBeUndefined();
+      expect(
+        configuredManager.resolveModelGrade('missing', builtinConfig),
+      ).toBeUndefined();
+
+      expect(
+        configuredManager.resolveModelGrade('high', {
+          ...builtinConfig,
+          level: 'project',
+          isBuiltin: false,
+          model: 'custom-model',
+        }),
+      ).toBeUndefined();
+      expect(
+        configuredManager.resolveModelGrade('high', {
+          ...builtinConfig,
+          level: 'project',
+          isBuiltin: false,
+          model: 'inherit',
+        }),
+      ).toBe('qwen-max');
+    });
+
+    it('exposes every valid grade without an allowlist', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { modelGrades: { small: 'fast', high: 'qwen-max' } },
+        }),
+      );
+
+      expect(configuredManager.getAvailableModelGrades()).toEqual(
+        new Map([
+          ['small', 'fast'],
+          ['high', 'qwen-max'],
+        ]),
+      );
+    });
+
+    it('trims grade keys before publishing and resolving', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { ' small ': 'fast', high: 'qwen-max' },
+            allowedGrades: [' small ', 'high'],
+          },
+        }),
+      );
+
+      const grades = configuredManager.getAvailableModelGrades();
+      expect([...grades.keys()]).toEqual(['small', 'high']);
+      expect(grades.get('small')).toBe('fast');
+      expect(configuredManager.resolveModelGrade('small', builtinConfig)).toBe(
+        'fast',
+      );
+    });
+
+    it('ignores malformed grade settings', () => {
+      const malformedGrades = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: {
+              valid: 'qwen-max',
+              invalid: 42 as unknown as string,
+              blank: '  ',
+              '  ': 'qwen-max',
+            },
+            allowedGrades: ['valid', 'invalid', 'blank', '  '],
+          },
+        }),
+      );
+
+      expect(malformedGrades.getAvailableModelGrades()).toEqual(
+        new Map([['valid', 'qwen-max']]),
+      );
+    });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

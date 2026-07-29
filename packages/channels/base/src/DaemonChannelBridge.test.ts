@@ -6,6 +6,7 @@ import type {
 import {
   DaemonChannelBridge,
   type DaemonChannelEvent,
+  type DaemonChannelLoopMcpHost,
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
 
@@ -130,6 +131,67 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('registers the loop MCP server for the exact daemon session', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const handlers = new Map<
+      string,
+      (
+        message: Record<string, unknown>,
+      ) => Promise<Record<string, unknown> | undefined>
+    >();
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async (sessionId, handler) => {
+        handlers.set(sessionId, handler);
+      }),
+      unregister: vi.fn(async (sessionId) => {
+        handlers.delete(sessionId);
+      }),
+    };
+    const create = vi.fn(async () => ({ text: 'created' }));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelLoopToolHandler({
+      create,
+      list: vi.fn(async () => ({ text: 'listed' })),
+      cancel: vi.fn(async () => ({ text: 'cancelled' })),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    expect(host.register).toHaveBeenCalledWith(
+      'session-1',
+      expect.any(Function),
+    );
+    await expect(
+      handlers.get('session-1')?.({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'channel_loop_create',
+          arguments: { cron: '*/5 * * * *', prompt: 'check status' },
+        },
+      }),
+    ).resolves.toMatchObject({
+      id: 1,
+      result: { content: [{ type: 'text', text: 'created' }] },
+    });
+    expect(create).toHaveBeenCalledWith('session-1', {
+      cron: '*/5 * * * *',
+      prompt: 'check status',
+    });
+
+    await bridge.discardSession('session-1');
+    expect(host.unregister).toHaveBeenCalledWith('session-1');
+    expect(handlers.has('session-1')).toBe(false);
+    bridge.stop();
+  });
+
   it('binds a daemon session and collects assistant chunks during prompt', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

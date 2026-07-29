@@ -32,6 +32,7 @@ import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import type { ReviewEffort } from './parse-args.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
@@ -40,6 +41,7 @@ import {
   tmpFile,
   worktreePath,
 } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -73,9 +75,12 @@ interface FetchPrArgs {
   host?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
+  effort?: ReviewEffort;
 }
 
 type FetchPrResult = PlanReport & {
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: ReviewEffort;
   prNumber: string;
   ownerRepo: string;
   remote: string;
@@ -374,6 +379,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
+    ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
@@ -438,6 +444,15 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

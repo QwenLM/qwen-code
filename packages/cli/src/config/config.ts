@@ -1862,7 +1862,18 @@ export async function loadCliConfig(
   if (argv.allowedMcpServerNames) {
     allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
     excludedMcpServers = undefined;
-  } else if (!bareMode) {
+  } else if (!bareMode && !safeMode) {
+    // Settings-sourced allow/exclude lists are LOCAL/ambient state, same
+    // category as settings.mcpServers itself — safe mode already drops the
+    // latter (getMcpServers()) but this branch used to read the former
+    // unconditionally (only bareMode was guarded), so a settings.json
+    // mcp.allowed narrower than the caller's own top-tier servers would
+    // silently filter them back out via getMcpServers()'s allowedMcpServers
+    // filter (added in this same PR, #7827, for the `--allowed-mcp-server-
+    // names` case) — defeating the very guarantee this PR exists to provide.
+    // The argv.allowedMcpServerNames branch above is unaffected: that's an
+    // explicit per-invocation argument, not local state, so it still applies
+    // under safe mode same as topTierMcpServers itself.
     allowedMcpServers = settings.mcp?.allowed
       ? new Set(settings.mcp.allowed.filter(Boolean))
       : undefined;
@@ -2008,10 +2019,20 @@ export async function loadCliConfig(
     sessionMcpServers || cliMcpServers
       ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
       : undefined;
+  // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
+  // ambient, file-sourced state they're meant to distrust) — but top-tier
+  // servers are an explicit, per-invocation argument from the caller (ACP
+  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
   const mcpServers =
     bareMode || safeMode
-      ? {}
+      ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  // Top-tier servers are never gated (#4615, see the comment above), so this
+  // is a no-op for them either way today. Skipped under safe mode anyway
+  // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
+  // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
+  // state at all, not even a read with no behavioral effect. Revisit if a
+  // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
@@ -2144,6 +2165,8 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    sessionWriterLeaseEnabled:
+      settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
@@ -2303,6 +2326,8 @@ export async function loadCliConfig(
                 exploreModel: settings.agents.builtin.exploreModel,
               }
             : undefined,
+          modelGrades: settings.agents.modelGrades,
+          allowedGrades: settings.agents.allowedGrades,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

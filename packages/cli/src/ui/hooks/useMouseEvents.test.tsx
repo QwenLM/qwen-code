@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useStdin, useStdout } from 'ink';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { useMouseEvents } from './useMouseEvents.js';
 
@@ -45,6 +46,28 @@ const vpWrapper = (useTerminalBuffer: boolean) => {
       <KeypressProvider kittyProtocolEnabled={false}>
         {children}
       </KeypressProvider>
+    </SettingsContext.Provider>
+  );
+  return VpWrapper;
+};
+
+const virtualViewportWrapper = (
+  virtualViewport: boolean,
+  rawUseTerminalBuffer?: boolean,
+) => {
+  const VpWrapper = ({ children }: { children: React.ReactNode }) => (
+    <SettingsContext.Provider
+      value={
+        {
+          merged: { ui: { useTerminalBuffer: rawUseTerminalBuffer } },
+        } as unknown as LoadedSettings
+      }
+    >
+      <VirtualViewportContext.Provider value={virtualViewport}>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          {children}
+        </KeypressProvider>
+      </VirtualViewportContext.Provider>
     </SettingsContext.Provider>
   );
   return VpWrapper;
@@ -196,6 +219,20 @@ describe('useMouseEvents', () => {
         wrapper: vpWrapper(true),
       });
       expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+
+    it('uses the startup VP decision when the raw setting is unset', () => {
+      renderHook(() => useMouseEvents(() => {}, { isActive: true }), {
+        wrapper: virtualViewportWrapper(true),
+      });
+      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+
+    it('keeps mouse mode off when the startup decision overrides an enabled setting', () => {
+      renderHook(() => useMouseEvents(() => {}, { isActive: true }), {
+        wrapper: virtualViewportWrapper(false, true),
+      });
+      expect(stdout.write).not.toHaveBeenCalledWith(ENABLE_MOUSE);
     });
 
     it('bypassVpGate: enables mouse mode even in non-VP (modal / VP viewport)', () => {

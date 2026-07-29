@@ -12,6 +12,8 @@ import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
+import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
+import type { GoalSnapshotV2 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   aggregateTranscriptRecordFragments,
@@ -129,6 +131,7 @@ interface TranscriptIndex {
   snapshotSize: number;
   leafUuid: string;
   activeUuids: string[];
+  goalStatePositions: number[];
   gaps: HistoryGap[];
   startTime: string;
   lastUpdated: string;
@@ -601,6 +604,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
   for (const uuid of index.activeUuids) {
     total += estimateStringBytes(uuid);
   }
+  total += index.goalStatePositions.length * 8;
   for (const gap of index.gaps) {
     total +=
       INDEX_ENTRY_BASE_BYTES +
@@ -786,6 +790,27 @@ async function readAggregatedRecords(
   }
 }
 
+async function readGoalStateBeforePosition(
+  index: TranscriptIndex,
+  position: number,
+): Promise<GoalSnapshotV2 | undefined> {
+  let low = 0;
+  let high = index.goalStatePositions.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (index.goalStatePositions[middle]! < position) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  const goalStatePosition = index.goalStatePositions[low - 1];
+  if (goalStatePosition === undefined) return undefined;
+  const uuid = index.activeUuids[goalStatePosition]!;
+  const [record] = await readAggregatedRecords(index, [uuid]);
+  return parseGoalStateRecordPayloadV2(record?.systemPayload)?.snapshot;
+}
+
 async function buildIndex(params: {
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
@@ -872,6 +897,14 @@ async function buildIndex(params: {
       : undefined;
   });
   const activeUuids = [...chain.uuids];
+  const goalStatePositions: number[] = [];
+  for (let position = 0; position < activeUuids.length; position++) {
+    const uuid = activeUuids[position]!;
+    const entry = byUuid.get(uuid);
+    if (entry?.type === 'system' && entry.subtype === 'goal_state') {
+      goalStatePositions.push(position);
+    }
+  }
   const gaps: HistoryGap[] = [...chain.gaps];
   if (chain.cycleUuid) {
     debugLogger.debug(
@@ -890,6 +923,7 @@ async function buildIndex(params: {
     snapshotSize,
     leafUuid,
     activeUuids,
+    goalStatePositions,
     gaps,
     startTime,
     lastUpdated,
@@ -1070,6 +1104,10 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
+    const backwardGoalState =
+      direction === 'backward'
+        ? await readGoalStateBeforePosition(index, nextPosition)
+        : undefined;
     const hasMore =
       direction === 'backward'
         ? nextPosition > 0
@@ -1104,7 +1142,11 @@ export class SessionTranscriptReader {
       hasMore,
       ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
-      ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
+      ...(backwardGoalState
+        ? { replay: { goalState: backwardGoalState } }
+        : cursor?.replay !== undefined
+          ? { replay: cursor.replay }
+          : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
     };
