@@ -3338,6 +3338,11 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).toContain(
       'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
     );
+    // Pin the template that JOINS them: a mutation to the prefix (e.g.
+    // adding a colon) breaks the census while both pins above stay green.
+    expect(reviewAddressReportStep).toContain(
+      'HEADLINE="🤖 AutoFix ${CAUSE} (attempt',
+    );
   });
 
   it('switches to Critical-only feedback after five change rounds', () => {
@@ -5096,7 +5101,7 @@ describe('qwen-autofix workflow', () => {
       repairDeterministicRejectionStep.match(
         /rm -f \\\n([\s\S]*?)\n {10}rm -rf "\$\{QWEN_HOME\}"/,
       )?.[1] ?? '';
-    expect(repairCleanup).not.toContain('gate-rejection.md');
+    expect(repairCleanup).toContain('gate-rejection.md');
     expect(repairDeterministicRejectionStep).not.toContain(
       '"${WORKDIR}/resolved-comments.txt"',
     );

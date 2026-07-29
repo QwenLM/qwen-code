@@ -3268,6 +3268,7 @@ jobs:
             "${WORKDIR}/failure.md" \
             "${WORKDIR}/handoff.md" \
             "${WORKDIR}/gate-output.log" \
+            "${WORKDIR}/gate-rejection.md" \
             "${WORKDIR}/agent-api-error" \
             "${WORKDIR}/agent-api-error-kind" \
             "${WORKDIR}/agent-timeout"
