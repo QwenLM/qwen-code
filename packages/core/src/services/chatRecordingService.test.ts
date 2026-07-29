@@ -24,9 +24,10 @@ import {
   serializeSnapshot,
   type FileHistorySnapshot,
 } from './fileHistoryService.js';
-import type {
+import {
+  SessionTranscriptChangedError,
   SessionWriterUnavailableError,
-  SessionWriterLease,
+  type SessionWriterLease,
 } from './session-writer-lease.js';
 import type {
   GoalStateRecordPayloadV2,
@@ -1561,6 +1562,17 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('uses the effective session writer lease gate by default', async () => {
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
+      const service = new ChatRecordingService(mockConfig);
+
+      service.recordUserMessage([{ text: 'legacy' }]);
+      await service.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
     it('retries directory setup after a synchronous failure', async () => {
       const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
       mkdirSpy.mockImplementationOnce(() => {
@@ -1864,6 +1876,67 @@ describe('ChatRecordingService', () => {
       expect(artifact.parentUuid).toBe(before.uuid);
       expect(after.parentUuid).toBe(before.uuid);
       expect(after.parentUuid).not.toBe(artifact.uuid);
+    });
+  });
+
+  describe('close', () => {
+    it('releases the writer lease before reporting a flush failure', async () => {
+      const failure = new SessionTranscriptChangedError();
+      vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
+
+      chatRecordingService.recordUserMessage([{ text: 'not durable' }]);
+
+      await expect(chatRecordingService.close()).rejects.toBe(failure);
+      expect(mockLease.release).toHaveBeenCalledOnce();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('cuts off new writes synchronously and closes single-flight', async () => {
+      let finishWrite!: () => void;
+      vi.mocked(mockLease.appendJsonLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishWrite = resolve;
+          }),
+      );
+      chatRecordingService.recordUserMessage([{ text: 'accepted' }]);
+
+      const first = chatRecordingService.close();
+      const second = chatRecordingService.close();
+      chatRecordingService.recordUserMessage([{ text: 'too late' }]);
+      await Promise.resolve();
+      finishWrite();
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        undefined,
+        undefined,
+      ]);
+      expect(mockLease.appendJsonLine).toHaveBeenCalledTimes(1);
+      expect(mockLease.release).toHaveBeenCalledTimes(1);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('drains a write barrier admitted before the close cutoff', async () => {
+      const operation = vi.fn().mockResolvedValue('snapshot');
+      const barrier = chatRecordingService.runWithWriteBarrier(operation);
+
+      const close = chatRecordingService.close();
+
+      await expect(barrier).resolves.toBe('snapshot');
+      await expect(close).resolves.toBeUndefined();
+      expect(operation).toHaveBeenCalledOnce();
+    });
+
+    it('clears ownership after an error that follows the release commit', async () => {
+      const cleanupFailure = new SessionWriterUnavailableError();
+      Object.defineProperty(mockLease, 'isReleased', {
+        configurable: true,
+        get: () => true,
+      });
+      vi.mocked(mockLease.release).mockRejectedValueOnce(cleanupFailure);
+
+      await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
   });
 
