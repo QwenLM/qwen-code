@@ -486,7 +486,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         for (const p of added) safeRmWithin(probeTree, p);
 
         const r = spawnSync(
-          'npx',
+          process.platform === 'win32' ? 'npx.cmd' : 'npx',
           ['vitest', 'run', '--reporter=json', ...probes],
           {
             cwd: probeTree,
