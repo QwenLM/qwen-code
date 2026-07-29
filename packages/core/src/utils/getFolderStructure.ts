@@ -53,7 +53,12 @@ interface FullFolderInfo {
   totalFiles: number; // Number of files included from this folder during BFS scan
   isIgnored?: boolean; // Flag to easily identify ignored folders later
   hasMoreFiles?: boolean; // Indicates if files were truncated for this specific folder
-  hasMoreSubfolders?: boolean; // Indicates if subfolders were truncated for this specific folder
+  // True when this folder's subfolders were truncated, OR when the item budget
+  // ran out before the folder was read at all. Both render as a trailing `...`,
+  // which is the point: an unread folder must not be indistinguishable from one
+  // that was read and found empty. Any new consumer has to cover the second
+  // case too — gating on `subFolders.length > 0` drops it silently.
+  hasMoreSubfolders?: boolean;
 }
 
 // --- Interfaces ---
