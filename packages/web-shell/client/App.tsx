@@ -1108,6 +1108,23 @@ function isEnvironmentAgentToolCall(tool: ACPToolCall): boolean {
   );
 }
 
+function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
+  const rawOutput = isRecord(tool.rawOutput) ? tool.rawOutput : undefined;
+  const subagentName =
+    typeof rawOutput?.['subagentName'] === 'string'
+      ? rawOutput['subagentName']
+      : undefined;
+  const subagentType =
+    typeof tool.args?.subagent_type === 'string'
+      ? tool.args.subagent_type
+      : undefined;
+  return subagentName
+    ? `${subagentName}-${tool.callId}`
+    : subagentType
+      ? `${subagentType}-${tool.callId}`
+      : undefined;
+}
+
 export function getEnvironmentAgentTasks(
   messages: readonly Message[],
   sessionTasks: readonly DaemonSessionTaskStatus[],
@@ -1124,6 +1141,33 @@ export function getEnvironmentAgentTasks(
       taskIdsByToolUseId.set(toolUseId, taskId);
     }
   }
+
+  // A live task already linked precisely (by toolUseId, message taskId, or
+  // derived id) to some transcript tool call must never be claimed by the loose
+  // content fallback: two agents sharing a description would otherwise collapse
+  // into one (the fallback steals the linked task, its owner re-matches it, and
+  // the orphan is dropped).
+  const envToolCallIds = new Set<string>();
+  const preciselyClaimedTaskIds = new Set<string>(taskIdsByToolUseId.values());
+  const collectPreciseLinks = (tools: readonly ACPToolCall[]) => {
+    for (const tool of tools) {
+      if (
+        isEnvironmentAgentToolCall(tool) &&
+        !envToolCallIds.has(tool.callId)
+      ) {
+        envToolCallIds.add(tool.callId);
+        const derivedTaskId = derivedTaskIdForTool(tool);
+        if (derivedTaskId) preciselyClaimedTaskIds.add(derivedTaskId);
+      }
+      if (tool.subTools) collectPreciseLinks(tool.subTools);
+    }
+  };
+  for (const message of messages) {
+    if (message.role === 'tool_group') collectPreciseLinks(message.tools);
+  }
+  const isPreciselyClaimed = (task: DaemonSessionAgentTaskStatus): boolean =>
+    (task.toolUseId != null && envToolCallIds.has(task.toolUseId)) ||
+    preciselyClaimedTaskIds.has(task.id);
 
   const agents: EnvironmentAgentTask[] = [];
   const seenTaskIds = new Set<string>();
@@ -1155,11 +1199,7 @@ export function getEnvironmentAgentTasks(
             ? rawOutput['subagentName']
             : undefined;
         const taskId = taskIdsByToolUseId.get(tool.callId);
-        const derivedTaskId = subagentName
-          ? `${subagentName}-${tool.callId}`
-          : subagentType
-            ? `${subagentType}-${tool.callId}`
-            : undefined;
+        const derivedTaskId = derivedTaskIdForTool(tool);
         // Completed background agents can lose their toolUseId / derived-id
         // linkage (e.g. across a daemon reload); fall back to content matching,
         // the same signal the daemon's legacy resolver uses.
@@ -1182,7 +1222,9 @@ export function getEnvironmentAgentTasks(
             task.toolUseId === tool.callId ||
             task.id === taskId ||
             task.id === derivedTaskId ||
-            (!seenTaskIds.has(task.id) && matchesLiveTaskContent(task)),
+            (!seenTaskIds.has(task.id) &&
+              !isPreciselyClaimed(task) &&
+              matchesLiveTaskContent(task)),
         );
         const title = tool.title?.replace(/^Agent:\s*/i, '').trim();
         const meaningfulTitle =

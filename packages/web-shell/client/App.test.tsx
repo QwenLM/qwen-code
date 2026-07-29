@@ -1778,6 +1778,116 @@ describe('environment agent tasks', () => {
       },
     ]);
   });
+
+  it('does not collapse two agents that share a description when one is linked precisely', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-A',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'completed',
+            args: { description: 'Review code', run_in_background: true },
+            rawOutput: { type: 'task_execution', status: 'completed' },
+          },
+          {
+            callId: 'call-B',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'completed',
+            args: { description: 'Review code', run_in_background: true },
+            rawOutput: { type: 'task_execution', status: 'completed' },
+          },
+        ],
+      },
+    ] satisfies Message[];
+    // The precisely-linked task is listed first so a loose description fallback
+    // would steal it before reaching the orphaned one.
+    const linkedTask = {
+      kind: 'agent' as const,
+      id: 'task-B',
+      label: 'Review code',
+      description: 'Review code',
+      status: 'completed' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: true,
+      toolUseId: 'call-B',
+    };
+    const orphanTask = {
+      kind: 'agent' as const,
+      id: 'task-A',
+      label: 'Review code',
+      description: 'Review code',
+      status: 'completed' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: true,
+    };
+
+    const result = getEnvironmentAgentTasks(messages, [linkedTask, orphanTask]);
+    expect(result).toHaveLength(2);
+    expect(result).toMatchObject([
+      { id: 'task-A', description: 'Review code', status: 'completed' },
+      { id: 'task-B', description: 'Review code', status: 'completed' },
+    ]);
+  });
+
+  it('lists two precisely-linked agents that share a description once each', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-A',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'completed',
+            args: { description: 'Review code', run_in_background: true },
+            rawOutput: { type: 'task_execution', status: 'completed' },
+          },
+          {
+            callId: 'call-B',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'completed',
+            args: { description: 'Review code', run_in_background: true },
+            rawOutput: { type: 'task_execution', status: 'completed' },
+          },
+        ],
+      },
+    ] satisfies Message[];
+    const taskA = {
+      kind: 'agent' as const,
+      id: 'task-A',
+      label: 'Review code',
+      description: 'Review code',
+      status: 'completed' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: true,
+      toolUseId: 'call-A',
+    };
+    const taskB = {
+      kind: 'agent' as const,
+      id: 'task-B',
+      label: 'Review code',
+      description: 'Review code',
+      status: 'completed' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: true,
+      toolUseId: 'call-B',
+    };
+
+    const result = getEnvironmentAgentTasks(messages, [taskA, taskB]);
+    expect(result).toHaveLength(2);
+    expect(result).toMatchObject([{ id: 'task-A' }, { id: 'task-B' }]);
+  });
 });
 
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
