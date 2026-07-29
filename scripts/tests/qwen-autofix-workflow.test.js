@@ -2498,6 +2498,11 @@ describe('qwen-autofix workflow', () => {
       }),
     ).toBe('inspect');
 
+    // Null/empty updatedAt (defensive guard) → inspected, not idle.
+    expect(runBackoff({ pr: '8001', updatedAt: null, slotNow: 0 })).toBe(
+      'inspect',
+    );
+
     // Visible in the fleet dashboard, like the busy skip.
     expect(reviewScanJob).toContain("'idle-backoff'");
     // The workflow comment must not claim the 10-target cap is relieved —
