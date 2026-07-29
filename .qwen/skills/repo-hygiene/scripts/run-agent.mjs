@@ -102,7 +102,17 @@ function runQwen(options, prompt) {
       if (log.destroyed) {
         resolve(payload);
       } else {
-        log.end(() => resolve(payload));
+        // Settle on error too: a swallowed stream error would otherwise
+        // drop the end() callback and hang the promise forever.
+        let done = false;
+        const settle = () => {
+          if (!done) {
+            done = true;
+            resolve(payload);
+          }
+        };
+        log.once('error', settle);
+        log.end(settle);
       }
     };
 
