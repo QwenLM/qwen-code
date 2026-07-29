@@ -166,12 +166,14 @@ beforeAll(async () => {
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
     // Capture the timeout handle so we can clear it on success — an
-    // un-cleared 10s timer outlives the spawn promise and keeps the
+    // un-cleared timer outlives the spawn promise and keeps the
     // vitest event loop alive past the test, manifesting as
     // intermittent `Test timed out` retries on slow CI.
+    // 25s is strictly below the 30s beforeAll backstop so this
+    // descriptive rejection fires first on a genuine boot hang.
     const bootTimer = setTimeout(
       () => reject(new Error('daemon boot timeout')),
-      10_000,
+      25_000,
     );
     const onData = (chunk: Buffer) => {
       buf += chunk.toString();
@@ -338,6 +340,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_context_usage',
       'session_supported_commands',
       'session_tasks',
+      'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
       'session_status',
@@ -365,9 +368,11 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_trust',
       'workspace_init',
       'workspace_github_setup',
+      'workspace_github_prs',
       'workspace_mcp_restart',
       'session_recap',
       'session_generation',
+      'workspace_generation',
       'session_btw',
       'mcp_workspace_pool',
       'mcp_pool_restart',
@@ -381,7 +386,9 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_extensions',
       'session_branch',
       'workspace_reload',
+      'channel_delivery',
       'channel_control',
+      'channel_management',
       'workspace_channel_observed_contacts',
       'persistent_workspace_registration',
       'workspace_display_name',

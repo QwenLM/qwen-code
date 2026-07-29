@@ -33,6 +33,7 @@ import {
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_RIPGREP_RUNTIME_RECOVERY,
   EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
@@ -40,6 +41,7 @@ import {
   EVENT_EXTENSION_UNINSTALL,
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
+  EVENT_MEMORY_RECALL_DELIVERY,
 } from './constants.js';
 import {
   logApiRequest,
@@ -52,6 +54,7 @@ import {
   logMalformedJsonResponse,
   logFileOperation,
   logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
   logSkillLaunch,
   logToolOutputTruncated,
   logExtensionEnable,
@@ -62,6 +65,7 @@ import {
   logApiError,
   logApiRetry,
   logProtocolTagSanitized,
+  logMemoryRecallDelivery,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
@@ -77,6 +81,7 @@ import {
   ToolCallEvent,
   UserPromptEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   SkillLaunchEvent,
   MalformedJsonResponseEvent,
   makeChatCompressionEvent,
@@ -90,6 +95,7 @@ import {
   ApiErrorEvent,
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -195,6 +201,81 @@ describe('loggers', () => {
       });
       expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
         /response_text|reasoning|tool_name|arguments/,
+      );
+    });
+  });
+
+  describe('logMemoryRecallDelivery', () => {
+    beforeEach(() => {
+      vi.spyOn(metrics, 'recordMemoryRecallDeliveryMetrics');
+    });
+
+    it('emits low-cardinality delivery telemetry without memory content or paths', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = new MemoryRecallDeliveryEvent({
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+        docs_selected: 2,
+        latency_ms: 123,
+      });
+
+      logMemoryRecallDelivery(config, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory recall delivery: phase=refined. delivery_point=discarded. Selected 2 doc(s).',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_MEMORY_RECALL_DELIVERY,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'reset',
+          strategy: 'model',
+          docs_selected: 2,
+          latency_ms: 123,
+        },
+      });
+      expect(mockLogger.emit.mock.calls[0][0].attributes).toHaveProperty(
+        'session.id',
+        'test-session-id',
+      );
+      expect(metrics.recordMemoryRecallDeliveryMetrics).toHaveBeenCalledWith(
+        config,
+        123,
+        {
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'reset',
+          strategy: 'model',
+        },
+      );
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /query|hash|content|filePath|projectPath|message|raw_error|secret/i,
+      );
+    });
+
+    it('omits discard_reason from metrics payload for delivered memory', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = new MemoryRecallDeliveryEvent({
+        phase: 'refined',
+        delivery_point: 'tool_result',
+        strategy: 'model',
+        docs_selected: 2,
+        latency_ms: 123,
+      });
+
+      logMemoryRecallDelivery(config, event);
+
+      expect(metrics.recordMemoryRecallDeliveryMetrics).toHaveBeenCalledWith(
+        config,
+        123,
+        {
+          phase: 'refined',
+          delivery_point: 'tool_result',
+          strategy: 'model',
+        },
       );
     });
   });
@@ -766,6 +847,47 @@ describe('loggers', () => {
           'event.name': EVENT_RIPGREP_FALLBACK,
           error: 'rg not found',
         }),
+      );
+    });
+  });
+
+  describe('logRipgrepRuntimeRecovery', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logRipgrepRuntimeRecoveryEvent');
+    });
+
+    it('logs privacy-safe runtime recovery fields', () => {
+      const event = new RipgrepRuntimeRecoveryEvent({
+        selection_mode: 'builtin',
+        retry_triggered: true,
+        retry_succeeded: true,
+        failure_kind: 'eagain',
+      });
+
+      logRipgrepRuntimeRecovery(mockConfig, event);
+
+      expect(
+        QwenLogger.prototype.logRipgrepRuntimeRecoveryEvent,
+      ).toHaveBeenCalledWith(event);
+      const emittedEvent = mockLogger.emit.mock.calls[0][0];
+      expect(emittedEvent.body).toBe('Ripgrep runtime recovery: eagain.');
+      expect(emittedEvent.attributes).toEqual(
+        expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_RIPGREP_RUNTIME_RECOVERY,
+          selection_mode: 'builtin',
+          retry_triggered: true,
+          retry_succeeded: true,
+          failure_kind: 'eagain',
+        }),
+      );
+      expect(JSON.stringify(emittedEvent.attributes)).not.toMatch(
+        /pattern|path|stdout|stderr|needle|repo/,
       );
     });
   });

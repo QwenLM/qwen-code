@@ -243,6 +243,14 @@
   user-select: none;
 }
 
+.lineButton {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
 .lineExpandable * {
   cursor: pointer;
 }

@@ -39,6 +39,8 @@ export enum Command {
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
@@ -137,7 +139,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Text deletion
   [Command.KILL_LINE_RIGHT]: [{ key: 'k', ctrl: true }],
   [Command.KILL_LINE_LEFT]: [{ key: 'u', ctrl: true }],
-  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true }],
+  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true, shift: false }],
   // Added command (meta/alt/option) for mac compatibility
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
@@ -188,6 +190,17 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'down', shift: false },
     { key: 'n', ctrl: true },
   ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  // Bound to Ctrl+arrows rather than plain arrows so the bare arrow keys keep
+  // moving the caret in the editable input buffer (plain arrows only switch
+  // tabs in modal dialogs, which have no text buffer). Alt/Option+arrows still
+  // perform word movement.
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: true, command: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: true, command: false },
+  ],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline
@@ -234,7 +247,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_MODEL]: [{ key: 'f', ctrl: true, shift: false }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
-  [Command.QUIT]: [{ key: 'c', ctrl: true }],
+  [Command.QUIT]: [{ key: 'c', ctrl: true, shift: false }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],

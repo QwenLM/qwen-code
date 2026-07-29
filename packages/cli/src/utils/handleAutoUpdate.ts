@@ -189,10 +189,16 @@ export function setUpdateHandler(
     }, 60000);
   };
 
-  const handleUpdateFailed = (data?: { message?: string }) => {
+  const handleUpdateFailed = (data?: {
+    message?: string;
+    severity?: 'error' | 'warning';
+  }) => {
     setUpdateInfo(null);
     addItemOrDefer({
-      type: MessageType.ERROR,
+      // Background update-check failures are emitted with severity 'warning'
+      // (#7049); actual update installation failures stay errors.
+      type:
+        data?.severity === 'warning' ? MessageType.WARNING : MessageType.ERROR,
       text: data?.message ?? t(UPDATE_FAILED_MESSAGE),
     });
   };

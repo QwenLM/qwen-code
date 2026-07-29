@@ -67,16 +67,20 @@ abstract class ChannelBase {
 }
 ```
 
+All internal message delivery routes through `sendThreadMessage(chatId, threadId, text)`. The default implementation falls through to `sendMessage(chatId, text)`, ignoring `threadId` — IM adapters are unaffected. Polling adapters (e.g. GitHub) override `sendThreadMessage` to post comments on a specific issue/PR using the `threadId`.
+
 Handles common cross-cutting concerns: sender gating (allowlist / denylist), group gating, message block streaming (chunk size, throttling), inbound debounce.
 
 ### Per-channel adapters
 
-| Adapter         | File                                                | Transport                                              | Notes                                                                                                        |
-| --------------- | --------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| DingTalk        | `packages/channels/dingtalk/src/DingtalkAdapter.ts` | DingTalk Stream SDK WebSocket                          | Sends via `sessionWebhook` POST; media images downloaded via DT API, base64 in envelope.                     |
-| WeChat (Weixin) | `packages/channels/weixin/src/WeixinAdapter.ts`     | iLink Bot HTTP long-poll                               | Sends via proprietary `sendText` / `sendImage` API; typing indicators.                                       |
-| Telegram        | `packages/channels/telegram/src/TelegramAdapter.ts` | Telegram Bot API long-poll (grammy)                    | Sends HTML chunks via `sendMessage`.                                                                         |
-| Feishu          | `packages/channels/feishu/src/FeishuAdapter.ts`     | Feishu/Lark Stream WebSocket (default) or HTTP webhook | Sends via Lark SDK as interactive cards; webhook mode requires `encryptKey` for HMAC signature verification. |
+| Adapter         | File                                                | Transport                                              | Notes                                                                                                                                         |
+| --------------- | --------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| DingTalk        | `packages/channels/dingtalk/src/DingtalkAdapter.ts` | DingTalk Stream SDK WebSocket                          | Sends via `sessionWebhook` POST; media images downloaded via DT API, base64 in envelope.                                                      |
+| WeChat (Weixin) | `packages/channels/weixin/src/WeixinAdapter.ts`     | iLink Bot HTTP long-poll                               | Sends via proprietary `sendText` / `sendImage` API; typing indicators.                                                                        |
+| Telegram        | `packages/channels/telegram/src/TelegramAdapter.ts` | Telegram Bot API long-poll (grammy)                    | Sends HTML chunks via `sendMessage`.                                                                                                          |
+| Feishu          | `packages/channels/feishu/src/FeishuAdapter.ts`     | Feishu/Lark Stream WebSocket (default) or HTTP webhook | Sends via Lark SDK as interactive cards; webhook mode requires `encryptKey` for HMAC signature verification.                                  |
+| GitHub          | `packages/channels/github/src/GithubAdapter.ts`     | GitHub Notifications API polling (`@octokit/rest`)     | Extends `PollingChannelBase`; cursor-based comment window dedup; posts comments via Issues API.                                               |
+| GitLab          | `packages/channels/gitlab/src/GitlabAdapter.ts`     | GitLab Todos API polling (`@gitbeaker/rest`)           | Extends `PollingChannelBase`; dispatches `todo.body` directly; `action_prompt_template` config drives event filtering and metadata rendering. |
 
 Each adapter implements:
 
@@ -94,6 +98,8 @@ Each adapter implements:
 | **WeChat**   | HTTP long-poll                  | `senderWxid` (+ optional `groupWxid`)                    | Text-only prompts with reply tokens | Same                                              |
 | **Telegram** | Bot API long-poll               | `from.id` (+ optional `chat.id` for groups)              | Inline keyboard buttons             | Same                                              |
 | **Feishu**   | WebSocket stream / HTTP webhook | `sender.open_id` (+ optional `chat_id` for groups)       | Interactive card buttons            | Same                                              |
+| **GitHub**   | Notifications API polling       | Numeric `user.id` (immutable; login resolved at connect) | Error comment + re-mention          | `senderPolicy: 'allowlist' \| 'open'`             |
+| **GitLab**   | Todos API polling               | `author.username` (lowercased)                           | Log + re-mention                    | `senderPolicy: 'allowlist' \| 'open'`             |
 
 > **Note:** The "Permission UX" column describes each platform's native affordance, but none is wired up yet — `AcpBridge.requestPermission` currently auto-approves every request (`packages/channels/base/src/AcpBridge.ts`), and `ChannelConfig.approvalMode` is declared but not yet read. Interactive approval is planned (Phase 5).
 
@@ -180,22 +186,22 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 
 ## Dependencies
 
-- `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
+- `packages/channels/base/` — `ChannelBase`, `PollingChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
 - `packages/sdk-typescript/src/daemon/` — `DaemonSessionClient` and friends.
-- Per-channel SDKs: `@dingtalk/stream` (DingTalk), proprietary iLink Bot HTTP (Weixin), `grammy` (Telegram).
+- Per-channel SDKs: `@dingtalk/stream` (DingTalk), proprietary iLink Bot HTTP (Weixin), `grammy` (Telegram), `@octokit/rest` (GitHub polling), `@gitbeaker/rest` (GitLab polling).
 
 ## Configuration
 
 `ChannelConfig` (from `packages/channels/base/src/types.ts`):
 
-| Knob                                     | Effect                                                                                                    |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), or `'single'` (one shared session per channel). |
-| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                         |
-| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                       |
-| `denylist?: string[]`                    | Sender ids denied.                                                                                        |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
-| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
+| Knob                                     | Effect                                                                                                                                                                         |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), `'chat_thread'` (channel + chatId + threadId, for polling adapters), or `'single'` (one shared session per channel). |
+| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                                                                                              |
+| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                                                                                            |
+| `denylist?: string[]`                    | Sender ids denied.                                                                                                                                                             |
+| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                                                                                             |
+| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                                                                                                    |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode)).
 

@@ -47,7 +47,10 @@ import {
   getShellAbortReasonKind,
   ShellExecutionService,
 } from '../services/shellExecutionService.js';
-import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
+import {
+  statusFilePathFor,
+  type ShellTaskRegistration,
+} from '../services/backgroundShellRegistry.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -84,6 +87,19 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+
+/**
+ * Model-facing liveness guidance shared verbatim by both background
+ * launch paths (`executeBackground` and the foreground→background
+ * promote), so the two copies cannot drift (#7626).
+ */
+function statusFileGuidance(outputPath: string): string {
+  return (
+    `status file: ${statusFilePathFor(outputPath)}\n` +
+    `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled). ` +
+    `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`).`
+  );
+}
 
 /**
  * Strip a single bare trailing `&` (bash background operator) from a
@@ -991,8 +1007,68 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
-/** Maximum wait for the output stream flush before transitioning the registry. */
-const PROMOTE_FLUSH_TIMEOUT_MS = 10_000;
+/**
+ * Maximum wait for the output stream flush before transitioning the
+ * registry. Shared by the promote settle path and `executeBackground`'s
+ * settle path — see `endStreamThenSettle`.
+ */
+const OUTPUT_FLUSH_TIMEOUT_MS = 10_000;
+
+/**
+ * End `stream` and run `settle` exactly once after its queued writes
+ * have been flushed to the underlying fd (`'finish'`). `stream.end()`
+ * is asynchronous — pending writes can still be in the libuv queue
+ * when it returns, so transitioning the registry before the flush
+ * lets `/tasks` consumers (and the status sidecar) observe a terminal
+ * status and read the output file BEFORE the trailing bytes are on
+ * disk, producing truncated logs. `'error'` covers a late EIO /
+ * ENOSPC racing `.end()` itself, an already-destroyed or
+ * already-finished stream short-circuits (neither event would ever
+ * fire on it), and the timer backstops a stream wedged mid-flush —
+ * whichever lands first, `settle` runs exactly once.
+ */
+function endStreamThenSettle(
+  stream: fs.WriteStream,
+  origin: 'promote' | 'background',
+  shellId: string,
+  settle: () => void,
+): void {
+  let settled = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const runOnce = () => {
+    if (settled) return;
+    settled = true;
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    settle();
+  };
+  // A destroyed or already-finished stream emits neither 'finish' nor
+  // 'error' — `.end()` on it is a silent no-op (Node only delivers
+  // ERR_STREAM_DESTROYED to an `end()` callback), so waiting would
+  // always burn the full timeout with nothing left to flush.
+  // `writableFinished`, not `writableEnded`: the latter is already
+  // true mid-flush, which is exactly the window this helper waits for.
+  if (stream.destroyed || stream.writableFinished) {
+    runOnce();
+    return;
+  }
+  try {
+    flushTimer = setTimeout(() => {
+      debugLogger.warn(
+        `${origin}: output stream flush timed out for ${shellId} after ${OUTPUT_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+      );
+      runOnce();
+    }, OUTPUT_FLUSH_TIMEOUT_MS);
+    flushTimer.unref();
+    stream.once('finish', runOnce);
+    stream.once('error', runOnce);
+    stream.end();
+  } catch (closeErr) {
+    debugLogger.warn(
+      `${origin}: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
+    );
+    runOnce();
+  }
+}
 
 /**
  * PR-2.5 slots shared between the foreground `execute()` postPromote
@@ -2815,8 +2891,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
+    let persistedOutputFiles: string[] | undefined;
+
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
+      const originalLlmContent = llmContent;
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -2829,14 +2908,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // no-op here. lines: Infinity keeps this char-only so the global line
         // cap can't undercut the declared 30k char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
-        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
+        {
+          threshold: 30_000,
+          previewChars: 4000,
+          keep: 'both',
+          lines: Number.POSITIVE_INFINITY,
+        },
       );
 
       if (truncatedResult.outputFile) {
+        persistedOutputFiles = [truncatedResult.outputFile];
         llmContent = truncatedResult.content;
         returnDisplayMessage +=
           (returnDisplayMessage ? '\n' : '') +
           `Output too long and was saved to: ${truncatedResult.outputFile}`;
+      } else if (truncatedResult.content !== originalLlmContent) {
+        persistedOutputFiles = [];
+        llmContent = truncatedResult.content;
       }
     }
 
@@ -2944,6 +3032,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       returnDisplay: returnDisplayMessage,
+      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...executionError,
     };
   }
@@ -3393,39 +3482,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         transitionRegistry(info);
         return;
       }
-      try {
-        // `finish` fires after all queued writes have been flushed to
-        // the underlying fd. `error` covers a late EIO / ENOSPC that
-        // doesn't reach the existing `'error'` listener — race with
-        // `.end()` itself. Either way, run the transition once.
-        let transitioned = false;
-        const finalize = () => {
-          if (transitioned) return;
-          transitioned = true;
-          transitionRegistry(info);
-        };
-        const flushTimer = setTimeout(() => {
-          debugLogger.warn(
-            `promote: output stream flush timed out for ${shellId} after ${PROMOTE_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
-          );
-          finalize();
-        }, PROMOTE_FLUSH_TIMEOUT_MS);
-        flushTimer.unref();
-        stream.once('finish', () => {
-          clearTimeout(flushTimer);
-          finalize();
-        });
-        stream.once('error', () => {
-          clearTimeout(flushTimer);
-          finalize();
-        });
-        stream.end();
-      } catch (closeErr) {
-        debugLogger.warn(
-          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
-        );
-        transitionRegistry(info);
-      }
+      endStreamThenSettle(stream, 'promote', shellId, () =>
+        transitionRegistry(info),
+      );
     };
     // Drain a settle that landed BEFORE the wire installed (fast
     // commands can exit between `result.promoted` and this line).
@@ -3447,6 +3506,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const statusLine = postPromoteSettleObserved
       ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
       : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
+    const statusFileLine = statusFileGuidance(outputPath);
     const inspectLine = `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
     const stopLine = postPromoteSettleObserved
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
@@ -3455,6 +3515,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
       statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,
+      statusFileLine,
       inspectLine,
       stopLine,
     ].join('\n');
@@ -3636,36 +3697,46 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.
+    //
+    // Same flush-ordering hazard as the promote settle path: transition
+    // the registry only after the output stream has flushed, so the
+    // status sidecar can't report a terminal state while the trailing
+    // output bytes are still in the libuv queue. The exit timestamp is
+    // captured BEFORE the flush wait — endTime records when the child
+    // exited, not when its bytes reached disk.
     void resultPromise.then(
       (result) => {
-        outputStream.end();
         const endTime = Date.now();
-        if (entryAc.signal.aborted) {
-          if (registry.get(shellId)?.status === 'running') {
-            registry.cancel(shellId, endTime);
+        endStreamThenSettle(outputStream, 'background', shellId, () => {
+          if (entryAc.signal.aborted) {
+            if (registry.get(shellId)?.status === 'running') {
+              registry.cancel(shellId, endTime);
+            }
+          } else if (
+            result.error ||
+            (result.exitCode !== null && result.exitCode !== 0) ||
+            result.signal !== null
+          ) {
+            // Non-zero exit / killed by signal / spawn error all count as failed.
+            // Treating them as `completed` would let `/tasks` (and any future
+            // model-facing notification) misreport a failed `npm test` or
+            // `false` command as a success.
+            const reason = result.error
+              ? result.error.message
+              : result.signal !== null
+                ? `terminated by signal ${result.signal}`
+                : `exited with code ${result.exitCode}`;
+            registry.fail(shellId, reason, endTime);
+          } else {
+            registry.complete(shellId, result.exitCode ?? 0, endTime);
           }
-        } else if (
-          result.error ||
-          (result.exitCode !== null && result.exitCode !== 0) ||
-          result.signal !== null
-        ) {
-          // Non-zero exit / killed by signal / spawn error all count as failed.
-          // Treating them as `completed` would let `/tasks` (and any future
-          // model-facing notification) misreport a failed `npm test` or
-          // `false` command as a success.
-          const reason = result.error
-            ? result.error.message
-            : result.signal !== null
-              ? `terminated by signal ${result.signal}`
-              : `exited with code ${result.exitCode}`;
-          registry.fail(shellId, reason, endTime);
-        } else {
-          registry.complete(shellId, result.exitCode ?? 0, endTime);
-        }
+        });
       },
       (err) => {
-        outputStream.end();
-        registry.fail(shellId, getErrorMessage(err), Date.now());
+        const endTime = Date.now();
+        endStreamThenSettle(outputStream, 'background', shellId, () =>
+          registry.fail(shellId, getErrorMessage(err), endTime),
+        );
       },
     );
 
@@ -3676,6 +3747,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
+        `${statusFileGuidance(outputPath)}\n` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates). Read the output file directly to view the captured output.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };

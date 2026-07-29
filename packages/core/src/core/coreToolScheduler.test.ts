@@ -9,6 +9,7 @@ import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type {
   AnyDeclarativeTool,
+  ChatRecordingService,
   Config,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -30,10 +31,13 @@ import {
   ToolErrorType,
 } from '../index.js';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import * as fsSync from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -54,6 +58,7 @@ import {
   MOCK_TOOL_GET_DEFAULT_PERMISSION,
   MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
+import { GeminiChat } from './geminiChat.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
@@ -72,6 +77,11 @@ import {
 } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
 
@@ -205,8 +215,16 @@ function createMockToolSpan(
 
 vi.mock('../telemetry/session-tracing.js', () => ({
   startToolSpan: vi.fn(
-    (name: string, attrs?: Record<string, string | number | boolean>) =>
-      createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
+    (
+      name: string,
+      attrs?: Record<string, string | number | boolean>,
+      description?: string,
+    ) =>
+      createMockToolSpan(`tool.${name}`, {
+        tool_name: name,
+        ...attrs,
+        ...(description ? { 'gen_ai.tool.description': description } : {}),
+      }),
   ),
   endToolSpan: vi.fn(
     (
@@ -711,8 +729,14 @@ describe('CoreToolScheduler', () => {
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
+    getGeminiClient?: () => unknown;
+    getPlanFilePath?: () => string;
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
+    chatRecordingService?: ChatRecordingService;
+    visionBridge?: boolean;
+    visionAgent?: boolean;
+    onToolResultFullTurnModel?: (model: string) => boolean;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -749,6 +773,15 @@ describe('CoreToolScheduler', () => {
           model: 'test-model',
           authType: 'gemini',
         }),
+        getEffectiveInputModalities: () =>
+          options.visionBridge || options.visionAgent ? {} : { image: true },
+        getDefaultVisionBridgeModel: () =>
+          options.visionBridge || options.visionAgent
+            ? {
+                id: 'qwen3-vl-plus',
+                ...(options.visionAgent ? { agentCapable: true as const } : {}),
+              }
+            : undefined,
         getModel: () => 'test-model',
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
@@ -770,7 +803,9 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getCwd: () => '/repo',
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getGeminiClient: options.getGeminiClient ?? (() => null),
+        getPlanFilePath:
+          options.getPlanFilePath ?? (() => '/tmp/plans/test-session-id.md'),
         getChatRecordingService: () => undefined,
         getMemoryPressureMonitor: () => options.memoryMonitor,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
@@ -799,6 +834,8 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
+      chatRecordingService: options.chatRecordingService,
+      onToolResultFullTurnModel: options.onToolResultFullTurnModel,
     });
 
     return {
@@ -808,6 +845,65 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it('restores the invocation context when a delayed confirmation executes', async () => {
+    const invocationContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'session-context',
+      promptId: 'prompt-context',
+    };
+    const unrelatedContext: InvocationContextV1 = {
+      ...invocationContext,
+      sessionId: 'unrelated-session',
+      promptId: 'unrelated-prompt',
+    };
+    let observedContext: InvocationContextV1 | undefined;
+    const tool = new MockTool({
+      name: 'approval-context-tool',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'info' as const,
+        title: 'Confirm context tool',
+        prompt: 'Run context tool?',
+        onConfirm: vi.fn().mockResolvedValue(undefined),
+      }),
+      execute: async () => {
+        observedContext = getInvocationContext();
+        return { llmContent: 'ok', returnDisplay: 'ok' };
+      },
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[tool.name, tool]]),
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    await runWithInvocationContext(invocationContext, () =>
+      scheduler.schedule(
+        [
+          {
+            callId: 'approval-context-call',
+            name: tool.name,
+            args: {},
+            isClientInitiated: false,
+            prompt_id: invocationContext.promptId,
+          },
+        ],
+        new AbortController().signal,
+      ),
+    );
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    await runWithInvocationContext(unrelatedContext, () =>
+      waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+
+    expect(observedContext).toEqual(invocationContext);
+  });
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
     const reminder = getPlanModeSystemReminder(false);
@@ -1102,6 +1198,325 @@ describe('CoreToolScheduler', () => {
     );
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     expect(execute).toHaveBeenCalledWith({ plan: 'Original plan' });
+  });
+
+  function createChatWithPlanCall(callId: string, plan: string): GeminiChat {
+    return new GeminiChat({} as unknown as Config, {}, [
+      { role: 'user', parts: [{ text: 'please plan this' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Here is my plan.' },
+          {
+            functionCall: {
+              id: callId,
+              name: ToolNames.EXIT_PLAN_MODE,
+              args: { plan, originalRequest: 'please plan this' },
+            },
+          },
+        ],
+      },
+    ]);
+  }
+
+  it('redacts the plan argument from history after an approved exit_plan_mode', async () => {
+    const bigPlan = '## Plan\n\n1. huge section\n2. code blocks\n3. tables';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
+    const chat = createChatWithPlanCall('plan-call-1', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'User approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-1',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const history = chat.getHistory();
+    const fnCall = history[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).not.toContain('huge section');
+    expect(fnCall.args!['plan']).toContain(
+      `Plan approved and saved to ${planFile}`,
+    );
+    fsSync.unlinkSync(planFile);
+    // Sibling parts and other args survive untouched.
+    expect(history[1]!.parts![0]).toEqual({ text: 'Here is my plan.' });
+    expect(fnCall.args!['originalRequest']).toBe('please plan this');
+  });
+
+  it('redacts the plan for a leader-approved (teammate) exit_plan_mode', async () => {
+    const bigPlan = '## Plan\n\nleader path fixture';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-leader-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
+    const chat = createChatWithPlanCall('plan-call-4', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'Leader approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'Leader approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-4',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-leader-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).not.toContain('leader path fixture');
+    expect(fnCall.args!['plan']).toContain(
+      `Plan approved and saved to ${planFile}`,
+    );
+    fsSync.unlinkSync(planFile);
+  });
+
+  it('keeps the plan argument when the plan file was never written (save failed)', async () => {
+    const bigPlan = '## Plan\n\nnothing on disk backs this';
+    const chat = createChatWithPlanCall('plan-call-3', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'User approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () =>
+        path.join(os.tmpdir(), 'qwen-plan-that-does-not-exist.md'),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-3',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-save-failed',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    // Never point the model at a file that is not there — the plan stays.
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).toBe(bigPlan);
+  });
+
+  it('keeps the plan argument in history when exit_plan_mode is not approved', async () => {
+    const bigPlan = '## Plan\n\nkeep me for revision';
+    const chat = createChatWithPlanCall('plan-call-2', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Plan execution was not approved. Remaining in plan mode.',
+        returnDisplay: 'Plan execution was not approved.',
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-2',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-rejected',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).toBe(bigPlan);
+  });
+
+  it('returns guidance error through the scheduler when a PM ask rule hits exit_plan_mode outside plan mode (#7671)', async () => {
+    const exitPlanConfig = {
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getApprovalModeRevision: () => 7,
+      getPrePlanMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+      savePlan: vi.fn(),
+      getTeamManager: () => undefined,
+    } as unknown as Config;
+    const realTool = new ExitPlanModeTool(exitPlanConfig);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('ask'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(true),
+      findMatchingDenyRule: vi.fn(),
+    };
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [ToolNames.EXIT_PLAN_MODE, realTool as unknown as MockTool],
+      ]),
+      approvalMode: ApprovalMode.DEFAULT,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    });
+    Object.assign(
+      (scheduler as unknown as { config: Record<string, unknown> }).config,
+      {
+        getPermissionManager: () => permissionManager,
+        getTargetDir: () => '/repo',
+        getConditionalRulesRegistry: () => undefined,
+        getSkillManager: () => undefined,
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'pm-ask-exit-plan',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'My plan' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-pm-ask-exit-plan',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    const errorJson = JSON.stringify(completedCalls[0].response);
+    expect(errorJson).toContain('not in plan mode');
+    expect(errorJson).toContain('Do not call exit_plan_mode again');
+  });
+
+  it('returns guidance error through the scheduler on Plan-to-non-Plan timing boundary (#7671)', async () => {
+    // Simulate: permission evaluation sees PLAN (requiresUserInteraction
+    // returns true, forcing ask), then mode switches before
+    // getConfirmationDetails is called.
+    let approvalModeCallCount = 0;
+    const exitPlanConfig = {
+      getApprovalMode: () => {
+        approvalModeCallCount++;
+        // The first call is requiresUserInteraction() during
+        // evaluatePermissionFlow; subsequent calls (inside
+        // getConfirmationDetails) see DEFAULT.
+        return approvalModeCallCount <= 1
+          ? ApprovalMode.PLAN
+          : ApprovalMode.DEFAULT;
+      },
+      getApprovalModeRevision: () => 7,
+      getPrePlanMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+      savePlan: vi.fn(),
+      getTeamManager: () => undefined,
+    } as unknown as Config;
+    const realTool = new ExitPlanModeTool(exitPlanConfig);
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [ToolNames.EXIT_PLAN_MODE, realTool as unknown as MockTool],
+      ]),
+      approvalMode: ApprovalMode.PLAN,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'timing-boundary-exit-plan',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'My plan' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-timing-boundary-exit-plan',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    const errorJson = JSON.stringify(completedCalls[0].response);
+    expect(errorJson).toContain('not in plan mode');
+    expect(errorJson).toContain('Do not call exit_plan_mode again');
   });
 
   it('does not let AUTO_EDIT approve an interaction-required info tool', async () => {
@@ -2038,10 +2453,11 @@ describe('CoreToolScheduler', () => {
     expect(output).toContain('POSTHOOK_HEAD_MARKER');
   });
 
-  it('offloads the largest tool outputs when a batch exceeds the budget', async () => {
+  it('deterministically bounds tool outputs when a batch exceeds the budget', async () => {
     // Both outputs are individually under the single-result threshold (25k),
     // so PR-A truncation leaves them alone; only their SUM (12k) exceeds the
-    // per-message batch budget (10k), so the largest is offloaded.
+    // per-message batch budget (10k). The small result fits intact and the
+    // remaining budget is assigned to the large result.
     const bigExecute = vi.fn().mockResolvedValue({
       llmContent: 'a'.repeat(9000),
       returnDisplay: 'big',
@@ -2060,10 +2476,14 @@ describe('CoreToolScheduler', () => {
         new MockTool({ name: 'smallBatchTool', execute: smallExecute }),
       ],
     ]);
+    const recordToolResult = vi.fn();
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
         toolsByName,
         toolOutputBatchBudget: 10_000,
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
       });
 
     await scheduler.schedule(
@@ -2102,12 +2522,79 @@ describe('CoreToolScheduler', () => {
         : '';
     };
 
-    // Largest output is offloaded to disk (recoverable pointer).
-    expect(outputOf('bigBatchTool')).toContain(
-      'Tool output was too large and has been truncated',
-    );
-    // Smaller output stays untouched (batch back under budget after offload).
+    expect(outputOf('bigBatchTool')).toContain('Tool output truncated.');
+    // Water-fill allocation keeps the smaller output intact.
     expect(outputOf('smallBatchTool')).toBe('b'.repeat(3000));
+    expect(
+      outputOf('bigBatchTool').length + outputOf('smallBatchTool').length,
+    ).toBeLessThanOrEqual(10_000);
+    expect(recordToolResult).toHaveBeenCalledTimes(2);
+    expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
+      calls.flatMap((call) =>
+        'response' in call ? call.response.responseParts : [],
+      ),
+    );
+  });
+
+  it('hard-caps a batch whose producer outputs already carry truncation markers', async () => {
+    const prefix = 'Tool output was too large and has been truncated';
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'firstShell',
+        new MockTool({
+          name: 'firstShell',
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `${prefix}${'a'.repeat(7000)}`,
+            returnDisplay: 'first',
+            persistedOutputFiles: ['/tmp/first.output'],
+          }),
+        }),
+      ],
+      [
+        'secondShell',
+        new MockTool({
+          name: 'secondShell',
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `${prefix}${'b'.repeat(7000)}`,
+            returnDisplay: 'second',
+            persistedOutputFiles: ['/tmp/second.output'],
+          }),
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        toolOutputBatchBudget: 10_000,
+      });
+
+    await scheduler.schedule(
+      ['firstShell', 'secondShell'].map((name) => ({
+        callId: name,
+        name,
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'p',
+      })),
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const calls = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const outputs = calls.map((call) =>
+      'response' in call
+        ? String(
+            call.response.responseParts[0].functionResponse?.response?.[
+              'output'
+            ] ?? '',
+          )
+        : '',
+    );
+    expect(
+      outputs.reduce((sum, output) => sum + output.length, 0),
+    ).toBeLessThanOrEqual(10_000);
+    expect(outputs.join('\n')).toContain('/tmp/first.output');
+    expect(outputs.join('\n')).toContain('/tmp/second.output');
   });
 
   it('offloads timeout error detail while preserving failure metadata', async () => {
@@ -2175,9 +2662,7 @@ describe('CoreToolScheduler', () => {
     if (big?.status === 'error' && small?.status === 'error') {
       const bigResponse =
         big.response.responseParts[0].functionResponse?.response;
-      expect(bigResponse?.['error']).toContain(
-        'Tool output was too large and has been truncated',
-      );
+      expect(bigResponse?.['error']).toContain('Tool output truncated.');
       expect(bigResponse).not.toHaveProperty('output');
       expect(big.response.error?.message).toBe('Command timed out.');
       expect(big.response.errorType).toBe(ToolErrorType.EXECUTION_TIMEOUT);
@@ -2187,12 +2672,11 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('preserves PostToolBatch additionalContext in the offload preview tail', async () => {
+  it('preserves PostToolBatch additionalContext in the aggregate preview tail', async () => {
     // The PostToolBatch hook context is appended to the TAIL of the last call.
-    // When that call is the batch's largest and gets offloaded, the offload
-    // preview uses keep:'both' (head + tail), so the tail-resident context
-    // survives in the preview — the model still sees the hook guidance, and the
-    // full output (context included) is recoverable from the spill file.
+    // When that call needs aggregate reduction, the head-and-tail preview keeps
+    // the tail-resident context visible to the model. The reused producer
+    // artifact contains the producer output, not hook context added later.
     const bigExecute = vi.fn().mockResolvedValue({
       llmContent: 'a'.repeat(9000),
       returnDisplay: 'big',
@@ -2245,7 +2729,7 @@ describe('CoreToolScheduler', () => {
       });
 
     // big is scheduled last, so it is the call PostToolBatch context attaches
-    // to — and it is also the batch's largest, so it gets offloaded.
+    // to — and it is also the large response that needs aggregate reduction.
     await scheduler.schedule(
       [
         {
@@ -2282,11 +2766,8 @@ describe('CoreToolScheduler', () => {
     };
 
     const bigOutput = outputOf('bigBatchTool');
-    // big is offloaded (largest), yet the PostToolBatch context survives
-    // because it is appended after the budget pass.
-    expect(bigOutput).toContain(
-      'Tool output was too large and has been truncated',
-    );
+    // The PostToolBatch context survives the final aggregate pass.
+    expect(bigOutput).toContain('Tool output truncated.');
     expect(bigOutput).toContain('POSTBATCH_MARKER');
   });
 
@@ -3203,6 +3684,278 @@ describe('CoreToolScheduler', () => {
         }
       ).callIdToPostToolBatchSignal.size,
     ).toBe(0);
+  });
+
+  it('bridges image tool results before completing the tool call', async () => {
+    runSideQueryMock.mockResolvedValue({ text: 'Screen says READY' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'captured screen' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            displayName: 'screen.png',
+          },
+        },
+      ],
+      returnDisplay: 'captured screen',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'screenshot_tool',
+            new MockTool({
+              name: 'screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-screen',
+          name: 'screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.id).toBe('call-screen');
+    expect(functionResponse?.name).toBe('screenshot_tool');
+    expect(functionResponse?.response?.['output']).toContain('captured screen');
+    expect(functionResponse?.response?.['output']).toContain(
+      'Screen says READY',
+    );
+    expect(completed.response.contentLength).toBe(
+      String(functionResponse?.response?.['output']).length,
+    );
+    expect(completed.response.visionBridgeNotice).toContain('qwen3-vl-plus');
+    expect(functionResponse).not.toHaveProperty('parts');
+    expect(runSideQueryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purpose: 'vision-bridge' }),
+    );
+    expect(
+      JSON.stringify(runSideQueryMock.mock.calls[0][1].contents),
+    ).toContain('screenshot_tool');
+  });
+
+  it('marks an image tool result for full-turn vision takeover', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'captured screen' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+      returnDisplay: 'captured screen',
+    });
+    const onToolResultFullTurnModel = vi.fn().mockReturnValue(true);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'screenshot_tool',
+            new MockTool({
+              name: 'screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionAgent: true,
+        onToolResultFullTurnModel,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-screen-agent',
+          name: 'screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-screen-agent',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    expect(onToolResultFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
+    expect(completed.response.modelOverride).toBe('qwen3-vl-plus\0');
+    expect(completed.response.visionBridgeNotice).toContain(
+      'Routing this image turn to qwen3-vl-plus',
+    );
+    expect(completed.response.responseParts[0].functionResponse?.parts).toEqual(
+      [
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+    );
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('bridges images returned with a tool error', async () => {
+    runSideQueryMock.mockResolvedValue({ text: 'Dialog says access denied' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'capture failure context' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+      returnDisplay: 'capture failed',
+      error: {
+        message: 'capture failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'failed_screenshot_tool',
+            new MockTool({
+              name: 'failed_screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-failed-screen',
+          name: 'failed_screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'error') {
+      throw new Error(`Expected error, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.id).toBe('call-failed-screen');
+    expect(functionResponse?.response?.['error']).toContain('capture failed');
+    expect(functionResponse?.response?.['error']).toContain(
+      'Dialog says access denied',
+    );
+    expect(completed.response.contentLength).toBe(
+      String(functionResponse?.response?.['error']).length,
+    );
+    expect(functionResponse).not.toHaveProperty('parts');
+    expect(runSideQueryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purpose: 'vision-bridge' }),
+    );
+  });
+
+  it('preserves error images for an image-capable primary model', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+      returnDisplay: 'capture failed',
+      error: {
+        message: 'capture failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'failed_screenshot_tool',
+            new MockTool({
+              name: 'failed_screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-failed-screen',
+          name: 'failed_screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'error') {
+      throw new Error(`Expected error, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['error']).toBe('capture failed');
+    expect(functionResponse?.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+    ]);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
   it('includes failed tool responses in PostToolBatch payloads', async () => {
@@ -8636,6 +9389,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       throwSpanSetStatus?: boolean;
       includeSensitiveSpanAttributes?: boolean;
       sensitiveSpanAttributeMaxLength?: number;
+      providerCallId?: string;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -8651,6 +9405,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       [
         {
           callId: 'span-call',
+          providerCallId: options.providerCallId,
           name: 'mockTool',
           args: { input: '/secret/path' },
           isClientInitiated: false,
@@ -8681,6 +9436,61 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('sensitive');
     expect(spanRecord.ended).toBe(true);
   }
+
+  it('uses the provider tool-call id for the GenAI field only', async () => {
+    const { spanRecord } = await runSingleTool({
+      providerCallId: 'provider-call',
+    });
+
+    expect(spanRecord.attributes).toMatchObject({
+      'tool.call_id': 'span-call',
+      call_id: 'span-call',
+      'gen_ai.tool.call.id': 'provider-call',
+    });
+
+    const { spanRecord: fallbackSpan } = await runSingleTool();
+    expect(fallbackSpan.attributes['gen_ai.tool.call.id']).toBe('span-call');
+  });
+
+  it('records static description and final successful arguments/result', async () => {
+    mockTelemetrySdkState.initialized = true;
+    const { spanRecord } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+    });
+
+    expect(spanRecord.attributes['gen_ai.tool.description']).toBe('mockTool');
+    expect(
+      JSON.parse(
+        spanRecord.spanAttributes['gen_ai.tool.call.arguments'] as string,
+      ),
+    ).toEqual({ input: '/secret/path' });
+    expect(
+      JSON.parse(
+        spanRecord.spanAttributes['gen_ai.tool.call.result'] as string,
+      ),
+    ).toEqual({ output: 'ok' });
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool_input');
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool_result');
+  });
+
+  it('keeps executed arguments but omits result for soft errors', async () => {
+    mockTelemetrySdkState.initialized = true;
+    const { spanRecord } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: { message: 'failed', type: ToolErrorType.EXECUTION_FAILED },
+      }),
+    });
+
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.arguments'],
+    ).toBeDefined();
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.result'],
+    ).toBeUndefined();
+  });
 
   it('acquires the sleep inhibitor around actual tool execution', async () => {
     mockAcquireSleepInhibitor.mockClear();
@@ -9262,14 +10072,12 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(completedCalls[0].status).toBe('success');
     expect(spanRecord.ended).toBe(true);
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      'Failed to add tool input span attributes:',
-      expect.any(TypeError),
-    );
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      'Failed to add tool result span attributes:',
-      expect.any(TypeError),
-    );
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.arguments'],
+    ).toBeUndefined();
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.result'],
+    ).toBeUndefined();
   });
 
   it('marks successful tool calls with OK status via endToolSpan', async () => {
@@ -13994,6 +14802,18 @@ describe('extractToolFilePaths', () => {
     expect(extractToolFilePaths(FS_TOOL, { file_path: '/proj/a.ts' })).toEqual([
       '/proj/a.ts',
     ]);
+  });
+
+  it('extracts the source path from zoom_image', () => {
+    expect(
+      extractToolFilePaths(ToolNames.ZOOM_IMAGE, {
+        file_path: '/proj/chart.png',
+        x1: 0,
+        y1: 0,
+        x2: 500,
+        y2: 500,
+      }),
+    ).toEqual(['/proj/chart.png']);
   });
 
   it('extracts notebook_path for notebook_edit', () => {

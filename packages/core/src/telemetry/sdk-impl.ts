@@ -419,6 +419,13 @@ export async function startTelemetrySdk(
       : logToSpanProcessor
         ? [logToSpanProcessor]
         : [],
+    // Metrics uses the singular `metricReader` field because
+    // `@opentelemetry/sdk-node@0.203.0` only accepts one reader; there is no
+    // `metricReaders: []` opt-out. The SDK's `start()` calls
+    // `configureMetricProviderFromEnv()` unconditionally, so env-based readers
+    // are only suppressed when an explicit reader is provided. This is
+    // intentionally asymmetric with `spanProcessors`/`logRecordProcessors`,
+    // where an empty array disables env fallback for those signals.
     ...(metricReader && { metricReader }),
     instrumentations: [
       new HttpInstrumentation({

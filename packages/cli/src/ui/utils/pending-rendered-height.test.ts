@@ -33,6 +33,22 @@ describe('splitMarkdownTableRow', () => {
   it('does not split on a pipe inside an inline math span', () => {
     expect(splitMarkdownTableRow('$a|b$ | c')).toEqual(['$a|b$', 'c']);
   });
+
+  it('does not let escaped math consume table separators', () => {
+    expect(splitMarkdownTableRow('$x$ | \\$a|b$ | c')).toEqual([
+      '$x$',
+      '\\$a',
+      'b$',
+      'c',
+    ]);
+  });
+
+  it('keeps pipes inside math that contains an escaped dollar', () => {
+    expect(splitMarkdownTableRow(String.raw`$x + \$5|y$ | c`)).toEqual([
+      String.raw`$x + \$5|y$`,
+      'c',
+    ]);
+  });
 });
 
 describe('estimateWrappedRows', () => {

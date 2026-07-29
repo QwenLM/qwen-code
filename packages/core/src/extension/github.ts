@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { simpleGit, type SimpleGit } from 'simple-git';
+import type { SimpleGit } from 'simple-git';
 import { getErrorMessage } from '../utils/errors.js';
 import * as os from 'node:os';
 import * as https from 'node:https';
@@ -29,6 +29,7 @@ import {
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 import { extractZipArchive } from './zip-extraction.js';
+import { loadSimpleGit } from '../utils/load-simple-git.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -109,6 +110,7 @@ function getGitHubToken(): string | undefined {
 }
 
 async function assertPinnedGitSupported(): Promise<void> {
+  const { simpleGit } = await loadSimpleGit();
   const version = await simpleGit().version();
   if (
     version.major < MINIMUM_PINNED_GIT_VERSION.major ||
@@ -166,6 +168,7 @@ export async function cloneFromGit(
 ): Promise<void> {
   const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
+    const { simpleGit } = await loadSimpleGit();
     let networkConfig: string[] = [];
     if (installMetadata.networkPolicy === 'public') {
       if (!/^https:/i.test(installMetadata.source)) {
@@ -184,7 +187,15 @@ export async function cloneFromGit(
     const git = restrictGitEnvironment(
       simpleGit(destination, {
         ...(signal ? { abort: signal } : {}),
-        ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+        ...(networkConfig.length > 0
+          ? {
+              config: networkConfig,
+              unsafe: {
+                allowUnsafeConfigPaths: true,
+                allowUnsafeProtocolOverride: true,
+              },
+            }
+          : {}),
       }),
       installMetadata.networkPolicy,
     );
@@ -414,6 +425,7 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
+      const { simpleGit } = await loadSimpleGit();
       if (installMetadata.networkPolicy === 'public') {
         await assertPinnedGitSupported();
       }
@@ -452,7 +464,15 @@ export async function checkForExtensionUpdate(
       const git = restrictGitEnvironment(
         simpleGit(extension.path, {
           ...(signal ? { abort: signal } : {}),
-          ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+          ...(networkConfig.length > 0
+            ? {
+                config: networkConfig,
+                unsafe: {
+                  allowUnsafeConfigPaths: true,
+                  allowUnsafeProtocolOverride: true,
+                },
+              }
+            : {}),
         }),
         installMetadata.networkPolicy,
       );

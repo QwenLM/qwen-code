@@ -53,7 +53,12 @@ interface FullFolderInfo {
   totalFiles: number; // Number of files included from this folder during BFS scan
   isIgnored?: boolean; // Flag to easily identify ignored folders later
   hasMoreFiles?: boolean; // Indicates if files were truncated for this specific folder
-  hasMoreSubfolders?: boolean; // Indicates if subfolders were truncated for this specific folder
+  // True when this folder's subfolders were truncated, OR when the item budget
+  // ran out before the folder was read at all. Both render as a trailing `...`,
+  // which is the point: an unread folder must not be indistinguishable from one
+  // that was read and found empty. Any new consumer has to cover the second
+  // case too — gating on `subFolders.length > 0` drops it silently.
+  hasMoreSubfolders?: boolean;
 }
 
 // --- Interfaces ---
@@ -91,9 +96,16 @@ async function readFullStructure(
     processedPaths.add(currentPath);
 
     if (currentItemCount >= options.maxItems) {
-      // If the root itself caused us to exceed, we can't really show anything.
-      // Otherwise, this folder won't be processed further.
-      // The parent that queued this would have set its own hasMoreSubfolders flag.
+      // The budget ran out before this folder's own contents could be read.
+      // It was already added to its parent, so without a marker it renders as
+      // a bare leaf and reads as an empty directory. The parent's
+      // hasMoreSubfolders flag says nothing about it either -- that flag means
+      // "I could not add every subfolder", and this one was added.
+      //
+      // Only one flag is set: formatStructure emits an indicator per flag, and
+      // hasMoreSubfolders alone produces the single trailing `...` that says
+      // the contents are unexplored, whether they are files or folders.
+      folderInfo.hasMoreSubfolders = true;
       continue;
     }
 
@@ -218,10 +230,11 @@ async function readFullStructure(
 }
 
 /**
- * Reads the directory structure using BFS, respecting maxItems.
+ * Formats a folder structure tree node into indented text lines.
  * @param node The current node in the reduced structure.
- * @param indent The current indentation string.
- * @param isLast Sibling indicator.
+ * @param currentIndent The current indentation string.
+ * @param isLastChildOfParent Sibling indicator.
+ * @param isProcessingRootNode Whether this is the root node of the structure.
  * @param builder Array to build the string lines.
  */
 function formatStructure(

@@ -18,6 +18,7 @@ import {
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
+import type { RipgrepFailureKind } from '../utils/ripgrepUtils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
@@ -367,6 +368,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   response_text?: string;
   prompt_id: string;
   auth_type?: string;
+  /** Time from stream dispatch to first user-visible content. */
+  ttft_ms?: number;
   /**
    * Name of the subagent that issued this request, or undefined when the
    * request originates from the main conversation.
@@ -382,6 +385,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     usage_data?: GenerateContentResponseUsageMetadata,
     response_text?: string,
     subagent_name?: string,
+    ttft_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -398,6 +402,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
     this.subagent_name = subagent_name;
+    this.ttft_ms = ttft_ms;
   }
 }
 
@@ -430,6 +435,33 @@ export class RipgrepFallbackEvent implements BaseTelemetryEvent {
     this.use_ripgrep = use_ripgrep;
     this.use_builtin_ripgrep = use_builtin_ripgrep;
     this.error = error;
+  }
+}
+
+export type RipgrepRuntimeRecoveryFailureKind = RipgrepFailureKind;
+
+export class RipgrepRuntimeRecoveryEvent implements BaseTelemetryEvent {
+  'event.name': 'ripgrep_runtime_recovery';
+  'event.timestamp': string;
+  selection_mode: 'builtin' | 'system';
+  retry_triggered: boolean;
+  retry_succeeded?: boolean;
+  failure_kind: RipgrepRuntimeRecoveryFailureKind;
+
+  constructor(params: {
+    selection_mode: 'builtin' | 'system';
+    retry_triggered: boolean;
+    retry_succeeded?: boolean;
+    failure_kind: RipgrepRuntimeRecoveryFailureKind;
+  }) {
+    this['event.name'] = 'ripgrep_runtime_recovery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.selection_mode = params.selection_mode;
+    this.retry_triggered = params.retry_triggered;
+    if (params.retry_succeeded !== undefined) {
+      this.retry_succeeded = params.retry_succeeded;
+    }
+    this.failure_kind = params.failure_kind;
   }
 }
 
@@ -1090,6 +1122,7 @@ export type TelemetryEvent =
   | ApiCancelEvent
   | ApiResponseEvent
   | FlashFallbackEvent
+  | RipgrepRuntimeRecoveryEvent
   | LoopDetectedEvent
   | LoopDetectionDisabledEvent
   | NextSpeakerCheckEvent
@@ -1462,5 +1495,44 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.docs_selected = params.docs_selected;
     this.strategy = params.strategy;
     this.duration_ms = params.duration_ms;
+  }
+}
+
+export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
+export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
+export type MemoryRecallDiscardReason =
+  | 'no_safe_delivery_point'
+  | 'new_query'
+  | 'reset'
+  | 'abort'
+  | 'shutdown'
+  | 'no_relevant_results';
+
+export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall.delivery';
+  'event.timestamp': string;
+  phase: MemoryRecallDeliveryPhase;
+  delivery_point: MemoryRecallDeliveryPoint;
+  discard_reason?: MemoryRecallDiscardReason;
+  strategy: 'none' | 'heuristic' | 'model';
+  docs_selected: number;
+  latency_ms: number;
+
+  constructor(params: {
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
+    strategy: 'none' | 'heuristic' | 'model';
+    docs_selected: number;
+    latency_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall.delivery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.phase = params.phase;
+    this.delivery_point = params.delivery_point;
+    this.discard_reason = params.discard_reason;
+    this.strategy = params.strategy;
+    this.docs_selected = params.docs_selected;
+    this.latency_ms = params.latency_ms;
   }
 }

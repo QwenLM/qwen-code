@@ -20,6 +20,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwd,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -112,7 +113,12 @@ async function handleLogList(
   try {
     applyReadHeaders(res);
     const { limit, skip } = parsePagination(req);
-    const result = await fetchGitLog(workspaceCwd, { limit, skip });
+    const rawRange = req.query['range'];
+    const range =
+      typeof rawRange === 'string' && rawRange.trim()
+        ? rawRange.trim()
+        : undefined;
+    const result = await fetchGitLog(workspaceCwd, { limit, skip, range });
     res.status(200).json(buildLogList(workspaceCwd, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
@@ -196,7 +202,7 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     void handleLogList(
       req,
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/log',
     );
@@ -207,7 +213,7 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     void handleCommitDetail(
       req,
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/log/commit',
     );

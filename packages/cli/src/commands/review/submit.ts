@@ -44,9 +44,12 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
+import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import { parseReceiptIds } from './lib/receipt.js';
 import { parseReviewArgs } from './parse-args.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import {
@@ -77,6 +80,20 @@ function defaultSkillArgsPath(): string {
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
+
+/**
+ * Review ids a prior submit in this window already recorded. Best-effort: an
+ * absent or unreadable receipt is an empty list, never a throw — the caller
+ * adds the current id regardless. The shape parse is shared with cleanup's
+ * reader (`lib/receipt.ts`) so the two halves cannot drift.
+ */
+function readReceiptIds(receiptPath: string): number[] {
+  try {
+    return parseReceiptIds(readFileSync(receiptPath, 'utf8'));
+  } catch {
+    return [];
+  }
+}
 
 /**
  * A line number GitHub will take: a positive whole number.
@@ -271,9 +288,13 @@ function compose(payload: ReviewPayload): {
   // `env` decides where the harness transcripts are read from, and it must not
   // come from a JSON the caller wrote: a run that wanted an approval could point
   // it at a directory of transcripts it fabricated, and the coverage gate reopens
-  // through one extra key. compose-review's own CLI strips it for the same reason.
-  const { env: _dropped, ...rest } = state;
+  // through one extra key. `prBodyFetcher` is the bilingual body-language seam:
+  // a non-function value reaching `bilingualFromPlan` throws and drops the Chinese
+  // fold through the fail-safe — the exact regression this PR closes. compose-review's
+  // own CLI strips both for the same reason.
+  const { env: _dropped, prBodyFetcher: _droppedFetcher, ...rest } = state;
   void _dropped;
+  void _droppedFetcher;
 
   const r = composeReview({
     ...rest,
@@ -520,7 +541,41 @@ export function runSubmit(args: SubmitArgs): void {
   // GitHub would receive a payload that never passed the gate. `--input -` posts
   // exactly the object we parsed and checked. (Still `--input`, never `-f body=`,
   // so the body's newlines reach GitHub as newlines.)
-  ghWithInput(JSON.stringify(post), 'api', target, '--input', '-');
+  const response = ghWithInput(
+    JSON.stringify(post),
+    'api',
+    target,
+    '--input',
+    '-',
+  );
+  // Receipt for cleanup's bypass audit: EVERY review this session was
+  // authorised to create, by id. The audit lists reviews by the reviewing
+  // account inside the window and flags any the receipt does not vouch for —
+  // without the id, a bypass posted through `gh pr review` (a review, not an
+  // issue comment) would be indistinguishable from the sanctioned one.
+  //
+  // The receipt ACCUMULATES ids rather than overwriting: the audit window
+  // spans drift restarts (fetch-pr preserves `auditSince`), so two sanctioned
+  // submits can fall in one window. A single-id receipt vouched only for the
+  // last, and the earlier legitimate review was then flagged as a bypass —
+  // a false positive for a write submit itself made. So read the prior ids,
+  // add this one, dedupe, write back. Best-effort: a receipt failure must
+  // never fail a review that DID post.
+  try {
+    const reviewId = (JSON.parse(response) as { id?: number }).id;
+    if (typeof reviewId === 'number') {
+      const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
+      const priorIds = readReceiptIds(receiptPath);
+      const reviewIds = [...new Set([...priorIds, reviewId])];
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      atomicWriteFileSync(
+        receiptPath,
+        `${JSON.stringify({ reviewIds, event, postedAt: new Date().toISOString() })}\n`,
+      );
+    }
+  } catch {
+    /* audit metadata only — the post itself succeeded */
+  }
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +

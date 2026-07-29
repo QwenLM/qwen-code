@@ -13,6 +13,7 @@ import {
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
+import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -78,13 +79,7 @@ function getInitialLanguage(): WebShellLanguage {
 }
 
 function getSessionIdFromUrl(): string | undefined {
-  const match = window.location.pathname.match(/\/session\/([^/]+)/);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
+  return parseSessionId(window.location.pathname);
 }
 
 function getWorkspaceIdFromUrl(): string | undefined {
@@ -98,7 +93,7 @@ function replaceStandaloneSessionUrl(
   workspaceId?: string,
 ): void {
   const url = new URL(window.location.href);
-  url.pathname = sessionId ? `/session/${encodeURIComponent(sessionId)}` : '/';
+  url.pathname = buildSessionPathname(url.pathname, sessionId);
   if (sessionId && workspaceId) {
     url.searchParams.set('workspace', workspaceId);
   } else {

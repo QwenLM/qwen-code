@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  FinishReason,
-  type Content,
-  type Part,
-  type PartListUnion,
-  type GenerateContentResponse,
-  type FunctionCall,
-  type FunctionDeclaration,
-  type GenerateContentResponseUsageMetadata,
+import type {
+  Content,
+  Part,
+  PartListUnion,
+  GenerateContentResponse,
+  FunctionCall,
+  FunctionDeclaration,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import { FinishReason } from './genai-compat.js';
 import type {
   ToolCallConfirmationDetails,
   ToolArtifact,
@@ -36,6 +36,11 @@ import {
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type {
+  GoalSnapshotV2,
+  GoalStateCause,
+  GoalTurnPermit,
+} from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
@@ -70,6 +75,7 @@ export enum GeminiEventType {
   HookSystemMessage = 'hook_system_message',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
+  GoalState = 'goal_state',
   ActiveGoal = 'active_goal',
   /** The system switched to a fallback model after the primary (or prior
    *  fallback) exhausted retries on a capacity/availability error. */
@@ -130,6 +136,7 @@ export interface ToolCallRequestInfo {
   response_id?: string;
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
+  goalContext?: GoalTurnPermit;
 }
 
 export interface ToolCallResponseInfo {
@@ -139,7 +146,9 @@ export interface ToolCallResponseInfo {
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
   contentLength?: number;
+  persistedOutputFiles?: string[];
   modelOverride?: string;
+  visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
 }
 
@@ -409,8 +418,15 @@ export type ServerGeminiActiveGoalEvent = {
   value: ActiveGoal | null;
 };
 
+export type ServerGeminiGoalStateEvent = {
+  type: GeminiEventType.GoalState;
+  value: GoalSnapshotV2;
+  cause?: GoalStateCause;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
+  | ServerGeminiGoalStateEvent
   | ServerGeminiActiveGoalEvent
   | ServerGeminiChatCompressedEvent
   | ServerGeminiCitationEvent
@@ -437,11 +453,15 @@ export class Turn {
   private pendingCitations = new Set<string>();
   finishReason: FinishReason | undefined = undefined;
   private currentResponseId?: string;
+  private readonly goalContext?: GoalTurnPermit;
 
   constructor(
     private readonly chat: GeminiChat,
     private readonly prompt_id: string,
-  ) {}
+    goalContext?: GoalTurnPermit,
+  ) {
+    this.goalContext = goalContext ? { ...goalContext } : undefined;
+  }
   // The run method yields simpler events suitable for server logic
   async *run(
     model: string,
@@ -460,6 +480,7 @@ export class Turn {
           },
         },
         this.prompt_id,
+        this.goalContext,
       );
 
       for await (const streamEvent of responseStream) {
@@ -649,6 +670,7 @@ export class Turn {
       isClientInitiated: false,
       prompt_id: this.prompt_id,
       response_id: this.currentResponseId,
+      ...(this.goalContext ? { goalContext: { ...this.goalContext } } : {}),
     };
 
     this.pendingToolCalls.push(toolCallRequest);

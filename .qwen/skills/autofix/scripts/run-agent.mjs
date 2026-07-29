@@ -315,11 +315,24 @@ if (result.error || result.signal || result.status !== 0) {
           result.apiError ? ` ${result.apiError}` : ''
         }`,
       );
-      // Only a BARE, un-evaluated API failure is retryable. A loop guard, a
-      // timeout, or an agent-written failure.md is a real verdict — leave
-      // those terminal even if an API-error string appears in the output tail.
-      // Signals the workflow to retry (sentinel ts) instead of advancing the
-      // watermark and stranding the PR.
+      // A TIMEOUT evaluated NOTHING — the agent ran out of budget before
+      // finishing, so nothing was committed and the feedback is UNaddressed.
+      // Treat it like any other pre-verdict failure and RETRY (the workflow
+      // stamps a sentinel ts) rather than advancing the watermark and
+      // stranding the feedback the loop never actually handled. This is
+      // transient far more often than not — on a heavily-reviewed PR a
+      // timed-out round is usually followed by a successful one (#7471:
+      // rounds 11/13 timed out, 12 pushed) — and a PR that PERSISTENTLY times
+      // out is bounded by the consecutive-failure cap, not by one-shot
+      // terminal. A loop guard stays terminal (a tool-call loop is a real
+      // defect, not a budget blip), handled by the loopDetected branch above.
+      if (result.timedOut) {
+        writeFileSync(file(options.workdir, 'agent-timeout'), `${detail}\n`);
+      }
+      // Only a BARE, un-evaluated API failure is retryable. An agent-written
+      // failure.md is a real verdict — left terminal even if an API-error
+      // string appears in the output tail. Signals the workflow to retry
+      // (sentinel ts) instead of advancing the watermark and stranding the PR.
       if (result.apiError && !result.timedOut) {
         writeFileSync(
           file(options.workdir, 'agent-api-error'),

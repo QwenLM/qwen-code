@@ -5,8 +5,12 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ChannelWebhookTask } from '@qwen-code/channel-base';
+import {
+  CHANNEL_LOOP_MCP_SERVER_NAME,
+  type ChannelWebhookTask,
+} from '@qwen-code/channel-base';
 import { createChannelWorkerGroup } from './channel-worker-group.js';
+import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -21,6 +25,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { ChannelDeliveryRequest } from './channel-delivery-ipc.js';
 
 const PRIMARY = '/ws/primary';
 const SECONDARY = '/ws/secondary';
@@ -51,15 +56,15 @@ function fakeRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
     list: () => runtimes,
     listManaged: () => runtimes,
     add: vi.fn(),
-    getByWorkspaceCwd: (cwd) =>
+    getByWorkspaceCwd: (cwd: string) =>
       runtimes.find((runtime) => runtime.workspaceCwd === cwd),
-    getByWorkspaceId: (id) =>
+    getByWorkspaceId: (id: string) =>
       runtimes.find((runtime) => runtime.workspaceId === id),
-    getManagedByWorkspaceCwd: (cwd) =>
+    getManagedByWorkspaceCwd: (cwd: string) =>
       runtimes.find((runtime) => runtime.workspaceCwd === cwd),
-    getManagedByWorkspaceId: (id) =>
+    getManagedByWorkspaceId: (id: string) =>
       runtimes.find((runtime) => runtime.workspaceId === id),
-    resolveWorkspaceCwd: (cwd) =>
+    resolveWorkspaceCwd: (cwd: string | undefined) =>
       cwd === undefined
         ? runtimes.find((runtime) => runtime.primary)
         : runtimes.find((runtime) => runtime.workspaceCwd === cwd),
@@ -67,7 +72,7 @@ function fakeRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
     beginDrain: vi.fn(() => true),
     cancelDrain: vi.fn(),
     completeDrain: vi.fn(),
-  };
+  } as unknown as WorkspaceRegistry;
 }
 
 function snapshot(
@@ -88,6 +93,7 @@ interface RecordedSupervisor {
     stop: ReturnType<typeof vi.fn>;
     restart: ReturnType<typeof vi.fn>;
     killAllSync: ReturnType<typeof vi.fn>;
+    deliverChannelMessage: ReturnType<typeof vi.fn>;
     enqueueWebhookTask: ReturnType<typeof vi.fn>;
   };
 }
@@ -103,6 +109,7 @@ function makeCreateSupervisor(
       restart: vi.fn(async () => snapshotFor(opts.workspace)),
       killAllSync: vi.fn(),
       snapshot: () => snapshotFor(opts.workspace),
+      deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
       enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
     };
     recorded.push({ opts, supervisor });
@@ -126,7 +133,196 @@ const webhookTask: ChannelWebhookTask = {
   payload: { runId: 123 },
 };
 
+const deliveryRequest: ChannelDeliveryRequest = {
+  deliveryId: 'delivery-1',
+  channelName: 'b',
+  target: { type: 'chat', id: 'group-1' },
+  text: 'inspection result',
+};
+
 describe('createChannelWorkerGroup', () => {
+  it('wires loop MCP to the exact workspace session with owner-safe cleanup', async () => {
+    const addSessionRuntimeMcpServer = vi.fn(async () => ({ toolCount: 3 }));
+    const removeSessionRuntimeMcpServer = vi.fn(async () => ({}));
+    const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    const secondary = {
+      ...fakeRuntime(SECONDARY, false),
+      bridge: {
+        addSessionRuntimeMcpServer,
+        removeSessionRuntimeMcpServer,
+      },
+      clientMcpSenderRegistry,
+    } as unknown as WorkspaceRuntime;
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true), secondary]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    createChannelWorkerGroup({
+      groups: [
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    const oldSender = vi.fn(async (payload: unknown) => payload);
+
+    await recorded[0]!.opts.registerChannelLoopMcp?.({
+      sessionId: 'session-1',
+      ownerId: 'worker-old',
+      sendMessage: oldSender,
+    });
+
+    expect(addSessionRuntimeMcpServer).toHaveBeenCalledWith(
+      'session-1',
+      CHANNEL_LOOP_MCP_SERVER_NAME,
+      {
+        type: 'sdk',
+        __clientMcpOverWs: true,
+      },
+      'worker-old',
+    );
+    const reverseSender = clientMcpSenderRegistry.lookup(
+      CHANNEL_LOOP_MCP_SERVER_NAME,
+    );
+    await expect(
+      reverseSender?.(
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { sessionId: 'session-1' },
+      ),
+    ).resolves.toMatchObject({ method: 'tools/list' });
+    expect(oldSender).toHaveBeenCalledOnce();
+
+    const newSender = vi.fn(async () => ({ owner: 'new' }));
+    clientMcpSenderRegistry.setSession(
+      CHANNEL_LOOP_MCP_SERVER_NAME,
+      'session-1',
+      newSender,
+      'worker-new',
+    );
+    await recorded[0]!.opts.unregisterChannelLoopMcp?.(
+      'session-1',
+      'worker-old',
+    );
+
+    expect(removeSessionRuntimeMcpServer).not.toHaveBeenCalled();
+    await expect(
+      clientMcpSenderRegistry.lookup(CHANNEL_LOOP_MCP_SERVER_NAME)?.(
+        { jsonrpc: '2.0', id: 2, method: 'ping' },
+        { sessionId: 'session-1' },
+      ),
+    ).resolves.toEqual({ owner: 'new' });
+  });
+
+  it('routes delivery to the exact workspace owner', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.deliverChannelMessage.mockResolvedValueOnce({
+      delivered: true,
+    });
+
+    await expect(
+      group.deliverChannelMessage(deliveryRequest, SECONDARY),
+    ).resolves.toEqual({ delivered: true });
+    expect(
+      recorded[0]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.deliverChannelMessage).toHaveBeenCalledWith(
+      deliveryRequest,
+    );
+  });
+
+  it('does not fall back when the selected workspace lacks the channel', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['a'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    const error = await group
+      .deliverChannelMessage(deliveryRequest, SECONDARY)
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'No channel worker for the selected workspace owns channel "b".',
+    });
+    expect((error as Error).message).not.toContain(SECONDARY);
+    expect(
+      recorded[0]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+    expect(
+      recorded[1]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('rejects delivery while the owning workspace is draining', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    group.beginWorkspaceDrain(SECONDARY);
+
+    await expect(
+      group.deliverChannelMessage(deliveryRequest, SECONDARY),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message:
+        'Channel worker for channel "b" is unavailable while its workspace is draining.',
+    });
+    expect(
+      recorded[1]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+  });
+
   it('routes webhook tasks to the supervisor that owns the channel', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
@@ -180,6 +376,8 @@ describe('createChannelWorkerGroup', () => {
     group.beginWorkspaceDrain(SECONDARY);
     await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
       code: 'channel_worker_unavailable',
+      message:
+        'Channel worker for channel "b" is unavailable while its workspace is draining.',
     });
     await expect(group.reconcile(groups, { force: true })).rejects.toThrow(
       'cannot change while a workspace is draining',
@@ -210,6 +408,7 @@ describe('createChannelWorkerGroup', () => {
     ]);
     await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
       code: 'channel_worker_unavailable',
+      message: 'No channel worker owns channel "b".',
     });
 
     await group.stop();
@@ -800,6 +999,7 @@ describe('createChannelWorkerGroup', () => {
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
         enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
     };
@@ -930,6 +1130,54 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1);
   });
 
+  it('force-reconciles only the targeted workspace', async () => {
+    const third = '/ws/third';
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+      fakeRuntime(third, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const groups: ChannelWorkspaceGroup[] = [
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ];
+    const group = createChannelWorkerGroup({
+      groups,
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await group.reconcile(
+      [
+        groups[0]!,
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['changed-elsewhere'] },
+        },
+        {
+          workspaceCwd: third,
+          selection: { mode: 'names', names: ['new-elsewhere'] },
+        },
+      ],
+      { forceWorkspaceCwd: PRIMARY },
+    );
+
+    expect(recorded).toHaveLength(3);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[2]!.opts.workspace).toBe(PRIMARY);
+    expect(recorded[2]!.supervisor.start).toHaveBeenCalledOnce();
+
+    await group.restoreWorkspace(third);
+    expect(recorded).toHaveLength(3);
+    expect(group.snapshots()).toHaveLength(2);
+  });
+
   it('coalesces concurrent reconciles onto the in-flight operation', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     let releaseReplacement!: () => void;
@@ -1040,6 +1288,7 @@ describe('createChannelWorkerGroup', () => {
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
         enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
       recorded.push({ opts, supervisor });
@@ -1294,6 +1543,7 @@ describe('createChannelWorkerGroup', () => {
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
         enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
     };

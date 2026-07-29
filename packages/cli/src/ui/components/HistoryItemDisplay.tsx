@@ -60,6 +60,7 @@ import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -68,6 +69,7 @@ import {
   layoutRowForEvent,
 } from '../utils/measure-element-position.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { ICON } from '../constants.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -124,7 +126,7 @@ const ClickableThinkMessage: React.FC<{
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
-  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const clickable = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
   const isActive = !isPending;
 
   useMouseEvents(
@@ -403,8 +405,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
-        <Box paddingLeft={1}>
-          <Text dimColor>● {itemForDisplay.summary}</Text>
+        <Box flexDirection="row">
+          <Box width={2} flexShrink={0}>
+            <Text dimColor>{ICON.CIRCLE_FILLED}</Text>
+          </Box>
+          <Text dimColor>{itemForDisplay.summary}</Text>
         </Box>
       )}
       {itemForDisplay.type === 'compression' && (

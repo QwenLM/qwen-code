@@ -112,7 +112,7 @@ Chunking itself is unchanged: the plan still tiles every line, tests and generat
 
 Step 3B's chunk agents are defined as "one per entry in `chunks[]`", and only `fetch-pr` produced a chunk plan. A local-diff review, or a cross-repo review in lightweight mode, therefore routed into a topology it had no chunk list for: no receipts, no tiling guarantee, and the orchestrator left to improvise line ranges. Two of the four review paths were promised a mechanism the skill could not deliver.
 
-`qwen review plan-diff <diff-file>` reads a captured diff and emits the same `chunks[]`, `files[]` and topology counts. Redirecting `git diff` or `gh pr diff` to a file already bypasses the 30 000-char shell cap, so all four paths now share one code path. It cannot decide `heavy` — that needs a tree to read the post-change file from — so a bare diff gets chunk agents but no invariant agents.
+`qwen review plan-diff <diff-file>` reads a captured diff and emits the same `chunks[]`, `files[]` and topology counts. Redirecting `git diff` or `gh pr diff` to a file bypasses Shell model-output truncation, so all four paths now share one code path. It cannot decide `heavy` — that needs a tree to read the post-change file from — so a bare diff gets chunk agents but no invariant agents.
 
 ### Why the topology gate ignores prose
 
@@ -272,6 +272,25 @@ PR #6486: the one job that would have exercised the new `Ctrl+F` hotkey — `Int
 - Cross-platform path handling (`path.join`, `os.tmpdir` vs project-local `.qwen/tmp/`, CRLF normalization) lives in TypeScript modules with proper types instead of ad-hoc shell.
 
 **Trade-off:** when the deterministic logic changes (e.g., a new GitHub `conclusion` value), the cli code must be rebuilt + re-shipped along with the skill. SKILL.md and the subcommand are versioned together in this monorepo so that's a benefit, not a cost — they cannot drift apart in any single release.
+
+## Why comment-status is a subcommand — and a second fetch of the same endpoint
+
+`pr-context` already paginates `pulls/{n}/comments` moments earlier in Step 1,
+and `comment-status` fetches the same endpoint again. The duplication is
+deliberate, and the reason is the process boundary: `pr-context` is pure
+GitHub API — it runs in lightweight cross-repo mode, where there is no
+worktree — while `comment-status` exists precisely to join the API's anchor
+facts with the WORKTREE's git history (`changedSinceComment`, `touchedBy`).
+One subcommand serving both modes would either drag a git dependency into the
+one command that must not have it, or silently emit half a report cross-repo.
+The cost is one extra paginated GET per worktree-mode review; the alternative
+the subcommand replaced was 20+ single-comment fetches, each a whole model
+turn, measured on a real 72-comment PR.
+
+Bodies stay in `pr-context`'s Markdown (under its untrusted-data preamble);
+`comment-status` carries only status facts. The two surfaces cannot disagree
+on classification: the blocker test (`carriesBlockerSignal`) and the
+thread-root walk (`findRootId`) are imported from `pr-context`, not copied.
 
 ## Why base-branch rule loading (security)
 
@@ -448,7 +467,7 @@ Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (
 
 ## Why the diff is a file, not a command
 
-Agents used to be handed `git diff main...HEAD` and told to run it. Shell tool output passes through `truncateToolOutput` with `ShellTool.maxOutputChars = 30_000` and `keep: 'both'`, which allocates `threshold / 5` characters to the head and the remainder to the tail.
+Agents used to be handed `git diff main...HEAD` and told to run it. At the time of the measurements below, Shell tool output passed through `truncateToolOutput` with `ShellTool.maxOutputChars = 30_000` and `keep: 'both'`, and the 30K trigger was also the preview budget: `threshold / 5` characters went to the head and the remainder to the tail. Shell now keeps the 30K persistence trigger but uses an approximately 4K head-and-tail model preview. That makes direct `git diff` output even less suitable for complete review coverage; the file-and-chunk design below remains authoritative.
 
 On PR #6457's 211 000-character diff that yields a 6 000-char head (`QQChannel.ts` lines 41-250) and a 24 000-char tail (`stream.test.ts` and `types.ts`, which sort last by path and together changed 9 lines). 85.8% of the diff — including 19 of the 20 Criticals eventually reported on that PR — was replaced by a `[CONTENT TRUNCATED]` marker. Every agent saw the same window, so the ten-way dimension fan-out multiplied redundancy rather than coverage, and each round of `/review` sampled a different subset of the bugs depending on which files an agent happened to `read_file` on its own initiative.
 

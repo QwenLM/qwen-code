@@ -184,6 +184,15 @@ describe('ShellTool', () => {
       write: vi.fn(),
       end: vi.fn(),
       on: vi.fn(),
+      // Both settle paths (promote + executeBackground) wait for the
+      // stream flush via `once('finish', ...)` before transitioning
+      // the registry. Default impl: immediately invoke the handler so
+      // tests don't hang waiting for an event the mocked stream never
+      // emits naturally. Ordering-sensitive tests install their own
+      // deferred stream via `mockReturnValueOnce`.
+      once: vi.fn((event: string, handler: () => void) => {
+        if (event === 'finish') handler();
+      }),
     } as unknown as fs.WriteStream);
 
     vi.mocked(os.platform).mockReturnValue('linux');
@@ -1254,6 +1263,245 @@ describe('ShellTool', () => {
         expect.any(Number),
       );
       expect(registry.complete).not.toHaveBeenCalled();
+    });
+
+    describe('background settle waits for the output stream flush', () => {
+      // `stream.end()` is asynchronous — pending writes can still be in
+      // the libuv queue when it returns. Transitioning the registry
+      // before the stream's 'finish' event lets consumers observe a
+      // terminal status (and the status sidecar report it) while the
+      // trailing output bytes are not yet on disk. These tests pin the
+      // ordering with a stream whose events fire only when the test
+      // says so.
+      const makeDeferredStream = () => {
+        const handlers = new Map<string, Array<() => void>>();
+        return {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            const list = handlers.get(event) ?? [];
+            list.push(handler);
+            handlers.set(event, list);
+          }),
+          emit: (event: string) => {
+            const list = handlers.get(event) ?? [];
+            handlers.set(event, []);
+            for (const h of list) h();
+          },
+        };
+      };
+
+      const startBackgroundAndExit = async (
+        deferred: { end: Mock },
+        { expectFlushRequested = true } = {},
+      ): Promise<{ shellId: string }> => {
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          deferred as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'true',
+          is_background: true,
+        });
+        await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        // Flush the .then() microtask attached to resultPromise.
+        await new Promise((r) => setImmediate(r));
+        if (expectFlushRequested) {
+          // The stream has been asked to flush…
+          expect(deferred.end).toHaveBeenCalledTimes(1);
+        }
+        return { shellId: entry.shellId };
+      };
+
+      it('holds the registry transition until the stream finish event', async () => {
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // …but the registry must NOT transition before the flush
+        // completes — this is the truncated-log window.
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+
+        // Exactly once: the still-armed 'error' listener firing later
+        // must not re-transition. (A second 'finish' emit would be
+        // vacuous — `once` semantics already drained its handler.)
+        deferred.emit('error');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      it('still transitions when the stream errors instead of finishing', async () => {
+        // A dead stream (EIO / ENOSPC racing `.end()`) must not strand
+        // the entry as running — the flush is best-effort, the
+        // transition is mandatory.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('error');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('transitions after the flush timeout when the stream never settles', async () => {
+        // Wedged fd whose 'finish'/'error' never fire (e.g. stuck
+        // mid-flush on an unresponsive filesystem): the 10s timer is
+        // the backstop. Fake only the timer functions so the
+        // setImmediate-based microtask flush in the helper stays real.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          const { shellId } = await startBackgroundAndExit(deferred);
+          expect(registry.complete).not.toHaveBeenCalled();
+
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+
+          // The finish landing after the timeout must not double-fire.
+          deferred.emit('finish');
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('settles immediately when the stream was already destroyed by a write error', async () => {
+        // fs.WriteStream has autoDestroy — an earlier EIO/ENOSPC write
+        // error destroys the stream long before the child exits. On a
+        // destroyed writable `.end()` is a silent no-op and neither
+        // 'finish' nor 'error' will ever fire, so waiting would stall
+        // the transition (and every /tasks or sidecar reader) for the
+        // full flush timeout with nothing left to flush.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = { ...makeDeferredStream(), destroyed: true };
+        const { shellId } = await startBackgroundAndExit(deferred, {
+          expectFlushRequested: false,
+        });
+
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+        // The dead stream is not asked to flush at all.
+        expect(deferred.end).not.toHaveBeenCalled();
+      });
+
+      it('settles immediately when the stream has already finished flushing', async () => {
+        // writableFinished means every byte reached the fd and 'finish'
+        // already fired — nothing left to wait for. (The guard must NOT
+        // use writableEnded: that flag is already true mid-flush, which
+        // is exactly the window these tests exist to protect.)
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = { ...makeDeferredStream(), writableFinished: true };
+        const { shellId } = await startBackgroundAndExit(deferred, {
+          expectFlushRequested: false,
+        });
+
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+        expect(deferred.end).not.toHaveBeenCalled();
+      });
+
+      it('still waits when the stream has ended but not yet finished flushing', async () => {
+        // writableEnded flips true the moment `.end()` is called while
+        // bytes can still sit in the libuv queue — writableFinished
+        // only turns true with 'finish'. The short-circuit must NOT
+        // fire in this state: settling here is exactly the truncation
+        // window the flush wait exists to prevent.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const deferred = {
+          ...makeDeferredStream(),
+          writableEnded: true,
+          writableFinished: false,
+        };
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // Mid-flush: the transition is still held…
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        // …until the flush actually completes.
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(registry.complete).toHaveBeenCalledWith(
+          shellId,
+          0,
+          expect.any(Number),
+        );
+      });
+
+      it('disarms the flush timer when stream.end() throws synchronously', async () => {
+        // The catch path settles immediately — but it must also clear
+        // the already-armed timer, or 10s later it fires and logs a
+        // misleading flush-timeout warning for a shell that settled
+        // long ago.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const registry = mockConfig.getBackgroundShellRegistry();
+          const deferred = makeDeferredStream();
+          deferred.end.mockImplementation(() => {
+            throw new Error('EBADF: bad file descriptor, close');
+          });
+          const { shellId } = await startBackgroundAndExit(deferred);
+
+          // Settled via the catch path, immediately.
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(registry.complete).toHaveBeenCalledWith(
+            shellId,
+            0,
+            expect.any(Number),
+          );
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('closing output stream on settle threw'),
+          );
+
+          // The timer must be gone: advancing past the timeout fires
+          // nothing and logs nothing.
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.complete).toHaveBeenCalledTimes(1);
+          expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+            expect.stringContaining('flush timed out'),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it('rejects a bare trailing & in managed background mode', async () => {
@@ -2725,6 +2973,32 @@ describe('ShellTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
     });
 
+    it('retains shell truncation without an artifact and records the persistence decision', async () => {
+      const originalOutput = 'A'.repeat(30_001);
+      const shortenedContent =
+        'Tool output was too large and has been truncated.\n[mocked truncated body]\n[Note: Could not save full output to file]';
+      const truncationModule = await import('../utils/truncation.js');
+      const spy = vi
+        .spyOn(truncationModule, 'truncateToolOutput')
+        .mockResolvedValue({ content: shortenedContent });
+
+      try {
+        const invocation = shellTool.build({
+          command: 'large-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({ output: originalOutput, exitCode: 0 });
+        const result = await promise;
+
+        expect(result.llmContent).toContain(shortenedContent);
+        expect(result.llmContent).not.toContain(originalOutput);
+        expect(result.persistedOutputFiles).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     describe('long-running foreground hint', () => {
       // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
       // default 120s timeout that's 60_000ms, which the tests below
@@ -3003,6 +3277,9 @@ describe('ShellTool', () => {
           );
           const hintIdx = content.indexOf('foreground command ran for');
           expect(hintIdx).toBeGreaterThan(truncIdx);
+          expect(result.persistedOutputFiles).toEqual([
+            '/tmp/qwen-temp/shell_mocked.output',
+          ]);
         } finally {
           // Restore even if assertions throw — otherwise the
           // truncateToolOutput spy leaks into subsequent tests.
@@ -3019,7 +3296,10 @@ describe('ShellTool', () => {
         const truncationModule = await import('../utils/truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
-          .mockResolvedValue({ content: 'unused', outputFile: undefined });
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+            outputFile: undefined,
+          }));
         try {
           const invocation = shellTool.build({
             command: 'find /',
@@ -3031,7 +3311,7 @@ describe('ShellTool', () => {
             output: 'short line\n'.repeat(50),
             exitCode: 0,
           });
-          await promise;
+          const result = await promise;
 
           // Shell must pass lines: Infinity so the global line cap can't
           // undercut its declared 30k char budget.
@@ -3039,8 +3319,12 @@ describe('ShellTool', () => {
             expect.anything(),
             ShellTool.Name,
             expect.any(String),
-            expect.objectContaining({ lines: Number.POSITIVE_INFINITY }),
+            expect.objectContaining({
+              lines: Number.POSITIVE_INFINITY,
+              previewChars: 4000,
+            }),
           );
+          expect(result.persistedOutputFiles).toBeUndefined();
         } finally {
           spy.mockRestore();
         }
@@ -3326,6 +3610,25 @@ describe('ShellTool', () => {
         // the background path's own llmContent doesn't, so this guards
         // against the hint leaking in via a shared code path.
         expect(result.llmContent).not.toContain('is_background: true');
+      });
+
+      it('teaches status-file liveness checking in the launch message', async () => {
+        // #7626: with only "read the output file" guidance, the model's
+        // sole liveness heuristic becomes "empty file = dead process" —
+        // wrong for block-buffering children (Python/ML jobs) whose
+        // output file stays at 0 bytes for their whole run, which led
+        // to duplicate relaunches of still-running processes.
+        const invocation = shellTool.build({
+          command: 'python train.py',
+          is_background: true,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const text = String(result.llmContent);
+        expect(text).toContain('status file: ');
+        expect(text).toMatch(/status file: .*shell-bg_[0-9a-f]+\.status/);
+        expect(text).toContain('Do NOT infer liveness from the output file');
+        expect(text).toContain('block-buffer');
+        expect(text).toContain('python -u');
       });
     });
 
@@ -5318,6 +5621,17 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain(
           `task_stop({ task_id: '${entry.shellId}'`,
         );
+        // #7626: the promoted path must teach the same status-file
+        // liveness heuristic as executeBackground — including the
+        // actionable unbuffering hint, so the two copies cannot drift.
+        expect(result.llmContent).toContain(
+          `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
+        );
+        expect(result.llmContent).toContain(
+          'Do NOT infer liveness from the output file',
+        );
+        expect(result.llmContent).toContain('python -u');
+        expect(result.llmContent).toContain('stdbuf -oL');
         expect(result.returnDisplay).toContain(
           `Promoted to background: ${entry.shellId}`,
         );

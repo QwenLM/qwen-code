@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { preconnectApi, resetPreconnectState } from './apiPreconnect.js';
+import {
+  preconnectApi,
+  resetPreconnectState,
+  waitForPreconnect,
+} from './apiPreconnect.js';
 
 // Mock the shared dispatcher functions from core
 const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
@@ -76,11 +80,12 @@ describe('apiPreconnect', () => {
   });
 
   describe('resolvedBaseUrl handling', () => {
-    it('should use resolvedBaseUrl when it is a default URL', () => {
+    it('should use resolvedBaseUrl when it is a default URL', async () => {
       preconnectApi('openai', {
         resolvedBaseUrl: 'https://api.openai.com/v1',
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://api.openai.com/v1',
         expect.objectContaining({ method: 'HEAD' }),
@@ -103,11 +108,12 @@ describe('apiPreconnect', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it('should use resolvedBaseUrl when it is a dashscope compatible-mode URL', () => {
+    it('should use resolvedBaseUrl when it is a dashscope compatible-mode URL', async () => {
       preconnectApi('openai', {
         resolvedBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://dashscope.aliyuncs.com/compatible-mode/v1',
         expect.objectContaining({ method: 'HEAD' }),
@@ -122,56 +128,61 @@ describe('apiPreconnect', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it('should accept DashScope regional endpoint (sg-singapore)', () => {
+    it('should accept DashScope regional endpoint (sg-singapore)', async () => {
       preconnectApi('openai', {
         resolvedBaseUrl:
           'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should accept DashScope regional endpoint (us-virginia)', () => {
+    it('should accept DashScope regional endpoint (us-virginia)', async () => {
       preconnectApi('openai', {
         resolvedBaseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should accept DashScope regional endpoint (cn-hongkong)', () => {
+    it('should accept DashScope regional endpoint (cn-hongkong)', async () => {
       preconnectApi('openai', {
         resolvedBaseUrl:
           'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should fall back to authType default when resolvedBaseUrl is a non-URL sentinel', () => {
+    it('should fall back to authType default when resolvedBaseUrl is a non-URL sentinel', async () => {
       preconnectApi('qwen-oauth', {
         resolvedBaseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://coding.dashscope.aliyuncs.com',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should fall back to default URL when resolvedBaseUrl is undefined', () => {
+    it('should fall back to default URL when resolvedBaseUrl is undefined', async () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://coding.dashscope.aliyuncs.com',
         expect.objectContaining({ method: 'HEAD' }),
@@ -180,40 +191,44 @@ describe('apiPreconnect', () => {
   });
 
   describe('preconnect behavior', () => {
-    it('should use default baseUrl for qwen-oauth', () => {
+    it('should use default baseUrl for qwen-oauth', async () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://coding.dashscope.aliyuncs.com',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should use default baseUrl for openai', () => {
+    it('should use default baseUrl for openai', async () => {
       preconnectApi('openai', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://api.openai.com',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should use default baseUrl for anthropic', () => {
+    it('should use default baseUrl for anthropic', async () => {
       preconnectApi('anthropic', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         'https://api.anthropic.com',
         expect.objectContaining({ method: 'HEAD' }),
       );
     });
 
-    it('should pass shared dispatcher on Node.js runtime', () => {
+    it('should pass shared dispatcher on Node.js runtime', async () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
@@ -222,24 +237,26 @@ describe('apiPreconnect', () => {
       );
     });
 
-    it('should pass configured proxy to shared dispatcher', () => {
+    it('should pass configured proxy to shared dispatcher', async () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(
         'http://proxy.example.com:8080',
       );
     });
 
-    it('should not fire twice', () => {
+    it('should not fire twice', async () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
       preconnectApi('openai', { proxy: 'http://proxy.example.com:8080' });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
-    it('should retry when targetUrl was unavailable on first call', () => {
+    it('should retry when targetUrl was unavailable on first call', async () => {
       // First call: unknown authType, no resolvedBaseUrl → no targetUrl
       preconnectApi('unknown-auth', {
         proxy: 'http://proxy.example.com:8080',
@@ -250,6 +267,7 @@ describe('apiPreconnect', () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://proxy.example.com:8080',
       });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(mockFetch).toHaveBeenCalledWith(
         'https://coding.dashscope.aliyuncs.com',
@@ -266,13 +284,14 @@ describe('apiPreconnect', () => {
       );
     });
 
-    it('should allow a later proxy preconnect after a no-proxy skip', () => {
+    it('should allow a later proxy preconnect after a no-proxy skip', async () => {
       // First call: no proxy, no useful undici pool to warm.
       preconnectApi('qwen-oauth');
       expect(mockFetch).not.toHaveBeenCalled();
 
       // Second call: proxy is now available, so preconnect should still fire.
       preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
+      await waitForPreconnect();
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(
         'http://proxy.example.com:8080',
@@ -295,8 +314,7 @@ describe('apiPreconnect', () => {
         proxy: 'http://token@proxy.local:8080',
       });
 
-      await Promise.resolve();
-      await Promise.resolve();
+      await waitForPreconnect();
 
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         'Preconnect failed (ignored): Error: connect ECONNREFUSED <redacted>@proxy.local:8080',
@@ -306,7 +324,7 @@ describe('apiPreconnect', () => {
       );
     });
 
-    it('should handle synchronous dispatcher errors gracefully', () => {
+    it('should handle dispatcher errors gracefully', () => {
       mockGetOrCreateSharedDispatcher.mockImplementation(() => {
         throw new Error('Failed to create dispatcher');
       });
@@ -315,7 +333,7 @@ describe('apiPreconnect', () => {
       ).not.toThrow();
     });
 
-    it('should redact proxy credentials from synchronous dispatcher errors', () => {
+    it('should redact proxy credentials from dispatcher errors', async () => {
       mockGetOrCreateSharedDispatcher.mockImplementation(() => {
         throw new Error('connect ECONNREFUSED user:pass@proxy.local:8080');
       });
@@ -323,6 +341,8 @@ describe('apiPreconnect', () => {
       preconnectApi('qwen-oauth', {
         proxy: 'http://user:pass@proxy.local:8080',
       });
+
+      await waitForPreconnect();
 
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         'Preconnect failed (ignored): Error: connect ECONNREFUSED <redacted>@proxy.local:8080',

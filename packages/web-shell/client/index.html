@@ -48,24 +48,28 @@
   </head>
   <body>
     <!--
-      Prevent React 19 dev-mode OOM crash: logComponentRender() calls
-      performance.measure() with component props as structured-clone detail.
-      Large transcript data exceeds the clone memory limit. This patch
-      silently drops the failing measure call; production builds are unaffected
-      because logComponentRender only exists in react-dom development bundles.
+      Prevent React 19 dev-mode OOM crashes. React records component prop
+      details through performance.measure(), which structured-clones and retains
+      those details. Strip the detail before large transcripts reach the native
+      call while preserving the component timing and non-React measures.
     -->
     <script>
       !(function () {
         if (typeof performance === 'undefined' || !performance.measure) return;
         var m = performance.measure.bind(performance);
         performance.measure = function () {
-          try {
-            return m.apply(this, arguments);
-          } catch (e) {
-            if (e instanceof DOMException && e.name === 'DataCloneError')
-              return;
-            throw e;
+          var options = arguments[1];
+          var devtools =
+            options &&
+            typeof options === 'object' &&
+            options.detail &&
+            options.detail.devtools;
+          if (devtools && devtools.track === 'Components ⚛') {
+            var args = Array.prototype.slice.call(arguments);
+            args[1] = Object.assign({}, options, { detail: null });
+            return m.apply(this, args);
           }
+          return m.apply(this, arguments);
         };
       })();
     </script>

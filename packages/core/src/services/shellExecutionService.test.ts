@@ -42,6 +42,7 @@ const mockSpawnSync = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
+const mockLoadXtermHeadless = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToText = vi.hoisted(() =>
   vi.fn((terminal: pkg.Terminal): string => {
@@ -102,6 +103,9 @@ vi.mock('os', () => ({
 }));
 vi.mock('../utils/getPty.js', () => ({
   getPty: mockGetPty,
+}));
+vi.mock('../utils/load-xterm-headless.js', () => ({
+  loadXtermHeadless: mockLoadXtermHeadless,
 }));
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
@@ -250,6 +254,7 @@ describe('ShellExecutionService', () => {
       module: { spawn: mockPtySpawn },
       name: 'mock-pty',
     });
+    mockLoadXtermHeadless.mockResolvedValue({ Terminal });
 
     onOutputEventMock = vi.fn();
 
@@ -316,6 +321,36 @@ describe('ShellExecutionService', () => {
     const result = await handle.result;
     return { result, handle, abortController };
   };
+
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the pty child env while keeping user vars and third-party credentials', async () => {
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      const spawnEnv = (
+        mockPtySpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
 
   describe('Successful Execution', () => {
     it('should execute a command and capture output', async () => {
@@ -412,6 +447,32 @@ describe('ShellExecutionService', () => {
           chunk: createExpectedAnsiOutput('aredword'),
         }),
       );
+    });
+
+    it('suppresses parser diagnostics for malformed PTY output', async () => {
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      try {
+        const { result } = await simulateExecution(
+          'malformed-output',
+          (pty) => {
+            pty.onData.mock.calls[0][0]('\u001b\xb0');
+            pty.onData.mock.calls[0][0]('recovered');
+            pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+          },
+        );
+
+        expect(
+          consoleErrorSpy.mock.calls.some((args) =>
+            args.some((arg) => String(arg).includes('Parsing error')),
+          ),
+        ).toBe(false);
+        expect(result.output).toContain('recovered');
+      } finally {
+        consoleErrorSpy.mockRestore();
+      }
     });
 
     it('should correctly decode multi-byte characters split across chunks', async () => {
@@ -2253,6 +2314,37 @@ describe('ShellExecutionService child_process fallback', () => {
     return { result, handle, abortController };
   };
 
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
+
+      await simulateExecution('echo hi', (cp) => {
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      const spawnEnv = (
+        mockCpSpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
+
   describe('Successful Execution', () => {
     it('should execute a command and capture stdout and stderr', async () => {
       const { result, handle } = await simulateExecution('ls -l', (cp) => {
@@ -3442,6 +3534,42 @@ describe('ShellExecutionService execution method selection', () => {
       expect(mockCpSpawn).not.toHaveBeenCalled();
     },
   );
+
+  it('does not spawn when aborted while xterm is loading', async () => {
+    let resolveXterm:
+      | ((value: { Terminal: typeof Terminal }) => void)
+      | undefined;
+    mockLoadXtermHeadless.mockReturnValue(
+      new Promise((resolve) => {
+        resolveXterm = resolve;
+      }),
+    );
+    const abortController = new AbortController();
+    const handlePromise = ShellExecutionService.execute(
+      'test command',
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true,
+      shellExecutionConfig,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockLoadXtermHeadless).toHaveBeenCalledOnce();
+    });
+    abortController.abort();
+    resolveXterm?.({ Terminal });
+
+    const handle = await handlePromise;
+    expect(await handle.result).toMatchObject({
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+      output: '',
+    });
+    expect(mockPtySpawn).not.toHaveBeenCalled();
+    expect(mockCpSpawn).not.toHaveBeenCalled();
+  });
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();

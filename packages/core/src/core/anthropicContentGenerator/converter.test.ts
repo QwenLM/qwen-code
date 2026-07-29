@@ -16,6 +16,7 @@ vi.mock('../../utils/schemaConverter.js', () => ({
 
 import { convertSchema } from '../../utils/schemaConverter.js';
 import { AnthropicContentConverter } from './converter.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('AnthropicContentConverter', () => {
   let converter: AnthropicContentConverter;
@@ -85,6 +86,103 @@ describe('AnthropicContentConverter', () => {
           cache_control: { type: 'ephemeral', scope: 'global' },
         },
       ]);
+    });
+
+    describe('staticSystemPrefix split', () => {
+      const staticPrefix = 'core prompt + memory';
+      const volatileSuffix = '\n\n# Git Status\nbranch: main';
+      const fullSystem = staticPrefix + volatileSuffix;
+
+      it('splits the system prompt at the static prefix boundary, scoping only the prefix', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: fullSystem },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+          {
+            // The volatile tail (git status, session-start context) always
+            // carries the per-session shape — it differs across sessions,
+            // so a global entry here would churn cache for zero hits.
+            type: 'text',
+            text: volatileSuffix,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+      });
+
+      it('splits without scope when useGlobalCacheScope is off', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: fullSystem },
+          },
+          { staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral' },
+          },
+          {
+            type: 'text',
+            text: volatileSuffix,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]);
+      });
+
+      it('falls back to a single block when the prefix does not match (subagent prompt)', () => {
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'a different subagent prompt' },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'a different subagent prompt',
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+      });
+
+      it('falls back to a single block when there is no suffix beyond the prefix', () => {
+        // Not a git repo → the system prompt IS the static prefix. A split
+        // would leave an empty second block, which Anthropic rejects.
+        const { system } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: staticPrefix },
+          },
+          { useGlobalCacheScope: true, staticSystemPrefix: staticPrefix },
+        );
+
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: staticPrefix,
+            cache_control: { type: 'ephemeral', scope: 'global' },
+          },
+        ]);
+      });
     });
 
     it('converts a plain string content into a user message', () => {
@@ -2202,6 +2300,10 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 8,
         cachedContentTokenCount: 0,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: false,
+        cacheCreationInputTokens: undefined,
+      });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([
@@ -2255,6 +2357,22 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the request model when the provider omits its model', () => {
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-no-model',
+        model: '',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+
+      expect(response.modelVersion).toBeUndefined();
     });
   });
 

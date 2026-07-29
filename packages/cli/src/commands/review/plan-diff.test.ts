@@ -10,8 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
+import { seedParseArgs } from './lib/test-utils.js';
 
 let dir: string;
+let cwd: string;
 const run = (diffPath: string, out: string, maxChunkLines = 400) =>
   (planDiffCommand.handler as (a: unknown) => void)({
     diff_path: diffPath,
@@ -21,8 +23,11 @@ const run = (diffPath: string, out: string, maxChunkLines = 400) =>
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'plan-diff-'));
+  cwd = process.cwd();
+  process.chdir(dir);
 });
 afterEach(() => {
+  process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -91,6 +96,44 @@ describe('plan-diff', () => {
     expect(plan.ownerRepo).toBe('QwenLM/qwen-code');
     // And no worktree appears — the identity does not fake a tree.
     expect(plan.worktreePath).toBeUndefined();
+  });
+
+  it('records the effort the caller passed, so the roster reads it from the plan', () => {
+    // The effort belongs IN the plan, not in a flag to `requiredAgents`: the
+    // roster, check-coverage and compose-review then all read one value and
+    // cannot disagree, and no caller can shrink the roster by omitting a flag.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      effort: 'medium',
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
+  });
+
+  it('recovers the effort from the parse-args report when --effort is not re-threaded', () => {
+    seedParseArgs(dir, 'medium');
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    run(diffPath, out); // note: no effort passed
+
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
+  });
+
+  it('omits effort when none is passed — the roster then keeps the full set', () => {
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBeUndefined();
   });
 
   it('refuses half a PR identity — a roster cannot require an agent nobody can build', () => {

@@ -46,7 +46,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../ui/select';
-import { XIcon } from 'lucide-react';
+import {
+  ArrowDownIcon,
+  ArrowDownUpIcon,
+  ArrowUpIcon,
+  BoltIcon,
+  CheckIcon,
+  CopyIcon,
+  FilterIcon,
+  GripVerticalIcon,
+  MinusIcon,
+  PlusIcon,
+  XIcon,
+} from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import styles from './EnhancedMarkdownTable.module.css';
 
 type TableElement = ReactElement<{
@@ -170,7 +188,7 @@ const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 const LONG_CELL_TEXT_LENGTH = 60;
 const LONG_CELL_LINE_COUNT = 3;
-const DENSITY_ORDER: TableDensity[] = ['standard', 'compact', 'comfortable'];
+const DENSITY_OPTIONS: TableDensity[] = ['standard', 'compact', 'comfortable'];
 const DEFAULT_COLUMN_STYLE: CSSProperties = {
   width: DEFAULT_COLUMN_WIDTH,
   minWidth: DEFAULT_COLUMN_WIDTH,
@@ -213,11 +231,6 @@ function isLongCellText(value: string): boolean {
     value.length > LONG_CELL_TEXT_LENGTH ||
     value.split(/\r\n|\r|\n/).length > LONG_CELL_LINE_COUNT
   );
-}
-
-function nextDensity(current: TableDensity): TableDensity {
-  const index = DENSITY_ORDER.indexOf(current);
-  return DENSITY_ORDER[(index + 1) % DENSITY_ORDER.length] ?? 'standard';
 }
 
 function densityClassName(density: TableDensity): string {
@@ -586,27 +599,6 @@ function moveColumn(order: number[], fromColumn: number, toColumn: number) {
   return next;
 }
 
-function moveVisibleColumn(
-  order: number[],
-  fromColumn: number,
-  toColumn: number,
-  hiddenColumns: Set<number>,
-) {
-  if (hiddenColumns.size === 0) return moveColumn(order, fromColumn, toColumn);
-  const visibleColumns = order.filter(
-    (columnIndex) => !hiddenColumns.has(columnIndex),
-  );
-  const nextVisibleColumns = moveColumn(visibleColumns, fromColumn, toColumn);
-  if (nextVisibleColumns === visibleColumns) return order;
-  let visibleIndex = 0;
-  return order.map((columnIndex) => {
-    if (hiddenColumns.has(columnIndex)) return columnIndex;
-    const nextColumn = nextVisibleColumns[visibleIndex];
-    visibleIndex += 1;
-    return nextColumn ?? columnIndex;
-  });
-}
-
 function initialColumnOrder(columnCount: number): number[] {
   return Array.from({ length: columnCount }, (_, index) => index);
 }
@@ -800,75 +792,6 @@ function normalizeFilter(
   }
 
   return isFilterActive(next) ? next : undefined;
-}
-
-function SortMenuSection({
-  columnIndex,
-  sortedThisColumn,
-  onSort,
-}: {
-  columnIndex: number;
-  sortedThisColumn: SortState | null;
-  onSort: (
-    columnIndex: number,
-    direction: SortState['direction'] | null,
-  ) => void;
-}) {
-  const { t } = useI18n();
-
-  return (
-    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
-      <Button
-        variant="ghost"
-        size="sm"
-        className={`w-full justify-start text-xs ${
-          sortedThisColumn?.direction === 'asc' ? 'bg-muted text-primary' : ''
-        }`}
-        type="button"
-        onClick={() => onSort(columnIndex, 'asc')}
-      >
-        {t('markdownTable.sort.asc')}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        className={`w-full justify-start text-xs ${
-          sortedThisColumn?.direction === 'desc' ? 'bg-muted text-primary' : ''
-        }`}
-        type="button"
-        onClick={() => onSort(columnIndex, 'desc')}
-      >
-        {t('markdownTable.sort.desc')}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="w-full justify-start text-xs"
-        type="button"
-        onClick={() => onSort(columnIndex, null)}
-      >
-        {t('markdownTable.sort.clear')}
-      </Button>
-    </div>
-  );
-}
-
-function VisibilityMenuSection({ onHideColumn }: { onHideColumn: () => void }) {
-  const { t } = useI18n();
-
-  return (
-    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
-      <Button
-        variant="ghost"
-        size="sm"
-        className="w-full justify-start text-xs"
-        type="button"
-        onClick={onHideColumn}
-      >
-        {t('markdownTable.hideColumn')}
-      </Button>
-    </div>
-  );
 }
 
 function ValueFilterSection({
@@ -1148,12 +1071,8 @@ function ColumnFilterMenu({
   filter,
   isNumeric,
   options,
-  sort,
-  canHideColumn,
   onApply,
   onClose,
-  onHideColumn,
-  onSort,
 }: {
   id: string;
   columnName: string;
@@ -1161,15 +1080,8 @@ function ColumnFilterMenu({
   filter?: ColumnFilter;
   isNumeric: boolean;
   options: FilterOption[];
-  sort: SortState | null;
-  canHideColumn: boolean;
   onApply: (columnIndex: number, filter: ColumnFilter | undefined) => void;
   onClose: () => void;
-  onHideColumn: (columnIndex: number) => void;
-  onSort: (
-    columnIndex: number,
-    direction: SortState['direction'] | null,
-  ) => void;
 }) {
   const allOptionValues = useMemo(
     () => options.map((option) => option.value),
@@ -1261,8 +1173,6 @@ function ColumnFilterMenu({
     onApply(columnIndex, undefined);
   };
 
-  const sortedThisColumn = sort?.columnIndex === columnIndex ? sort : null;
-
   return (
     <PopoverContent
       id={id}
@@ -1287,14 +1197,6 @@ function ColumnFilterMenu({
           {columnName}
         </PopoverTitle>
       </PopoverHeader>
-      <SortMenuSection
-        columnIndex={columnIndex}
-        sortedThisColumn={sortedThisColumn}
-        onSort={onSort}
-      />
-      {canHideColumn && (
-        <VisibilityMenuSection onHideColumn={() => onHideColumn(columnIndex)} />
-      )}
       <ValueFilterSection
         columnIndex={columnIndex}
         columnName={columnName}
@@ -1365,6 +1267,171 @@ export function EnhancedMarkdownTable({
   return <EnhancedTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
+function CustomColumnsPopover({
+  headers,
+  columnOrder,
+  hiddenColumns,
+  detailColumns,
+  onToggleTableColumn,
+  onToggleAllTableColumns,
+  onToggleDetailColumn,
+  onToggleAllDetailColumns,
+  onReset,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
+}: {
+  headers: EnhancedTableCell[];
+  columnOrder: number[];
+  hiddenColumns: Set<number>;
+  detailColumns: Set<number>;
+  onToggleTableColumn: (columnIndex: number) => void;
+  onToggleAllTableColumns: (visible: boolean) => void;
+  onToggleDetailColumn: (columnIndex: number) => void;
+  onToggleAllDetailColumns: (visible: boolean) => void;
+  onReset: () => void;
+  onDragStart: (
+    event: ReactDragEvent<HTMLButtonElement>,
+    columnIndex: number,
+  ) => void;
+  onDragEnd: () => void;
+  onDragOver: (event: ReactDragEvent<HTMLElement>) => void;
+  onDrop: (event: ReactDragEvent<HTMLElement>, columnIndex: number) => void;
+}) {
+  const { t } = useI18n();
+  const id = useId();
+  const visibleColumnCount = headers.length - hiddenColumns.size;
+  const allTableColumnsVisible = visibleColumnCount === headers.length;
+  const allDetailColumnsVisible = detailColumns.size === headers.length;
+  const tableColumnsChecked =
+    visibleColumnCount === 0
+      ? false
+      : allTableColumnsVisible
+        ? true
+        : 'indeterminate';
+  const detailColumnsChecked =
+    detailColumns.size === 0
+      ? false
+      : allDetailColumnsVisible
+        ? true
+        : 'indeterminate';
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={styles.toolbarControl}
+          type="button"
+        >
+          <BoltIcon />
+          {t('markdownTable.customColumns')}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className={`${styles.columnsPopover} max-h-[min(520px,calc(100vh-16px))] w-80 max-w-[85vw] gap-0 overflow-auto p-0`}
+      >
+        <div className="flex items-center gap-3 border-b px-3 py-3">
+          <Checkbox
+            checked={tableColumnsChecked}
+            onCheckedChange={(checked) =>
+              onToggleAllTableColumns(checked === true)
+            }
+            aria-label={t('markdownTable.customColumns.toggleAllTable')}
+          />
+          <span className="flex-1 text-xs text-muted-foreground">
+            {t('markdownTable.customColumns.tableSection')}
+          </span>
+          <Button variant="ghost" size="sm" type="button" onClick={onReset}>
+            {t('markdownTable.customColumns.reset')}
+          </Button>
+        </div>
+        <div className="p-2">
+          {columnOrder.map((columnIndex) => {
+            const header = headers[columnIndex];
+            if (!header) return null;
+            const columnName =
+              header.text ||
+              t('markdownTable.column', { index: columnIndex + 1 });
+            return (
+              <div
+                key={header.key}
+                className="flex min-h-9 items-center gap-2 rounded-md px-1.5 hover:bg-muted"
+                onDragOver={onDragOver}
+                onDrop={(event) => onDrop(event, columnIndex)}
+              >
+                <button
+                  className="flex size-7 shrink-0 cursor-grab items-center justify-center rounded-md text-muted-foreground hover:bg-muted-foreground/10 active:cursor-grabbing"
+                  type="button"
+                  draggable
+                  onDragStart={(event) => onDragStart(event, columnIndex)}
+                  onDragEnd={onDragEnd}
+                  aria-label={t('markdownTable.moveColumn', {
+                    column: columnName,
+                  })}
+                >
+                  <GripVerticalIcon className="size-3.5" />
+                </button>
+                <Checkbox
+                  id={`${id}-table-${columnIndex}`}
+                  checked={!hiddenColumns.has(columnIndex)}
+                  onCheckedChange={() => onToggleTableColumn(columnIndex)}
+                />
+                <Label
+                  htmlFor={`${id}-table-${columnIndex}`}
+                  className="min-w-0 flex-1 cursor-pointer truncate font-normal"
+                >
+                  {columnName}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-3 border-y px-3 py-3">
+          <Checkbox
+            checked={detailColumnsChecked}
+            onCheckedChange={(checked) =>
+              onToggleAllDetailColumns(checked === true)
+            }
+            aria-label={t('markdownTable.customColumns.toggleAllDetails')}
+          />
+          <span className="text-xs text-muted-foreground">
+            {t('markdownTable.customColumns.detailSection')}
+          </span>
+        </div>
+        <div className="p-2">
+          {headers.map((header, columnIndex) => {
+            const columnName =
+              header.text ||
+              t('markdownTable.column', { index: columnIndex + 1 });
+            return (
+              <div
+                key={`${header.key}-detail`}
+                className="flex min-h-9 items-center gap-2 rounded-md px-1.5 hover:bg-muted"
+              >
+                <Checkbox
+                  id={`${id}-detail-${columnIndex}`}
+                  checked={detailColumns.has(columnIndex)}
+                  onCheckedChange={() => onToggleDetailColumn(columnIndex)}
+                />
+                <Label
+                  htmlFor={`${id}-detail-${columnIndex}`}
+                  className="min-w-0 flex-1 cursor-pointer truncate font-normal"
+                >
+                  {columnName}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function EnhancedTable({
   table,
   toolbarExtra,
@@ -1385,6 +1452,9 @@ export function EnhancedTable({
     useState<ColumnContextMenu | null>(null);
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(
     () => new Set(),
+  );
+  const [detailColumns, setDetailColumns] = useState<Set<number>>(
+    () => new Set(initialColumnOrder(table.columnCount)),
   );
   const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
   const [columnOrder, setColumnOrder] = useState<number[]>(() =>
@@ -1518,6 +1588,7 @@ export function EnhancedTable({
     setOpenFilterMenu(null);
     setColumnContextMenu(null);
     setHiddenColumns(new Set());
+    setDetailColumns(new Set(initialColumnOrder(table.columnCount)));
     setColumnWidths({});
     setColumnOrder(initialColumnOrder(table.columnCount));
     setActiveColumn(null);
@@ -1651,6 +1722,24 @@ export function EnhancedTable({
     };
   }, [cellDialog, columnContextMenu, openFilterMenu]);
 
+  useEffect(() => {
+    if (!selection) return;
+    const clearSelectionOnOutsideMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !shellRef.current?.contains(target)) {
+        stopDragging();
+        setSelection(null);
+      }
+    };
+    document.addEventListener('mousedown', clearSelectionOnOutsideMouseDown);
+    return () => {
+      document.removeEventListener(
+        'mousedown',
+        clearSelectionOnOutsideMouseDown,
+      );
+    };
+  }, [selection, stopDragging]);
+
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
     [filters, table.rows],
@@ -1689,6 +1778,13 @@ export function EnhancedTable({
         .filter((index) => index >= 0 && index < table.columnCount)
         .filter((index) => !hiddenColumns.has(index)),
     [columnOrder, hiddenColumns, table.columnCount],
+  );
+  const detailColumnIndexes = useMemo(
+    () =>
+      initialColumnOrder(table.columnCount).filter((index) =>
+        detailColumns.has(index),
+      ),
+    [detailColumns, table.columnCount],
   );
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
@@ -1799,15 +1895,6 @@ export function EnhancedTable({
     closeFilterMenu();
   };
 
-  const setColumnSort = (
-    columnIndex: number,
-    direction: SortState['direction'] | null,
-  ) => {
-    setSelection(null);
-    setActiveColumn(columnIndex);
-    setSort(direction ? { columnIndex, direction } : null);
-  };
-
   const toggleSort = (columnIndex: number) => {
     setSelection(null);
     setActiveColumn(columnIndex);
@@ -1835,8 +1922,7 @@ export function EnhancedTable({
     setOpenFilterMenu({ columnIndex });
   };
 
-  const hideColumn = (columnIndex: number) => {
-    if (orderedVisibleColumnIndexes.length <= 1) return;
+  const toggleTableColumn = (columnIndex: number) => {
     setSelection(null);
     setActiveColumn((current) => (current === columnIndex ? null : current));
     closeFilterMenu();
@@ -1850,14 +1936,55 @@ export function EnhancedTable({
     );
     setHiddenColumns((current) => {
       const next = new Set(current);
-      next.add(columnIndex);
+      if (next.has(columnIndex)) {
+        next.delete(columnIndex);
+      } else {
+        next.add(columnIndex);
+      }
       return next;
     });
   };
 
-  const showHiddenColumns = () => {
+  const toggleAllTableColumns = (visible: boolean) => {
     setSelection(null);
+    setActiveColumn(null);
+    closeFilterMenu();
+    if (visible) {
+      setHiddenColumns(new Set());
+      return;
+    }
+    setHiddenColumns(new Set(initialColumnOrder(table.columnCount)));
+    setFilters({});
+    setSort(null);
+  };
+
+  const toggleDetailColumn = (columnIndex: number) => {
+    setDetailColumns((current) => {
+      const next = new Set(current);
+      if (next.has(columnIndex)) {
+        next.delete(columnIndex);
+      } else {
+        next.add(columnIndex);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllDetailColumns = (visible: boolean) => {
+    setDetailColumns(
+      visible
+        ? new Set(initialColumnOrder(table.columnCount))
+        : new Set<number>(),
+    );
+  };
+
+  const resetColumns = () => {
+    setSelection(null);
+    setActiveColumn(null);
+    closeFilterMenu();
+    setColumnOrder(initialColumnOrder(table.columnCount));
     setHiddenColumns(new Set());
+    setDetailColumns(new Set(initialColumnOrder(table.columnCount)));
   };
 
   const toggleFreezeFirstColumnFromMenu = () => {
@@ -1888,10 +2015,6 @@ export function EnhancedTable({
         Math.min(event.clientY, window.innerHeight - menuHeight - 6),
       ),
     });
-  };
-
-  const toggleDensity = () => {
-    setDensity((current) => nextDensity(current));
   };
 
   const toggleRowDetail = (rowKey: string) => {
@@ -2069,12 +2192,7 @@ export function EnhancedTable({
     setSelection(null);
     setActiveColumn(sourceColumnIndex);
     setColumnOrder((current) =>
-      moveVisibleColumn(
-        current,
-        sourceColumnIndex,
-        targetColumnIndex,
-        hiddenColumns,
-      ),
+      moveColumn(current, sourceColumnIndex, targetColumnIndex),
     );
   };
 
@@ -2246,7 +2364,6 @@ export function EnhancedTable({
   const selectedCount = selectionStatistics?.selectedCount ?? 0;
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
-  const densityLabel = t(`markdownTable.density.${density}`);
   const hasLongText = useMemo(
     () =>
       visibleRows.some((row) =>
@@ -2304,146 +2421,196 @@ export function EnhancedTable({
         freezeFirstColumn ? styles.hasFrozenColumn : ''
       } ${isDragging ? styles.dragging : ''}`}
     >
-      <div className={styles.toolbar}>
-        <span className={styles.summary}>{rowSummary}</span>
-        <span className={styles.hint}>{t('markdownTable.hint')}</span>
-        <button
-          className={styles.copyButton}
-          type="button"
-          onClick={copyVisibleTable}
-        >
-          {copiedVisible ? (
-            <>
-              <span className={styles.copyCheck}>✓</span>
-              {t('code.copied')}
-            </>
-          ) : (
-            t('markdownTable.copyVisible')
+      <TooltipProvider delayDuration={300}>
+        <div className={styles.toolbar}>
+          <span className={styles.summary}>{rowSummary}</span>
+          {activeFilterCount > 0 && (
+            <span className={styles.selection}>
+              {t('markdownTable.filtersActive', { count: activeFilterCount })}
+            </span>
           )}
-        </button>
-        {hiddenColumns.size > 0 && (
-          <button
-            className={styles.copyButton}
-            type="button"
-            onClick={showHiddenColumns}
-          >
-            {t('markdownTable.showHiddenColumns', {
-              count: hiddenColumns.size,
-            })}
-          </button>
-        )}
-        <button
-          className={styles.copyButton}
-          type="button"
-          onClick={toggleDensity}
-        >
-          {t('markdownTable.density', { density: densityLabel })}
-        </button>
-        {hasLongText && (
-          <button
-            className={styles.copyButton}
-            type="button"
-            onClick={() => setLongTextExpanded((current) => !current)}
-          >
-            {longTextExpanded
-              ? t('markdownTable.collapseLongText')
-              : t('markdownTable.expandLongText')}
-          </button>
-        )}
-        {activeFilterCount > 0 && (
-          <span className={styles.selection}>
-            {t('markdownTable.filtersActive', { count: activeFilterCount })}
-          </span>
-        )}
-        {selectedCount > 0 && (
-          <>
-            {selectionStatistics && (
-              <div className={styles.selectionStats}>
-                <span className={styles.selectionMetric}>
-                  {t('markdownTable.selection.selected')}{' '}
-                  <strong className={styles.selectionMetricValue}>
-                    {selectionStatistics.selectedCount}
-                  </strong>
-                </span>
-                <span className={styles.selectionMetric}>
-                  {t('markdownTable.selection.nonEmpty')}{' '}
-                  <strong className={styles.selectionMetricValue}>
-                    {selectionStatistics.nonEmptyCount}
-                  </strong>
-                </span>
-                <span className={styles.selectionMetric}>
-                  {t('markdownTable.selection.numeric')}{' '}
-                  <strong className={styles.selectionMetricValue}>
-                    {selectionStatistics.numericCount}
-                  </strong>
-                </span>
-                {selectionStatistics.numericCount > 0 && (
-                  <>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.sum')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.sum,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.average')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.average,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.min')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.min,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                    <span className={styles.selectionMetric}>
-                      {t('markdownTable.selection.max')}{' '}
-                      <strong className={styles.selectionMetricValue}>
-                        {formatSelectionStatistic(
-                          selectionStatistics.max,
-                          selectionStatistics,
-                          language,
-                        )}
-                      </strong>
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-            <button
-              className={styles.copyButton}
-              type="button"
-              onClick={copySelection}
-            >
-              {copiedSelection ? (
+          {selectedCount > 0 && selectionStatistics && (
+            <div className={styles.selectionStats}>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.selected')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {selectionStatistics.selectedCount}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.nonEmpty')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {selectionStatistics.nonEmptyCount}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.numeric')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {selectionStatistics.numericCount}
+                </strong>
+              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    className={styles.selectionCopyButton}
+                    type="button"
+                    onClick={copySelection}
+                    aria-label={t('markdownTable.copyTsv')}
+                  >
+                    {copiedSelection
+                      ? t('code.copied')
+                      : t('markdownTable.copyTsv')}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {t('markdownTable.copyTsvHint')}
+                </TooltipContent>
+              </Tooltip>
+              {selectionStatistics.numericCount > 0 && (
                 <>
-                  <span className={styles.copyCheck}>✓</span>
-                  {t('code.copied')}
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.sum')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.sum,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.average')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.average,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.min')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.min,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
+                  <span
+                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
+                  >
+                    {t('markdownTable.selection.max')}{' '}
+                    <strong className={styles.selectionMetricValue}>
+                      {formatSelectionStatistic(
+                        selectionStatistics.max,
+                        selectionStatistics,
+                        language,
+                      )}
+                    </strong>
+                  </span>
                 </>
-              ) : (
-                t('markdownTable.copyTsv')
               )}
-            </button>
-          </>
-        )}
-        {toolbarExtra}
-      </div>
+            </div>
+          )}
+          <span className={styles.toolbarSpacer} />
+          <Select
+            value={density}
+            onValueChange={(value) => setDensity(value as TableDensity)}
+          >
+            <SelectTrigger
+              size="sm"
+              className={styles.densityTrigger}
+              aria-label={t('markdownTable.densityLabel')}
+            >
+              <SelectValue>
+                {t('markdownTable.densityCurrent', {
+                  density: t(`markdownTable.density.${density}`),
+                })}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent className={styles.densityMenu}>
+              {DENSITY_OPTIONS.map((option) => (
+                <SelectItem key={option} value={option} data-value={option}>
+                  {t(`markdownTable.density.${option}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <CustomColumnsPopover
+            headers={table.headers}
+            columnOrder={columnOrder}
+            hiddenColumns={hiddenColumns}
+            detailColumns={detailColumns}
+            onToggleTableColumn={toggleTableColumn}
+            onToggleAllTableColumns={toggleAllTableColumns}
+            onToggleDetailColumn={toggleDetailColumn}
+            onToggleAllDetailColumns={toggleAllDetailColumns}
+            onReset={resetColumns}
+            onDragStart={startColumnDrag}
+            onDragEnd={stopColumnDrag}
+            onDragOver={dragOverColumn}
+            onDrop={dropColumn}
+          />
+          {hasLongText && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={styles.toolbarControl}
+              type="button"
+              onClick={() => setLongTextExpanded((current) => !current)}
+            >
+              {longTextExpanded
+                ? t('markdownTable.collapseLongText')
+                : t('markdownTable.expandLongText')}
+            </Button>
+          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                className={styles.iconButton}
+                type="button"
+                onClick={copyVisibleTable}
+                aria-label={t('markdownTable.copyVisible')}
+              >
+                {copiedVisible ? (
+                  <>
+                    <CheckIcon aria-hidden="true" />
+                    <span className="sr-only">✓</span>
+                  </>
+                ) : (
+                  <CopyIcon aria-hidden="true" />
+                )}
+                <span className="sr-only">
+                  {copiedVisible
+                    ? t('code.copied')
+                    : t('markdownTable.copyVisible')}
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {copiedVisible
+                ? t('code.copied')
+                : t('markdownTable.copyVisible')}
+            </TooltipContent>
+          </Tooltip>
+          {toolbarExtra}
+        </div>
+      </TooltipProvider>
       <div
         ref={containerRef}
-        className={styles.scroller}
+        className={`${styles.scroller} ${
+          detailRowKey ? styles.scrollerWithDetail : ''
+        }`}
         tabIndex={0}
         onCopy={handleCopy}
       >
@@ -2455,7 +2622,7 @@ export function EnhancedTable({
                   freezeFirstColumn ? styles.stickyActionHeaderCell : ''
                 }`}
               >
-                {t('markdownTable.actions')}
+                <span className="sr-only">{t('markdownTable.actions')}</span>
               </th>
               {orderedVisibleColumnIndexes.map((columnIndex) => {
                 const header = table.headers[columnIndex];
@@ -2463,11 +2630,6 @@ export function EnhancedTable({
                 const isSorted = sort?.columnIndex === columnIndex;
                 const isFiltered = isFilterActive(filters[columnIndex]);
                 const isMenuOpen = openFilterMenu?.columnIndex === columnIndex;
-                const sortLabel = isSorted
-                  ? sort.direction === 'asc'
-                    ? '↑'
-                    : '↓'
-                  : '↕';
                 const columnName =
                   header.text ||
                   t('markdownTable.column', { index: columnIndex + 1 });
@@ -2500,46 +2662,16 @@ export function EnhancedTable({
                     onContextMenu={(event) =>
                       openColumnContextMenu(event, columnIndex)
                     }
-                    onDragOver={dragOverColumn}
-                    onDrop={(event) => dropColumn(event, columnIndex)}
                     style={columnStyle(columnIndex, headerAlignStyle)}
                     title={columnName}
                   >
                     <div className={styles.headerControls}>
-                      <button
-                        className={styles.headerButton}
-                        type="button"
-                        onClick={() => toggleSort(columnIndex)}
-                        aria-label={sortAriaLabel}
+                      <span
+                        className={styles.headerText}
                         style={headerAlignStyle}
                       >
-                        <span
-                          className={styles.headerText}
-                          style={headerAlignStyle}
-                        >
-                          {header.content}
-                        </span>
-                        <span className={styles.sortIcon} aria-hidden="true">
-                          {sortLabel}
-                        </span>
-                      </button>
-                      <button
-                        className={`${styles.reorderHandle} ${
-                          isActiveColumn ? styles.reorderHandleVisible : ''
-                        }`}
-                        type="button"
-                        draggable
-                        tabIndex={isActiveColumn ? 0 : -1}
-                        onDragStart={(event) =>
-                          startColumnDrag(event, columnIndex)
-                        }
-                        onDragEnd={stopColumnDrag}
-                        aria-label={t('markdownTable.moveColumn', {
-                          column: columnName,
-                        })}
-                      >
-                        ⋮⋮
-                      </button>
+                        {header.content}
+                      </span>
                       <Popover
                         open={isMenuOpen}
                         onOpenChange={(open) =>
@@ -2559,7 +2691,7 @@ export function EnhancedTable({
                               isMenuOpen ? filterMenuId : undefined
                             }
                           >
-                            ▾
+                            <FilterIcon aria-hidden="true" />
                           </button>
                         </PopoverTrigger>
                         {isMenuOpen && (
@@ -2571,17 +2703,29 @@ export function EnhancedTable({
                             filter={filters[columnIndex]}
                             isNumeric={numericColumns[columnIndex] ?? false}
                             options={openFilterOptions}
-                            sort={sort}
-                            canHideColumn={
-                              orderedVisibleColumnIndexes.length > 1
-                            }
                             onApply={setColumnFilter}
                             onClose={closeFilterMenu}
-                            onHideColumn={hideColumn}
-                            onSort={setColumnSort}
                           />
                         )}
                       </Popover>
+                      <button
+                        className={`${styles.sortTrigger} ${
+                          isSorted ? styles.sortTriggerActive : ''
+                        }`}
+                        type="button"
+                        onClick={() => toggleSort(columnIndex)}
+                        aria-label={sortAriaLabel}
+                      >
+                        {isSorted ? (
+                          sort.direction === 'asc' ? (
+                            <ArrowUpIcon aria-hidden="true" />
+                          ) : (
+                            <ArrowDownIcon aria-hidden="true" />
+                          )
+                        ) : (
+                          <ArrowDownUpIcon aria-hidden="true" />
+                        )}
+                      </button>
                     </div>
                     <button
                       className={styles.resizeHandle}
@@ -2614,9 +2758,7 @@ export function EnhancedTable({
               const detailId = `${tableId}-detail-${row.key}`;
               return (
                 <Fragment key={row.key}>
-                  <tr
-                    className={rowIndex % 2 === 1 ? styles.evenRow : undefined}
-                  >
+                  <tr>
                     <td
                       className={`${styles.cell} ${styles.actionCell} ${
                         freezeFirstColumn ? styles.stickyActionCell : ''
@@ -2635,7 +2777,11 @@ export function EnhancedTable({
                           { index: rowIndex + 1 },
                         )}
                       >
-                        {t('markdownTable.rowDetails')}
+                        {detailOpen ? (
+                          <MinusIcon aria-hidden="true" />
+                        ) : (
+                          <PlusIcon aria-hidden="true" />
+                        )}
                       </button>
                     </td>
                     {orderedVisibleColumnIndexes.map((columnIndex) => {
@@ -2687,10 +2833,10 @@ export function EnhancedTable({
                         colSpan={orderedVisibleColumnIndexes.length + 1}
                       >
                         <div className={styles.detailPanel}>
-                          <div className={styles.detailTitle}>
+                          <span className="sr-only">
                             {t('markdownTable.detailsHeader')}
-                          </div>
-                          {orderedVisibleColumnIndexes.map((columnIndex) => {
+                          </span>
+                          {detailColumnIndexes.map((columnIndex) => {
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
@@ -2711,6 +2857,11 @@ export function EnhancedTable({
                               </div>
                             );
                           })}
+                          {detailColumnIndexes.length === 0 && (
+                            <div className={styles.emptyValue}>
+                              {t('markdownTable.customColumns.noDetails')}
+                            </div>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -2775,7 +2926,7 @@ export function EnhancedTable({
                 size="icon-sm"
                 aria-label={t('markdownTable.close')}
               >
-                <XIcon />
+                <XIcon className="size-3.5" strokeWidth={1.5} />
                 <span className="sr-only">{t('markdownTable.close')}</span>
               </Button>
             </DialogClose>

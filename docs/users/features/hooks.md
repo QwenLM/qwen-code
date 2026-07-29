@@ -103,6 +103,24 @@ HTTP hooks send hook input as POST requests to specified URLs. They support URL 
 - **DNS Validation**: Validates domain resolution before requests to prevent DNS rebinding attacks
 - **Environment Variable Interpolation**: `${VAR}` syntax, only allows variables in `allowedEnvVars` whitelist
 
+#### Allowing private-network hooks (managed environments only)
+
+By default, HTTP hooks cannot target private or link-local IP ranges. In platform-managed environments where the hook receiver is a first-party, VPC-internal endpoint (for example, an internal API gateway resolving to `172.16.0.0/12`), you can relax the IP-range checks with:
+
+```json
+{
+  "security": {
+    "allowPrivateNetworkHooks": true
+  }
+}
+```
+
+- This setting is **only honored from User, System, and SystemDefaults settings scopes**. A value set in Workspace (project) settings is ignored and logged as a warning, so a cloned repository can never self-grant this bypass.
+- The flag relaxes only the general private/CGNAT/link-local **range** checks. Cloud metadata endpoints stay blocked in every configuration: the `BLOCKED_HOSTS` list is matched literally (`metadata.google.internal`, `metadata.azure.internal`, ...), and the metadata IPs `169.254.169.254` and `100.100.100.200` are blocked in all serialized forms (including IPv4-mapped IPv6 such as `::ffff:a9fe:a9fe`) and after DNS resolution.
+- The `security.allowedHttpHookUrls` whitelist still applies independently. In managed environments, pair this flag with a whitelist so only the intended internal endpoints are reachable.
+
+> **Warning:** Enabling this flag lets hooks reach internal infrastructure on your network. Enable it only in trusted, managed settings — never in a repository you do not control.
+
 **Example:**
 
 ```json
@@ -138,6 +156,8 @@ Function hooks directly call registered JavaScript/TypeScript functions. They ar
 ### Prompt Hooks
 
 Prompt hooks use an LLM to evaluate hook input and return a decision. This is useful for making intelligent decisions based on context, such as determining whether to allow or block an operation.
+
+> **Data handling:** A prompt hook sends its event input to the configured model provider. When file-backed debug logging is enabled, the fully expanded prompt-hook request is also written to the session debug log. Treat hook input and debug logs as potentially sensitive.
 
 **How it works:**
 
@@ -184,7 +204,7 @@ Prompt hooks can be used with most hook events, including:
 - `PostToolUse` - Evaluate tool results and potentially inject context
 - `Stop` - Determine whether to continue or stop
 - `SubagentStop` - Evaluate subagent results
-- `UserPromptSubmit` - Evaluate or enrich user prompts
+- `UserPromptSubmit` - Evaluate or enrich eligible model-bound prompts
 
 **Example: Stop Hook**
 
@@ -240,7 +260,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
 | `PostToolUse`        | After successful tool execution           | Tool id                                                        |
 | `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
-| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                            |
+| `UserPromptSubmit`   | Before supported model invocations        | None                                                           |
 | `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
 | `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
 | `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
@@ -327,7 +347,18 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 
 ### Hook Input Structure
 
-All hooks receive standardized input in JSON format through stdin (command) or POST body (http).
+All hook executors receive the standardized event input. The delivery boundary depends on the executor:
+
+| Hook type  | Input recipient                                                 |
+| :--------- | :-------------------------------------------------------------- |
+| `command`  | Child process through JSON on `stdin`                           |
+| `http`     | Configured endpoint through a JSON `POST` body                  |
+| `function` | Trusted in-process callback                                     |
+| `prompt`   | Configured model provider after the input replaces `$ARGUMENTS` |
+
+Function hooks are trusted code running in the Qwen process. They receive an in-process object, so fields must not be treated as immutable against a function hook.
+
+Qwen does not control whether a hook process, endpoint, callback, or model provider retains or forwards its input. Review each configured executor's data-handling policy.
 
 **Common Fields:**
 
@@ -342,6 +373,8 @@ All hooks receive standardized input in JSON format through stdin (command) or P
 ```
 
 Event-specific fields are added based on the hook type. When running in a subagent, `agent_id` and `agent_type` are additionally included.
+
+Hook input is a forward-extensible JSON contract: new optional fields can be added to existing events. Consumers should ignore unknown fields. A strict decoder that rejects unknown properties must be updated to explicitly allow each new optional field before upgrading Qwen Code. For security-sensitive hooks, a decoder failure can change fail-open or fail-closed behavior, so administrators must validate the upgraded payload against the deployed hook before rollout.
 
 ### Hook Output Structure
 
@@ -491,15 +524,32 @@ The `permissionDecision` value controls whether the tool runs:
 
 #### UserPromptSubmit
 
-**Purpose**: Executed when the user submits a prompt to modify, validate, or enrich the input.
+**Purpose**: Executed before supported model invocations to validate, block, or enrich the current model-bound prompt. The event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input.
 
 **Event-specific fields**:
 
 ```json
 {
-  "prompt": "the user's submitted prompt text"
+  "prompt": "current model-bound prompt for this hook invocation",
+  "submitted_prompt": "optional user text captured at a supported interactive TUI submission boundary"
 }
 ```
+
+`submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported interactive TUI submission to a fresh `UserQuery`. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, and teammate traffic. ACP, headless, `serve`, SDK, and remote-input paths do not produce it in this version.
+
+Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
+
+After restored or provenance-unavailable model-bound input is cleared or submitted, the composer also clears its undo and redo history. This prevents undo from restoring expanded text after its marker or sidecar has been consumed.
+
+Large-paste placeholders remain compact in `submitted_prompt`; the expanded pasted content appears only in `prompt`. Consumers should treat the field as a TUI text projection rather than a byte-for-byte record of clipboard input.
+
+Any non-empty input present while Vim mode is enabled omits `submitted_prompt`, including after Vim is disabled, because Vim registers do not carry provenance in this version. This conservative rule also covers drafts entered before enabling Vim. Clearing the composer starts a new eligible input.
+
+This field is provenance, not authentication, tenant identity, authorization, or DLP. It is caller-supplied data. Every executor configured for this event receives it; in particular, HTTP hooks send it to their endpoint and prompt hooks send it to their model provider.
+
+When both fields are present, prompt-hook payloads contain overlapping text and can consume additional model input tokens. There is no per-hook field suppression in this version.
+
+Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `submitted_prompt` continues to represent the captured submission. Function hooks are trusted same-process code and are not constrained by an immutability guarantee.
 
 **Output Options**:
 
@@ -633,13 +683,13 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 #### StopFailure
 
-**Purpose**: Executed when the turn ends due to an API error (instead of Stop). This is a **fire-and-forget** event - hook output and exit codes are ignored.
+**Purpose**: Executed when the turn ends due to an API error or loop detection (instead of Stop). This is a **fire-and-forget** event - hook output and exit codes are ignored.
 
 **Event-specific fields**:
 
 ```json
 {
-  "error": "rate_limit | authentication_failed | billing_error | invalid_request | server_error | max_output_tokens | unknown",
+  "error": "rate_limit | authentication_failed | billing_error | invalid_request | server_error | max_output_tokens | loop_detected | unknown",
   "error_details": "detailed error message (optional)",
   "last_assistant_message": "the last message from the assistant before the error (optional)"
 }
@@ -1289,9 +1339,11 @@ A PostToolUse HTTP hook that sends all tool execution records to a remote audit 
 }
 ```
 
-### Example 3: User Prompt Validation Hook
+### Example 3: Interactive TUI Submitted Prompt Validation Hook
 
-A UserPromptSubmit hook that validates user prompts for sensitive information and provides context for long prompts:
+To inspect the current model-bound content instead, read `prompt`. That field can include generated or expanded content, is not the original user input, and does not imply that `UserPromptSubmit` covers every model send. Do not silently fall back from `submitted_prompt` to `prompt` when source provenance is required.
+
+A UserPromptSubmit hook that validates supported interactive TUI submissions for sensitive information and provides context for long prompts. It skips invocations where source provenance is unavailable. The keyword check is illustrative and is not a complete DLP policy:
 
 **prompt_validator.py**
 
@@ -1305,9 +1357,12 @@ try:
     input_data = json.load(sys.stdin)
 except json.JSONDecodeError as e:
     print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-    exit(1)
+    sys.exit(1)
 
-user_prompt = input_data.get("prompt", "")
+user_prompt = input_data.get("submitted_prompt")
+if user_prompt is None:
+    # Do not mistake model-bound or machine-generated content for raw input.
+    sys.exit(0)
 
 # Sensitive words list
 sensitive_words = ["password", "secret", "token", "api_key"]
@@ -1324,7 +1379,7 @@ for word in sensitive_words:
             }
         }
         print(json.dumps(output))
-        exit(0)
+        sys.exit(0)
 
 # Check prompt length and add warning context if too long
 if len(user_prompt) > 1000:
@@ -1335,10 +1390,10 @@ if len(user_prompt) > 1000:
         }
     }
     print(json.dumps(output))
-    exit(0)
+    sys.exit(0)
 
 # No processing needed for normal cases
-exit(0)
+sys.exit(0)
 ```
 
 ## Troubleshooting
@@ -1347,5 +1402,5 @@ exit(0)
 - Verify hook script permissions and executability
 - Ensure proper JSON formatting in hook outputs
 - Use specific matcher patterns to avoid unintended hook execution
-- Use `--debug` mode to see detailed hook matching and execution information
+- Use `--debug` mode to see detailed hook matching and execution information. Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
 - Temporarily disable all hooks: add `"disableAllHooks": true` in settings

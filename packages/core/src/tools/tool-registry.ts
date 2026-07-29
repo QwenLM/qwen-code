@@ -24,8 +24,11 @@ import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -61,7 +64,14 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
-    const child = spawn(callCommand, [this.toolName]);
+    // The user-configured tool-call command is a child process launched on the
+    // agent's behalf, so it must not inherit Qwen-internal daemon secrets.
+    // Passing `env` explicitly loses the native inheritance that resolved
+    // Windows' case-insensitive PATH keys, so normalize as the shell and MCP
+    // spawn sites do (a no-op off win32).
+    const child = spawn(callCommand, [this.toolName], {
+      env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+    });
     child.stdin.write(JSON.stringify(this.params));
     child.stdin.end();
 
@@ -592,7 +602,12 @@ export class ToolRegistry {
           'Tool discovery command is empty or contains only whitespace.',
         );
       }
-      const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[]);
+      // Same as the tool-call command above: the discovery command is
+      // agent-launched, must not inherit Qwen-internal daemon secrets, and
+      // needs the Windows PATH normalization that comes with an explicit env.
+      const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
+        env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+      });
       let stdout = '';
       const stdoutDecoder = new StringDecoder('utf8');
       let stderr = '';
@@ -813,6 +828,57 @@ export class ToolRegistry {
     // Stable order so the startup reminder text is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
+  }
+
+  /**
+   * Reveals every deferred tool — bundled built-ins and MCP alike — when
+   * the combined estimated token footprint of their schemas fits within
+   * `budgetTokens`. Every mid-session reveal rewrites the declaration
+   * list and invalidates the prompt-cache prefix, so the prefix only
+   * stays stable when NOTHING is left for ToolSearch to reveal: a small
+   * deferred set is cheaper to declare upfront in full than to load one
+   * cache-busting piece at a time. All-or-nothing on purpose — a partial
+   * reveal would leave an arbitrary subset behind ToolSearch.
+   *
+   * Already-revealed tools count toward the total (reveal is
+   * idempotent), so repeated calls cannot ratchet past the budget as MCP
+   * servers come and go. Returns the number of newly revealed tools.
+   */
+  preloadDeferredToolsWithinBudget(budgetTokens: number): number {
+    const candidates: string[] = [];
+    let totalChars = 0;
+    for (const tool of this.tools.values()) {
+      if (!tool.shouldDefer || tool.alwaysLoad) continue;
+      if (this.config.getVisibleTools().has(tool.name)) continue;
+      candidates.push(tool.name);
+      totalChars += JSON.stringify(tool.schema).length;
+    }
+    const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
+    if (candidates.length === 0) {
+      debugLogger.debug(
+        `preloadDeferredToolsWithinBudget: no deferrable tools to preload (budget=${budgetTokens} tokens).`,
+      );
+      return 0;
+    }
+    if (estimatedTokens > budgetTokens) {
+      debugLogger.debug(
+        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch ` +
+          `(estimated ${estimatedTokens} tokens > budget ${budgetTokens} tokens).`,
+      );
+      return 0;
+    }
+    let revealed = 0;
+    for (const name of candidates) {
+      if (!this.revealedDeferred.has(name)) {
+        this.revealDeferredTool(name);
+        revealed++;
+      }
+    }
+    debugLogger.debug(
+      `preloadDeferredToolsWithinBudget: preloading ${candidates.length} deferred tool(s) ` +
+        `(estimated ${estimatedTokens} tokens <= budget ${budgetTokens} tokens); ${revealed} newly revealed.`,
+    );
+    return revealed;
   }
 
   getMcpServerInstructions(): Map<string, string> {

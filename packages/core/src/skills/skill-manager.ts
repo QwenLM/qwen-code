@@ -36,6 +36,7 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
 import {
   QWEN_DIR,
   SKILL_PROVIDER_CONFIG_DIRS,
@@ -900,12 +901,27 @@ export class SkillManager {
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
-      case 'user':
-        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+      case 'user': {
+        const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           v === QWEN_DIR
             ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
             : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
         );
+        for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
+          const homeExpanded = expandHomeDir(customDir);
+          const expanded = path.resolve(homeExpanded);
+          if (!path.isAbsolute(homeExpanded)) {
+            debugLogger.warn(
+              `Custom skill directory "${customDir}" is relative; ` +
+                `resolved to "${expanded}" against the working directory`,
+            );
+          }
+          if (!dirs.includes(expanded)) {
+            dirs.push(expanded);
+          }
+        }
+        return dirs;
+      }
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':

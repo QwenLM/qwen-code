@@ -46,6 +46,7 @@ export async function truncateAndSaveToFile(
   threshold: number,
   truncateLines: number,
   keep: 'head' | 'tail' | 'both' = 'both',
+  previewChars = threshold,
 ): Promise<{ content: string; outputFile?: string }> {
   // Fast path: when no line cap applies (per-tool char budgets pass
   // truncateLines = Infinity) and content is within the char threshold, return
@@ -86,20 +87,36 @@ export async function truncateAndSaveToFile(
 
   // Collect head lines within budget. If a single line exceeds the
   // remaining budget, include a truncated slice of it.
+  const previewBudget = Math.max(0, previewChars);
+
+  // The separator sits between (or beside) the head and tail, so it has to
+  // come out of the budget rather than be added on top of it. It was emitted
+  // unconditionally while the head budget ignored it entirely, so a small
+  // previewChars came back over budget every time: 0 produced 39 characters,
+  // 10 produced 42, 40 produced 47. Below the separator's own length there is
+  // no room to say anything and still show content -- and the wrapper message
+  // above already states the output was truncated -- so drop it there.
+  const sep = previewBudget > separator.length ? separator : '';
+  const contentBudget = previewBudget - sep.length;
   const headBudget =
     keep === 'head'
-      ? threshold
+      ? contentBudget
       : keep === 'tail'
         ? 0
-        : Math.floor(threshold / 5);
+        : Math.floor(contentBudget / 5);
   const beginning: string[] = [];
   let headChars = 0;
   for (let i = 0; i < Math.min(headCount, lines.length); i++) {
     const remaining = headBudget - headChars;
     if (remaining <= 0) break;
     if (lines[i].length + 1 > remaining) {
-      const sliceLen = Math.max(remaining - ellipsis.length, 0);
-      beginning.push(lines[i].slice(0, sliceLen) + ellipsis);
+      // The ellipsis has to fit inside `remaining` too. Emitting it when
+      // fewer than three characters were left put the preview over budget by
+      // the difference, on top of the separator overrun above.
+      if (remaining >= ellipsis.length) {
+        const sliceLen = remaining - ellipsis.length;
+        beginning.push(lines[i].slice(0, sliceLen) + ellipsis);
+      }
       headChars = headBudget;
       break;
     }
@@ -110,7 +127,7 @@ export async function truncateAndSaveToFile(
   // Collect tail lines within remaining budget. If a single line exceeds
   // the remaining budget, include a truncated slice of it.
   const tailBudget =
-    keep === 'head' ? 0 : Math.max(threshold - headChars - separator.length, 0);
+    keep === 'head' ? 0 : Math.max(contentBudget - headChars, 0);
   const end: string[] = [];
   let tailChars = 0;
   const tailStart = Math.max(lines.length - tailCount, beginning.length);
@@ -118,11 +135,15 @@ export async function truncateAndSaveToFile(
     const remaining = tailBudget - tailChars;
     if (remaining <= 0) break;
     if (lines[i].length + 1 > remaining) {
-      const sliceLen = Math.max(remaining - ellipsis.length, 0);
-      // slice(-0) === slice(0) returns the WHOLE line, so guard the zero case
-      // explicitly: sliceLen === 0 means no budget for any tail chars (the head
-      // branch's slice(0, 0) already yields '' correctly).
-      end.unshift(ellipsis + (sliceLen > 0 ? lines[i].slice(-sliceLen) : ''));
+      // As above: below the ellipsis's own length there is no room to mark the
+      // cut without overshooting, so mark nothing.
+      if (remaining >= ellipsis.length) {
+        const sliceLen = remaining - ellipsis.length;
+        // slice(-0) === slice(0) returns the WHOLE line, so guard the zero
+        // case explicitly: sliceLen === 0 means no budget for any tail chars
+        // (the head branch's slice(0, 0) already yields '' correctly).
+        end.unshift(ellipsis + (sliceLen > 0 ? lines[i].slice(-sliceLen) : ''));
+      }
       tailChars = tailBudget;
       break;
     }
@@ -135,10 +156,10 @@ export async function truncateAndSaveToFile(
   // both keeps the existing head+separator+tail shape.
   const truncatedContent =
     keep === 'head'
-      ? beginning.join('\n') + separator
+      ? beginning.join('\n') + sep
       : keep === 'tail'
-        ? separator + end.join('\n')
-        : beginning.join('\n') + separator + end.join('\n');
+        ? sep + end.join('\n')
+        : beginning.join('\n') + sep + end.join('\n');
 
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
@@ -200,6 +221,7 @@ export async function truncateToolOutput(
     threshold?: number;
     lines?: number;
     keep?: 'head' | 'tail' | 'both';
+    previewChars?: number;
   },
   promptId?: string,
 ): Promise<{ content: string; outputFile?: string }> {
@@ -210,6 +232,7 @@ export async function truncateToolOutput(
     limits?.threshold ?? config.getTruncateToolOutputThreshold();
   const lines = limits?.lines ?? config.getTruncateToolOutputLines();
   const keep = limits?.keep ?? 'both';
+  const previewChars = limits?.previewChars ?? threshold;
 
   if (threshold <= 0 || lines <= 0) {
     return { content };
@@ -232,6 +255,7 @@ export async function truncateToolOutput(
     threshold,
     lines,
     keep,
+    previewChars,
   );
 
   if (result.outputFile) {
@@ -364,6 +388,14 @@ export interface PersistResult {
   bytesWritten: number;
 }
 
+export function normalizeToolResultCallId(callId: string): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  const safeCallId = path.basename(callId).replace(/\x00/g, '_');
+  return !safeCallId || safeCallId === '.' || safeCallId === '..'
+    ? undefined
+    : safeCallId;
+}
+
 export async function persistAndTruncateToolResult(
   callId: string,
   toolName: string,
@@ -398,9 +430,8 @@ export async function persistAndTruncateToolResult(
   // Reserve budget before async write; rollback on failure below.
   config.trackToolResultBytes(byteSize);
 
-  // eslint-disable-next-line no-control-regex
-  const safeCallId = path.basename(callId).replace(/\x00/g, '_');
-  if (!safeCallId || safeCallId === '.' || safeCallId === '..') {
+  const safeCallId = normalizeToolResultCallId(callId);
+  if (!safeCallId) {
     debugLogger.warn(
       `Invalid callId for disk persistence: ${JSON.stringify(callId)}`,
     );
@@ -410,10 +441,9 @@ export async function persistAndTruncateToolResult(
       bytesWritten: 0,
     };
   }
-  const toolResultsDir = config.storage.getToolResultsDir();
-  const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
-
   try {
+    const toolResultsDir = config.storage.getToolResultsDir();
+    const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
     await fs.mkdir(toolResultsDir, { recursive: true });
     await atomicWriteFile(outputFile, content, {
       mode: 0o600,
@@ -428,9 +458,7 @@ export async function persistAndTruncateToolResult(
       bytesWritten: byteSize,
     };
   } catch (error) {
-    // Rollback budget reservation on write failure
-    config.trackToolResultBytes(-byteSize);
-    debugLogger.warn(`Failed to persist tool result to ${outputFile}:`, error);
+    debugLogger.warn('Failed to persist tool result:', error);
     try {
       const fallback = await truncateAndSaveToFile(
         content,
@@ -439,8 +467,17 @@ export async function persistAndTruncateToolResult(
         config.getTruncateToolOutputThreshold(),
         config.getTruncateToolOutputLines(),
       );
+      if (fallback.outputFile) {
+        return {
+          content: fallback.content,
+          outputFile: fallback.outputFile,
+          bytesWritten: byteSize,
+        };
+      }
+      config.trackToolResultBytes(-byteSize);
       return { content: fallback.content, bytesWritten: 0 };
     } catch (fallbackError) {
+      config.trackToolResultBytes(-byteSize);
       debugLogger.warn('Fallback truncation also failed:', fallbackError);
       return {
         content: buildStub(content, byteSize, '(disk persistence unavailable)'),

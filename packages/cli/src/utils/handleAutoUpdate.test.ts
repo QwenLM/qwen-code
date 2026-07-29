@@ -489,6 +489,47 @@ describe('setUpdateHandler', () => {
     cleanup();
   });
 
+  it('should render update-failed with warning severity as a warning (#7049)', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-failed', {
+      message:
+        'Update check skipped (registry unreachable) — run /update to retry.',
+      severity: 'warning',
+    });
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.WARNING,
+        text: 'Update check skipped (registry unreachable) — run /update to retry.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should keep rendering update-failed as an error when severity is explicit error', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-failed', {
+      message: 'Automatic update failed. Please try updating manually.',
+      severity: 'error',
+    });
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: 'Automatic update failed. Please try updating manually.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
   it('should defer addItem when not idle (update-success)', () => {
     const isIdleRef = { current: false };
     const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);

@@ -69,6 +69,32 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('pastes long plain text as a placeholder and expands it on submit @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const pasted = `${'original '.repeat(151)}end`;
+  const placeholder = `[Pasted Content ${pasted.length} chars]`;
+  const edited = `${pasted} edited`;
+
+  await gotoSession(page, scenario, daemon);
+  await pasteComposerText(page, pasted);
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expect(editor).toHaveText(placeholder);
+
+  await page.keyboard.type(' edited');
+  await expect(editor).toHaveText(`${placeholder} edited`);
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    requestBodyRecord(firstRequest(daemon.promptRequests())),
+    edited,
+  );
+});
+
 test('keeps later SSE connections alive when an earlier one is cancelled @smoke', async ({
   page,
 }, testInfo) => {
@@ -354,6 +380,61 @@ test('gates voice dictation on the workspace voice setting @smoke', async ({
   await expect(voiceButton).toBeVisible();
 });
 
+test('loads Voice status from the active secondary workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  const secondaryCwd = '/work/secondary';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: secondaryCwd,
+    capabilities: {
+      workspaceCwd: '/work/primary',
+      features: [
+        'session_events',
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: secondaryCwd,
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    voice: { enabled: true, workspaceCwd: secondaryCwd },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await expect(
+    page.getByRole('button', { name: 'Start voice dictation' }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) =>
+            request.method === 'GET' &&
+            request.path === '/workspaces/secondary/voice',
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'GET' && request.path === '/workspace/voice',
+    ),
+  ).toBe(false);
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,
@@ -626,6 +707,20 @@ async function replaceComposerText(page: Page, text: string): Promise<void> {
     process.platform === 'darwin' ? 'Meta+A' : 'Control+A',
   );
   await page.keyboard.insertText(text);
+}
+
+async function pasteComposerText(page: Page, text: string): Promise<void> {
+  const origin = new URL(page.url()).origin;
+  await page
+    .context()
+    .grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+  await page.evaluate((clipboardText) => {
+    return navigator.clipboard.writeText(clipboardText);
+  }, text);
+  await page.locator('[data-web-shell-composer-editor] .cm-content').click();
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+V' : 'Control+V',
+  );
 }
 
 async function pasteComposerImages(page: Page, count: number): Promise<void> {

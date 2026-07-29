@@ -17,12 +17,17 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { createUserContent, FinishReason } from '@google/genai';
+import { createUserContent, FinishReason } from './genai-compat.js';
+import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import {
+  isQuotaExhaustedError,
+  formatQuotaExhaustedMessage,
+} from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -46,7 +51,9 @@ import {
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import * as fs from 'node:fs';
+import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
@@ -56,7 +63,6 @@ import {
   logApiRetry,
   logChatCompression,
 } from '../telemetry/loggers.js';
-import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
@@ -100,7 +106,10 @@ import {
   isSystemReminderContent,
 } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
-import { getCustomSystemPrompt } from './prompts.js';
+import {
+  getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
+} from './prompts.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
@@ -112,6 +121,7 @@ import {
   setToolCallPreparations,
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 
 export { InvalidStreamError };
 
@@ -162,6 +172,100 @@ function syncFunctionCallsField(
       enumerable: true,
     });
   }
+}
+
+/**
+ * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
+ * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
+ * aliases so the load-side plan redaction keeps matching sessions recorded
+ * under a pre-migration name, in lockstep with the write-side scheduler.
+ */
+function canonicalPlanToolName(toolName: string | undefined): string {
+  if (!toolName) return '';
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
+/**
+ * Single source of the pointer text that replaces an approved plan's
+ * `functionCall.args.plan` (#6237). Shared by the tool scheduler's
+ * post-approval rewrite and the load-side pass below so the two surfaces
+ * cannot drift.
+ */
+export function approvedPlanRedactionText(planPath: string): string {
+  return (
+    `[Plan approved and saved to ${planPath}. The plan text was ` +
+    `removed from the conversation after approval; read that ` +
+    `file if you need to consult it again.]`
+  );
+}
+
+/**
+ * Pure history-wide variant of the approved-plan redaction: rewrites the
+ * `plan` argument of every `exit_plan_mode` `functionCall` whose paired
+ * `functionResponse` carries an approval `llmContent` AND whose plan text
+ * equals `savedPlanContent` (the current on-disk plan file). Returns a new
+ * array when anything changed, or null when the history is untouched.
+ *
+ * Exported for tests; production callers go through
+ * `GeminiChat.setHistory` / the constructor.
+ */
+export function redactApprovedPlansInHistory(
+  history: Content[],
+  savedPlanContent: string,
+  planPath: string,
+): Content[] | null {
+  const approved = new Set<string>();
+  for (const entry of history) {
+    if (!entry?.parts) continue;
+    for (const part of entry.parts) {
+      const fr = part.functionResponse;
+      if (
+        !fr?.id ||
+        canonicalPlanToolName(fr.name) !== ToolNames.EXIT_PLAN_MODE
+      )
+        continue;
+      const output = (fr.response as { output?: unknown } | undefined)?.[
+        'output'
+      ];
+      if (
+        typeof output === 'string' &&
+        PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES.some((prefix) =>
+          output.startsWith(prefix),
+        )
+      ) {
+        approved.add(fr.id);
+      }
+    }
+  }
+  if (approved.size === 0) return null;
+
+  let changed = false;
+  const out = history.map((entry) => {
+    if (entry?.role !== 'model' || !entry.parts) return entry;
+    let entryChanged = false;
+    const parts = entry.parts.map((part) => {
+      const fc = part.functionCall;
+      if (
+        !fc?.id ||
+        canonicalPlanToolName(fc.name) !== ToolNames.EXIT_PLAN_MODE
+      )
+        return part;
+      if (!approved.has(fc.id)) return part;
+      if ((fc.args ?? {})['plan'] !== savedPlanContent) return part;
+      entryChanged = true;
+      return {
+        ...part,
+        functionCall: {
+          ...fc,
+          args: { ...fc.args, plan: approvedPlanRedactionText(planPath) },
+        },
+      };
+    });
+    if (!entryChanged) return entry;
+    changed = true;
+    return { ...entry, parts };
+  });
+  return changed ? out : null;
 }
 
 /**
@@ -1546,6 +1650,7 @@ export class GeminiChat {
    * can't, since compression shrinks history independently of the push.
    */
   private userContentPushCount = 0;
+  private manualPlanExitNoticesEnabled = false;
 
   /**
    * Reset both partial-push markers in lockstep. Every history-mutation
@@ -1592,6 +1697,11 @@ export class GeminiChat {
     private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
+    this.redactApprovedPlansFromLoadedHistory();
+  }
+
+  enableManualPlanExitNotices(): void {
+    this.manualPlanExitNoticesEnabled = true;
   }
 
   /**
@@ -1734,7 +1844,6 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.lastOutputTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
@@ -1831,7 +1940,6 @@ export class GeminiChat {
       }),
     );
     this.setHistory(newHistory);
-    clearDetailedSpanState();
     this.lastPromptTokenCount = adjustedTokenCount;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
@@ -1899,7 +2007,9 @@ export class GeminiChat {
     model: string,
     params: SendMessageParameters,
     prompt_id: string,
+    goalContext?: GoalTurnPermit,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
       ? await this.config
@@ -1934,6 +2044,8 @@ export class GeminiChat {
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
+    let manualPlanExitNoticeVersion: number | undefined;
+    let manualPlanExitNoticeText: string | undefined;
 
     // Determine the ceiling for this turn's output request. The clamp below
     // (see clampOutputTokensToWindow) sizes the actual max_tokens to the room
@@ -1976,7 +2088,30 @@ export class GeminiChat {
       // the upcoming prompt — closes the "first send after inherited history"
       // gap where `lastPromptTokenCount === 0` and the gate would otherwise
       // see only the stale prior-turn count (0).
-      const userContent = createUserContent(params.message);
+      let userContent = createUserContent(params.message);
+      const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
+      if (
+        toolOutputBudget !== undefined &&
+        Number.isFinite(toolOutputBudget) &&
+        userContent.parts
+      ) {
+        const [guarded] = enforceFunctionResponseBudget(
+          [
+            {
+              callId: 'send-boundary',
+              toolName: 'tool-response-batch',
+              responseParts: userContent.parts,
+            },
+          ],
+          toolOutputBudget,
+        );
+        if (guarded.responseParts !== userContent.parts) {
+          debugLogger.warn(
+            `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
+          );
+          userContent = { ...userContent, parts: guarded.responseParts };
+        }
+      }
 
       // Hard-tier rescue: when the estimated prompt size is at or above the
       // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
@@ -2135,6 +2270,25 @@ export class GeminiChat {
         });
       }
 
+      if (this.manualPlanExitNoticesEnabled) {
+        const notice = this.config.takePendingManualPlanExitNotice();
+        if (notice) {
+          manualPlanExitNoticeVersion = notice.version;
+          manualPlanExitNoticeText = getManualPlanExitSystemReminder(
+            notice.currentMode,
+          );
+          userContent = {
+            ...userContent,
+            parts: [
+              ...(userContent.parts ?? []),
+              {
+                text: manualPlanExitNoticeText,
+              },
+            ],
+          };
+        }
+      }
+
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       currentUserContent = userContent;
@@ -2223,6 +2377,11 @@ export class GeminiChat {
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
+      if (manualPlanExitNoticeVersion !== undefined) {
+        this.config.restorePendingManualPlanExitNotice(
+          manualPlanExitNoticeVersion,
+        );
+      }
       streamDoneResolver!();
       throw error;
     }
@@ -2273,6 +2432,11 @@ export class GeminiChat {
           : undefined;
         const maxRateLimitRetries =
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+        const retryInitialDelayMs =
+          cgConfig?.retryInitialDelayMs ??
+          RATE_LIMIT_RETRY_OPTIONS.initialDelayMs;
+        const retryMaxDelayMs =
+          cgConfig?.retryMaxDelayMs ?? RATE_LIMIT_RETRY_OPTIONS.maxDelayMs;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
         // Max output tokens escalation: when no user/env override is set and
@@ -2318,6 +2482,7 @@ export class GeminiChat {
               params,
               prompt_id,
               requestOverrides,
+              turnGoalContext,
             );
 
             lastFinishReason = undefined;
@@ -2347,6 +2512,26 @@ export class GeminiChat {
               extraRetryErrorCodes,
             });
 
+            // Permanent quota exhaustion (e.g. Bailian token-plan "1-week
+            // quota has been exhausted, will reset at ...") can arrive
+            // mid-stream as a StreamContentError, bypassing retryWithBackoff
+            // (which only wraps stream establishment). Fast-fail before the
+            // rate-limit branch: its 429 code would otherwise schedule a 1-5
+            // minute delay on an error that cannot succeed until the reset
+            // time. Throws a plain Error (no .status) and skips model
+            // fallback, matching the retryWithBackoff fast-fail.
+            if (isQuotaExhaustedError(error)) {
+              debugLogger.warn('Quota exhausted mid-stream, fast-failing', {
+                retryPath: 'stream',
+                retryDecision: 'fail-fast',
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
+              });
+              throw new Error(formatQuotaExhaustedMessage(error), {
+                cause: error,
+              });
+            }
+
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
@@ -2367,6 +2552,8 @@ export class GeminiChat {
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
+                  initialDelayMs: retryInitialDelayMs,
+                  maxDelayMs: retryMaxDelayMs,
                   error,
                 });
                 const message = parseAndFormatApiError(
@@ -2490,6 +2677,29 @@ export class GeminiChat {
                     // tryCompress stops resetting it.
                     self.popPendingPartialAssistantTurn();
 
+                    // Reactive compression replaces the committed user turn.
+                    // Keep its one-shot notice in the rebuilt retry request.
+                    const noticeText = manualPlanExitNoticeText;
+                    if (
+                      noticeText &&
+                      !self.history.some((content) =>
+                        content.parts?.some((part) =>
+                          part.text?.includes(noticeText),
+                        ),
+                      )
+                    ) {
+                      const lastContent = self.history.at(-1);
+                      if (lastContent?.role === 'user') {
+                        lastContent.parts = [
+                          ...(lastContent.parts ?? []),
+                          { text: noticeText },
+                        ];
+                      } else {
+                        self.history.push(
+                          createUserContent([{ text: noticeText }]),
+                        );
+                      }
+                    }
                     requestContents = self.getRequestHistoryForRoute(
                       currentUserContent,
                       requestModalities,
@@ -2681,6 +2891,7 @@ export class GeminiChat {
                 attemptState.params,
                 prompt_id,
                 requestOverrides,
+                turnGoalContext,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3097,6 +3308,7 @@ export class GeminiChat {
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
+                    turnGoalContext,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -3250,6 +3462,7 @@ export class GeminiChat {
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
     },
+    goalContext?: GoalTurnPermit,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3286,6 +3499,15 @@ export class GeminiChat {
         // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
         if (isRateLimitError(error, extraRetryErrorCodes)) return true;
 
+        // Transient network errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP
+        // status and would otherwise fall through every predicate above.
+        if (
+          classifyRetryError(error, { extraRetryErrorCodes }).kind ===
+          'transport'
+        ) {
+          return true;
+        }
+
         return false;
       },
       authType,
@@ -3317,7 +3539,7 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse);
+    return this.processStreamResponse(model, streamResponse, goalContext);
   }
 
   private async *makeFallbackStream(
@@ -3328,6 +3550,7 @@ export class GeminiChat {
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
+    goalContext?: GoalTurnPermit,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
@@ -3335,6 +3558,7 @@ export class GeminiChat {
       params,
       prompt_id,
       { contentGenerator, retryAuthType, retryErrorCodes },
+      goalContext,
     );
 
     for await (const chunk of stream) {
@@ -3528,6 +3752,124 @@ export class GeminiChat {
     this.clearPendingPartialState();
   }
 
+  /**
+   * Replaces the `plan` argument of an `exit_plan_mode` `functionCall` in
+   * history with a short reference, keeping every other part and argument
+   * intact.
+   *
+   * The full plan text a model submits to `exit_plan_mode` stays in history
+   * as its own tool-call arguments; on long conversations models
+   * occasionally regurgitate chunks of that blob in later responses
+   * (#6237). Once the plan is approved it is persisted to disk by
+   * `Config.savePlan`, so the in-context copy can be swapped for a pointer
+   * without losing information. Rejected plans are left untouched — the
+   * model needs the text to revise them.
+   *
+   * When `expectedPlan` is provided the rewrite additionally requires the
+   * in-history plan to equal it byte-for-byte. Callers pass the on-disk
+   * plan-file content here so the pointer can never claim a save that
+   * failed (`savePlanBestEffort` swallows filesystem errors) or reference
+   * a file that holds a different plan.
+   *
+   * The entry is replaced immutably at the same index; the partial-push
+   * markers compare by index and role, so this cannot desync them.
+   *
+   * @returns true when a matching functionCall was found and rewritten.
+   */
+  redactApprovedPlanFromHistory(
+    callId: string,
+    replacement: string,
+    expectedPlan?: string,
+  ): boolean {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (entry?.role !== 'model' || !entry.parts) continue;
+      const partIdx = entry.parts.findIndex(
+        (part) =>
+          part.functionCall?.id === callId &&
+          canonicalPlanToolName(part.functionCall.name) ===
+            ToolNames.EXIT_PLAN_MODE,
+      );
+      if (partIdx === -1) continue;
+      const part = entry.parts[partIdx]!;
+      const functionCall = part.functionCall!;
+      const plan = (functionCall.args ?? {})['plan'];
+      if (typeof plan !== 'string') {
+        return false;
+      }
+      if (expectedPlan !== undefined && plan !== expectedPlan) {
+        return false;
+      }
+      const newParts = [...entry.parts];
+      newParts[partIdx] = {
+        ...part,
+        functionCall: {
+          ...functionCall,
+          args: { ...functionCall.args, plan: replacement },
+        },
+      };
+      this.history[i] = { ...entry, parts: newParts };
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Read-side counterpart of {@link redactApprovedPlanFromHistory}: the
+   * chat-recording JSONL captured the assistant turn (with the full plan
+   * argument) before the tool ran, so a `--resume` / `--continue` reload
+   * re-feeds the plan text the in-session redaction already removed
+   * (#6237). Every wholesale history load re-applies the redaction to
+   * approved `exit_plan_mode` calls.
+   *
+   * Only calls whose in-history plan matches the current on-disk plan file
+   * are rewritten — same never-lie rule as the write side. With several
+   * approved plans in one session the file holds only the last one, so
+   * earlier calls rehydrate unredacted; safe, just not minimal.
+   */
+  private redactApprovedPlansFromLoadedHistory(): void {
+    const hasPlanCall = this.history.some((entry) =>
+      entry?.parts?.some(
+        (part) =>
+          canonicalPlanToolName(part.functionCall?.name) ===
+          ToolNames.EXIT_PLAN_MODE,
+      ),
+    );
+    if (!hasPlanCall) return;
+    let planPath: string;
+    let savedPlan: string;
+    try {
+      planPath = this.config.getPlanFilePath();
+      savedPlan = fs.readFileSync(planPath, 'utf-8');
+    } catch (err) {
+      // No plan file (never saved, or save failed): leave history alone —
+      // never swap plan text for a pointer to a file that is not there.
+      // Logged (unlike a bare swallow) so a --resume that silently skips
+      // the redaction is traceable under DEBUG.
+      debugLogger.debug(
+        `Skipping load-side plan redaction, plan file unavailable: ${err}`,
+      );
+      return;
+    }
+    const redacted = redactApprovedPlansInHistory(
+      this.history,
+      savedPlan,
+      planPath,
+    );
+    if (redacted) {
+      this.history = redacted;
+    } else {
+      // hasPlanCall was true, so a null here means every exit_plan_mode
+      // call was skipped (unapproved, id-less, or plan text differing
+      // from the saved file) — trace it for "plan still in history"
+      // triage, mirroring the write side.
+      debugLogger.debug(
+        `Load-side plan redaction left history unchanged: no approved ` +
+          `exit_plan_mode call matches the plan file at ${planPath}.`,
+      );
+    }
+  }
+
   setHistory(history: Content[]): void {
     this.history = history;
     // History replacement (compression, /clear, --resume reload) wipes
@@ -3538,6 +3880,7 @@ export class GeminiChat {
     // push, corrupting the conversation. Drop the paired deferred-record
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
+    this.redactApprovedPlansFromLoadedHistory();
   }
 
   truncateHistory(keepCount: number): void {
@@ -3661,6 +4004,7 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    goalContext?: GoalTurnPermit,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -3975,6 +4319,7 @@ export class GeminiChat {
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
         contextWindowSize,
+        ...(goalContext ? { goalContext: { ...goalContext } } : {}),
       };
       if (streamError !== null) {
         // Stream-error + tool-use partial: defer the JSONL append until

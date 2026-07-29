@@ -4,23 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
   useStreamingState,
-  useTranscriptBlocks,
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   useWorkspaceActions,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../adapters/types';
+import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
-import { useMessages } from '../hooks/useMessages';
+import { useWebShellCustomization } from '../customization';
+import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from '../constants/sessions';
+import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTranscriptBlocks';
+import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
@@ -43,6 +50,10 @@ import {
 } from '../utils/workspace';
 import { workspaceAccentColor } from '../utils/workspaceColor';
 import {
+  resolveVoiceWorkspaceTarget,
+  type VoiceStatusRevision,
+} from '../voice/voice-workspace-target';
+import {
   getLocalCommands,
   localizeBuiltinDescriptions,
   skillDescriptionKey,
@@ -64,6 +75,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
+import { PaneHeaderActions } from './PaneHeaderActions';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
@@ -76,6 +88,16 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'model',
   'voice',
 ];
+const EMPTY_VOICE_WORKSPACE_REVISIONS: Readonly<Record<string, number>> = {};
+
+export interface PaneHeaderActionsInfo {
+  sessionId: string;
+  workspaceCwd?: string;
+}
+
+export type PaneHeaderActionsRenderer = (
+  info: PaneHeaderActionsInfo,
+) => ReactNode;
 
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
@@ -86,6 +108,24 @@ export interface ChatPaneProps {
    * multi-workspace daemon; falls back to the connection's own workspace.
    */
   workspaceCwd?: string;
+  /**
+   * Extra actions rendered in the pane header, before the built-in
+   * maximize/close buttons. Receives this pane's session id (and workspace
+   * when known) so the host can scope each control to the right session. When
+   * the actions no longer fit beside the title they collapse into a `…`
+   * overflow menu.
+   *
+   * Each child should be a single interactive element (button or link). When
+   * collapsed, the overflow menu lists the actions and proxies a click to that
+   * element, labelling each item from its accessible name (decorative
+   * `aria-hidden` glyphs are ignored). The action instance stays mounted in a
+   * hidden, off-pane slot across collapse so its state survives; because that
+   * slot is `visibility: hidden`, an action that opens a popover anchored to
+   * itself must render the popover through a portal — one rendered as a
+   * descendant of the action (or anchored to its bounding box) would be
+   * invisible or mispositioned while collapsed.
+   */
+  renderHeaderActions?: PaneHeaderActionsRenderer;
   onClose?: () => void;
   /**
    * Toggle this pane between maximized (solo, filling the whole split) and the
@@ -107,6 +147,10 @@ export interface ChatPaneProps {
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Allow prompt admission to recover a disconnected SSE stream. */
   restartSseOnPrompt?: boolean;
+  hidden?: boolean;
+  voiceUserRevision?: number;
+  voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
+  voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
 }
 
 /**
@@ -119,6 +163,7 @@ export interface ChatPaneProps {
 export function ChatPane({
   title,
   workspaceCwd,
+  renderHeaderActions,
   onClose,
   onToggleMaximize,
   isMaximized = false,
@@ -128,18 +173,56 @@ export function ChatPane({
   onPaneArtifactsChange,
   messageTurnOutputs,
   restartSseOnPrompt = false,
+  hidden = false,
+  voiceUserRevision = 0,
+  voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
+  voiceWorkspaces,
 }: ChatPaneProps) {
   const { t } = useI18n();
+  const { renderComposerFooter: CustomComposerFooter } =
+    useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
-  const messages = useMessages(t);
-  const blocks = useTranscriptBlocks();
+  const blocks = useAnimationFrameTranscriptBlocks();
+  const messages = useMessagesFromBlocks(t, blocks);
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
+  const openSubagentDetails = useCallback(
+    (tool: ACPToolCall) => {
+      if (!connection.sessionId || !onRightPanelOpen) return;
+      const rawOutput =
+        tool.rawOutput && typeof tool.rawOutput === 'object'
+          ? (tool.rawOutput as Record<string, unknown>)
+          : undefined;
+      const subagentType =
+        (typeof tool.args?.subagent_type === 'string'
+          ? tool.args.subagent_type
+          : undefined) ??
+        (typeof rawOutput?.['subagentName'] === 'string'
+          ? rawOutput['subagentName']
+          : undefined);
+      onRightPanelOpen({
+        id: `subagent:${connection.sessionId}:${tool.callId}`,
+        kind: 'subagent',
+        title: tool.title || subagentType || t('agent.label'),
+        turnId: tool.callId,
+        tool,
+        sessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+      });
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      onRightPanelOpen,
+      t,
+      workspaceCwd,
+    ],
+  );
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
@@ -155,6 +238,17 @@ export function ChatPane({
   ]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
+  const reloadTranscript = useCallback(
+    async (signal: AbortSignal) => {
+      if (!connection.sessionId) return;
+      await actions.reloadSession(signal);
+    },
+    [actions, connection.sessionId],
+  );
+  const transcriptReloadSupported =
+    connection.capabilities?.features.includes(
+      SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
   const {
     followupState,
@@ -197,6 +291,36 @@ export function ChatPane({
   pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
+  const paneVoiceCwd =
+    connection.sessionId &&
+    connection.workspaceCwd &&
+    (!workspaceCwd || workspaceCwd === connection.workspaceCwd)
+      ? connection.workspaceCwd
+      : undefined;
+  const voiceTarget = useMemo(
+    () =>
+      resolveVoiceWorkspaceTarget({
+        capabilities: workspace.capabilities,
+        intendedCwd: paneVoiceCwd,
+        sessionId: connection.sessionId,
+        workspaces: voiceWorkspaces,
+      }),
+    [
+      connection.sessionId,
+      paneVoiceCwd,
+      voiceWorkspaces,
+      workspace.capabilities,
+    ],
+  );
+  const voiceStatusRevision: VoiceStatusRevision = useMemo(
+    () => ({
+      user: voiceUserRevision,
+      workspace: voiceTarget
+        ? (voiceWorkspaceRevisions[voiceTarget.workspaceKey] ?? 0)
+        : 0,
+    }),
+    [voiceTarget, voiceUserRevision, voiceWorkspaceRevisions],
+  );
   const isResponding = streamingState !== 'idle';
   const artifactsByTurn = useMemo(
     () =>
@@ -330,11 +454,11 @@ export function ChatPane({
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
-      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
-        onRightPanelOpen({ ...request, workspaceActions });
+      if (request.kind === 'subagent') {
+        onRightPanelOpen(request);
         return;
       }
-      onRightPanelOpen(request);
+      onRightPanelOpen({ ...request, workspaceActions });
     },
     [onRightPanelOpen, workspaceActions],
   );
@@ -436,6 +560,13 @@ export function ChatPane({
         : PANE_TOOLBAR_ACTIONS,
     [showWorkspaceChip],
   );
+  const headerActions =
+    connection.sessionId && renderHeaderActions
+      ? renderHeaderActions({
+          sessionId: connection.sessionId,
+          workspaceCwd: paneWorkspaceCwd || undefined,
+        })
+      : null;
 
   // Also surface the workspace in the pane HEADER (always visible at the top),
   // not just the composer chip at the bottom — on a narrow split the composer
@@ -484,46 +615,66 @@ export function ChatPane({
         <span className={styles.title} title={headerLabel}>
           {headerLabel}
         </span>
-        {onToggleMaximize && (
-          <button
-            type="button"
-            className={styles.maximizeButton}
-            onClick={onToggleMaximize}
-            aria-pressed={isMaximized}
-            aria-label={t(
-              isMaximized ? 'splitView.restorePane' : 'splitView.maximizePane',
-            )}
-            title={t(
-              isMaximized ? 'splitView.restorePane' : 'splitView.maximizePane',
-            )}
-          >
-            {/* Same icon vocabulary as the dialog fullscreen toggle. */}
-            {isMaximized ? (
-              <Minimize2Icon size={16} aria-hidden />
-            ) : (
-              <Maximize2Icon size={16} aria-hidden />
-            )}
-          </button>
-        )}
-        {onClose && (
-          <button
-            type="button"
-            className={styles.closeButton}
-            onClick={onClose}
-            aria-label={t('splitView.closePane')}
-            title={t('splitView.closePane')}
-          >
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-              <path
-                d="M6 6l12 12M18 6L6 18"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-        )}
+        <PaneHeaderActions
+          trailing={
+            onToggleMaximize || onClose ? (
+              <>
+                {onToggleMaximize && (
+                  <button
+                    type="button"
+                    className={styles.maximizeButton}
+                    onClick={onToggleMaximize}
+                    aria-pressed={isMaximized}
+                    aria-label={t(
+                      isMaximized
+                        ? 'splitView.restorePane'
+                        : 'splitView.maximizePane',
+                    )}
+                    title={t(
+                      isMaximized
+                        ? 'splitView.restorePane'
+                        : 'splitView.maximizePane',
+                    )}
+                  >
+                    {/* Same icon vocabulary as the dialog fullscreen toggle. */}
+                    {isMaximized ? (
+                      <Minimize2Icon size={16} aria-hidden />
+                    ) : (
+                      <Maximize2Icon size={16} aria-hidden />
+                    )}
+                  </button>
+                )}
+                {onClose && (
+                  <button
+                    type="button"
+                    className={styles.closeButton}
+                    onClick={onClose}
+                    aria-label={t('splitView.closePane')}
+                    title={t('splitView.closePane')}
+                    data-testid="pane-close"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="16"
+                      height="16"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M6 6l12 12M18 6L6 18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                )}
+              </>
+            ) : null
+          }
+        >
+          {headerActions}
+        </PaneHeaderActions>
       </header>
 
       {connection.error && (
@@ -535,36 +686,46 @@ export function ChatPane({
       )}
 
       <div className={styles.body}>
-        <MessageList
-          messages={messages}
-          pendingApproval={pendingToolApproval}
-          loadingTranscript={connection.loadingTranscript}
-          catchingUp={connection.catchingUp}
-          hasOlderHistory={transcriptHistory.hasMore}
-          loadingOlderHistory={transcriptHistory.loading}
-          historyCapacityReached={transcriptHistory.capacityReached}
-          onLoadOlderHistory={transcriptHistory.loadMore}
-          isResponding={isResponding}
-          workspaceCwd={connection.workspaceCwd || ''}
-          hideSessionTimeline
-          turnFileChanges={
-            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
-          }
-          turnArtifacts={
-            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
-          }
-          turnScheduledTasks={
-            visibleTurnOutputKinds.has('scheduled_task')
-              ? scheduledTasksByTurn
-              : undefined
-          }
-          onTurnOutputOpen={handleRightPanelOpen}
-          generateContent={
-            connection.capabilities?.features.includes('session_generation')
-              ? actions.generateSessionContent
-              : undefined
-          }
-        />
+        <SubagentDetailsProvider onOpen={openSubagentDetails}>
+          <MessageList
+            messages={messages}
+            pendingApproval={pendingToolApproval}
+            loadingTranscript={connection.loadingTranscript}
+            catchingUp={connection.catchingUp}
+            hasOlderHistory={transcriptHistory.hasMore}
+            loadingOlderHistory={transcriptHistory.loading}
+            historyCapacityReached={transcriptHistory.capacityReached}
+            historyPaginationError={transcriptHistory.paginationError}
+            onLoadOlderHistory={transcriptHistory.loadMore}
+            transcriptBlockCount={blocks.length}
+            transcriptActivity={store}
+            onReloadTranscript={
+              transcriptReloadSupported ? reloadTranscript : undefined
+            }
+            isResponding={isResponding}
+            workspaceCwd={connection.workspaceCwd || ''}
+            hideSessionTimeline
+            turnFileChanges={
+              visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+            }
+            turnArtifacts={
+              visibleTurnOutputKinds.has('artifact')
+                ? artifactsByTurn
+                : undefined
+            }
+            turnScheduledTasks={
+              visibleTurnOutputKinds.has('scheduled_task')
+                ? scheduledTasksByTurn
+                : undefined
+            }
+            onTurnOutputOpen={handleRightPanelOpen}
+            generateContent={
+              connection.capabilities?.features.includes('session_generation')
+                ? actions.generateSessionContent
+                : undefined
+            }
+          />
+        </SubagentDetailsProvider>
       </div>
 
       <div className={styles.footer}>
@@ -621,11 +782,25 @@ export function ChatPane({
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
+          disabled={approvalActive}
+          voiceTarget={hidden ? undefined : voiceTarget}
+          voiceStatusRevision={voiceStatusRevision}
           followupState={followupState}
           onAcceptFollowup={onAcceptFollowup}
           onDismissFollowup={onDismissFollowup}
+          sessionId={connection.sessionId}
+          atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
         />
+        {CustomComposerFooter && (
+          <CustomComposerFooter
+            disabled={approvalActive}
+            isRunning={isResponding}
+            currentMode={connection.currentMode ?? 'default'}
+            currentModel={connection.currentModel ?? ''}
+            sessionName={connection.displayName}
+          />
+        )}
       </div>
     </section>
   );

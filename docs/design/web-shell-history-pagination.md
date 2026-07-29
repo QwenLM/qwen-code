@@ -117,6 +117,33 @@ transcript becomes scrollable or history is exhausted. A failed or partial page
 leaves the current transcript intact, stops automatic retries, and surfaces the
 existing daemon notice path.
 
+### Live-session retention
+
+The 50,000-block store limit remains a final safety cap. Web Shell also applies
+a 500-block reload trigger to sessions that remain open for a long time. Once a
+transcript exceeds that trigger, the agent is idle, no SSE event has arrived for
+two minutes, and the reader remains at the live tail, Web Shell reloads the same
+session with `historyPageSize: 100`. The old SSE subscription is closed by the
+normal session-switch cleanup. The load response supplies the bounded replay
+and its atomic `lastEventId`; the provider rebuilds the transcript and starts a
+new SSE subscription from that watermark.
+
+The existing transcript remains mounted while this background load is in
+flight. Once the bounded replay arrives, the provider resets and dispatches it
+in one store notification, so the reader never sees an empty or loading state.
+
+Loading an already attached session with a page size refreshes only its UI
+replay. It does not restart the agent or reload the model-facing conversation.
+The bridge reads a fresh persisted page while the session EventBus watermark is
+stable and returns it through the normal load envelope. If events arrive during
+that read, the bridge retries and otherwise falls back to its existing replay.
+
+After reload, upward scrolling follows the same `beforeRecordId` and opaque
+cursor pagination used by historical sessions. Scrolling upward cancels the
+reload timer. Returning to the live tail starts a new two-minute quiet period.
+Main and split views own independent providers, SSE subscriptions, timers,
+cursors, and retained windows.
+
 ## Consistency and failure handling
 
 - Initial history and the SSE watermark remain coupled through `session/load`.
@@ -138,18 +165,11 @@ existing daemon notice path.
 
 ## Affected areas
 
-| Layer                    | Change                                                       |
-| ------------------------ | ------------------------------------------------------------ |
-| Core transcript reader   | Backward cursor and exclusive record boundary                |
-| ACP replay               | Record UUID metadata and latest-suffix selection             |
-| ACP bridge / serve route | Paged-load metadata, validation, and `hasMore` propagation   |
-| TypeScript SDK           | Restore option, backward page option, restored history state |
-| WebUI provider           | Isolated prepend, page state, stale-request protection       |
-| Web Shell                | Opt-in page size and automatic top-loading behavior          |
-
-## Open questions and follow-ups
-
-- A session created and kept live for its entire lifetime has no persisted
-  record UUID on its live EventBus frames. This change pages sessions restored
-  through the new load path; adding record identity to live emission is a
-  separate recording/emission coordination change.
+| Layer                    | Change                                                     |
+| ------------------------ | ---------------------------------------------------------- |
+| Core transcript reader   | Backward cursor and exclusive record boundary              |
+| ACP replay               | Record UUID metadata and latest-suffix selection           |
+| ACP bridge / serve route | Paged-load metadata, validation, and `hasMore` propagation |
+| TypeScript SDK           | Restore page-size option and restored history state        |
+| WebUI provider           | Isolated prepend, page state, stale-request protection     |
+| Web Shell                | Opt-in page size and automatic top-loading behavior        |

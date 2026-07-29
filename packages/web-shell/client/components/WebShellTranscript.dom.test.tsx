@@ -109,6 +109,12 @@ describe('WebShellTranscript DOM integration', () => {
     );
 
     expect(container.textContent).toContain('Inspect the project');
+    expect(container.textContent).not.toContain('Thinking through it');
+    const thinkingToggle = container.querySelector<HTMLButtonElement>(
+      'button[title="Expand thinking"]',
+    );
+    expect(thinkingToggle).not.toBeNull();
+    act(() => thinkingToggle?.click());
     expect(container.textContent).toContain('Thinking through it');
     expect(container.textContent).toContain('Read package file');
     expect(container.textContent).toContain('Explore the codebase');
@@ -346,11 +352,8 @@ describe('WebShellTranscript DOM integration', () => {
     );
     const toggle = container.querySelector('[data-testid="toggle-u1"]');
     const row = toggle?.closest('[role="button"]');
-    const reasoning = Array.from(container.querySelectorAll('*')).find(
-      (element) => element.textContent === 'Hidden reasoning',
-    );
     expect(row?.getAttribute('aria-expanded')).toBe('false');
-    expect(reasoning?.closest('[data-collapsed="true"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('Hidden reasoning');
 
     act(() => {
       row?.dispatchEvent(
@@ -358,7 +361,13 @@ describe('WebShellTranscript DOM integration', () => {
       );
     });
     expect(row?.getAttribute('aria-expanded')).toBe('true');
-    expect(reasoning?.closest('[data-collapsed="true"]')).toBeNull();
+    expect(container.textContent).not.toContain('Hidden reasoning');
+    const thinkingToggle = container.querySelector<HTMLButtonElement>(
+      'button[title="Expand thinking"]',
+    );
+    expect(thinkingToggle).not.toBeNull();
+    act(() => thinkingToggle?.click());
+    expect(container.textContent).toContain('Hidden reasoning');
   });
 
   it('suppresses session and goal events while preserving their text', () => {

@@ -1,22 +1,36 @@
 import { basename, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
+  ChannelPromptOwner,
+  ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   Envelope,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -107,6 +121,8 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
     'media',
     'webhook',
     'staff_id',
+    'staffId',
+    'dingtalkId',
     'open_id',
     'union_id',
     'user_?id',
@@ -118,6 +134,10 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
   ].join('|'),
   'i',
 );
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 type ResolvedChannelMemoryIntent =
   | ChannelMemoryIntent
@@ -235,6 +255,10 @@ type PendingPermission = {
   sessionId: string;
   target: SessionTarget;
   request: PermissionRequestEvent['request'];
+  userInputPresented?: boolean;
+  settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
+  settled?: UserInputSettlementReason;
+  responsePromise?: Promise<boolean>;
 };
 type PermissionOption = PermissionRequestEvent['request']['options'][number];
 type PendingPermissionLookup =
@@ -243,6 +267,9 @@ type PendingPermissionLookup =
   | { kind: 'ambiguous'; requestIds: string[] };
 type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
+  runId: string;
+  owner?: ChannelPromptOwner;
+  activeSegmentId?: string;
   cancelled: boolean;
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
@@ -263,6 +290,7 @@ type ActivePrompt = {
   messageId?: string;
   senderId?: string;
   senderName?: string;
+  metadata?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -484,6 +512,7 @@ export abstract class ChannelBase {
       sessionId: event.sessionId,
       target,
       request: event.request,
+      settlementListeners: new Set(),
     };
     this.pendingPermissions.set(event.requestId, pending);
     const chatKey = this.permissionChatKey(target);
@@ -491,6 +520,10 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
+      const presentation = this.tryPresentUserInput(pending);
+      if (presentation && (await presentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
@@ -499,10 +532,10 @@ export abstract class ChannelBase {
       ) {
         await this.pushProactive(target, text);
       } else {
-        await this.sendMessage(target.chatId, text);
+        await this.sendThreadMessage(target.chatId, target.threadId, text);
       }
     } catch (err) {
-      this.removePendingPermission(event.requestId);
+      this.removePendingPermission(event.requestId, 'cancelled');
       try {
         await this.bridge.respondToPermission?.(event.requestId, {
           outcome: { outcome: 'cancelled' },
@@ -514,6 +547,198 @@ export abstract class ChannelBase {
       }
       throw err;
     }
+  }
+
+  private tryPresentUserInput(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const questions = this.normalizeUserQuestions(pending);
+    const submitOptionId = this.approvalOptionId(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      !questions ||
+      !submitOptionId
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelUserInputRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      questions,
+      submitOptionId,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (response) => {
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.userInputPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        const result = await this.presentUserInputRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] user input presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private normalizeUserQuestions(
+    pending: PendingPermission,
+  ): ChannelUserQuestion[] | undefined {
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const canonical = meta?.['qwenInteractionKind'] === 'user_question';
+    const identifiedLegacy =
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const rawInput = isRecord(toolCall['rawInput'])
+      ? toolCall['rawInput']
+      : undefined;
+    const rawQuestions = canonical
+      ? meta?.['qwenQuestions']
+      : identifiedLegacy
+        ? rawInput?.['questions']
+        : undefined;
+    if (
+      !Array.isArray(rawQuestions) ||
+      rawQuestions.length < 1 ||
+      rawQuestions.length > 4
+    ) {
+      return undefined;
+    }
+
+    const questions: ChannelUserQuestion[] = [];
+    for (const [index, rawQuestion] of rawQuestions.entries()) {
+      if (!isRecord(rawQuestion)) {
+        return undefined;
+      }
+      const header = rawQuestion['header'];
+      const question = rawQuestion['question'];
+      const rawOptions = rawQuestion['options'];
+      const multiSelect = rawQuestion['multiSelect'];
+      if (
+        typeof header !== 'string' ||
+        header.trim().length === 0 ||
+        typeof question !== 'string' ||
+        question.trim().length === 0 ||
+        !Array.isArray(rawOptions) ||
+        rawOptions.length < 2 ||
+        rawOptions.length > 4 ||
+        (multiSelect !== undefined && typeof multiSelect !== 'boolean')
+      ) {
+        return undefined;
+      }
+      const options: ChannelUserQuestion['options'] = [];
+      for (const rawOption of rawOptions) {
+        if (
+          !isRecord(rawOption) ||
+          typeof rawOption['label'] !== 'string' ||
+          rawOption['label'].trim().length === 0 ||
+          typeof rawOption['description'] !== 'string'
+        ) {
+          return undefined;
+        }
+        options.push({
+          label: rawOption['label'],
+          description: rawOption['description'],
+        });
+      }
+      questions.push({
+        answerKey: String(index),
+        header,
+        question,
+        options,
+        multiSelect: multiSelect ?? false,
+      });
+    }
+    return questions;
+  }
+
+  private async respondToUserInput(
+    pending: PendingPermission,
+    response: ChannelUserInputResponse,
+  ): Promise<boolean> {
+    if (pending.responsePromise) {
+      return pending.responsePromise;
+    }
+    if (
+      this.pendingPermissions.get(pending.requestId) !== pending ||
+      !this.bridge.respondToPermission
+    ) {
+      return false;
+    }
+    pending.responsePromise = Promise.resolve()
+      .then(() => this.bridge.respondToPermission!(pending.requestId, response))
+      .then(
+        (accepted) => {
+          this.removePendingPermission(
+            pending.requestId,
+            accepted
+              ? this.userInputSettlementReason(pending, response.outcome)
+              : 'cancelled',
+          );
+          return accepted;
+        },
+        (error: unknown) => {
+          this.removePendingPermission(pending.requestId, 'cancelled');
+          throw error;
+        },
+      );
+    return pending.responsePromise;
   }
 
   private permissionTargetForEvent(
@@ -544,7 +769,14 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
-    this.removePendingPermission(event.requestId);
+    const pending = this.pendingPermissions.get(event.requestId);
+    if (!pending) {
+      return;
+    }
+    this.removePendingPermission(
+      event.requestId,
+      this.userInputSettlementReason(pending, event.outcome),
+    );
   }
 
   constructor(
@@ -610,6 +842,19 @@ export abstract class ChannelBase {
   abstract disconnect(): void;
 
   /**
+   * Thread-targeted delivery. Polling adapters override this to post comments
+   * on a specific issue/PR. The default falls through to sendMessage(chatId,
+   * text), ignoring threadId — existing IM adapters are behaviorally unchanged.
+   */
+  protected async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+  ): Promise<void> {
+    await this.sendMessage(chatId, text);
+  }
+
+  /**
    * Adapter hook for task lifecycle events — the canonical way to track task
    * state (onPromptStart/onPromptEnd are retained for back-compat). The prompt
    * flow never awaits this hook; an async override's rejection is caught and
@@ -618,6 +863,12 @@ export abstract class ChannelBase {
   protected onTaskLifecycle(
     _event: ChannelTaskLifecycleEvent,
   ): void | Promise<void> {}
+
+  protected async presentUserInputRequest(
+    _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
 
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     try {
@@ -663,6 +914,13 @@ export abstract class ChannelBase {
       return;
     }
     active.cancellationEmitted = true;
+    const segment = this.closeOutputSegment(sessionId, active);
+    void this.notifyOutputSegmentEnd(
+      active.chatId,
+      sessionId,
+      segment,
+      'cancelled',
+    );
     this.emitTaskLifecycle({
       ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
       type: 'cancelled',
@@ -691,6 +949,53 @@ export abstract class ChannelBase {
       namespace: config.memoryScope?.namespace || `channel:${name}`,
       mode: config.memoryScope?.mode ?? 'metadata-only',
     };
+  }
+
+  async deliverProactive(
+    target: ChannelProactiveTarget,
+    text: string,
+  ): Promise<void> {
+    if (target.channelName !== this.name) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not own delivery target.`,
+      );
+    }
+    if (!this.supportsProactiveSend()) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not support proactive delivery.`,
+      );
+    }
+    if (
+      (target.type !== 'user' && target.type !== 'chat') ||
+      typeof target.id !== 'string' ||
+      target.id.trim().length === 0
+    ) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" received an invalid proactive target.`,
+      );
+    }
+    if (typeof text !== 'string' || text.trim().length === 0) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" received empty proactive text.`,
+      );
+    }
+    const sessionTarget: SessionTarget = {
+      channelName: target.channelName,
+      senderId: target.id,
+      chatId: target.id,
+      isGroup: target.type === 'chat',
+    };
+    if (!this.supportsProactiveDeliveryTarget(sessionTarget)) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not support this proactive target.`,
+      );
+    }
+    await this.pushProactiveDelivery(sessionTarget, text);
   }
 
   /** Built once — identity/memoryScope are frozen at construction. */
@@ -729,14 +1034,92 @@ export abstract class ChannelBase {
     sessionId: string,
     messageId?: string,
   ): ChannelTaskLifecycleBase {
+    const active = this.activePrompts.get(sessionId);
     return {
       channelName: this.name,
       chatId,
       sessionId,
       ...(messageId ? { messageId } : {}),
+      ...(active?.runId ? { runId: active.runId } : {}),
+      ...(active?.owner ? { owner: active.owner } : {}),
       identity: this.identity,
       memoryScope: this.memoryScope,
     };
+  }
+
+  private outputSegmentContext(
+    sessionId: string,
+    active: ActivePrompt,
+    segmentId: string,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const resolvedTarget =
+      target ??
+      (active.senderId
+        ? {
+            channelName: this.name,
+            chatId: active.chatId,
+            senderId: active.senderId,
+            ...(active.threadId ? { threadId: active.threadId } : {}),
+            ...(active.isGroup !== undefined
+              ? { isGroup: active.isGroup }
+              : {}),
+          }
+        : undefined);
+    if (
+      !active.owner ||
+      !resolvedTarget ||
+      resolvedTarget.channelName !== this.name
+    ) {
+      return undefined;
+    }
+    return {
+      channelName: this.name,
+      sessionId,
+      runId: active.runId,
+      segmentId,
+      owner: active.owner,
+      target: resolvedTarget,
+      ...(active.messageId ? { messageId: active.messageId } : {}),
+    };
+  }
+
+  private ensureOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+  ): ChannelOutputSegmentContext | undefined {
+    if (!active.owner) return undefined;
+    const segmentId = active.activeSegmentId ?? randomUUID();
+    const context = this.outputSegmentContext(sessionId, active, segmentId);
+    if (context) active.activeSegmentId = segmentId;
+    return context;
+  }
+
+  private closeOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const segmentId = active.activeSegmentId;
+    if (!segmentId) return undefined;
+    active.activeSegmentId = undefined;
+    return this.outputSegmentContext(sessionId, active, segmentId, target);
+  }
+
+  private async notifyOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext | undefined,
+    reason: ChannelOutputSegmentEndReason,
+  ): Promise<void> {
+    if (!segment) return;
+    try {
+      await this.onOutputSegmentEnd(chatId, sessionId, segment, reason);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
+      );
+    }
   }
 
   supportsProactiveSend(): boolean {
@@ -745,6 +1128,10 @@ export abstract class ChannelBase {
 
   protected supportsProactiveTarget(target: SessionTarget): boolean {
     return target.threadId === undefined;
+  }
+
+  protected supportsProactiveDeliveryTarget(target: SessionTarget): boolean {
+    return this.supportsProactiveTarget(target);
   }
 
   protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
@@ -760,7 +1147,25 @@ export abstract class ChannelBase {
         'Channel does not support proactive loop messages for threaded targets.',
       );
     }
-    await this.sendMessage(target.chatId, text);
+    await this.sendThreadMessage(target.chatId, target.threadId, text);
+  }
+
+  protected async pushProactiveDelivery(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.pushProactive(target, text);
+    } catch (error) {
+      if (isChannelProactiveDeliveryError(error)) {
+        throw error;
+      }
+      throw new ChannelProactiveDeliveryError(
+        'transient',
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
   }
 
   private async prepareUnattendedSessionContext(
@@ -998,6 +1403,7 @@ export abstract class ChannelBase {
       alreadyPrefixed: true,
       referencedText: undefined,
       attachments: undefined,
+      metadata: undefined,
       imageBase64: undefined,
       imageMimeType: undefined,
     };
@@ -1142,6 +1548,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1455,6 +1862,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1661,6 +2069,11 @@ export abstract class ChannelBase {
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
+        this.discardRetiredSession(
+          promptBridge,
+          sessionId,
+          `timed-out loop ${jobId}`,
+        );
         process.stderr.write(
           `[${this.name}] retired timed out loop ${jobId} session ${sessionId} after cancel did not settle\n`,
         );
@@ -1673,6 +2086,26 @@ export abstract class ChannelBase {
       );
     } finally {
       clearTimeout(graceTimer);
+    }
+  }
+
+  private discardRetiredSession(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    reason: string,
+  ): void {
+    const safeSessionId = sanitizeLogText(sessionId, 64);
+    const safeReason = sanitizeLogText(reason, 128);
+    try {
+      void promptBridge.discardSession?.(sessionId).catch((err) => {
+        process.stderr.write(
+          `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+      );
     }
   }
 
@@ -1726,9 +2159,22 @@ export abstract class ChannelBase {
         active.cancelled = true;
         this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  protected requestPromptRunCancellation(
+    sessionId: string,
+    runId: string,
+    reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
+  ): Promise<boolean> {
+    const active = this.activePrompts.get(sessionId);
+    if (!active || active.runId !== runId) {
+      return Promise.resolve(false);
+    }
+    return this.requestActivePromptCancellation(sessionId, reason);
   }
 
   private dropCollectBuffer(sessionId: string): void {
@@ -1868,20 +2314,65 @@ export abstract class ChannelBase {
     _chatId: string,
     _chunk: string,
     _sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): void {}
+
+  protected onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    _segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    if (reason === 'response_boundary') {
+      return this.onResponseBoundary(chatId, sessionId);
+    }
+  }
 
   /**
    * Called when the agent starts a new response segment for the same prompt.
    * Override to clear adapter-owned streaming buffers.
    */
-  protected onResponseBoundary(_chatId: string, _sessionId: string): void {}
+  protected onResponseBoundary(
+    _chatId: string,
+    _sessionId: string,
+  ): void | Promise<void> {}
 
   protected async sendResponseMessage(
     chatId: string,
     text: string,
-    _sessionId: string,
+    sessionId: string,
   ): Promise<void> {
-    await this.sendMessage(chatId, text);
+    const active = this.activePrompts.get(sessionId);
+    const target = this.router.getTarget(sessionId);
+    const threadId = active?.threadId ?? target?.threadId;
+    await this.sendThreadMessage(chatId, threadId, text);
+  }
+
+  /**
+   * Adapter hook for delivery-only metadata. The response delivery path can read
+   * the active prompt while it exists; adapters must not retain its raw content.
+   */
+  protected getResponseMessageId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.messageId;
+  }
+
+  protected getResponseSenderId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.senderId;
+  }
+
+  protected getResponseMetadata(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.metadata;
+  }
+
+  /**
+   * Returns the active prompt's response thread while it remains available for
+   * adapter delivery. Falls back to the session target after prompt cleanup.
+   */
+  protected getResponseThreadId(sessionId: string): string | undefined {
+    return (
+      this.activePrompts.get(sessionId)?.threadId ??
+      this.router.getTarget(sessionId)?.threadId
+    );
   }
 
   /**
@@ -1893,6 +2384,7 @@ export abstract class ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     await this.sendResponseMessage(chatId, fullText, sessionId);
   }
@@ -1913,16 +2405,18 @@ export abstract class ChannelBase {
       // to authorized senders like /clear (auth gate only — no confirm step). A
       // non-shared (1:1) session is always authorized, so behavior is unchanged.
       if (!this.isAuthorizedForSharedSession(envelope)) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Only authorized members can cancel requests in this shared session.',
         );
         return true;
       }
       const activeSessionId = this.findActiveSessionId(envelope);
       if (!activeSessionId) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'No request is currently running.',
         );
         return true;
@@ -1930,8 +2424,9 @@ export abstract class ChannelBase {
 
       const active = this.activePrompts.get(activeSessionId);
       if (!active) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'No request is currently running.',
         );
         return true;
@@ -1942,8 +2437,9 @@ export abstract class ChannelBase {
         activeSessionId,
         'cancel_command',
       );
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         cancelSucceeded
           ? 'Cancelled current request.'
           : 'Failed to cancel current request.',
@@ -1972,12 +2468,16 @@ export abstract class ChannelBase {
     return live;
   }
 
-  private removePendingPermission(requestId: string): void {
+  private removePendingPermission(
+    requestId: string,
+    reason: UserInputSettlementReason = 'resolved_outside_presenter',
+  ): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) {
       return;
     }
     this.pendingPermissions.delete(requestId);
+    this.settleUserInput(pending, reason);
     const chatKey = this.permissionChatKey(pending.target);
     const requestIds = this.pendingPermissionsByChat.get(chatKey);
     if (!requestIds) {
@@ -1991,18 +2491,65 @@ export abstract class ChannelBase {
     }
   }
 
-  private removePendingPermissionsForSession(sessionId: string): void {
+  private removePendingPermissionsForSession(
+    sessionId: string,
+    reason: UserInputSettlementReason = 'cancelled',
+  ): void {
     const requestIds = Array.from(this.pendingPermissions)
       .filter(([, pending]) => pending.sessionId === sessionId)
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
-      this.removePendingPermission(requestId);
+      this.removePendingPermission(requestId, reason);
     }
   }
 
   private clearPendingPermissions(): void {
-    this.pendingPermissions.clear();
-    this.pendingPermissionsByChat.clear();
+    for (const requestId of Array.from(this.pendingPermissions.keys())) {
+      this.removePendingPermission(requestId, 'cancelled');
+    }
+  }
+
+  private settleUserInput(
+    pending: PendingPermission,
+    reason: UserInputSettlementReason,
+  ): void {
+    if (pending.settled) {
+      return;
+    }
+    pending.settled = reason;
+    const listeners = Array.from(pending.settlementListeners);
+    pending.settlementListeners.clear();
+    for (const listener of listeners) {
+      try {
+        listener(reason);
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] user input settlement listener failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+      }
+    }
+  }
+
+  private userInputSettlementReason(
+    pending: PendingPermission,
+    outcome: PermissionResolvedEvent['outcome'],
+  ): UserInputSettlementReason {
+    if (outcome?.outcome === 'cancelled') {
+      return 'cancelled';
+    }
+    if (outcome?.outcome === 'selected') {
+      const selected = pending.request.options.find(
+        (option) => option.optionId === outcome.optionId,
+      );
+      if (
+        selected?.kind === 'reject_once' ||
+        (selected?.optionId === 'cancel' &&
+          (selected as { kind?: string }).kind === undefined)
+      ) {
+        return 'cancelled';
+      }
+    }
+    return 'resolved_outside_presenter';
   }
 
   private pendingPermissionForEnvelope(
@@ -2052,6 +2599,8 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
+      (!pending.userInputPresented ||
+        pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
     );
@@ -2154,8 +2703,9 @@ export abstract class ChannelBase {
     decision: 'approve' | 'approve-always' | 'deny',
   ): Promise<boolean> {
     if (!this.isAuthorizedForSharedSession(envelope)) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Only authorized members can answer permission requests in this shared session.',
       );
       return true;
@@ -2172,15 +2722,17 @@ export abstract class ChannelBase {
           return `- ${sanitizeQuotedText(id, 128)}${title}`;
         })
         .join('\n');
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         `Multiple permission requests are pending for this chat. Reply with /${decision} <request-id>.\n${requestList}`,
       );
       return true;
     }
     if (lookup.kind === 'none') {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         lookup.explicit
           ? 'No pending permission request with that id for this chat.'
           : 'No pending permission request for this chat.',
@@ -2188,14 +2740,22 @@ export abstract class ChannelBase {
       return true;
     }
     if (!this.bridge.respondToPermission) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Permission relay is not available for this session.',
       );
       return true;
     }
 
     const { pending } = lookup;
+    if (pending.userInputPresented && decision !== 'deny') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+      );
+      return true;
+    }
     const response = (() => {
       if (decision === 'deny') {
         return this.denialResponse(pending);
@@ -2209,8 +2769,9 @@ export abstract class ChannelBase {
         : undefined;
     })();
     if (!response) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         decision === 'approve-always'
           ? 'This permission request has no always-allow option.'
           : 'This permission request has no approvable option.',
@@ -2220,24 +2781,25 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = await this.bridge.respondToPermission(
-        pending.requestId,
-        response,
-      );
+      accepted = pending.userInputPresented
+        ? await this.respondToUserInput(pending, response)
+        : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
         `[${this.name}] permission response failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
       );
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Failed to answer the permission request.',
       );
       return true;
     }
     this.removePendingPermission(pending.requestId);
-    await this.sendMessage(
+    await this.sendThreadMessage(
       envelope.chatId,
+      envelope.threadId,
       accepted
         ? decision === 'approve'
           ? 'Permission approved.'
@@ -2280,7 +2842,7 @@ export abstract class ChannelBase {
             id,
             (this.sessionGenerations.get(id) ?? 0) + 1,
           );
-          this.removePendingPermissionsForSession(id);
+          this.removePendingPermissionsForSession(id, 'run_cancelled');
           // Cancel an in-flight turn (and drop its buffered follow-ups) before
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
@@ -2362,13 +2924,19 @@ export abstract class ChannelBase {
             // bumped value — reclaim it immediately.
             this.sessionGenerations.delete(id);
           }
+          this.discardRetiredSession(this.bridge, id, 'cleared');
         }
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
-        await this.sendMessage(envelope.chatId, 'No active session to clear.');
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'No active session to clear.',
+        );
       }
     };
 
@@ -2378,15 +2946,17 @@ export abstract class ChannelBase {
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
       if (!this.isAuthorizedForSharedSession(envelope)) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Only authorized members can clear this shared session.',
         );
         return true;
       }
       if (this.isSharedSession(envelope) && args.toLowerCase() !== 'confirm') {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
         );
         return true;
@@ -2413,8 +2983,9 @@ export abstract class ChannelBase {
     // leaks the workspace basename, so non-members shouldn't see it either.
     this.registerCommand('who', async (envelope) => {
       if (!this.isAuthorizedForSharedSession(envelope)) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Only authorized members can view this shared session.',
         );
         return true;
@@ -2439,8 +3010,9 @@ export abstract class ChannelBase {
             : envelope.isGroup
               ? ' (private to you)'
               : '';
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         [
           `Channel: ${this.name}`,
           // Identity/memory lines only for channels that opted in — keep
@@ -2514,7 +3086,11 @@ export abstract class ChannelBase {
       }
 
       lines.push('', 'Send any text to chat with the agent.');
-      await this.sendMessage(envelope.chatId, lines.join('\n'));
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        lines.join('\n'),
+      );
       return true;
     });
 
@@ -2522,8 +3098,9 @@ export abstract class ChannelBase {
       // For a shared session, gate it to authorized senders like /who — /status
       // reports session & access state, so non-members shouldn't read it either.
       if (!this.isAuthorizedForSharedSession(envelope)) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Only authorized members can view this shared session.',
         );
         return true;
@@ -2546,7 +3123,11 @@ export abstract class ChannelBase {
             ]
           : []),
       ];
-      await this.sendMessage(envelope.chatId, lines.join('\n'));
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        lines.join('\n'),
+      );
       return true;
     });
 
@@ -2560,12 +3141,17 @@ export abstract class ChannelBase {
     args: string,
   ): Promise<boolean> {
     if (!this.loopController) {
-      await this.sendMessage(envelope.chatId, 'Loops are not available.');
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Loops are not available.',
+      );
       return true;
     }
     if (!this.isAuthorizedForSharedSession(envelope)) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Only authorized members can use loops in this shared session.',
       );
       return true;
@@ -2582,8 +3168,9 @@ export abstract class ChannelBase {
       case 'cancel':
         return this.handleLoopCancel(envelope, rest[0]);
       default:
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
         );
         return true;
@@ -2596,15 +3183,17 @@ export abstract class ChannelBase {
   ): Promise<boolean> {
     if (!this.loopController) return true;
     if (!this.supportsProactiveSend()) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'This channel does not support proactive loop messages.',
       );
       return true;
     }
     if (this.config.sessionScope === 'single') {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Loops are not supported when sessionScope is single.',
       );
       return true;
@@ -2612,8 +3201,9 @@ export abstract class ChannelBase {
 
     const parsed = parseLoopAddArgs(args);
     if (!parsed) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Usage: /loop add "<cron>" <prompt>',
       );
       return true;
@@ -2622,8 +3212,9 @@ export abstract class ChannelBase {
     try {
       this.loopController.validateCron(parsed.cron);
     } catch (err) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`,
       );
       return true;
@@ -2631,16 +3222,18 @@ export abstract class ChannelBase {
 
     const target = this.loopTargetFromEnvelope(envelope);
     if (!this.supportsProactiveTarget(target)) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'This channel does not support proactive loop messages for this chat target.',
       );
       return true;
     }
     const prompt = sanitizePromptText(parsed.prompt.trim());
     if (Array.from(prompt).length > MAX_LOOP_PROMPT_CHARS) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`,
       );
       return true;
@@ -2676,14 +3269,19 @@ export abstract class ChannelBase {
       }
     }
     if (!job) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         `Too many loops for this chat. Cancel an existing loop before adding another.`,
       );
       return true;
     }
 
-    await this.sendMessage(envelope.chatId, `Loop ${job.id}: ${job.cron}`);
+    await this.sendThreadMessage(
+      envelope.chatId,
+      envelope.threadId,
+      `Loop ${job.id}: ${job.cron}`,
+    );
     return true;
   }
 
@@ -2809,11 +3407,16 @@ export abstract class ChannelBase {
       this.loopTargetFromEnvelope(envelope),
     );
     if (jobs.length === 0) {
-      await this.sendMessage(envelope.chatId, 'No loops.');
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'No loops.',
+      );
       return true;
     }
-    await this.sendMessage(
+    await this.sendThreadMessage(
       envelope.chatId,
+      envelope.threadId,
       jobs.map((job) => this.formatLoopListLine(job)).join('\n'),
     );
     return true;
@@ -2825,7 +3428,11 @@ export abstract class ChannelBase {
   ): Promise<boolean> {
     if (!this.loopController) return true;
     if (!id) {
-      await this.sendMessage(envelope.chatId, 'Usage: /loop inspect <id>');
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Usage: /loop inspect <id>',
+      );
       return true;
     }
     const jobs = await this.loopController.listForTarget(
@@ -2834,7 +3441,11 @@ export abstract class ChannelBase {
     );
     const job = jobs.find((candidate) => candidate.id === id);
     if (!job) {
-      await this.sendMessage(envelope.chatId, `No loop ${id}.`);
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `No loop ${id}.`,
+      );
       return true;
     }
 
@@ -2857,7 +3468,11 @@ export abstract class ChannelBase {
       lines.push(`Last result: ${job.lastResultPreview}`);
     }
     lines.push(`Prompt: ${job.prompt}`);
-    await this.sendMessage(envelope.chatId, lines.join('\n'));
+    await this.sendThreadMessage(
+      envelope.chatId,
+      envelope.threadId,
+      lines.join('\n'),
+    );
     return true;
   }
 
@@ -2893,7 +3508,11 @@ export abstract class ChannelBase {
   ): Promise<boolean> {
     if (!this.loopController) return true;
     if (!id) {
-      await this.sendMessage(envelope.chatId, 'Usage: /loop cancel <id>');
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Usage: /loop cancel <id>',
+      );
       return true;
     }
     const jobs = await this.loopController.listForTarget(
@@ -2902,12 +3521,17 @@ export abstract class ChannelBase {
     );
     const match = jobs.find((job) => job.id === id);
     if (!match) {
-      await this.sendMessage(envelope.chatId, `No loop ${id}.`);
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `No loop ${id}.`,
+      );
       return true;
     }
     const disabled = await this.loopController.disable(id);
-    await this.sendMessage(
+    await this.sendThreadMessage(
       envelope.chatId,
+      envelope.threadId,
       disabled ? `Cancelled loop ${id}.` : `Failed to cancel loop ${id}.`,
     );
     return true;
@@ -3093,8 +3717,9 @@ export abstract class ChannelBase {
     envelope: Envelope,
   ): Promise<ChannelMemoryCallbacks | undefined> {
     if (!this.channelMemory) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'Channel memory is not configured for this channel.',
       );
       return undefined;
@@ -3129,10 +3754,12 @@ export abstract class ChannelBase {
   private async handleChannelMemoryIntent(
     envelope: Envelope,
     intent: ResolvedChannelMemoryIntent,
+    options: { suppressSaveConfirmation?: boolean } = {},
   ): Promise<void> {
     if (intent.kind === 'no_match') {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         'No matching channel memory entry.',
       );
       return;
@@ -3152,15 +3779,17 @@ export abstract class ChannelBase {
           envelope,
           this.channelMemoryErrorMessage(error),
         );
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
       }
       const selected = this.entriesForChannelMemoryIds(entries, intent.ids);
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         [
           'Multiple channel memory entries match:',
           ...this.renderChannelMemoryCandidates(selected),
@@ -3183,15 +3812,17 @@ export abstract class ChannelBase {
           envelope,
           this.channelMemoryErrorMessage(error),
         );
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
       }
       const selected = this.entriesForChannelMemoryIds(entries, intent.ids);
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         [
           'Channel memory (page 1/1):',
           ...this.renderChannelMemoryCandidates(selected),
@@ -3215,8 +3846,9 @@ export abstract class ChannelBase {
           ? this.takePendingChannelMemoryMutation(envelope, 'update')
           : this.takePendingChannelMemoryMutation(envelope, 'remove');
       if (!pending) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           intent.kind === 'update_confirm'
             ? 'No pending channel memory update. Start a new update request first.'
             : 'No pending channel memory removal. Start a new removal request first.',
@@ -3254,8 +3886,9 @@ export abstract class ChannelBase {
           envelope,
           message,
         );
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           message === 'Channel memory entry changed'
             ? 'That channel memory entry changed since it was selected. View channel memory and start the operation again.'
             : `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
@@ -3263,15 +3896,17 @@ export abstract class ChannelBase {
         return;
       }
       if (!changed) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `No channel memory entry ${pending.id}.`,
         );
         return;
       }
       this.invalidateUnattendedMemory(envelope);
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         `Channel memory ${pending.id} ${isUpdate ? 'updated' : 'removed'}.`,
       );
       return;
@@ -3333,8 +3968,9 @@ export abstract class ChannelBase {
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
         this.logChannelMemoryError('save', envelope, message);
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
@@ -3342,10 +3978,18 @@ export abstract class ChannelBase {
       if (result.changed) {
         this.invalidateUnattendedMemory(envelope);
       }
+      // When the save is a side-effect of a message that continues to the
+      // agent, skip the confirmation: the agent's reply is the single
+      // response, and a bot-injected "memory saved" message would read as a
+      // separate turn. Failures above still surface unconditionally.
+      if (options.suppressSaveConfirmation) {
+        return;
+      }
       if (result.added.length > 0) {
         const ids = result.added.map((entry) => entry.id);
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           result.duplicateIds.length > 0
             ? `Channel memory saved: ${ids.join(', ')}. Skipped duplicates: ${result.duplicateIds.join(', ')}.`
             : ids.length === 1
@@ -3353,12 +3997,17 @@ export abstract class ChannelBase {
               : `Channel memory saved: ${ids.join(', ')}.`,
         );
       } else if (result.duplicateIds.length > 0) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Channel memory already contains ${result.duplicateIds.join(', ')}.`,
         );
       } else {
-        await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'Channel memory updated.',
+        );
       }
       return;
     }
@@ -3372,16 +4021,18 @@ export abstract class ChannelBase {
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
         this.logChannelMemoryError('read', envelope, message);
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
       }
       if (intent.kind === 'inspect') {
         const entry = entries.find((candidate) => candidate.id === intent.id);
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           entry
             ? `Channel memory ${entry.id}:\n${sanitizePromptText(entry.text).trim()}`
             : `No channel memory entry ${intent.id}.`,
@@ -3393,22 +4044,28 @@ export abstract class ChannelBase {
         Math.ceil(entries.length / CHANNEL_MEMORY_PAGE_SIZE),
       );
       if (intent.page > totalPages) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Channel memory page ${intent.page} does not exist.`,
         );
         return;
       }
       if (entries.length === 0) {
-        await this.sendMessage(envelope.chatId, 'No channel memory saved.');
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'No channel memory saved.',
+        );
         return;
       }
       const pageStart = (intent.page - 1) * CHANNEL_MEMORY_PAGE_SIZE;
       const lines = entries
         .slice(pageStart, pageStart + CHANNEL_MEMORY_PAGE_SIZE)
         .map((entry) => this.renderChannelMemoryCandidate(entry));
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         [`Channel memory (page ${intent.page}/${totalPages}):`, ...lines].join(
           '\n',
         ),
@@ -3439,22 +4096,25 @@ export abstract class ChannelBase {
           envelope,
           message,
         );
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Failed to ${isUpdate ? 'update' : 'remove'} channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
       }
       if (!changed) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `No channel memory entry ${id}.`,
         );
         return;
       }
       this.invalidateUnattendedMemory(envelope);
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         `Channel memory ${id} ${isUpdate ? 'updated' : 'removed'}.`,
       );
       return;
@@ -3463,8 +4123,9 @@ export abstract class ChannelBase {
     if (intent.kind === 'clear_confirm') {
       const pending = this.takePendingChannelMemoryMutation(envelope, 'clear');
       if (!pending) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'No pending clear request. Say "清空记忆" first.',
         );
         return;
@@ -3478,8 +4139,9 @@ export abstract class ChannelBase {
       } catch (error) {
         const message = this.channelMemoryErrorMessage(error);
         this.logChannelMemoryError('clear', envelope, message);
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
         );
         return;
@@ -3487,8 +4149,9 @@ export abstract class ChannelBase {
       if (result.changed) {
         this.invalidateUnattendedMemory(envelope);
       }
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
+        envelope.threadId,
         result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
       );
       return;
@@ -3534,7 +4197,7 @@ export abstract class ChannelBase {
     const key = this.channelMemoryPendingKey(envelope);
     this.pendingChannelMemoryMutationDeliveries.set(key, mutation);
     try {
-      await this.sendMessage(envelope.chatId, message);
+      await this.sendThreadMessage(envelope.chatId, envelope.threadId, message);
     } catch (error) {
       if (this.pendingChannelMemoryMutationDeliveries.get(key) === mutation) {
         this.pendingChannelMemoryMutationDeliveries.delete(key);
@@ -3775,9 +4438,11 @@ export abstract class ChannelBase {
    * Whether the resolved session is SHARED across senders. `single` collapses
    * the whole channel to one `__single__` session for EVERY sender — group OR
    * DM — so it is ALWAYS shared (even a DM maps to `__single__`). `thread` is
-   * shared only in a group (a DM maps to the lone caller's own chat). `user` is
-   * per-sender, never shared. Drives both the destructive-/clear confirm gate
-   * and the host-shell (`!`) gate.
+   * shared only in a group (a DM maps to the lone caller's own chat).
+   * `chat_thread` is always shared: it scopes by chat+thread, and a thread
+   * (issue/PR discussion) can carry multiple participants even outside a
+   * group. `user` is per-sender, never shared. Drives both the
+   * destructive-/clear confirm gate and the host-shell (`!`) gate.
    */
   private isSharedSession(envelope: Envelope): boolean {
     return this.isSharedSessionTarget(envelope);
@@ -3786,6 +4451,7 @@ export abstract class ChannelBase {
   private isSharedSessionTarget(target: { isGroup?: boolean }): boolean {
     return (
       this.config.sessionScope === 'single' ||
+      this.config.sessionScope === 'chat_thread' ||
       (target.isGroup === true && this.config.sessionScope === 'thread')
     );
   }
@@ -4135,7 +4801,11 @@ export abstract class ChannelBase {
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
-        return this.onPairingRequired(envelope.chatId, result.pairingCode)
+        return this.onPairingRequired(
+          envelope.chatId,
+          result.pairingCode,
+          envelope.threadId,
+        )
           .then(() => false)
           .catch((err: unknown) => {
             process.stderr.write(
@@ -4254,6 +4924,7 @@ export abstract class ChannelBase {
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
+    let memoryIntentFromClassifier = false;
     if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
       this.deletePendingChannelMemoryMutation(envelope);
     }
@@ -4262,10 +4933,24 @@ export abstract class ChannelBase {
       this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
       memoryIntent = await this.classifyChannelMemoryIntent(envelope);
+      memoryIntentFromClassifier = memoryIntent !== null;
     }
     if (memoryIntent) {
-      await this.handleChannelMemoryIntent(envelope, memoryIntent);
-      return;
+      // A classifier-detected `remember` rides inside a free-form message
+      // that may carry other tasks; the save is a side-effect, so the rest
+      // of the message must still reach the agent (with the confirmation
+      // suppressed — the agent's reply is the single response). Explicit
+      // memory phrases and every management intent (list/inspect/update/
+      // remove/clear and their confirmations) consume the whole message by
+      // design and keep the early return.
+      const memorySaveIsSideEffect =
+        memoryIntentFromClassifier && memoryIntent.kind === 'remember';
+      await this.handleChannelMemoryIntent(envelope, memoryIntent, {
+        suppressSaveConfirmation: memorySaveIsSideEffect,
+      });
+      if (!memorySaveIsSideEffect) {
+        return;
+      }
     }
 
     // 3. Slash command handling — before session/agent routing
@@ -4298,8 +4983,9 @@ export abstract class ChannelBase {
         );
       }
       if (envelope.isGroup) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Shell commands (`!`) are disabled in group chats.',
         );
         return;
@@ -4307,8 +4993,9 @@ export abstract class ChannelBase {
       // A single-scope DM collapses every DM to one channel-wide session, so it
       // is multi-operator too despite not being a group.
       if (this.isSharedSession(envelope)) {
-        await this.sendMessage(
+        await this.sendThreadMessage(
           envelope.chatId,
+          envelope.threadId,
           'Shell commands (`!`) are disabled in shared sessions.',
         );
         return;
@@ -4348,13 +5035,15 @@ export abstract class ChannelBase {
             result.exitCode !== null && result.exitCode !== 0
               ? `\nExit code: ${result.exitCode}`
               : '';
-          await this.sendMessage(
+          await this.sendThreadMessage(
             envelope.chatId,
+            envelope.threadId,
             `$ ${cmd}\n${output}${exitLine}`,
           );
         } catch (error) {
-          await this.sendMessage(
+          await this.sendThreadMessage(
             envelope.chatId,
+            envelope.threadId,
             `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
@@ -4443,6 +5132,10 @@ export abstract class ChannelBase {
       if (filePaths.length > 0) {
         promptText = promptText + '\n\n' + filePaths.join('\n');
       }
+    }
+
+    if (envelope.metadata) {
+      promptText = promptText + '\n\n' + sanitizePromptText(envelope.metadata);
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
@@ -4544,6 +5237,7 @@ export abstract class ChannelBase {
             // turn at the channel level (cancelled is already set above), so
             // the event reflects that intent, not the bridge RPC outcome.
             this.emitTaskCancellation(active, sessionId, 'steer');
+            this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
           }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
           // after the wind-down bound, this steered turn is wedged behind a hung
@@ -4697,6 +5391,11 @@ export abstract class ChannelBase {
         doneResolve = r;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
+        owner: {
+          kind: 'channel_user',
+          id: envelope.senderId,
+        },
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -4706,6 +5405,7 @@ export abstract class ChannelBase {
         messageId: envelope.messageId,
         senderId: envelope.senderId,
         senderName: envelope.senderName,
+        metadata: envelope.metadata,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only
@@ -4745,6 +5445,7 @@ export abstract class ChannelBase {
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
           hasStreamedText = true;
+          const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -4754,7 +5455,7 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(envelope.chatId, held, sessionId);
+          this.onResponseChunk(envelope.chatId, held, sessionId, segment);
           streamer?.push(held);
         }
       };
@@ -4777,7 +5478,13 @@ export abstract class ChannelBase {
         }
         heldChunks.length = 0;
         hasStreamedText = false;
-        this.onResponseBoundary(envelope.chatId, sessionId);
+        const segment = this.closeOutputSegment(sessionId, promptState);
+        void this.notifyOutputSegmentEnd(
+          envelope.chatId,
+          sessionId,
+          segment,
+          'response_boundary',
+        );
         streamer?.stop();
       };
       const promptBridge = this.bridge;
@@ -4804,7 +5511,16 @@ export abstract class ChannelBase {
             }
             await streamer.flush();
           } else {
-            await this.onResponseComplete(envelope.chatId, response, sessionId);
+            const segment = this.ensureOutputSegment(sessionId, promptState);
+            await this.onResponseComplete(
+              envelope.chatId,
+              response,
+              sessionId,
+              segment,
+            );
+            if (segment && promptState.activeSegmentId === segment.segmentId) {
+              promptState.activeSegmentId = undefined;
+            }
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -4813,6 +5529,13 @@ export abstract class ChannelBase {
           await this.settleCancelRequested(promptState);
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'completed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -4831,6 +5554,13 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled) {
           releaseHeldChunks();
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'failed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -4848,6 +5578,9 @@ export abstract class ChannelBase {
           process.stderr.write(
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
+        }
+        if (promptState.cancelled) {
+          return;
         }
         throw err;
       } finally {
@@ -4927,6 +5660,7 @@ export abstract class ChannelBase {
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
             attachments: undefined,
+            metadata: undefined,
             imageBase64: undefined,
             imageMimeType: undefined,
           };
@@ -4953,15 +5687,18 @@ export abstract class ChannelBase {
   protected async onPairingRequired(
     chatId: string,
     code: string | null,
+    threadId?: string,
   ): Promise<void> {
     if (code) {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         chatId,
+        threadId,
         `Your pairing code is: ${code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${code}`,
       );
     } else {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         chatId,
+        threadId,
         'Too many pending pairing requests. Please try again later.',
       );
     }

@@ -4,45 +4,67 @@
   margin: 8px 0;
   overflow: visible;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 14px;
   background: var(--card);
 }
 
+.tableShell svg,
+.columnsPopover svg {
+  stroke-width: 1.5;
+}
+
 .densityCompact {
-  --table-cell-padding: 3px 6px;
-  --table-header-padding: 5px 7px;
-  --table-detail-padding: 7px 9px;
-  --table-detail-gap: 5px;
+  --table-row-height: 40px;
+  --table-cell-padding: 7px 10px;
+  --table-cell-padding-inline: 10px;
+  --table-header-padding: 6px 10px;
+  --table-detail-padding: 4px 8px;
+  --table-detail-gap: 2px;
   --table-line-height: 1.35;
   --table-column-min-width: 72px;
   --table-column-max-width: 240px;
 }
 
 .densityStandard {
-  --table-cell-padding: 6px 8px;
-  --table-header-padding: 7px 8px;
-  --table-detail-padding: 9px 11px;
-  --table-detail-gap: 6px;
+  --table-row-height: 48px;
+  --table-cell-padding: 11px 14px;
+  --table-cell-padding-inline: 14px;
+  --table-header-padding: 8px 14px;
+  --table-detail-padding: 6px 10px;
+  --table-detail-gap: 3px;
   --table-line-height: 1.45;
 }
 
 .densityComfortable {
-  --table-cell-padding: 8px 10px;
-  --table-header-padding: 9px 10px;
-  --table-detail-padding: 11px 13px;
-  --table-detail-gap: 8px;
+  --table-row-height: 56px;
+  --table-cell-padding: 15px 18px;
+  --table-cell-padding-inline: 18px;
+  --table-header-padding: 11px 18px;
+  --table-detail-padding: 8px 12px;
+  --table-detail-gap: 4px;
   --table-line-height: 1.55;
 }
 
 .toolbar {
+  container: table-toolbar / inline-size;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
-  padding: 6px 8px;
+  box-sizing: border-box;
+  height: 38px;
+  padding: 4px 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--subtle-bg);
+  border-radius: 14px 14px 0 0;
+  background: var(--table-section-bg, var(--subtle-bg));
   font-size: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .summary {
@@ -50,8 +72,8 @@
   font-weight: 600;
 }
 
-.hint {
-  color: var(--muted-foreground);
+.toolbarSpacer {
+  flex: 1 1 auto;
 }
 
 .selection {
@@ -61,13 +83,15 @@
 
 .selectionStats {
   display: flex;
-  flex-wrap: wrap;
+  min-width: 0;
+  flex-wrap: nowrap;
   gap: 4px 10px;
   align-items: center;
   color: var(--muted-foreground);
 }
 
 .selectionMetric {
+  flex: 0 0 auto;
   white-space: nowrap;
 }
 
@@ -77,29 +101,75 @@
   font-weight: 600;
 }
 
-.copyButton {
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--foreground);
-  font: inherit;
+.selectionCopyButton {
+  height: 24px;
+  padding-inline: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.toolbarControl {
+  height: 28px;
+  padding-inline: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.densityTrigger {
+  width: auto;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 4px;
+  padding-inline: 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.densityTrigger svg,
+.densityMenu svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.5;
+}
+
+.iconButton {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
   cursor: pointer;
-  background: var(--card);
 }
 
-.copyCheck {
-  margin-right: 4px;
+.iconButton svg {
+  width: 14px;
+  height: 14px;
 }
 
-.copyButton:hover {
+.iconButton:hover {
   background: var(--subtle-bg-strong);
+  color: var(--foreground);
 }
 
 .scroller {
+  container: table-scroller / inline-size;
   max-width: 100%;
-  max-height: min(60vh, 520px);
+  max-height: min(75vh, 720px);
   overflow: auto;
+  border-radius: 0 0 13px 13px;
   outline: none;
+}
+
+.scrollerWithDetail {
+  max-height: none;
 }
 
 .scroller:focus-visible {
@@ -108,7 +178,7 @@
 }
 
 .table {
-  --action-column-width: 88px;
+  --action-column-width: 40px;
 
   width: max-content;
   min-width: 100%;
@@ -119,19 +189,16 @@
 
 .headerCell,
 .cell {
-  border-right: 1px solid var(--border);
+  box-sizing: border-box;
   border-bottom: 1px solid var(--border);
-}
-
-.headerCell:last-child,
-.cell:last-child {
-  border-right: none;
 }
 
 .headerCell {
   position: sticky;
   top: 0;
   z-index: 3;
+  height: 40px;
+  padding: 0;
   min-width: var(--table-column-min-width, 120px);
   max-width: var(--table-column-max-width, 360px);
   overflow: visible;
@@ -148,99 +215,54 @@
 
 .headerControls {
   display: flex;
-  align-items: stretch;
-  min-width: 0;
-}
-
-.headerButton {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  gap: 8px;
+  height: 100%;
   align-items: center;
-  justify-content: space-between;
-  padding: var(--table-header-padding, 7px 8px);
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
+  min-width: 0;
+  padding: var(--table-header-padding, 11px 14px);
 }
 
-.headerButton:hover,
-.filterTrigger:hover {
-  background: var(--subtle-bg-strong);
+.cell {
+  height: var(--table-row-height, 48px);
 }
 
 .headerText {
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sortIcon {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.filterTrigger {
-  flex: 0 0 28px;
+.filterTrigger,
+.sortTrigger {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   border: none;
-  border-left: 1px solid var(--border);
+  border-radius: 5px;
   background: transparent;
   color: var(--muted-foreground);
-  font: inherit;
   cursor: pointer;
+}
+
+.filterTrigger svg,
+.sortTrigger svg {
+  width: 13px;
+  height: 13px;
+}
+
+.filterTrigger:hover,
+.sortTrigger:hover {
+  background: var(--subtle-bg-strong);
+  color: var(--foreground);
 }
 
 .activeHeaderCell {
   background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
-}
-
-.reorderHandle {
-  flex: 0 0 0;
-  width: 0;
-  min-width: 0;
-  padding: 0;
-  overflow: hidden;
-  border: none;
-  border-left: 0 solid transparent;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 12px;
-  cursor: grab;
-  opacity: 0;
-  pointer-events: none;
-  transition:
-    flex-basis 120ms ease,
-    width 120ms ease,
-    opacity 120ms ease,
-    border-color 120ms ease,
-    background 120ms ease;
-}
-
-.reorderHandleVisible,
-.reorderHandle:focus-visible,
-.reorderHandle:active {
-  flex-basis: 24px;
-  width: 24px;
-  border-left-width: 1px;
-  border-left-color: var(--border);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.reorderHandle:active {
-  cursor: grabbing;
-}
-
-.reorderHandle:hover,
-.reorderHandle:focus-visible {
-  background: var(--subtle-bg-strong);
 }
 
 .resizeHandle {
@@ -264,6 +286,10 @@
 
 .filterTriggerActive {
   background: color-mix(in srgb, var(--agent-blue-500) 18%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.sortTriggerActive {
   color: var(--agent-blue-500);
 }
 
@@ -306,7 +332,7 @@
   color: var(--foreground);
   line-height: var(--table-line-height, 1.45);
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   cursor: cell;
@@ -338,16 +364,11 @@
   user-select: none;
 }
 
-.evenRow .cell {
-  background: color-mix(in srgb, var(--subtle-bg) 55%, transparent);
-}
-
 tr:hover .cell {
   background: var(--subtle-bg-strong);
 }
 
 .selectedCell,
-.evenRow .selectedCell,
 tr:hover .selectedCell {
   background: color-mix(in srgb, var(--agent-blue-500) 20%, transparent);
   box-shadow: inset 0 0 0 1px var(--agent-blue-500);
@@ -374,9 +395,11 @@ tr:hover .selectedCell {
 }
 
 .actionCell {
-  padding: 4px 6px;
+  padding: 4px;
   cursor: default;
+  line-height: 0;
   user-select: none;
+  vertical-align: middle;
 }
 
 .frozenCell {
@@ -403,11 +426,6 @@ tr:hover .selectedCell {
   background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
 }
 
-.evenRow .stickyActionCell,
-.evenRow .frozenCell {
-  background: linear-gradient(var(--subtle-bg), var(--subtle-bg)), var(--card);
-}
-
 tr:hover .stickyActionCell,
 tr:hover .frozenCell {
   background:
@@ -417,8 +435,6 @@ tr:hover .frozenCell {
 
 .stickyActionCell.selectedCell,
 .frozenCell.selectedCell,
-.evenRow .stickyActionCell.selectedCell,
-.evenRow .frozenCell.selectedCell,
 tr:hover .stickyActionCell.selectedCell,
 tr:hover .frozenCell.selectedCell {
   background:
@@ -433,52 +449,76 @@ tr:hover .frozenCell.selectedCell {
 }
 
 .rowDetailButton {
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--card);
-  color: var(--foreground);
-  font: inherit;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
   cursor: pointer;
+  vertical-align: middle;
+}
+
+.rowDetailButton svg {
+  width: 14px;
+  height: 14px;
 }
 
 .rowDetailButton:hover,
 .rowDetailButton[aria-expanded='true'] {
   background: var(--subtle-bg-strong);
+  color: var(--foreground);
 }
 
 .detailRow {
-  background: var(--subtle-bg);
+  background: var(--table-section-bg, var(--subtle-bg));
 }
 
 .detailCell {
   padding: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--subtle-bg);
+  background: var(--table-section-bg, var(--subtle-bg));
   color: var(--foreground);
+}
+
+.table tbody > tr:last-child > .cell,
+.table tbody > tr:last-child > .detailCell {
+  border-bottom: 0;
 }
 
 .detailPanel {
+  position: sticky;
+  left: 0;
   display: grid;
-  gap: var(--table-detail-gap, 6px);
+  box-sizing: border-box;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 300px));
+  justify-content: start;
+  column-gap: 24px;
+  row-gap: var(--table-detail-gap, 3px);
+  width: 100cqw;
   padding: var(--table-detail-padding, 9px 11px);
-}
-
-.detailTitle {
-  color: var(--foreground);
-  font-weight: 700;
+  padding-left: calc(
+    var(--action-column-width) + var(--table-cell-padding-inline, 14px)
+  );
 }
 
 .detailItem {
   display: grid;
-  grid-template-columns: minmax(84px, 140px) minmax(0, 1fr);
+  grid-template-columns: 72px 220px;
   gap: 8px;
   align-items: start;
+  min-width: 0;
+  padding-top: 4px;
+  line-height: 1.3;
 }
 
 .detailLabel {
   color: var(--muted-foreground);
-  font-weight: 600;
+  font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -501,4 +541,20 @@ tr:hover .frozenCell.selectedCell {
   color: var(--muted-foreground);
   font-size: 13px;
   text-align: center;
+}
+
+@container table-toolbar (max-width: 720px) {
+  .selectionMetricSecondary {
+    display: none;
+  }
+}
+
+@container table-scroller (max-width: 320px) {
+  .detailPanel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detailItem {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
 }

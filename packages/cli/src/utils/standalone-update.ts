@@ -12,10 +12,11 @@ import { Readable, Transform } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
-import { fetch } from 'undici';
+import type { Response as UndiciResponse } from 'undici';
 import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { loadUndici } from './load-undici.js';
 import { verifySignature } from './standalone-update-verify.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
 import { t } from '../i18n/index.js';
@@ -38,7 +39,6 @@ const VALID_TARGETS = new Set([
 
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
-type UndiciResponse = Awaited<ReturnType<typeof fetch>>;
 type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
 function normalizeVersion(version: string): string {
@@ -71,6 +71,9 @@ async function tryFetch(
   | { response?: undefined; error: Error }
 > {
   try {
+    // Lazy-load undici so it stays out of the eager startup closure
+    // (issue #7264).
+    const { fetch } = await loadUndici();
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
     });

@@ -36,7 +36,10 @@ const formatUpdateInstructions = vi.fn(
     return ['Manual update required. Please reinstall Qwen Code.'];
   },
 );
-vi.mock('../utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
+vi.mock('../utils/updateCheck.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/updateCheck.js')>()),
+  checkForUpdatesDetailed,
+}));
 vi.mock('../../utils/processUtils.js', () => ({
   CUSTOM_SANDBOX_IMAGE_ENV_VAR: 'QWEN_CODE_CUSTOM_SANDBOX_IMAGE',
   HOST_UPDATE_RELAUNCH_ENV_VAR: 'QWEN_CODE_HOST_UPDATE_RELAUNCH',
@@ -376,7 +379,7 @@ describe('updateCommand', () => {
       type: 'message',
       messageType: 'error',
       content:
-        'Failed to check for updates. Please check your network or registry configuration.',
+        'Failed to check for updates (registry error). Please check your network or registry configuration.',
     });
     expect(getInstallationInfo).not.toHaveBeenCalled();
   });

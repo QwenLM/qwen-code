@@ -9,7 +9,7 @@ import pkg from './package.json' with { type: 'json' };
 const COMPONENT_SCOPE =
   ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
 const COMPONENT_ROOT_SCOPE =
-  ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn])';
+  ':is([data-web-shell-root]:where([data-web-shell-shadcn]), [data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
 
 function scopeComponentCss(css: string): string {
   const root = postcss.parse(css);
@@ -153,10 +153,16 @@ export default defineConfig({
         'class-variance-authority',
         'clsx',
         'tailwind-merge',
+        'vaul',
         '@qwen-code/sdk',
         /^@qwen-code\/sdk\//,
         '@qwen-code/webui',
         /^@qwen-code\/webui\//,
+        '@datafe-open/markdown-chart',
+        '@datafe-open/markdown-chart-echarts',
+        '@datafe-open/markdown-chart-react',
+        'echarts',
+        /^echarts\//,
         'react-markdown',
         'remark-gfm',
         'remark-math',
