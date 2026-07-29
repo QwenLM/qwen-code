@@ -12729,5 +12729,104 @@ describe('GeminiChat', async () => {
       );
       expect(hasRawXml).toBe(false);
     });
+
+    it('does not recover when a structured tool call is already present', async () => {
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        name: 'list_dir',
+                        args: { path: '.' },
+                      },
+                    },
+                    { text: xml },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'list and read' },
+        'prompt-xml-guard-toolcall',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      // A structured tool call must short-circuit the fallback (no double execution).
+      const recoveredChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) =>
+          p.functionCall?.id?.startsWith('xml-recovered-'),
+        ),
+      );
+      expect(recoveredChunk).toBeUndefined();
+
+      // History retains the raw XML text (not stripped by recovery).
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(
+        lastEntry.parts?.some((p) => p.text && p.text.includes('<invoke')),
+      ).toBe(true);
+    });
+
+    it('does not recover documentation prose containing invoke examples', async () => {
+      const prose =
+        'Here is how you use the tool. First you open the file, then you read it. ' +
+        'The invoke block below shows the format. Remember to always check the path. ' +
+        'This is a documentation example for the read_file tool call format.';
+      const text =
+        prose +
+        '\n<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield xmlChunk(text, 'STOP');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'explain the tool' },
+        'prompt-xml-guard-prose',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      // The prose guard must veto recovery: no synthetic chunk is yielded.
+      const recoveredChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) =>
+          p.functionCall?.id?.startsWith('xml-recovered-'),
+        ),
+      );
+      expect(recoveredChunk).toBeUndefined();
+
+      // History retains the original prose + XML text unchanged.
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(
+        lastEntry.parts?.some((p) => p.text && p.text.includes('<invoke')),
+      ).toBe(true);
+    });
   });
 });

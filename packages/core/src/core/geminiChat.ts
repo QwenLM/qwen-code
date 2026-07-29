@@ -4290,6 +4290,10 @@ export class GeminiChat {
         debugLogger.warn(
           `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) from plain text content`,
         );
+      } else {
+        debugLogger.warn(
+          'XML tool call fallback: detected XML tool calls but recovery was rejected (prose ratio too high or no parameterized blocks)',
+        );
       }
     }
 
