@@ -383,19 +383,23 @@ jobs:
             fi
           done
 
+          # Caps count production code only: fix.md mandates a regression
+          # test per fix, so counting tests/docs would drop in-policy work.
+          PROD_EXCLUDE='(^docs/|\.md$|\.test\.|\.spec\.|__tests__/|__snapshots__/)'
+          export PROD_EXCLUDE
           MAX_FILES_PER_FIX='3'
           MAX_LINES_PER_FIX='100'
           DROPPED_COMMITS=()
           while IFS= read -r sha; do
-            FILES="$(git diff-tree --no-commit-id --name-only -r "${sha}" | wc -l | tr -d ' ')"
+            FILES="$(git diff-tree --no-commit-id --name-only -r "${sha}" | grep -c -v -E "${PROD_EXCLUDE}" || true)"
             if [[ "${FILES}" -gt "${MAX_FILES_PER_FIX}" ]]; then
-              echo "⚠️  Commit ${sha:0:7} touches ${FILES} files; cap is ${MAX_FILES_PER_FIX}. Dropping."
+              echo "⚠️  Commit ${sha:0:7} touches ${FILES} production files; cap is ${MAX_FILES_PER_FIX}. Dropping."
               DROPPED_COMMITS+=("${sha}")
               continue
             fi
-            LINES="$(git diff-tree --no-commit-id --numstat -r "${sha}" | awk '{a+=$1; d+=$2} END {print a+d+0}')"
+            LINES="$(git diff-tree --no-commit-id --numstat -r "${sha}" | awk '$3 !~ ENVIRON["PROD_EXCLUDE"] {a+=$1+$2} END {print a+0}')"
             if [[ "${LINES}" -gt "${MAX_LINES_PER_FIX}" ]]; then
-              echo "⚠️  Commit ${sha:0:7} has ${LINES} diff lines; cap is ${MAX_LINES_PER_FIX}. Dropping."
+              echo "⚠️  Commit ${sha:0:7} has ${LINES} production diff lines; cap is ${MAX_LINES_PER_FIX}. Dropping."
               DROPPED_COMMITS+=("${sha}")
             fi
           done < <(git rev-list origin/main.."${BRANCH}")

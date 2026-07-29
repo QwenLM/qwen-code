@@ -92,8 +92,9 @@ nothing worth fixing is a valid, silent outcome.
   fits the per-commit threshold below should be committed.
 - Each fix: production diff ≤ 20 lines. Tests or docs may exceed slightly, but
   the change must stay a small, single-root-cause fix.
-- Any finding whose minimal fix spans more than three files or more than one
-  hundred lines of production code is report-only, regardless of how certain
+- Any finding whose minimal fix spans more than three production files or
+  more than one hundred lines of production code (tests and docs excluded
+  from both counts) is report-only, regardless of how certain
   the finding is. The threshold is the floor, not a goal — a four-file fix is
   already past it. Report-only findings are filed as a single consolidated
   issue by the workflow after the PR is opened.
