@@ -2178,6 +2178,9 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(advertised).toBe(agentMinutes);
     const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
     expect(soft).toBeLessThan(agentMinutes);
+    // A lower bound catches the most common drift: the hard kill is
+    // raised but the soft budget is forgotten, silently wasting CI time.
+    expect(soft).toBeGreaterThanOrEqual(agentMinutes - 15);
   });
 
   // Cleanups must never descend through a PR-writable parent, and an
