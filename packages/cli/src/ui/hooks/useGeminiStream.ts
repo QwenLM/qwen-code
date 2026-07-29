@@ -2264,6 +2264,8 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ActiveGoal:
               handleActiveGoalEvent(event.value);
               break;
+            case ServerGeminiEventType.GoalState:
+              break;
             default: {
               // enforces exhaustive switch-case
               const unreachable: never = event;
