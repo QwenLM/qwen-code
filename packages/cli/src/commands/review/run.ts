@@ -162,11 +162,11 @@ export function newestArtifactSince(
 
 /**
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
- * never reached a verdict (child failed, timed out, or left no composed
- * artifact); 3 = it completed AND the caller asked --fail-on request-changes
- * AND the event is REQUEST_CHANGES. 3, not 2 — yargs exits 1 on usage errors
- * and some shells reserve 2, so a CI gate can tell "review is blocking" from
- * "the tool broke" without parsing anything.
+ * never reached a verdict (child failed, timed out with no verdict captured,
+ * or left no composed artifact); 3 = it completed AND the caller asked
+ * --fail-on request-changes AND the event is REQUEST_CHANGES. 3, not 2 — yargs
+ * exits 1 on usage errors and some shells reserve 2, so a CI gate can tell
+ * "review is blocking" from "the tool broke" without parsing anything.
  */
 export function exitCodeFor(
   completed: boolean,
@@ -373,7 +373,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   }
   const reportPath = newestArtifactSince(REVIEWS_DIR, /\.md$/, cutoffMs);
 
-  const completed = composed !== null && !timedOut;
+  const completed = composed !== null;
   const result: RunReviewResult = {
     completed,
     event: composed?.event ?? null,

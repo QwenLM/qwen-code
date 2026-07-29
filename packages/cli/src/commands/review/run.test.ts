@@ -444,6 +444,42 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it('keeps a captured verdict when the timeout fires after compose-review', async () => {
+    // The race the contract must survive: compose-review writes the verdict
+    // (Step 6) and the capture poll snapshots it, but --timeout-minutes fires
+    // before the child exits (Steps 7–9). The flag terminates a run "without a
+    // verdict", so a captured verdict still counts as completed — the kill must
+    // not flip exit 0 to 1 or suppress the verdict, and `timedOut` alone still
+    // records that the timer fired.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler({ 'timeout-minutes': 1 });
+    // The capture poll snapshots the verdict while the child still runs...
+    await vi.advanceTimersByTimeAsync(1_000);
+    // ...then the timeout fires and kills the group before the child exits.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+    child.emit('close', null, 'SIGTERM');
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.timedOut).toBe(true);
+    expect(result.event).toBe('APPROVE');
+    expect(process.exitCode).toBe(0);
+  });
+
   it('forwards a parent signal to the child group and exits 128+signum', async () => {
     // The detached child sits outside the foreground group a terminal's
     // Ctrl+C signals, and a cancelled CI job sends the parent SIGTERM.
