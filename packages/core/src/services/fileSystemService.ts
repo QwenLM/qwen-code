@@ -6,10 +6,15 @@
 
 import os from 'node:os';
 import type { Stats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
+import {
+  readTextRange,
+  type ReadTextRangeResult,
+} from '../utils/read-text-range.js';
 import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
 import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
@@ -45,6 +50,21 @@ export type CoreReadTextFileRequest = Omit<
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: Stats;
+};
+
+/**
+ * Handle-bound range read used by filesystem security boundaries. The caller
+ * owns the handle lifecycle and must pass the Stats captured from that handle.
+ */
+export type CoreReadTextFileHandleRequest = Omit<
+  CoreReadTextFileRequest,
+  'limit' | 'line' | 'maxOutputBytes' | 'stats'
+> & {
+  fileHandle: FileHandle;
+  stats: Stats;
+  line?: number;
+  limit: number;
+  maxOutputBytes: number;
 };
 
 /**
@@ -309,21 +329,40 @@ export class StandardFileSystemService implements FileSystemService {
       ...(signal !== undefined ? { signal } : {}),
       ...(stats !== undefined ? { stats } : {}),
     });
-    const detectedLineEnding =
-      readResult.lineEnding ?? detectLineEnding(readResult.content);
-    return {
-      content: readResult.content,
-      _meta: {
-        bom: readResult.bom,
-        encoding: readResult.encoding,
-        originalLineCount: readResult.originalLineCount,
-        originalLineCountExact: readResult.originalLineCountExact,
-        lineEnding: detectedLineEnding,
-        ...(readResult.truncatedByBytes !== undefined
-          ? { truncatedByBytes: readResult.truncatedByBytes }
-          : {}),
-      },
-    };
+    return toReadTextFileResponse(readResult);
+  }
+
+  async readTextFileFromHandle(
+    params: CoreReadTextFileHandleRequest,
+  ): Promise<ReadTextFileResponse> {
+    if (!isPositiveSafeInteger(params.limit)) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite limit, got ${params.limit}`,
+      );
+    }
+    if (!isPositiveSafeInteger(params.maxOutputBytes)) {
+      throw new RangeError(
+        `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
+      );
+    }
+    if (
+      params.line !== undefined &&
+      (!Number.isSafeInteger(params.line) || params.line < 0)
+    ) {
+      throw new RangeError(
+        `handle-bound text reads require a non-negative integer line, got ${params.line}`,
+      );
+    }
+    const readResult = await readTextRange({
+      path: params.path,
+      fileHandle: params.fileHandle,
+      stats: params.stats,
+      limit: params.limit,
+      maxOutputBytes: params.maxOutputBytes,
+      ...(params.line !== undefined ? { offset: params.line } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
+    });
+    return toReadTextFileResponse(readResult);
   }
 
   async writeTextFile(
@@ -354,4 +393,30 @@ export class StandardFileSystemService implements FileSystemService {
       });
     });
   }
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+function toReadTextFileResponse(
+  readResult:
+    | Awaited<ReturnType<typeof readFileWithLineAndLimit>>
+    | ReadTextRangeResult,
+): ReadTextFileResponse {
+  const detectedLineEnding =
+    readResult.lineEnding ?? detectLineEnding(readResult.content);
+  return {
+    content: readResult.content,
+    _meta: {
+      bom: readResult.bom,
+      encoding: readResult.encoding,
+      originalLineCount: readResult.originalLineCount,
+      originalLineCountExact: readResult.originalLineCountExact,
+      lineEnding: detectedLineEnding,
+      ...(readResult.truncatedByBytes !== undefined
+        ? { truncatedByBytes: readResult.truncatedByBytes }
+        : {}),
+    },
+  };
 }
