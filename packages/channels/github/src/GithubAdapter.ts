@@ -12,6 +12,14 @@ import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
+  /**
+   * Optional allowlist of GitHub notification reasons to process.
+   * When set, notifications whose `reason` is not in this list are skipped
+   * before any lane dispatch. Valid reasons: "mention", "review_requested",
+   * "assign", "author", "comment", "ci_activity", "manual", "state_change",
+   * "subscribed", "team_mention". Defaults to undefined (all reasons processed).
+   */
+  reasonFilter?: string[];
 }
 
 interface GithubCursor {
@@ -81,6 +89,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
+  /** Set form of `reasonFilter` for O(1) lookup; undefined = no filter. */
+  private reasonFilterSet: Set<string> | undefined;
 
   constructor(
     name: string,
@@ -89,6 +99,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
+    if (Array.isArray(config.reasonFilter) && config.reasonFilter.length > 0) {
+      this.reasonFilterSet = new Set(config.reasonFilter);
+    }
   }
 
   protected createInitialCursor(): GithubCursor {
@@ -223,6 +236,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
+      if (
+        this.reasonFilterSet &&
+        !this.reasonFilterSet.has(notification.reason)
+      ) {
+        continue;
+      }
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
       if (!extracted) {
         continue;

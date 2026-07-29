@@ -999,6 +999,49 @@ describe('GithubChannel', () => {
     });
   });
 
+  describe('reasonFilter', () => {
+    it('skips notifications whose reason is not in the allowlist', async () => {
+      await initWithoutLoop({
+        reasonFilter: ['mention'],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+          makeNotification({
+            reason: 'mention',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'Trigger: mention.',
+      );
+    });
+
+    it('processes all reasons when filter is empty or unset', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'subscribed',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'plain comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+  });
+
   describe('sendThreadMessage', () => {
     it('throws on invalid threadId format', async () => {
       await expect(
