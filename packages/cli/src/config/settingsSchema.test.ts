@@ -122,6 +122,17 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties
@@ -201,6 +212,19 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
+    });
+
     it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
       const timeout = getSettingsSchema().visionBridgeTimeoutMs;
 
@@ -242,6 +266,15 @@ describe('SettingsSchema', () => {
         minimum: 1,
         maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
         default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      });
+    });
+
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
       });
     });
 
@@ -408,9 +441,9 @@ describe('SettingsSchema', () => {
         getSettingsSchema().ui.properties.useTerminalBuffer;
       expect(useTerminalBuffer).toBeDefined();
       expect(useTerminalBuffer.type).toBe('boolean');
-      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.default).toBe(true);
       expect(useTerminalBuffer.showInDialog).toBe(true);
-      expect(useTerminalBuffer.requiresRestart).toBe(false);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
     });
 
     it('should expose response tokens/sec as an opt-in UI setting', () => {

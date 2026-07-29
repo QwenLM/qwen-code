@@ -77,6 +77,7 @@ These settings can be overridden by environment variables or CLI flags.
 | `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                   | URL string        | -                       |
 | `outfile`                         | `QWEN_TELEMETRY_OUTFILE`                             | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides OTLP export)                                                                                         | file path         | -                       |
 | `logPrompts`                      | `QWEN_TELEMETRY_LOG_PROMPTS`                         | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                                                                                                      | `true`/`false`    | `true`                  |
+| `userId`                          | `QWEN_TELEMETRY_USER_ID`                             | -                                                        | Stable end-user identifier written to GenAI spans as the ARMS extension `gen_ai.user.id`; prefer a pseudonymous value                  | string            | -                       |
 | `includeSensitiveSpanAttributes`  | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES`   | -                                                        | Include standard GenAI messages, instructions, tool definitions, tool arguments, and successful tool results as native span attributes | `true`/`false`    | `false`                 |
 | `sensitiveSpanAttributeMaxLength` | `QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH` | -                                                        | Maximum compact JSON string length for each sensitive native span attribute. Set lower if your backend rejects large attributes.       | `1..104857600`    | `1048576`               |
 | `resourceAttributes`              | `OTEL_RESOURCE_ATTRIBUTES` (+ `OTEL_SERVICE_NAME`)   | -                                                        | Static resource attributes attached to every exported span / log / metric. See [Resource attributes](#resource-attributes) below.      | `key=value,…`     | `{}`                    |
@@ -158,6 +159,17 @@ The per-signal endpoint environment variables also accept the standard
 OpenTelemetry names: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`.
 The `QWEN_TELEMETRY_OTLP_*` variants take precedence over the `OTEL_*` variants.
+
+**End-user identity:** `telemetry.userId` and
+`QWEN_TELEMETRY_USER_ID` are explicit opt-ins for the ARMS span attribute
+`gen_ai.user.id`. The environment variable takes precedence after both values
+are trimmed; a blank environment value falls back to settings. The identifier
+is written only to interaction, LLM, Tool, and Agent spans. It is not a Resource
+attribute, log or metric attribute, outbound Baggage value, or current
+OpenTelemetry GenAI standard field. Prefer a stable pseudonymous identifier.
+The value is resolved at startup, so configuration changes require a restart.
+Do not configure a process-wide value on a daemon or channel instance serving
+multiple end users.
 
 For detailed information about all configuration options, see the
 [Configuration Guide](../../users/configuration/settings.md).
@@ -445,6 +457,26 @@ sent to Alibaba Cloud.
    > (`/v1/traces`, `/v1/logs`, `/v1/metrics`) to the base URL. If your
    > backend uses different paths, use per-signal endpoint overrides as
    > shown in Option B.
+
+   To populate ARMS Session Analysis `User ID`, add a stable pseudonymous
+   identity as a span-level setting:
+
+   ```json
+   {
+     "telemetry": {
+       "userId": "user-079458",
+       "resourceAttributes": {
+         "acs.arms.service.feature": "genai_app"
+       }
+     }
+   }
+   ```
+
+   For container deployments, set
+   `QWEN_TELEMETRY_USER_ID=user-079458` instead. A custom
+   `telemetry.resourceAttributes.user.id` remains an unrelated Resource
+   dimension and does not populate ARMS Session Analysis; remove it when
+   migrating to the span-level setting.
 
 2. If your Alibaba Cloud endpoint requires authentication, provide OTLP
    headers through standard OpenTelemetry environment variables such as
@@ -824,16 +856,16 @@ The daemon process (long-running HTTP server mode) exposes its own metrics.
 Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each interaction is a trace root with its own `traceId`; cross-prompt correlation uses the `session.id` attribute.
 
 - `qwen-code.interaction`: Root span for each user prompt turn.
-  - **Attributes**: `session.id`, `qwen-code.prompt_id`, `qwen-code.message_type`, `qwen-code.model`, `qwen-code.approval_mode`, `interaction.sequence`, `interaction.duration_ms`, `qwen-code.turn_status` ("ok"/"error"/"cancelled")
+  - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `qwen-code.prompt_id`, `qwen-code.message_type`, `qwen-code.model`, `qwen-code.approval_mode`, `interaction.sequence`, `interaction.duration_ms`, `qwen-code.turn_status` ("ok"/"error"/"cancelled")
 
 - `qwen-code.llm_request`: Wraps a single LLM API call.
-  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`, `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
+  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.request.model`, `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
   - **Compatibility attributes**: `session.id`, `qwen-code.prompt_id`, `llm_request.context` ("subagent"/"interaction"/"standalone"), `duration_ms`, `ttft_ms`, `request_setup_ms`, `attempt`, `retry_total_delay_ms`, `sampling_ms`, `output_tokens_per_second`, `success`, `error`, `finish_reason`, `thoughts_token_count`, `subagent_name`, `error_type`, `error_status_code`
   - Standard response fields come from the provider response. Standard token fields are emitted only for provider-reported non-negative safe integers. If the provider reports only a total token count, input/output usage is omitted rather than estimated.
   - Standard request-parameter fields come from the first provider-final SDK request object after adapter defaults, overrides, unsupported-field removal, and output-window clamps. Qwen Code does not infer SDK or server defaults.
 
 - `qwen-code.tool`: Wraps the full tool lifecycle (approval wait + execution).
-  - **Attributes**: `session.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`
+  - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`
 
 - `qwen-code.tool.execution`: Wraps the tool execution phase (after approval).
   - **Attributes**: `session.id`, `duration_ms`, `success`, `error`
@@ -845,7 +877,7 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
   - **Attributes**: `session.id`, `hook_event` ("PreToolUse"/"PostToolUse"/"PostToolUseFailure"/"PostToolBatch"), `tool.name`, `tool.use_id` (optional), `is_interrupt` (boolean, optional), `duration_ms`, `success`, `should_proceed` (optional), `should_stop` (optional), `block_type` (optional), `error` (optional)
 
 - `qwen-code.subagent`: Wraps a single subagent invocation.
-  - **Attributes**: `gen_ai.operation.name` (`invoke_agent`), `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional `gen_ai.request.model`, `qwen-code.subagent.id`, `qwen-code.subagent.name`, `qwen-code.subagent.invocation_kind` ("foreground"/"fork"/"background"), `qwen-code.subagent.is_built_in`, `qwen-code.subagent.depth`, `qwen-code.subagent.status`, `qwen-code.subagent.terminate_reason`, `qwen-code.subagent.duration_ms`
+  - **Attributes**: `gen_ai.operation.name` (`invoke_agent`), `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional ARMS extension `gen_ai.user.id`, optional `gen_ai.request.model`, `qwen-code.subagent.id`, `qwen-code.subagent.name`, `qwen-code.subagent.invocation_kind` ("foreground"/"fork"/"background"), `qwen-code.subagent.is_built_in`, `qwen-code.subagent.depth`, `qwen-code.subagent.status`, `qwen-code.subagent.terminate_reason`, `qwen-code.subagent.duration_ms`
 
 #### GenAI field migration and ARMS recognition
 

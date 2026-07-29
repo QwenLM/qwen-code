@@ -380,9 +380,9 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "showScrollbar": {
           "description": "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
@@ -505,6 +505,10 @@
     "telemetry": {
       "type": "object",
       "properties": {
+        "userId": {
+          "description": "Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.",
+          "type": "string"
+        },
         "includeSensitiveSpanAttributes": {
           "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
           "type": "boolean",
@@ -1381,6 +1385,20 @@
               "type": "string",
               "default": "inherit"
             }
+          }
+        },
+        "modelGrades": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Maps semantic model grade names exposed to the Agent tool to concrete model selectors."
+        },
+        "allowedGrades": {
+          "description": "Optional whitelist of model grade names the Agent tool may use.",
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
         "maxParallelAgents": {
@@ -3113,6 +3131,11 @@
         },
         "todoStopGuard": {
           "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionWriterLease": {
+          "description": "Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
           "type": "boolean",
           "default": false
         },

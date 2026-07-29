@@ -1007,8 +1007,68 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
-/** Maximum wait for the output stream flush before transitioning the registry. */
-const PROMOTE_FLUSH_TIMEOUT_MS = 10_000;
+/**
+ * Maximum wait for the output stream flush before transitioning the
+ * registry. Shared by the promote settle path and `executeBackground`'s
+ * settle path — see `endStreamThenSettle`.
+ */
+const OUTPUT_FLUSH_TIMEOUT_MS = 10_000;
+
+/**
+ * End `stream` and run `settle` exactly once after its queued writes
+ * have been flushed to the underlying fd (`'finish'`). `stream.end()`
+ * is asynchronous — pending writes can still be in the libuv queue
+ * when it returns, so transitioning the registry before the flush
+ * lets `/tasks` consumers (and the status sidecar) observe a terminal
+ * status and read the output file BEFORE the trailing bytes are on
+ * disk, producing truncated logs. `'error'` covers a late EIO /
+ * ENOSPC racing `.end()` itself, an already-destroyed or
+ * already-finished stream short-circuits (neither event would ever
+ * fire on it), and the timer backstops a stream wedged mid-flush —
+ * whichever lands first, `settle` runs exactly once.
+ */
+function endStreamThenSettle(
+  stream: fs.WriteStream,
+  origin: 'promote' | 'background',
+  shellId: string,
+  settle: () => void,
+): void {
+  let settled = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const runOnce = () => {
+    if (settled) return;
+    settled = true;
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    settle();
+  };
+  // A destroyed or already-finished stream emits neither 'finish' nor
+  // 'error' — `.end()` on it is a silent no-op (Node only delivers
+  // ERR_STREAM_DESTROYED to an `end()` callback), so waiting would
+  // always burn the full timeout with nothing left to flush.
+  // `writableFinished`, not `writableEnded`: the latter is already
+  // true mid-flush, which is exactly the window this helper waits for.
+  if (stream.destroyed || stream.writableFinished) {
+    runOnce();
+    return;
+  }
+  try {
+    flushTimer = setTimeout(() => {
+      debugLogger.warn(
+        `${origin}: output stream flush timed out for ${shellId} after ${OUTPUT_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+      );
+      runOnce();
+    }, OUTPUT_FLUSH_TIMEOUT_MS);
+    flushTimer.unref();
+    stream.once('finish', runOnce);
+    stream.once('error', runOnce);
+    stream.end();
+  } catch (closeErr) {
+    debugLogger.warn(
+      `${origin}: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
+    );
+    runOnce();
+  }
+}
 
 /**
  * PR-2.5 slots shared between the foreground `execute()` postPromote
@@ -3422,39 +3482,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         transitionRegistry(info);
         return;
       }
-      try {
-        // `finish` fires after all queued writes have been flushed to
-        // the underlying fd. `error` covers a late EIO / ENOSPC that
-        // doesn't reach the existing `'error'` listener — race with
-        // `.end()` itself. Either way, run the transition once.
-        let transitioned = false;
-        const finalize = () => {
-          if (transitioned) return;
-          transitioned = true;
-          transitionRegistry(info);
-        };
-        const flushTimer = setTimeout(() => {
-          debugLogger.warn(
-            `promote: output stream flush timed out for ${shellId} after ${PROMOTE_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
-          );
-          finalize();
-        }, PROMOTE_FLUSH_TIMEOUT_MS);
-        flushTimer.unref();
-        stream.once('finish', () => {
-          clearTimeout(flushTimer);
-          finalize();
-        });
-        stream.once('error', () => {
-          clearTimeout(flushTimer);
-          finalize();
-        });
-        stream.end();
-      } catch (closeErr) {
-        debugLogger.warn(
-          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
-        );
-        transitionRegistry(info);
-      }
+      endStreamThenSettle(stream, 'promote', shellId, () =>
+        transitionRegistry(info),
+      );
     };
     // Drain a settle that landed BEFORE the wire installed (fast
     // commands can exit between `result.promoted` and this line).
@@ -3667,36 +3697,46 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.
+    //
+    // Same flush-ordering hazard as the promote settle path: transition
+    // the registry only after the output stream has flushed, so the
+    // status sidecar can't report a terminal state while the trailing
+    // output bytes are still in the libuv queue. The exit timestamp is
+    // captured BEFORE the flush wait — endTime records when the child
+    // exited, not when its bytes reached disk.
     void resultPromise.then(
       (result) => {
-        outputStream.end();
         const endTime = Date.now();
-        if (entryAc.signal.aborted) {
-          if (registry.get(shellId)?.status === 'running') {
-            registry.cancel(shellId, endTime);
+        endStreamThenSettle(outputStream, 'background', shellId, () => {
+          if (entryAc.signal.aborted) {
+            if (registry.get(shellId)?.status === 'running') {
+              registry.cancel(shellId, endTime);
+            }
+          } else if (
+            result.error ||
+            (result.exitCode !== null && result.exitCode !== 0) ||
+            result.signal !== null
+          ) {
+            // Non-zero exit / killed by signal / spawn error all count as failed.
+            // Treating them as `completed` would let `/tasks` (and any future
+            // model-facing notification) misreport a failed `npm test` or
+            // `false` command as a success.
+            const reason = result.error
+              ? result.error.message
+              : result.signal !== null
+                ? `terminated by signal ${result.signal}`
+                : `exited with code ${result.exitCode}`;
+            registry.fail(shellId, reason, endTime);
+          } else {
+            registry.complete(shellId, result.exitCode ?? 0, endTime);
           }
-        } else if (
-          result.error ||
-          (result.exitCode !== null && result.exitCode !== 0) ||
-          result.signal !== null
-        ) {
-          // Non-zero exit / killed by signal / spawn error all count as failed.
-          // Treating them as `completed` would let `/tasks` (and any future
-          // model-facing notification) misreport a failed `npm test` or
-          // `false` command as a success.
-          const reason = result.error
-            ? result.error.message
-            : result.signal !== null
-              ? `terminated by signal ${result.signal}`
-              : `exited with code ${result.exitCode}`;
-          registry.fail(shellId, reason, endTime);
-        } else {
-          registry.complete(shellId, result.exitCode ?? 0, endTime);
-        }
+        });
       },
       (err) => {
-        outputStream.end();
-        registry.fail(shellId, getErrorMessage(err), Date.now());
+        const endTime = Date.now();
+        endStreamThenSettle(outputStream, 'background', shellId, () =>
+          registry.fail(shellId, getErrorMessage(err), endTime),
+        );
       },
     );
 

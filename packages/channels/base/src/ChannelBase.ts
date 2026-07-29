@@ -1,21 +1,30 @@
 import { basename, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
+  ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   Envelope,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import {
@@ -125,6 +134,10 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
   ].join('|'),
   'i',
 );
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 type ResolvedChannelMemoryIntent =
   | ChannelMemoryIntent
@@ -242,6 +255,10 @@ type PendingPermission = {
   sessionId: string;
   target: SessionTarget;
   request: PermissionRequestEvent['request'];
+  userInputPresented?: boolean;
+  settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
+  settled?: UserInputSettlementReason;
+  responsePromise?: Promise<boolean>;
 };
 type PermissionOption = PermissionRequestEvent['request']['options'][number];
 type PendingPermissionLookup =
@@ -250,6 +267,9 @@ type PendingPermissionLookup =
   | { kind: 'ambiguous'; requestIds: string[] };
 type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
+  runId: string;
+  owner?: ChannelPromptOwner;
+  activeSegmentId?: string;
   cancelled: boolean;
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
@@ -491,6 +511,7 @@ export abstract class ChannelBase {
       sessionId: event.sessionId,
       target,
       request: event.request,
+      settlementListeners: new Set(),
     };
     this.pendingPermissions.set(event.requestId, pending);
     const chatKey = this.permissionChatKey(target);
@@ -498,6 +519,10 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
+      const presentation = this.tryPresentUserInput(pending);
+      if (presentation && (await presentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
@@ -509,7 +534,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(target.chatId, target.threadId, text);
       }
     } catch (err) {
-      this.removePendingPermission(event.requestId);
+      this.removePendingPermission(event.requestId, 'cancelled');
       try {
         await this.bridge.respondToPermission?.(event.requestId, {
           outcome: { outcome: 'cancelled' },
@@ -521,6 +546,198 @@ export abstract class ChannelBase {
       }
       throw err;
     }
+  }
+
+  private tryPresentUserInput(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const questions = this.normalizeUserQuestions(pending);
+    const submitOptionId = this.approvalOptionId(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      !questions ||
+      !submitOptionId
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelUserInputRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      questions,
+      submitOptionId,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (response) => {
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.userInputPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        const result = await this.presentUserInputRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] user input presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private normalizeUserQuestions(
+    pending: PendingPermission,
+  ): ChannelUserQuestion[] | undefined {
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const canonical = meta?.['qwenInteractionKind'] === 'user_question';
+    const identifiedLegacy =
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const rawInput = isRecord(toolCall['rawInput'])
+      ? toolCall['rawInput']
+      : undefined;
+    const rawQuestions = canonical
+      ? meta?.['qwenQuestions']
+      : identifiedLegacy
+        ? rawInput?.['questions']
+        : undefined;
+    if (
+      !Array.isArray(rawQuestions) ||
+      rawQuestions.length < 1 ||
+      rawQuestions.length > 4
+    ) {
+      return undefined;
+    }
+
+    const questions: ChannelUserQuestion[] = [];
+    for (const [index, rawQuestion] of rawQuestions.entries()) {
+      if (!isRecord(rawQuestion)) {
+        return undefined;
+      }
+      const header = rawQuestion['header'];
+      const question = rawQuestion['question'];
+      const rawOptions = rawQuestion['options'];
+      const multiSelect = rawQuestion['multiSelect'];
+      if (
+        typeof header !== 'string' ||
+        header.trim().length === 0 ||
+        typeof question !== 'string' ||
+        question.trim().length === 0 ||
+        !Array.isArray(rawOptions) ||
+        rawOptions.length < 2 ||
+        rawOptions.length > 4 ||
+        (multiSelect !== undefined && typeof multiSelect !== 'boolean')
+      ) {
+        return undefined;
+      }
+      const options: ChannelUserQuestion['options'] = [];
+      for (const rawOption of rawOptions) {
+        if (
+          !isRecord(rawOption) ||
+          typeof rawOption['label'] !== 'string' ||
+          rawOption['label'].trim().length === 0 ||
+          typeof rawOption['description'] !== 'string'
+        ) {
+          return undefined;
+        }
+        options.push({
+          label: rawOption['label'],
+          description: rawOption['description'],
+        });
+      }
+      questions.push({
+        answerKey: String(index),
+        header,
+        question,
+        options,
+        multiSelect: multiSelect ?? false,
+      });
+    }
+    return questions;
+  }
+
+  private async respondToUserInput(
+    pending: PendingPermission,
+    response: ChannelUserInputResponse,
+  ): Promise<boolean> {
+    if (pending.responsePromise) {
+      return pending.responsePromise;
+    }
+    if (
+      this.pendingPermissions.get(pending.requestId) !== pending ||
+      !this.bridge.respondToPermission
+    ) {
+      return false;
+    }
+    pending.responsePromise = Promise.resolve()
+      .then(() => this.bridge.respondToPermission!(pending.requestId, response))
+      .then(
+        (accepted) => {
+          this.removePendingPermission(
+            pending.requestId,
+            accepted
+              ? this.userInputSettlementReason(pending, response.outcome)
+              : 'cancelled',
+          );
+          return accepted;
+        },
+        (error: unknown) => {
+          this.removePendingPermission(pending.requestId, 'cancelled');
+          throw error;
+        },
+      );
+    return pending.responsePromise;
   }
 
   private permissionTargetForEvent(
@@ -551,7 +768,14 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
-    this.removePendingPermission(event.requestId);
+    const pending = this.pendingPermissions.get(event.requestId);
+    if (!pending) {
+      return;
+    }
+    this.removePendingPermission(
+      event.requestId,
+      this.userInputSettlementReason(pending, event.outcome),
+    );
   }
 
   constructor(
@@ -639,6 +863,12 @@ export abstract class ChannelBase {
     _event: ChannelTaskLifecycleEvent,
   ): void | Promise<void> {}
 
+  protected async presentUserInputRequest(
+    _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     try {
       const result = this.onTaskLifecycle(event);
@@ -683,6 +913,13 @@ export abstract class ChannelBase {
       return;
     }
     active.cancellationEmitted = true;
+    const segment = this.closeOutputSegment(sessionId, active);
+    void this.notifyOutputSegmentEnd(
+      active.chatId,
+      sessionId,
+      segment,
+      'cancelled',
+    );
     this.emitTaskLifecycle({
       ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
       type: 'cancelled',
@@ -796,14 +1033,92 @@ export abstract class ChannelBase {
     sessionId: string,
     messageId?: string,
   ): ChannelTaskLifecycleBase {
+    const active = this.activePrompts.get(sessionId);
     return {
       channelName: this.name,
       chatId,
       sessionId,
       ...(messageId ? { messageId } : {}),
+      ...(active?.runId ? { runId: active.runId } : {}),
+      ...(active?.owner ? { owner: active.owner } : {}),
       identity: this.identity,
       memoryScope: this.memoryScope,
     };
+  }
+
+  private outputSegmentContext(
+    sessionId: string,
+    active: ActivePrompt,
+    segmentId: string,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const resolvedTarget =
+      target ??
+      (active.senderId
+        ? {
+            channelName: this.name,
+            chatId: active.chatId,
+            senderId: active.senderId,
+            ...(active.threadId ? { threadId: active.threadId } : {}),
+            ...(active.isGroup !== undefined
+              ? { isGroup: active.isGroup }
+              : {}),
+          }
+        : undefined);
+    if (
+      !active.owner ||
+      !resolvedTarget ||
+      resolvedTarget.channelName !== this.name
+    ) {
+      return undefined;
+    }
+    return {
+      channelName: this.name,
+      sessionId,
+      runId: active.runId,
+      segmentId,
+      owner: active.owner,
+      target: resolvedTarget,
+      ...(active.messageId ? { messageId: active.messageId } : {}),
+    };
+  }
+
+  private ensureOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+  ): ChannelOutputSegmentContext | undefined {
+    if (!active.owner) return undefined;
+    const segmentId = active.activeSegmentId ?? randomUUID();
+    const context = this.outputSegmentContext(sessionId, active, segmentId);
+    if (context) active.activeSegmentId = segmentId;
+    return context;
+  }
+
+  private closeOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const segmentId = active.activeSegmentId;
+    if (!segmentId) return undefined;
+    active.activeSegmentId = undefined;
+    return this.outputSegmentContext(sessionId, active, segmentId, target);
+  }
+
+  private async notifyOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext | undefined,
+    reason: ChannelOutputSegmentEndReason,
+  ): Promise<void> {
+    if (!segment) return;
+    try {
+      await this.onOutputSegmentEnd(chatId, sessionId, segment, reason);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
+      );
+    }
   }
 
   supportsProactiveSend(): boolean {
@@ -1232,6 +1547,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1545,6 +1861,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1751,6 +2068,11 @@ export abstract class ChannelBase {
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
+        this.discardRetiredSession(
+          promptBridge,
+          sessionId,
+          `timed-out loop ${jobId}`,
+        );
         process.stderr.write(
           `[${this.name}] retired timed out loop ${jobId} session ${sessionId} after cancel did not settle\n`,
         );
@@ -1763,6 +2085,26 @@ export abstract class ChannelBase {
       );
     } finally {
       clearTimeout(graceTimer);
+    }
+  }
+
+  private discardRetiredSession(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    reason: string,
+  ): void {
+    const safeSessionId = sanitizeLogText(sessionId, 64);
+    const safeReason = sanitizeLogText(reason, 128);
+    try {
+      void promptBridge.discardSession?.(sessionId).catch((err) => {
+        process.stderr.write(
+          `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to discard ${safeReason} session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+      );
     }
   }
 
@@ -1816,9 +2158,22 @@ export abstract class ChannelBase {
         active.cancelled = true;
         this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  protected requestPromptRunCancellation(
+    sessionId: string,
+    runId: string,
+    reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
+  ): Promise<boolean> {
+    const active = this.activePrompts.get(sessionId);
+    if (!active || active.runId !== runId) {
+      return Promise.resolve(false);
+    }
+    return this.requestActivePromptCancellation(sessionId, reason);
   }
 
   private dropCollectBuffer(sessionId: string): void {
@@ -1958,13 +2313,28 @@ export abstract class ChannelBase {
     _chatId: string,
     _chunk: string,
     _sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): void {}
+
+  protected onOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    _segment: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {
+    if (reason === 'response_boundary') {
+      return this.onResponseBoundary(chatId, sessionId);
+    }
+  }
 
   /**
    * Called when the agent starts a new response segment for the same prompt.
    * Override to clear adapter-owned streaming buffers.
    */
-  protected onResponseBoundary(_chatId: string, _sessionId: string): void {}
+  protected onResponseBoundary(
+    _chatId: string,
+    _sessionId: string,
+  ): void | Promise<void> {}
 
   protected async sendResponseMessage(
     chatId: string,
@@ -1986,6 +2356,7 @@ export abstract class ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     await this.sendResponseMessage(chatId, fullText, sessionId);
   }
@@ -2069,12 +2440,16 @@ export abstract class ChannelBase {
     return live;
   }
 
-  private removePendingPermission(requestId: string): void {
+  private removePendingPermission(
+    requestId: string,
+    reason: UserInputSettlementReason = 'resolved_outside_presenter',
+  ): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) {
       return;
     }
     this.pendingPermissions.delete(requestId);
+    this.settleUserInput(pending, reason);
     const chatKey = this.permissionChatKey(pending.target);
     const requestIds = this.pendingPermissionsByChat.get(chatKey);
     if (!requestIds) {
@@ -2088,18 +2463,65 @@ export abstract class ChannelBase {
     }
   }
 
-  private removePendingPermissionsForSession(sessionId: string): void {
+  private removePendingPermissionsForSession(
+    sessionId: string,
+    reason: UserInputSettlementReason = 'cancelled',
+  ): void {
     const requestIds = Array.from(this.pendingPermissions)
       .filter(([, pending]) => pending.sessionId === sessionId)
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
-      this.removePendingPermission(requestId);
+      this.removePendingPermission(requestId, reason);
     }
   }
 
   private clearPendingPermissions(): void {
-    this.pendingPermissions.clear();
-    this.pendingPermissionsByChat.clear();
+    for (const requestId of Array.from(this.pendingPermissions.keys())) {
+      this.removePendingPermission(requestId, 'cancelled');
+    }
+  }
+
+  private settleUserInput(
+    pending: PendingPermission,
+    reason: UserInputSettlementReason,
+  ): void {
+    if (pending.settled) {
+      return;
+    }
+    pending.settled = reason;
+    const listeners = Array.from(pending.settlementListeners);
+    pending.settlementListeners.clear();
+    for (const listener of listeners) {
+      try {
+        listener(reason);
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] user input settlement listener failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+      }
+    }
+  }
+
+  private userInputSettlementReason(
+    pending: PendingPermission,
+    outcome: PermissionResolvedEvent['outcome'],
+  ): UserInputSettlementReason {
+    if (outcome?.outcome === 'cancelled') {
+      return 'cancelled';
+    }
+    if (outcome?.outcome === 'selected') {
+      const selected = pending.request.options.find(
+        (option) => option.optionId === outcome.optionId,
+      );
+      if (
+        selected?.kind === 'reject_once' ||
+        (selected?.optionId === 'cancel' &&
+          (selected as { kind?: string }).kind === undefined)
+      ) {
+        return 'cancelled';
+      }
+    }
+    return 'resolved_outside_presenter';
   }
 
   private pendingPermissionForEnvelope(
@@ -2149,6 +2571,8 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
+      (!pending.userInputPresented ||
+        pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
     );
@@ -2297,6 +2721,13 @@ export abstract class ChannelBase {
     }
 
     const { pending } = lookup;
+    if (pending.userInputPresented && decision !== 'deny') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+      );
+      return true;
+    }
     const response = (() => {
       if (decision === 'deny') {
         return this.denialResponse(pending);
@@ -2322,10 +2753,9 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = await this.bridge.respondToPermission(
-        pending.requestId,
-        response,
-      );
+      accepted = pending.userInputPresented
+        ? await this.respondToUserInput(pending, response)
+        : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
@@ -2384,7 +2814,7 @@ export abstract class ChannelBase {
             id,
             (this.sessionGenerations.get(id) ?? 0) + 1,
           );
-          this.removePendingPermissionsForSession(id);
+          this.removePendingPermissionsForSession(id, 'run_cancelled');
           // Cancel an in-flight turn (and drop its buffered follow-ups) before
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
@@ -2466,6 +2896,7 @@ export abstract class ChannelBase {
             // bumped value — reclaim it immediately.
             this.sessionGenerations.delete(id);
           }
+          this.discardRetiredSession(this.bridge, id, 'cleared');
         }
         await this.sendThreadMessage(
           envelope.chatId,
@@ -4778,6 +5209,7 @@ export abstract class ChannelBase {
             // turn at the channel level (cancelled is already set above), so
             // the event reflects that intent, not the bridge RPC outcome.
             this.emitTaskCancellation(active, sessionId, 'steer');
+            this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
           }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
           // after the wind-down bound, this steered turn is wedged behind a hung
@@ -4931,6 +5363,11 @@ export abstract class ChannelBase {
         doneResolve = r;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
+        owner: {
+          kind: 'channel_user',
+          id: envelope.senderId,
+        },
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -4979,6 +5416,7 @@ export abstract class ChannelBase {
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
           hasStreamedText = true;
+          const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -4988,7 +5426,7 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(envelope.chatId, held, sessionId);
+          this.onResponseChunk(envelope.chatId, held, sessionId, segment);
           streamer?.push(held);
         }
       };
@@ -5011,7 +5449,13 @@ export abstract class ChannelBase {
         }
         heldChunks.length = 0;
         hasStreamedText = false;
-        this.onResponseBoundary(envelope.chatId, sessionId);
+        const segment = this.closeOutputSegment(sessionId, promptState);
+        void this.notifyOutputSegmentEnd(
+          envelope.chatId,
+          sessionId,
+          segment,
+          'response_boundary',
+        );
         streamer?.stop();
       };
       const promptBridge = this.bridge;
@@ -5038,7 +5482,16 @@ export abstract class ChannelBase {
             }
             await streamer.flush();
           } else {
-            await this.onResponseComplete(envelope.chatId, response, sessionId);
+            const segment = this.ensureOutputSegment(sessionId, promptState);
+            await this.onResponseComplete(
+              envelope.chatId,
+              response,
+              sessionId,
+              segment,
+            );
+            if (segment && promptState.activeSegmentId === segment.segmentId) {
+              promptState.activeSegmentId = undefined;
+            }
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -5047,6 +5500,13 @@ export abstract class ChannelBase {
           await this.settleCancelRequested(promptState);
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'completed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5065,6 +5525,13 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled) {
           releaseHeldChunks();
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'failed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5082,6 +5549,9 @@ export abstract class ChannelBase {
           process.stderr.write(
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
+        }
+        if (promptState.cancelled) {
+          return;
         }
         throw err;
       } finally {

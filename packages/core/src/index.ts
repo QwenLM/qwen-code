@@ -263,9 +263,11 @@ export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
 } from './utils/sync-file-encoding.js';
+export { LargeNonUtf8TextError } from './utils/read-text-range.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
+export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
@@ -511,6 +513,7 @@ export {
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
+export * from './utils/git-branches.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';

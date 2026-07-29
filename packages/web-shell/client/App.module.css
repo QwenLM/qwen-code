@@ -343,6 +343,7 @@
   --foreground: #fafafa;
   --card: #161616;
   --card-foreground: #fafafa;
+  --table-section-bg: var(--subtle-bg);
   --popover: #1a1a1a;
   --popover-foreground: #fafafa;
   --primary: #fafafa;
@@ -416,6 +417,7 @@
   --foreground: #0a0a0b;
   --card: #ffffff;
   --card-foreground: #0a0a0b;
+  --table-section-bg: #f3f4f6;
   --popover: #ffffff;
   --popover-foreground: #0a0a0b;
   --primary: #151517;

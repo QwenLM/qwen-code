@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -79,6 +79,7 @@
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
+    "sharp": "^0.34.5",
     "shell-quote": "^1.9.0",
     "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",

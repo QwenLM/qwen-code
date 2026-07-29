@@ -9,6 +9,8 @@ import {
   findInlineMathExpressions,
   INLINE_MATH_MAX_CHARS,
   readInlineMathSpanAt,
+  unescapeMarkdownBeforeMath,
+  unescapeMarkdownDollars,
 } from './inline-math.js';
 
 describe('inline math recognition', () => {
@@ -28,6 +30,27 @@ describe('inline math recognition', () => {
   it('rejects formulas whose closing dollar is escaped', () => {
     expect(findInlineMathExpressions(String.raw`A $x\$ B`)).toEqual([]);
     expect(findInlineMathExpressions(String.raw`Total $a b\$ end`)).toEqual([]);
+  });
+
+  it('recognizes literal dollars inside and next to formulas', () => {
+    expect(findInlineMathExpressions(String.raw`Formula $x + \$5$`)).toEqual([
+      String.raw`x + \$5`,
+    ]);
+    expect(
+      findInlineMathExpressions(String.raw`Literal then math: \$$x^2$`),
+    ).toEqual(['x^2']);
+    expect(
+      findInlineMathExpressions(String.raw`Math then literal: $x^2\$$`),
+    ).toEqual([String.raw`x^2\$`]);
+  });
+
+  it('uses the full backslash-run parity around delimiters', () => {
+    expect(findInlineMathExpressions(String.raw`Odd \$x$; even \\$y$`)).toEqual(
+      ['y'],
+    );
+    expect(findInlineMathExpressions(String.raw`Odd $x\$; even $y\\$`)).toEqual(
+      [String.raw`y\\`],
+    );
   });
 
   it('ignores inline code spans and unclosed formulas', () => {
@@ -53,5 +76,13 @@ describe('inline math recognition', () => {
   it('reads a span only at the requested offset', () => {
     expect(readInlineMathSpanAt('A $x$ B', 2)).toBe('$x$');
     expect(readInlineMathSpanAt(String.raw`A \$x$ B`, 3)).toBeNull();
+    expect(readInlineMathSpanAt(String.raw`\$$x$`, 2)).toBe('$x$');
+  });
+
+  it('removes Markdown escaping from literal dollars by parity', () => {
+    expect(unescapeMarkdownDollars(String.raw`\$ \\$ \\\$`)).toBe(
+      String.raw`$ \$ \$`,
+    );
+    expect(unescapeMarkdownBeforeMath(String.raw`prefix \\`)).toBe('prefix \\');
   });
 });

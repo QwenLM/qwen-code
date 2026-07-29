@@ -96,6 +96,60 @@ describe('convertSchema', () => {
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
 
+    it('should keep a Draft 4 boolean exclusive limit instead of dropping it', () => {
+      expect(
+        convertSchema(
+          { type: 'number', minimum: 10, exclusiveMinimum: true },
+          'openapi_30',
+        ),
+      ).toEqual({ type: 'number', minimum: 10, exclusiveMinimum: true });
+      expect(
+        convertSchema(
+          { type: 'number', maximum: 10, exclusiveMaximum: true },
+          'openapi_30',
+        ),
+      ).toEqual({ type: 'number', maximum: 10, exclusiveMaximum: true });
+    });
+
+    it('should keep a nested Draft 4 boolean exclusive limit', () => {
+      expect(
+        convertSchema(
+          {
+            type: 'object',
+            properties: {
+              pct: { type: 'number', minimum: 0, exclusiveMinimum: true },
+            },
+          },
+          'openapi_30',
+        ),
+      ).toEqual({
+        type: 'object',
+        properties: {
+          pct: { type: 'number', minimum: 0, exclusiveMinimum: true },
+        },
+      });
+    });
+
+    it('should be idempotent for exclusive limits', () => {
+      const once = convertSchema(
+        { type: 'number', exclusiveMinimum: 10 },
+        'openapi_30',
+      );
+      expect(convertSchema(once, 'openapi_30')).toEqual(once);
+    });
+
+    // Guard against over-correcting: the numeric form must still be CONSUMED
+    // by step 3 rather than passed through, or the boolean it writes would be
+    // overwritten by the number and the output would stop being Draft 4.
+    it('should not pass a numeric exclusive limit through unconverted', () => {
+      const result = convertSchema(
+        { type: 'number', exclusiveMaximum: 5 },
+        'openapi_30',
+      );
+      expect(result['exclusiveMaximum']).toBe(true);
+      expect(result['maximum']).toBe(5);
+    });
+
     it('should convert nested objects recursively', () => {
       const input = {
         type: 'object',
@@ -158,6 +212,79 @@ describe('convertSchema', () => {
         patternProperties: { '^foo': { type: 'string' } },
       };
       const expected = { type: 'string' };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
+    it('never treats property names as schema keywords', () => {
+      // `properties` keys are names, not keywords. Walking the map as if it
+      // were a schema node makes each step misfire on a colliding name: the
+      // const step replaces a property called `const` with a bogus `enum`,
+      // the skip list drops one called `default`, and one called `type` is
+      // copied verbatim instead of being converted.
+      const input = {
+        type: 'object',
+        properties: {
+          type: { type: ['string', 'null'], description: 'a prop named type' },
+          const: { type: 'string', enum: [1, 2] },
+          default: { type: 'boolean' },
+          enum: { type: ['integer', 'null'] },
+          items: { type: 'string' },
+          $schema: { type: 'string' },
+          dependencies: { type: 'string' },
+          patternProperties: { type: 'string' },
+        },
+        required: ['type'],
+      };
+      const expected = {
+        type: 'object',
+        properties: {
+          // Converted as a schema, not read as a `type` keyword.
+          type: {
+            type: 'string',
+            nullable: true,
+            description: 'a prop named type',
+          },
+          const: { type: 'string', enum: ['1', '2'] },
+          default: { type: 'boolean' },
+          enum: { type: 'integer', nullable: true },
+          items: { type: 'string' },
+          $schema: { type: 'string' },
+          dependencies: { type: 'string' },
+          patternProperties: { type: 'string' },
+        },
+        required: ['type'],
+      };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
+    it('converts $defs and definitions as name maps too', () => {
+      const input = {
+        type: 'object',
+        $defs: { const: { type: ['string', 'null'] } },
+        definitions: { default: { type: ['number', 'null'] } },
+      };
+      const expected = {
+        type: 'object',
+        $defs: { const: { type: 'string', nullable: true } },
+        definitions: { default: { type: 'number', nullable: true } },
+      };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
+    it('still removes keyword-level unsupported fields beside a map', () => {
+      // The map guard must not become an escape hatch for the real keywords:
+      // a top-level `$schema` is still dropped even when a property shares
+      // its name.
+      const input = {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        $id: '#foo',
+        type: 'object',
+        properties: { $schema: { type: 'string' } },
+      };
+      const expected = {
+        type: 'object',
+        properties: { $schema: { type: 'string' } },
+      };
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
   });

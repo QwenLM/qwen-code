@@ -7,15 +7,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
-import type {
-  GoalSnapshotV2,
-  GoalStateCause,
-  GoalStateRecordPayloadV2,
-  GoalTurnPermit,
-  TranscriptCursor,
+import {
+  GOAL_PROPOSAL_REASON_MAX_BYTES,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type GoalStateRecordPayloadV2,
+  type GoalTurnPermit,
+  type TranscriptCursor,
 } from './goal-protocol.js';
 import {
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
   type GoalEvidenceSource,
   type GoalJournal,
   type GoalTurnHost,
@@ -257,7 +259,13 @@ describe('goal runtime', () => {
     await runtime.finishTurn(permit);
 
     expect(evidenceSource.flush).toHaveBeenCalledOnce();
-    expect(verifier).toHaveBeenCalledOnce();
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentTurnId: permit.turnId,
+        currentDeliveredOutput: ['Delivered result'],
+      }),
+      expect.any(AbortSignal),
+    );
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -1386,7 +1394,7 @@ describe('goal runtime', () => {
     expect(newHost.preemptGoalTurn).not.toHaveBeenCalled();
   });
 
-  it('migrates a legacy active goal once before making it schedulable', async () => {
+  it('migrates a legacy active goal once into a paused state', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
@@ -1402,14 +1410,15 @@ describe('goal runtime', () => {
         goal: {
           objective: 'ship it',
           revision: 1,
-          status: 'active',
+          status: 'paused',
           evidenceCursor: { recordId: expect.any(String) },
         },
       },
     });
     expect(host.started).toEqual([]);
     runtime.bindHost(host);
-    await vi.waitFor(() => expect(host.started).toHaveLength(1));
+    await Promise.resolve();
+    expect(host.started).toEqual([]);
   });
 
   it('releases a rejected host start without an unhandled rejection', async () => {
@@ -1538,7 +1547,7 @@ describe('goal runtime', () => {
     });
   });
 
-  it('returns a defensive worker view and rejects it after permit invalidation', async () => {
+  it('returns defensive worker state and checks the complete permit atomically', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
@@ -1547,12 +1556,20 @@ describe('goal runtime', () => {
     const permit = host.started[0];
 
     const view = await runtime.getGoalForWorker(permit);
+    const permittedSnapshot = runtime.getSnapshotForPermit(permit);
     view.objective = 'mutated';
     view.evidenceCursor.recordId = 'mutated';
+    permittedSnapshot.goal!.objective = 'mutated snapshot';
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship',
       evidenceCursor: { recordId: expect.not.stringContaining('mutated') },
     });
+    expect(() =>
+      runtime.getSnapshotForPermit({
+        ...permit,
+        turnId: 'different-turn',
+      }),
+    ).toThrow('Goal turn permit is no longer valid');
 
     await runtime.dispatch({
       action: 'edit',
@@ -1563,23 +1580,49 @@ describe('goal runtime', () => {
     await expect(runtime.getGoalForWorker(permit)).rejects.toThrow(
       'Goal turn permit is no longer valid',
     );
+    expect(() => runtime.getSnapshotForPermit(permit)).toThrow(
+      'Goal turn permit is no longer valid',
+    );
   });
 
-  it('requires three repeated blocked turns and resets that audit on resume', async () => {
+  it('rejects an oversized proposal reason before consuming the turn proposal slot', async () => {
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const permit = host.started[0];
+
+    expect(() =>
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1),
+        evidenceRefs: ['oversized'],
+      }),
+    ).toThrow(/UTF-8 bytes/i);
+    expect(
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'valid reason',
+        evidenceRefs: ['valid'],
+      }),
+    ).toEqual({ recorded: true, readyForVerification: true });
+  });
+
+  it('normalizes omitted blocker kinds in the repeated audit and resets it on resume', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    for (let index = 0; index < 2; index += 1) {
+    for (const blockerKind of [undefined, 'repeated'] as const) {
       const permit = host.started.at(-1)!;
       expect(
         runtime.recordTerminalProposal(permit, {
           status: 'blocked',
           reason: 'waiting for access',
           evidenceRefs: [],
-          blockerKind: 'repeated',
+          ...(blockerKind ? { blockerKind } : {}),
         }),
       ).toEqual({ recorded: true, readyForVerification: false });
       await runtime.finishTurn(permit);
@@ -1591,7 +1634,6 @@ describe('goal runtime', () => {
         status: 'blocked',
         reason: 'waiting for access',
         evidenceRefs: [],
-        blockerKind: 'repeated',
       }),
     ).toEqual({ recorded: true, readyForVerification: true });
     await runtime.dispatch({
@@ -1636,10 +1678,17 @@ describe('goal runtime', () => {
 
     const restoredHost = fakeGoalTurnHost();
     const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+    const recoveredPayload = journal.appended.at(-1)!;
     await restored.restore([
       {
-        ...goalStateRecord(journal.appended.at(-1)!.snapshot),
-        systemPayload: journal.appended.at(-1)!,
+        ...goalStateRecord(recoveredPayload.snapshot),
+        systemPayload: {
+          ...recoveredPayload,
+          blockedAudit: {
+            ...recoveredPayload.blockedAudit!,
+            fingerprint: '\nwaiting for access',
+          },
+        },
       },
     ]);
     restored.bindHost(restoredHost);
@@ -1954,8 +2003,8 @@ describe('goal runtime', () => {
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
     runtime.bindHost(host);
 
-    await expect(runtime.restore([malformed])).rejects.toThrow(
-      'malformed or uses an unsupported version',
+    await expect(runtime.restore([malformed])).rejects.toBeInstanceOf(
+      GoalPersistenceUnavailableError,
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
@@ -1972,8 +2021,12 @@ describe('goal runtime', () => {
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
 
-    await expect(runtime.restore([legacyGoalRecord()])).rejects.toThrow(
-      'migration write failed',
+    await expect(runtime.restore([legacyGoalRecord()])).rejects.toEqual(
+      expect.objectContaining({
+        name: 'GoalPersistenceUnavailableError',
+        message: 'migration write failed',
+        cause: expect.objectContaining({ message: 'migration write failed' }),
+      }),
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
@@ -1983,11 +2036,11 @@ describe('goal runtime', () => {
     await runtime.restore([legacyGoalRecord()]);
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship it',
-      status: 'active',
+      status: 'paused',
     });
   });
 
-  it('commits successful legacy recovery before reentrant subscribers run', async () => {
+  it('commits paused legacy recovery before a reentrant resume', async () => {
     const journal = fakeGoalJournal({
       appendErrors: [new Error('migration write failed'), undefined],
     });
@@ -2000,7 +2053,7 @@ describe('goal runtime', () => {
     let reentrantDispatch: Promise<unknown> | undefined;
     let reentered = false;
     runtime.subscribe((snapshot) => {
-      if (reentered || snapshot.goal?.status !== 'active') return;
+      if (reentered || snapshot.goal?.status !== 'paused') return;
       reentered = true;
       try {
         runtime.bindHost(host);
@@ -2008,7 +2061,7 @@ describe('goal runtime', () => {
         bindError = error;
       }
       reentrantDispatch = runtime.dispatch({
-        action: 'pause',
+        action: 'resume',
         expectedGoalId: snapshot.goal.goalId,
         expectedRevision: snapshot.goal.revision,
       });
@@ -2019,7 +2072,7 @@ describe('goal runtime', () => {
 
     expect(bindError).toBeUndefined();
     expect(host.started).toHaveLength(1);
-    expect(runtime.getSnapshot().goal?.status).toBe('paused');
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
   });
 
   it('preempts replace and clear after commit and admits only active replacements', async () => {
