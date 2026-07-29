@@ -324,8 +324,8 @@ export async function generateAiContent(
         summaries.set(entry.number, entry.title);
       }
       if (consecutiveBatchFailures >= maxConsecutiveBatchFailures) {
-        // The model side is down, not slow: stop paying 60s per remaining
-        // batch and fall back wholesale instead of pretending otherwise.
+        // The model side is down, not slow: stop paying per remaining batch
+        // and fall back wholesale instead of pretending otherwise.
         circuitOpen = true;
         warnings.push(
           `Summary batches stopped after ${consecutiveBatchFailures} consecutive failures; remaining entries use pull-request titles.`,

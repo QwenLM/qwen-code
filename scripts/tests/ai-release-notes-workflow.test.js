@@ -58,7 +58,7 @@ describe('stable release notes workflow', () => {
     );
     expect(validate).toContain('is not a stable release tag');
     expect(validate).toContain('exit 1');
-    expect(generate).toContain('timeout-minutes: 15');
+    expect(generate).toContain('timeout-minutes: 35');
     expect(generate).toContain('continue-on-error: true');
     expect(generate).toContain('GitHub-generated notes');
     expect(generate).toContain('node scripts/generate-release-notes.js');
