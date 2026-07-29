@@ -11,7 +11,7 @@
 // verdict logic is unit-tested in `classifyProbeRun`; what these lock down is
 // where the probe runs and what it leaves behind.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
@@ -476,6 +476,74 @@ describe('test-efficacy probe isolation (#6832)', () => {
         detail: expect.stringContaining('still PASSED'),
       },
     ]);
+  });
+
+  it('reports mutants skipped for budget when time runs out mid-loop', async () => {
+    // Three safety-verb candidates, but the budget expires after two: the
+    // counter, the `skippedForBudget` report field, and the stdout line are
+    // exercised end-to-end. `Date.now()` is mocked to advance 50 s per call
+    // (the real budget is 540 s and a real run cannot reach it in a test):
+    // the baseline measures 50 s, so `estimatedRunMs` is 65 s, and the
+    // remaining budget drops below `2 × 65 s` on the third loop check.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export let items: string[] = ["a"];\n' +
+        'export const state = new Map<string, string>();\n' +
+        'export const cache = new Set<string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export let items: string[] = ["a"];\n' +
+        'export const state = new Map<string, string>();\n' +
+        'export const cache = new Set<string>();\n' +
+        'export function reset() {\n' +
+        '  items = [];\n' +
+        '  state.clear();\n' +
+        '  cache.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    let mockNow = 0;
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+      mockNow += 50_000;
+      return mockNow;
+    });
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      dateSpy.mockRestore();
+    }
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed.length).toBe(2);
+    expect(out.mutants.skippedForBudget).toBe(1);
+    expect(out.mutants.probed.length + out.mutants.skippedForBudget).toBe(3);
+    for (const m of out.mutants.probed) {
+      expect(m.verdict).toBe('survived');
+    }
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
