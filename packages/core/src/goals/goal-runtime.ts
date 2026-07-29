@@ -63,6 +63,16 @@ export interface GoalEvidenceSource {
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
 }
 
+export class GoalPersistenceUnavailableError extends Error {
+  constructor(
+    message = 'Goal persistence is unavailable for this session',
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'GoalPersistenceUnavailableError';
+  }
+}
+
 export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
@@ -571,7 +581,7 @@ export function createGoalRuntime(
         if (restored) return;
         const recovery = recoverGoalFromRecords(records);
         if (recovery.kind === 'unsupported') {
-          recoveryError = new Error(recovery.reason);
+          recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
           throw recoveryError;
         }
         try {
@@ -594,7 +604,14 @@ export function createGoalRuntime(
               recordUuid,
               now: Date.now(),
             });
-            await options.journal.recordGoalState(recordUuid, payload);
+            try {
+              await options.journal.recordGoalState(recordUuid, payload);
+            } catch (error) {
+              throw new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
+            }
             assertAvailable();
             recoveredSnapshot = structuredClone(payload.snapshot);
             recoveredCause = payload.cause;
