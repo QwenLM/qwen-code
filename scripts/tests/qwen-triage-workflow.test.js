@@ -21,6 +21,7 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -550,6 +551,42 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(order).toContain('(2b-bis)');
     expect(order).toContain('not an enrichment');
+  });
+
+  it('makes the not-verified sentence a mechanical 2b-bis trigger', () => {
+    // Post-merge measurement of #7917 (2026-07-29): 9 eligible PRs, two
+    // considered-and-declined mentions, zero positive recommendations — and
+    // the one clear behavioural candidate (#7947, bounded reads) wrote
+    // "author tested on macOS only" in its own Stage 2 comment and never
+    // named a lane. The judgement-based rule ("when 2b cannot settle it")
+    // failed exactly where the comment had already written the gap down. So
+    // the trigger is now textual: the draft's own admission is the trigger,
+    // and pending CI does not lift it.
+    const section = prSkill
+      .slice(
+        prSkill.indexOf('#### 2b-bis.'),
+        prSkill.indexOf('#### 2c. Real-Scenario'),
+      )
+      .replace(/\s+/g, ' ');
+    expect(section).toContain('mechanical, not a judgement call');
+    expect(section).toContain('grep your own draft');
+    // The trigger phrases are the ones real comments actually emit — the
+    // first two are verbatim from #7947's and #7951's Stage 2 comments.
+    expect(section).toContain('not verified');
+    expect(section).toContain('author tested on <one platform> only');
+    expect(section).toContain('not independently re-run');
+    // Pending CI must not lift the trigger: #7947's likely out was "the
+    // ubuntu Test job is still in progress".
+    expect(section).toContain('"CI is still running" does not lift');
+    // The mechanical rule must sit BEFORE the skip cases, or the skip cases
+    // read as outs from it rather than the other way around.
+    expect(section.indexOf('mechanical, not a judgement call')).toBeLessThan(
+      section.indexOf('Skip it — explicitly'),
+    );
+    // And the skip cases themselves must survive — the trigger tightens the
+    // rule, it does not replace the two legitimate outs.
+    expect(section).toContain('No behavioural claim to settle');
+    expect(section).toContain('The author lacks write access');
   });
 
   it('names /verify on the high-risk paths, not just tmux', () => {
@@ -1256,8 +1293,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(chown).toBeGreaterThan(repin);
     expect(launch).toBeGreaterThan(home);
     // Killing is not enough on its own: surviving build processes must
-    // fail the step rather than race the sweeps that follow.
-    expect(runStep).toContain('pgrep -u node');
+    // fail the step rather than race the sweeps that follow. The check
+    // disregards zombies — see the build-process-guard suite for why.
+    expect(runStep).toContain('live_build_processes');
     expect(runStep).toContain('refusing to start the agent');
     expect(runStep).toContain('"HOME=$AGENT_HOME"');
     // The proxy must require this run's bearer, not just a fixed dummy key.
@@ -1535,6 +1573,48 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
+  // expected A/B base-cell failures proving the tests are load-bearing"
+  // while assertions.json said fail:7 — so the publisher's trust rule
+  // (merge-ready requires fail==0) correctly refused it and the headline
+  // degraded to "no usable structured verdict". Both sides told the truth
+  // about different questions. The fix is the counting semantics: a control
+  // cell that fails AS PREDICTED is a passed assertion.
+  it('defines expected failures as passes in the assertion contract', () => {
+    const rules = verifySkill
+      .slice(verifySkill.indexOf('## Hard rules'))
+      .replace(/\s+/g, ' ');
+    expect(rules).toContain('Expected failures are passes');
+    expect(rules).toContain('assert the control goes red');
+    expect(rules).toContain('counts only UNEXPECTED outcomes');
+    // The rule must state the publisher-side consequence, or an agent has no
+    // reason to believe the count semantics are load-bearing.
+    expect(rules).toContain('cannot be `merge-ready`');
+    expect(rules).toContain('`inconclusive`, not `findings`');
+    // And it must sit in Hard rules, not in narrative prose.
+    expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
+      verifySkill.indexOf('## Hard rules'),
+    );
+  });
+
+  // The whole report is already inside a <details> on the PR. With the
+  // Chinese summary as the last item, reaching it meant expanding that fold
+  // and scrolling the entire English report — ~90 lines on a real one.
+  it('puts the report Chinese summary next to the verdict, not last', () => {
+    const struct = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(struct).toBeTruthy();
+    const zh = struct.indexOf('中文摘要');
+    expect(zh).toBeGreaterThan(-1);
+    expect(zh).toBeLessThan(struct.indexOf('Central claim + A/B table'));
+    expect(zh).toBeLessThan(struct.indexOf('**Not covered**'));
+    expect(zh).toBeLessThan(struct.indexOf('**Methodology**'));
+    // Moved, not duplicated — two summaries would drift apart.
+    expect(struct.match(/中文摘要/g)?.length).toBe(1);
+  });
+
   // Only a validated assertions object counts as evidence.
   it('rejects inconsistent assertions objects', () => {
     const publishStep = step('Post verification report comment');
@@ -1628,6 +1708,76 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // Every weak terminal body carries the qualitative prefix and folds its
+  // Chinese into <details>, matching the full-report path's layout.
+  it('renders weak terminal bodies with qualitative glyphs and folded Chinese', () => {
+    const dir = fixture();
+    try {
+      const cancelled = render(dir, {
+        NAME: 'wk-cancelled',
+        VERIFY_RESULT: 'cancelled',
+      });
+      expect(cancelled).toContain('\u26a0\ufe0f incomplete \u2014 cancelled');
+      expect(cancelled).toContain('<details>');
+      expect(cancelled).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u5df2\u53d6\u6d88</summary>',
+      );
+
+      const infra = render(dir, {
+        NAME: 'wk-infra',
+        VERIFY_RESULT: 'failure',
+        VERDICT: '',
+      });
+      expect(infra).toContain(
+        '\u26a0\ufe0f incomplete \u2014 infrastructure failure',
+      );
+      expect(infra).toContain('<details>');
+      expect(infra).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c</summary>',
+      );
+
+      const skipped = render(dir, {
+        NAME: 'wk-skipped',
+        VERDICT: 'skipped',
+        SKIP_REASON: 'the PR is a draft',
+      });
+      expect(skipped).toContain('\u26a0\ufe0f not run \u2014 skipped');
+      expect(skipped).toContain('the PR is a draft');
+      expect(skipped).toContain('<details>');
+      expect(skipped).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u8fd0\u884c \u00b7 \u5df2\u8df3\u8fc7</summary>',
+      );
+
+      const na = render(dir, { NAME: 'wk-na', VERDICT: 'n/a' });
+      expect(na).toContain('\u26a0\ufe0f not run \u2014 n/a');
+      expect(na).toContain('<details>');
+      expect(na).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u8fd0\u884c \u00b7 \u4e0d\u9002\u7528</summary>',
+      );
+      // The Chinese body must be INSIDE the fold, not unfolded below.
+      const naDetails = na.indexOf('<details>');
+      const naZh = na.indexOf('\u8be5 PR \u4ec5\u6539\u52a8\u6587\u6863');
+      expect(naZh).toBeGreaterThan(naDetails);
+
+      const dl = render(dir, {
+        NAME: 'wk-dl',
+        DOWNLOAD_OUTCOME: 'failure',
+      });
+      expect(dl).toContain(
+        '\u26a0\ufe0f incomplete \u2014 results unavailable',
+      );
+      expect(dl).toContain('<details>');
+      expect(dl).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u7ed3\u679c\u4e0d\u53ef\u7528</summary>',
+      );
+      const dlDetails = dl.indexOf('<details>');
+      const dlZh = dl.indexOf('\u9a8c\u8bc1\u5df2\u6267\u884c');
+      expect(dlZh).toBeGreaterThan(dlDetails);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // The prepare step classifies install/build failures; the comment must
   // agree with that classification instead of always blaming the PR.
   it('reports an infra-classified prepare failure as infrastructure', () => {
@@ -1640,6 +1790,15 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(infra).toContain('infrastructure failure');
       expect(infra).not.toContain('treated as a PR failure');
+      // The qualitative glyph is what a swapped assignment would corrupt
+      // while every substring above still matched: an infra incident is
+      // nobody's-fault (warning); a real build failure is the PR's (cross).
+      expect(infra).toContain(
+        '\u26a0\ufe0f incomplete \u2014 infrastructure failure',
+      );
+      expect(infra).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c</summary>',
+      );
 
       const real = render(dir, {
         NAME: 'fail',
@@ -1653,6 +1812,15 @@ describe('qwen-triage verify publish fidelity', () => {
       // reader cannot tell this verdict from the single-shot one that
       // mis-blamed a PR for an ETXTBSY race.
       expect(real).toContain('failed twice in a row');
+      expect(real).toContain(
+        '\u274c not passed \u2014 the PR could not be built',
+      );
+      expect(real).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u274c \u4e0d\u901a\u8fc7 \u00b7 PR \u6784\u5efa\u5931\u8d25</summary>',
+      );
+      // The retry clause has a Chinese counterpart on this same arm; pin
+      // it so a dropped PREPARE_ATTEMPTS_ZH interpolation cannot ship silent.
+      expect(real).toContain('\u8fde\u7eed\u4e24\u6b21');
 
       // The build arm of the phase mapping was never rendered by any test,
       // so a typo in that command name would have shipped unnoticed.
@@ -1695,6 +1863,232 @@ describe('qwen-triage verify publish fidelity', () => {
 
   // Only bodies carrying findings are substantive; weak notices must not be
   // snapshotted as the previous round's report.
+  // The scope disclaimer under the headline has been bilingual since the
+  // lane shipped, but the verdict itself — the one line a reader acts on —
+  // was English-only. A Chinese reader got the caveat and not the
+  // conclusion.
+  it('leads every verdict with a distinct qualitative call, bilingually', () => {
+    // "merge-ready (agent verdict)" is lane jargon; the maintainer asked for
+    // pass/no-pass. Every arm now leads with a qualitative call, and only
+    // agent verdicts may claim passed/not-passed — a crashed, timed-out, or
+    // verdict-less run says nothing about the PR and must render as
+    // incomplete/inconclusive, never as a pass or a fail.
+    const dir = fixture();
+    try {
+      const ARMS = [
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' },
+          '\u2705 passed \u2014 merge-ready (agent verdict)',
+          '\u2705 \u901a\u8fc7 \u00b7 \u53ef\u5408\u5165\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
+          '\u274c not passed \u2014 findings reported (agent verdict)',
+          '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u62a5\u544a\u4e86\u53d1\u73b0\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
+          '\u274c not passed \u2014 blocked (agent verdict)',
+          '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u963b\u585e\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
+          '\u26a0\ufe0f inconclusive \u2014 the agent could not reach a conclusion',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 agent \u672a\u80fd\u5f97\u51fa\u7ed3\u8bba',
+        ],
+        [
+          { VERDICT: 'pass' },
+          '\u26a0\ufe0f inconclusive \u2014 completed without a usable structured verdict',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u5df2\u5b8c\u6210\u4f46\u65e0\u53ef\u7528\u7684\u7ed3\u6784\u5316\u5224\u5b9a',
+        ],
+        [
+          { VERDICT: 'fail' },
+          '\u26a0\ufe0f incomplete \u2014 the agent run failed',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 agent \u8fd0\u884c\u5931\u8d25',
+        ],
+        [
+          { VERDICT: 'timeout' },
+          '\u26a0\ufe0f incomplete \u2014 the run timed out with partial evidence',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u8fd0\u884c\u8d85\u65f6\uff0c\u8bc1\u636e\u4e0d\u5b8c\u6574',
+        ],
+        [
+          { VERDICT: 'infra-error' },
+          '\u26a0\ufe0f incomplete \u2014 infra-error (crash, OOM, or unwritable results)',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c\uff08\u5d29\u6e83\u3001OOM \u6216\u7ed3\u679c\u4e0d\u53ef\u5199\uff09',
+        ],
+        [
+          { VERDICT: 'bogus' },
+          '\u26a0\ufe0f inconclusive \u2014 the run ended in an unrecognized state',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u8fd0\u884c\u4ee5\u672a\u8bc6\u522b\u7684\u72b6\u6001\u7ed3\u675f',
+        ],
+      ];
+      const seenEn = new Set();
+      const seenZh = new Set();
+      ARMS.forEach(([env, en, zh], i) => {
+        const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
+        expect(body).toContain(`**Sandboxed verification: ${en}**`);
+        expect(body).toContain(
+          `<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a${zh}</summary>`,
+        );
+        // Only agent verdicts judge the code: every process-outcome arm must
+        // carry \u26a0\ufe0f, and never the pass/fail glyphs.
+        if (!env.AGENT_VERDICT) {
+          const head = body.slice(0, body.indexOf('<details>'));
+          expect(head).toContain('\u26a0\ufe0f');
+          expect(head).not.toContain('\u2705');
+          expect(head).not.toContain('\u274c');
+        }
+        seenEn.add(en);
+        seenZh.add(zh);
+      });
+      // Distinct per arm, both sides. A single hardcoded string — or one
+      // that echoes the English — satisfies per-arm containment, so the
+      // pairing is pinned as a bijection.
+      expect(seenEn.size).toBe(ARMS.length);
+      expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['pass', { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' }],
+    ['timeout', { VERDICT: 'timeout', AGENT_VERDICT: '' }],
+  ])(
+    'keeps English unfolded and folds the Chinese into one details (%s)',
+    (_label, env) => {
+      const dir = fixture();
+      try {
+        const body = render(dir, { NAME: `fold-${_label}`, ...env });
+        const details = body.indexOf(
+          '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a',
+        );
+        const detailsEnd = body.indexOf('</details>');
+        expect(details).toBeGreaterThan(-1);
+        // English body sits BEFORE the fold...
+        if (_label === 'pass') {
+          expect(body.indexOf('Ran the PR in an isolated')).toBeLessThan(
+            details,
+          );
+          expect(body.indexOf('Scripted assertions:')).toBeLessThan(details);
+        } else {
+          expect(
+            body.indexOf('The verification run did not complete'),
+          ).toBeLessThan(details);
+        }
+        // ...and every Chinese body line sits INSIDE it.
+        const zhBody =
+          _label === 'pass'
+            ? body.indexOf('\u6c99\u7bb1\u9a8c\u8bc1\u5728\u9694\u79bb')
+            : body.indexOf(
+                '\u672c\u6b21\u9a8c\u8bc1\u8fd0\u884c\u672a\u6b63\u5e38\u7ed3\u675f',
+              );
+        expect(zhBody).toBeGreaterThan(details);
+        expect(zhBody).toBeLessThan(detailsEnd);
+        if (_label === 'pass') {
+          const assertZh = body.indexOf('\u811a\u672c\u65ad\u8a00\uff1a');
+          expect(assertZh).toBeGreaterThan(details);
+          expect(assertZh).toBeLessThan(detailsEnd);
+        }
+        // The report block stays outside the Chinese fold.
+        expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
+          detailsEnd,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('renders the assertion count in both languages', () => {
+    const dir = fixture();
+    try {
+      const body = render(dir, {
+        NAME: 'assertzh',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed · 0 failed · 10 total',
+      );
+      expect(body).toContain('脚本断言：10 通过 · 0 失败 · 10 总计');
+
+      // The Chinese line rides the same validated object as the English one:
+      // an inconsistent assertions.json must suppress BOTH, or the comment
+      // grows a number that no gate checked.
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1,"fail":0,"total":0}',
+      );
+      const bad = render(dir, {
+        NAME: 'assertbad',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(bad).not.toContain('Scripted assertions:');
+      expect(bad).not.toContain('脚本断言');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #7836: when the agent claims merge-ready but assertions.json records
+  // failures, the publisher must explain the mismatch in the comment body
+  // so a reader does not see a hedged headline above "7 failed" with
+  // nothing connecting them.
+  it('explains why a merge-ready claim was not trusted', () => {
+    const dir = fixture();
+    try {
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1675,"fail":7,"total":1682}',
+      );
+      const body = render(dir, {
+        NAME: 'mismatch',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'The agent reported `merge-ready`, but `assertions.json` recorded 7 failures',
+      );
+      expect(body).toContain('\u26a0\ufe0f inconclusive');
+      expect(body).not.toContain('\u2705 passed');
+      // The Chinese counterpart must sit INSIDE the fold, so a Chinese-only
+      // reader expanding it sees the reason, not just the raw numbers.
+      const details = body.indexOf('<details>');
+      const detailsEnd = body.indexOf('</details>');
+      const zhMismatch = body.indexOf('agent \u62a5\u544a\u4e86 `merge-ready`');
+      expect(zhMismatch).toBeGreaterThan(details);
+      expect(zhMismatch).toBeLessThan(detailsEnd);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Float counts (10.0) must be floored to integers (10) so a clean run
+  // is not downgraded by a string comparison against '0.0'.
+  it('floors float assertion counts to integers', () => {
+    const dir = fixture();
+    try {
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":10.0,"fail":0.0,"total":10}',
+      );
+      const body = render(dir, {
+        NAME: 'float',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed \u00b7 0 failed \u00b7 10 total',
+      );
+      expect(body).toContain('\u2705 passed');
+      expect(body).not.toContain('10.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('marks only finding-bearing bodies as substantive', () => {
     const dir = fixture();
     const M = 'qwen-triage:verify-substantive';
@@ -2442,7 +2836,9 @@ describe('qwen-triage verify maintainer-review round', () => {
     // A mid-body stall closes the response (curl 18), not a hang until the
     // client's own timeout (curl 28).
     expect(out).toContain('stall_exit=18');
-  });
+    // 20 chunks x 200 ms is 4 s before the stall arm even starts, so this
+    // cannot fit vitest's 5 s default. It was timing out on main.
+  }, 30000);
 
   // GitHub cancels the OLDER pending run in a concurrency group, so the
   // requester's own /verify proceeds — the earlier "queued behind other
@@ -2715,7 +3111,9 @@ describe('qwen-triage tmux lane parity', () => {
     const out = runProxyWatchdogTest(proxy);
     expect(out).toContain('chunks=20');
     expect(out).toContain('stall_exit=18');
-  });
+    // Same reason as its verify-lane twin: the stream alone outlasts the
+    // 5 s default.
+  }, 30000);
 
   // PR lifecycle scripts run before the agent and can plant a
   // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
@@ -2821,7 +3219,7 @@ describe('qwen-triage tmux lane parity', () => {
     const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
     expect(runStep).toContain('pkill -KILL -u node');
     expect(runStep).toContain(
-      'Processes owned by the build user survived; refusing to start the agent.',
+      'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
     );
     // Before the sweep and the proxy: the cleanup must not race a live
     // process, and no leftover child may be alive when the proxy binds.
@@ -2925,4 +3323,123 @@ describe('qwen-triage tmux lane parity', () => {
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
+});
+
+describe('qwen-triage build-process guard', () => {
+  // The guard fired on a real run (job 30267953352) and failed the job with
+  // nothing but "processes survived" — no pid, no state, no command line.
+  // Nobody could tell a genuine leftover from a harmless one, including the
+  // person who wrote it. Both lanes now name what survived.
+  it('names the surviving processes instead of just refusing', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(runStep, `${lane} lost the guard`).toContain(
+        'live_build_processes',
+      );
+      expect(runStep).toContain('surviving process:');
+      expect(runStep).toContain(
+        'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
+      );
+    }
+  });
+
+  // `ps -u node` exits 1 when the user owns zero processes. Under
+  // `set -euo pipefail` the bare assignment would die silently on the
+  // success path — the `|| true` absorbs the no-match status.
+  it('"survivors" assignment tolerates zero processes under pipefail', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(
+        runStep,
+        `${lane}: survivors assignment must survive ps exit 1`,
+      ).toContain('survivors="$(live_build_processes)" || true');
+    }
+  });
+
+  // A zombie cannot be killed and cannot execute anything, so counting one
+  // means this check can never clear.
+  //
+  // PLATFORM NOTE, and the reason this test is split in two: Linux pgrep
+  // reports defunct processes ("Defunct processes are reported." — pgrep(1),
+  // procps-ng), which is why the original `pgrep -u node` guard could hang
+  // on a zombie in CI. macOS pgrep does NOT list them, so the behavioural
+  // arm below cannot discriminate the old implementation from the new one
+  // here — verified directly: ps lists our zombie, pgrep does not. The
+  // structural assertion is therefore the one that holds on every platform.
+  it('excludes zombies from the surviving-process check', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      const body = runStep
+        .match(/live_build_processes\(\) \{\n([\s\S]*?)\n\s*\}/)?.[1]
+        ?.trim();
+      expect(body, `${lane}: no live_build_processes body`).toBeTruthy();
+      // It must read process STATE and drop zombies. `pgrep` alone cannot:
+      // on Linux it reports defunct processes and offers no default filter.
+      expect(body, `${lane}: the filter must inspect process state`).toMatch(
+        /stat=/,
+      );
+      expect(body, `${lane}: the filter must exclude zombies`).toMatch(
+        /\/\^Z\//,
+      );
+      expect(body).not.toMatch(/^pgrep\b/);
+    }
+  });
+
+  // The OS property the exclusion rests on: a zombie survives SIGKILL and
+  // ps still lists it, so an unfiltered check would never clear.
+  it('confirms a zombie survives SIGKILL and stays visible to ps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zombie-'));
+    try {
+      writeFileSync(
+        join(dir, 'mkzombie.py'),
+        [
+          'import os, time',
+          'pid = os.fork()',
+          'if pid == 0:',
+          '    os._exit(0)',
+          'print(pid, flush=True)',
+          'time.sleep(8)',
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        `python3 "$1/mkzombie.py" > "$1/zpid" &`,
+        'PP=$!',
+        'sleep 1',
+        'Z="$(tr -d " \n" < "$1/zpid")"',
+        '[ -n "$Z" ] || { echo "no-zombie"; kill $PP 2>/dev/null; exit 0; }',
+        'kill -9 "$Z" 2>/dev/null',
+        'sleep 0.5',
+        'echo "state=$(ps -o stat= -p "$Z" 2>/dev/null | tr -d " ")"',
+        'echo "unfiltered=$(ps -o pid= -p "$Z" 2>/dev/null | wc -l | tr -d " ")"',
+        `echo "filtered=$(ps -o pid=,stat=,args= -p "$Z" 2>/dev/null | awk '$2 !~ /^Z/' | wc -l | tr -d ' ')"`,
+        'kill $PP 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 30000,
+      }).stdout;
+      if (out.includes('no-zombie')) return;
+      expect(out).toMatch(/state=Z/);
+      expect(out).toContain('unfiltered=1');
+      expect(out).toContain('filtered=0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
 });
