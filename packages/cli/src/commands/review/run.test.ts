@@ -1,0 +1,248 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// `review run` is a contract around the headless review: build the right
+// /review invocation, republish the verdict compose-review wrote (never the
+// model's prose), and map outcomes onto exit codes a CI gate can trust. The
+// child CLI itself is tested elsewhere; these tests pin the contract — prompt
+// assembly, artifact discovery (this run's verdict, not a stale one), the
+// completed/failed/blocking exit split, and the spawn wiring.
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  utimesSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: { ...actual, spawn: spawnMock },
+    spawn: spawnMock,
+  };
+});
+
+const { buildReviewPrompt, newestArtifactSince, exitCodeFor, runCommand } =
+  await import('./run.js');
+const { REVIEW_TMP_DIR, REVIEWS_DIR } = await import('./lib/paths.js');
+
+describe('buildReviewPrompt', () => {
+  it('reviews the local tree when no target is given', () => {
+    expect(buildReviewPrompt({})).toBe('/review');
+  });
+
+  it('threads target, effort, and --comment through verbatim', () => {
+    expect(
+      buildReviewPrompt({ target: '7724', effort: 'high', comment: true }),
+    ).toBe('/review 7724 --effort high --comment');
+  });
+
+  it('omits what was not asked for', () => {
+    expect(buildReviewPrompt({ effort: 'medium' })).toBe(
+      '/review --effort medium',
+    );
+  });
+});
+
+describe('newestArtifactSince', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'run-artifacts-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function file(name: string, mtimeMs: number): string {
+    const path = join(dir, name);
+    writeFileSync(path, '{}', 'utf8');
+    utimesSync(path, mtimeMs / 1000, mtimeMs / 1000);
+    return path;
+  }
+
+  it('ignores artifacts older than the run', () => {
+    // A stale composed JSON is the LAST review's verdict — republishing it
+    // would report an outcome this run never produced.
+    const start = Date.now();
+    file('qwen-review-local-composed.json', start - 60_000);
+
+    expect(
+      newestArtifactSince(dir, /^qwen-review-.*composed\.json$/, start),
+    ).toBeNull();
+  });
+
+  it('returns the newest matching artifact from this run', () => {
+    const start = Date.now() - 10_000;
+    file('qwen-review-local-composed.json', start + 1_000);
+    const newer = file('qwen-review-pr-9-composed.json', start + 5_000);
+    file('unrelated.json', start + 9_000);
+
+    expect(
+      newestArtifactSince(dir, /^qwen-review-.*composed\.json$/, start),
+    ).toBe(newer);
+  });
+
+  it('returns null when the directory does not exist', () => {
+    expect(
+      newestArtifactSince(join(dir, 'absent'), /composed/, Date.now()),
+    ).toBeNull();
+  });
+});
+
+describe('exitCodeFor', () => {
+  it('splits completed / no-verdict / blocking into 0 / 1 / 3', () => {
+    expect(exitCodeFor(true, 'APPROVE', 'none')).toBe(0);
+    expect(exitCodeFor(true, 'REQUEST_CHANGES', 'none')).toBe(0);
+    expect(exitCodeFor(false, null, 'none')).toBe(1);
+    expect(exitCodeFor(true, 'REQUEST_CHANGES', 'request-changes')).toBe(3);
+    expect(exitCodeFor(true, 'COMMENT', 'request-changes')).toBe(0);
+    // An incomplete run is 1 even under --fail-on: "the tool broke" must never
+    // read as "the review blocked".
+    expect(exitCodeFor(false, 'REQUEST_CHANGES', 'request-changes')).toBe(1);
+  });
+});
+
+describe('review run (handler)', () => {
+  let dir: string;
+  let cwd: string;
+  let outs: string[];
+  let exitCode: number | undefined;
+
+  class FakeChild extends EventEmitter {
+    stdout = Object.assign(new EventEmitter(), { resume: () => {} });
+    stderr = Object.assign(new EventEmitter(), { resume: () => {} });
+    kill = vi.fn();
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'run-handler-'));
+    cwd = process.cwd();
+    process.chdir(dir);
+    outs = [];
+    exitCode = process.exitCode as number | undefined;
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      outs.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    spawnMock.mockReset();
+  });
+
+  afterEach(() => {
+    process.exitCode = exitCode;
+    vi.restoreAllMocks();
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runHandler(over: Record<string, unknown> = {}): Promise<void> {
+    return (runCommand.handler as (a: unknown) => Promise<void>)({
+      comment: false,
+      json: true,
+      'fail-on': 'none',
+      'timeout-minutes': 120,
+      'approval-mode': 'yolo',
+      quiet: true,
+      ...over,
+    });
+  }
+
+  /** Child that "completes", writing (or not) a composed verdict first. */
+  function armChild(exit: number, composed?: Record<string, unknown>): void {
+    spawnMock.mockImplementation(() => {
+      const child = new FakeChild();
+      setImmediate(() => {
+        if (composed) {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          mkdirSync(REVIEWS_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify(composed),
+            'utf8',
+          );
+          writeFileSync(join(REVIEWS_DIR, 'review.md'), '# report', 'utf8');
+        }
+        child.emit('close', exit);
+      });
+      return child;
+    });
+  }
+
+  it('republishes the composed verdict and exits 0', async () => {
+    armChild(0, {
+      event: 'REQUEST_CHANGES',
+      verdictLine: 'Verdict: Request changes',
+      baseEvent: 'REQUEST_CHANGES',
+      cappedBy: [],
+      downgraded: false,
+      downgradedFrom: null,
+      remediation: [],
+    });
+    await runHandler();
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(result.verdictLine).toBe('Verdict: Request changes');
+    expect(result.reportPath).toContain('review.md');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('exits 3 on a blocking verdict only when --fail-on asks for it', async () => {
+    armChild(0, {
+      event: 'REQUEST_CHANGES',
+      verdictLine: 'Verdict: Request changes',
+    });
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('treats a clean child exit without a composed verdict as failure', async () => {
+    // The model can wander off and exit 0 without ever reaching Step 7. That is
+    // "no verdict", never "approve".
+    armChild(0);
+    await runHandler();
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('closes the child stdin so piped input cannot defeat slash detection', async () => {
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler();
+
+    const [, argvUsed, opts] = spawnMock.mock.calls[0] as [
+      string,
+      string[],
+      { stdio: unknown[] },
+    ];
+    expect(opts.stdio[0]).toBe('ignore');
+    expect(argvUsed).toContain('--prompt');
+    expect(argvUsed).toContain('/review');
+  });
+
+  it('passes the approval mode through to the child CLI', async () => {
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ 'approval-mode': 'default' });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    const i = argvUsed.indexOf('--approval-mode');
+    expect(i).toBeGreaterThan(-1);
+    expect(argvUsed[i + 1]).toBe('default');
+  });
+});
