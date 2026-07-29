@@ -908,6 +908,26 @@ describe('KeypressContext - Kitty Protocol', () => {
         }),
       );
     });
+
+    it('should still treat Kitty Ctrl+C as the escape hatch', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Modifier 5 is Ctrl
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;5u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          ctrl: true,
+          shift: false,
+          kittyProtocol: true,
+        }),
+      );
+    });
   });
 
   describe('paste mode', () => {
