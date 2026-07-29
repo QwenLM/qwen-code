@@ -78,3 +78,8 @@ the `@`-command display text.
 - Other transcript consumers (desktop, web UI) can adopt `displayText` in
   follow-ups; until then they see the tagged shape, which is at least
   mechanically identifiable.
+
+ACP/export/daemon consumers that go through `transcript-replay`'s
+`projectUserRecord` also prefer `displayText` and strip a trailing tagged
+part for subtype-less user records (same three-shape fallback as the TUI
+resume path).

@@ -21,6 +21,7 @@ import {
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core/goalWire';
+import { isUserPromptSubmitContextPartText } from '@qwen-code/qwen-code-core';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -513,8 +514,65 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
+    } else if (!record.subtype) {
+      // Plain user records — including UserPromptSubmit-augmented ones —
+      // prefer the recorded display projection, then strip a trailing
+      // whole-part tagged hook-context block. Matches resumeHistoryUtils.
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const displayText =
+        payload && typeof payload['displayText'] === 'string'
+          ? payload['displayText']
+          : undefined;
+      if (displayText) {
+        yield emit(
+          createTranscriptMessageUpdate({
+            role: 'user',
+            text: displayText,
+            ...meta,
+          }),
+        );
+        return;
+      }
+      yield* this.projectMessageParts(
+        this.withoutTrailingUserPromptSubmitContext(record),
+        'user',
+        emit,
+        meta,
+      );
+      return;
     }
     yield* this.projectMessageParts(record, 'user', emit, meta);
+  }
+
+  /**
+   * Drops a trailing message part that is entirely a tagged UserPromptSubmit
+   * context block. Injection always appends after the user's own part(s), so
+   * a sole matching part is treated as user-authored and kept.
+   */
+  private withoutTrailingUserPromptSubmitContext(
+    record: TranscriptRecordInput,
+  ): TranscriptRecordInput {
+    const parts = record.message?.parts;
+    if (!Array.isArray(parts) || parts.length <= 1) {
+      return record;
+    }
+    const last = parts[parts.length - 1];
+    if (
+      !isObjectRecord(last) ||
+      typeof last['text'] !== 'string' ||
+      !isUserPromptSubmitContextPartText(last['text'])
+    ) {
+      return record;
+    }
+    return {
+      ...record,
+      message: {
+        ...record.message,
+        parts: parts.slice(0, -1),
+      },
+    };
   }
 
   private *projectAssistantRecord(

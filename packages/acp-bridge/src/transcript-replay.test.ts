@@ -193,6 +193,74 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  describe('UserPromptSubmit hook context provenance', () => {
+    const tagged =
+      '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    it('prefers displayText for plain user records over tagged parts', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-1', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'my prompt' }, { text: tagged }],
+          },
+          systemPayload: {
+            displayText: 'my prompt',
+            hookContext: 'injected hook context',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+    });
+
+    it('strips a trailing whole-part tagged block when displayText is absent', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-2', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'my prompt' }, { text: tagged }],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+    });
+
+    it('keeps a sole part that matches the tag shape', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-3', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: tagged }],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: tagged },
+        },
+      ]);
+    });
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(

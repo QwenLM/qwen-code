@@ -2571,16 +2571,20 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
-          this.config.getChatRecordingService()?.recordUserMessage(
-            request,
-            goalPermit,
-            injectedHookContext !== undefined
-              ? {
-                  displayText: preInjectionPromptText,
-                  hookContext: injectedHookContext,
-                }
-              : undefined,
-          );
+          const recordingService = this.config.getChatRecordingService();
+          if (!recordingService) {
+            // no-op
+          } else if (injectedHookContext !== undefined) {
+            // Only pass the payload when a hook actually injected; omitting
+            // the third argument keeps existing two-arg spies/call sites
+            // exact (passing `undefined` would still count as a third arg).
+            recordingService.recordUserMessage(request, goalPermit, {
+              displayText: preInjectionPromptText,
+              hookContext: injectedHookContext,
+            });
+          } else {
+            recordingService.recordUserMessage(request, goalPermit);
+          }
         }
       }
 

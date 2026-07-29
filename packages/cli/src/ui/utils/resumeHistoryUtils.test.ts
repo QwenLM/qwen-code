@@ -144,6 +144,26 @@ describe('resumeHistoryUtils', () => {
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
     });
 
+    it('prefers displayText over the tag-strip fallback', () => {
+      // Fixture where the two branches disagree: without displayText the
+      // tag-strip path would expose the middle "expanded extra" part.
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            { text: 'my prompt' },
+            { text: 'expanded extra' },
+            { text: tagged },
+          ],
+        },
+        systemPayload: {
+          displayText: 'my prompt',
+          hookContext: 'injected hook context',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
     it('strips a trailing whole-part tagged block when no displayText is recorded', () => {
       const items = buildUserItems({
         type: 'user',

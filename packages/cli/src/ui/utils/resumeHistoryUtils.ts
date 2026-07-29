@@ -15,6 +15,7 @@ import type {
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
   HistoryGap,
+  UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
@@ -46,7 +47,7 @@ import {
 function extractUserRecordDisplayText(
   record: ConversationRecord['messages'][number],
 ): string {
-  const payload = record.systemPayload as { displayText?: string } | undefined;
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
   if (payload?.displayText) {
     return payload.displayText;
   }

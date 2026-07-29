@@ -539,7 +539,7 @@ Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `s
 - `reason`: human-readable explanation for the decision
 - `hookSpecificOutput.additionalContext`: additional context to append to the prompt (optional)
 
-When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history, session transcripts, and resumed sessions. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately, and the interactive UI displays that original text rather than the injected context.
+When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history and session transcripts. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately; the interactive TUI and the ACP/export transcript-replay path display that original text rather than the injected context.
 
 **Note**: Since UserPromptSubmitOutput extends HookOutput, all standard fields are available but only additionalContext in hookSpecificOutput is specifically defined for this event.
 
