@@ -218,6 +218,10 @@ export type {
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
+  PaneHeaderActionsInfo,
+  PaneHeaderActionsRenderer,
+} from './components/ChatPane';
+export type {
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
