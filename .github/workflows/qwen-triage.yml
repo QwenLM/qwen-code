@@ -126,10 +126,13 @@ jobs:
               # persistent ECS pool as before, while an external author's
               # code is sponsored by the commenter onto an ephemeral
               # GitHub-hosted VM behind a pre-execution risk screen — the
-              # machine is destroyed after the run, so the persistence and
-              # lateral-movement threats that justify the ECS gate do not
-              # exist there. /triage only reads content, so the commenter's
-              # permission gates it.
+              # machine is destroyed after the run, so the PERSISTENCE
+              # threat that justifies the ECS gate does not exist there.
+              # (Persistence is the decisive ECS risk: the pool is
+              # network-isolated, but machines are reused, and the next
+              # run arrives carrying credentials that planted artifacts
+              # could harvest.) /triage only reads content, so the
+              # commenter's permission gates it.
               # Match case-INSENSITIVELY: the job predicates above are
               # GitHub Actions expressions, whose string comparisons ignore
               # case, so `@QWEN-CODE /VERIFY` reaches this step. A
@@ -1855,8 +1858,10 @@ jobs:
     # Routed by the AUTHOR's permission (decided in authorize): write-access
     # authors run on the persistent ECS pool; external authors run sponsored
     # on an ephemeral GitHub-hosted VM that is destroyed after the job — the
-    # persistence and lateral-movement threats the ECS gate exists for do
-    # not apply there. Same container image on both, so the environment
+    # PERSISTENCE threat the ECS gate exists for does not apply there. (The
+    # pool is network-isolated, so persistence — planted artifacts
+    # harvesting a later run's credentials — is the decisive ECS risk, not
+    # lateral movement.) Same container image on both, so the environment
     # contract is identical.
     runs-on: "${{ needs.authorize.outputs.verify_runner == 'hosted' && fromJSON('[\"ubuntu-latest\"]') || fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') }}"
     # The job checks out and executes PR code. Run the steps in a container so
