@@ -1,0 +1,139 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { RunCommand } from './exec.js';
+import { ensureUp, nodeIdentity } from './tailscale.js';
+import { ensureCert } from './cert.js';
+import { startUnit, stopUnit, isActive } from './process.js';
+import {
+  readState,
+  writeState,
+  clearState,
+  type LauncherState,
+} from './state.js';
+import { renderQr } from './qr.js';
+
+export interface Deps {
+  run: RunCommand;
+  dir: string; // ~/.qwen/rc
+  port: number;
+  unit: string; // e.g. qwen-rc-gateway
+  serveCmd: string[]; // PATH-independent argv prefix for qwen-rc, e.g. [process.argv[0], process.argv[1]]
+}
+
+export interface UpResult {
+  ok: boolean;
+  url?: string;
+  host?: string;
+  port?: number;
+  unit?: string;
+  bootstrapCode?: string;
+  certExpiry?: string;
+  qr?: string;
+  hint?: string;
+}
+
+function connectUrl(host: string, port: number): string {
+  return `https://${host}:${port}/ui/`;
+}
+
+function readBootstrapCode(dir: string): string | undefined {
+  const p = join(dir, 'owner-bootstrap.code');
+  if (!existsSync(p)) return undefined;
+  const c = readFileSync(p, 'utf8').trim();
+  return c.length > 0 ? c : undefined;
+}
+
+export async function up(deps: Deps): Promise<UpResult> {
+  const { run, dir, port, unit, serveCmd } = deps;
+
+  // 1. Tailnet.
+  const upOutcome = await ensureUp(run);
+  if (upOutcome.kind !== 'running') {
+    const hint =
+      upOutcome.kind === 'needs-auth'
+        ? `Authenticate this device, then re-run \`qwen-rc up\`:\n  ${upOutcome.authUrl}`
+        : upOutcome.kind === 'not-installed'
+          ? 'Tailscale is not installed in WSL. Install it, then re-run.'
+          : upOutcome.kind === 'needs-operator'
+            ? 'Run `tailscale set --operator=$USER` once so up can manage Tailscale without sudo.'
+            : `tailscale up failed: ${upOutcome.message}`;
+    return { ok: false, hint };
+  }
+
+  const id = await nodeIdentity(run);
+  if (!id)
+    return {
+      ok: false,
+      hint: 'Could not read the Tailscale node identity (status --json).',
+    };
+
+  // 2. TLS cert.
+  const cert = await ensureCert(run, id.host, join(dir, 'tls'));
+  if (cert.kind !== 'ok') {
+    const hint =
+      cert.kind === 'https-not-enabled'
+        ? 'Enable HTTPS/MagicDNS for your tailnet in the Tailscale admin console, then re-run.'
+        : `tailscale cert failed: ${cert.message}`;
+    return { ok: false, hint };
+  }
+
+  const url = connectUrl(id.host, port);
+
+  // 3. Start the gateway unit — unless already active (idempotent).
+  if (!(await isActive(run, unit))) {
+    const serveArgv = [
+      ...serveCmd, // PATH-independent (systemd --user has systemd's env, not the shell's)
+      'serve',
+      '--host',
+      id.ip,
+      '--tls',
+      cert.pair.certPath,
+      '--tls-key',
+      cert.pair.keyPath,
+      '--port',
+      String(port),
+    ];
+    const started = await startUnit(run, unit, serveArgv);
+    if (started.code !== 0) {
+      const err = started.stderr || started.stdout;
+      // The Electron path (`wsl.exe -- qwen-rc up`) may have no user-session
+      // D-Bus, so systemd --user fails; give the specific remedy, not a raw error.
+      const busDown =
+        /failed to connect to bus|XDG_RUNTIME_DIR|no medium found/i.test(err);
+      const hint = busDown
+        ? 'systemd --user is unavailable in this shell (no session D-Bus). Set `XDG_RUNTIME_DIR=/run/user/$(id -u)` and run `loginctl enable-linger $USER` once — this is the usual cause when launched via wsl.exe.'
+        : `Failed to start the gateway unit: ${err.trim().slice(0, 500)}`;
+      return { ok: false, hint };
+    }
+  }
+
+  const state: LauncherState = { unit, url, host: id.host, port };
+  writeState(dir, state);
+
+  // 4. Connect info.
+  const bootstrapCode = readBootstrapCode(dir);
+  const qr = await renderQr(url).catch(() => undefined);
+  return { ok: true, url, host: id.host, port, unit, bootstrapCode, qr };
+}
+
+export async function down(deps: Deps): Promise<{ ok: boolean }> {
+  const { run, dir, unit } = deps;
+  const st = readState(dir);
+  await stopUnit(run, st?.unit ?? unit); // idempotent; a stopped unit is fine
+  clearState(dir);
+  return { ok: true };
+}
+
+export async function status(
+  deps: Deps,
+): Promise<{ running: boolean; url?: string; certExpiry?: string }> {
+  const { run, dir, unit } = deps;
+  const st = readState(dir);
+  const running = await isActive(run, st?.unit ?? unit);
+  return { running, url: st?.url, certExpiry: st?.certExpiry };
+}
