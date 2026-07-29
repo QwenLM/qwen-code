@@ -1124,6 +1124,43 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('does not repaint static history after a resize settles (#8004)', () => {
+      vi.useFakeTimers();
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 24 });
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Advance well past the old RESIZE_REPAINT_SETTLE_MS (200ms) debounce.
+      // The removed settle -> refreshStatic path wrote clearTerminal here; the
+      // new contract never does, so a future re-introduction would fail this.
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+      vi.useRealTimers();
+    });
+
     it('handleClearScreen avoids a second clearTerminal write', () => {
       const clearSpy = vi.spyOn(console, 'clear').mockImplementation(() => {});
 
