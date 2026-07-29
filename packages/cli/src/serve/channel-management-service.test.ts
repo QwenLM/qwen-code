@@ -302,6 +302,14 @@ describe('createChannelManagementService', () => {
     await expect(service.pairingRequests('bot')).rejects.toMatchObject({
       code: 'channel_workspace_mismatch',
     });
+    await expect(service.pairingApprovals('bot')).rejects.toMatchObject({
+      code: 'channel_workspace_mismatch',
+    });
+    await expect(
+      service.revokePairingApproval('bot', 'sender-1'),
+    ).rejects.toMatchObject({
+      code: 'channel_workspace_mismatch',
+    });
 
     expect(store.setStartupNames).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
@@ -309,7 +317,7 @@ describe('createChannelManagementService', () => {
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
   });
 
-  it('lists and approves pairing requests in the selected workspace scope', async () => {
+  it('manages pairing requests and approvals in the selected workspace scope', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const qwenHome = await fs.mkdtemp(
       path.join(os.tmpdir(), 'channel-management-pairing-'),
@@ -344,6 +352,21 @@ describe('createChannelManagementService', () => {
         requests: [],
       });
       expect(pairing.isApproved('sender-1')).toBe(true);
+      await expect(service.pairingApprovals('bot')).resolves.toEqual({
+        senderIds: ['sender-1'],
+      });
+      await expect(
+        service.revokePairingApproval('bot', 'sender-1'),
+      ).resolves.toEqual({
+        revoked: 'sender-1',
+        senderIds: [],
+      });
+      expect(pairing.isApproved('sender-1')).toBe(false);
+      await expect(
+        service.revokePairingApproval('bot', 'sender-1'),
+      ).rejects.toMatchObject({
+        code: 'channel_pairing_approval_not_found',
+      });
     } finally {
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
       else process.env['QWEN_HOME'] = previousQwenHome;
@@ -819,6 +842,12 @@ describe('createChannelManagementService', () => {
     });
     await expect(
       service.approvePairing('bot', 'ABCDEFGH'),
+    ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+    await expect(service.pairingApprovals('bot')).rejects.toMatchObject({
+      code: 'channel_pairing_not_enabled',
+    });
+    await expect(
+      service.revokePairingApproval('bot', 'sender-1'),
     ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
   });
 });
