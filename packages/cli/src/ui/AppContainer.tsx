@@ -2322,12 +2322,16 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const popAllQueuedMessages = useCallback((): string | null => {
-    const submission = popAllMessages(releaseQueuedGoalReservations);
+    const goalTurnKeys = removeGoalTurns();
+    if (goalTurnKeys.length > 0) {
+      releaseQueuedGoalReservations(goalTurnKeys);
+    }
+    const submission = popAllMessages();
     if (submission === null) return null;
     restoredSubmissionRef.current = submission;
     submittedPromptProvenanceUnavailableRef.current = false;
     return submission.modelText;
-  }, [popAllMessages, releaseQueuedGoalReservations]);
+  }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
 
   useEffect(() => {
     const host: GoalTurnHost = {

@@ -48,7 +48,7 @@ export interface UseMessageQueueReturn {
   getPendingSubmissionCount: () => number;
   claimGoalTurn: () => QueuedGoalTurn | undefined;
   claimDirectUserAdmission: () => DirectUserAdmission;
-  removeGoalTurns: () => number;
+  removeGoalTurns: () => string[];
   popNextSubmission: (
     goalControlMode?: GoalQueueControlMode,
   ) => QueuedSubmission | null;
@@ -59,7 +59,6 @@ export interface UseMessageQueueReturn {
   ) => QueuedUserSubmission | null;
   restoreMessages: (messages: string[], submittedPrompt?: string) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
-  popNextSegment: () => string | null;
 }
 
 interface QueuedMessage {
@@ -171,12 +170,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
     };
   }, [claimGoalTurn, nextMessageKey]);
 
-  const removeGoalTurns = useCallback((): number => {
-    const removed = goalQueueRef.current.length;
-    if (removed === 0) return 0;
+  const removeGoalTurns = useCallback((): string[] => {
+    const keys = goalQueueRef.current.map(({ turnKey }) => turnKey);
+    if (keys.length === 0) return [];
     goalQueueRef.current = [];
     setQueuedGoalTurns([]);
-    return removed;
+    return keys;
   }, []);
 
   const popNextSubmission = useCallback(
@@ -286,15 +285,6 @@ export function useMessageQueue(): UseMessageQueueReturn {
     [],
   );
 
-  const popNextSegment = useCallback((): string | null => {
-    const current = queueRef.current;
-    if (current.length === 0) return null;
-    const [head, ...rest] = current;
-    queueRef.current = rest;
-    setQueuedMessages(rest);
-    return head.text;
-  }, []);
-
   return {
     messageQueue: queuedMessages.map(({ text }) => text),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
@@ -312,6 +302,5 @@ export function useMessageQueue(): UseMessageQueueReturn {
     popAllMessages,
     restoreMessages,
     drainQueue,
-    popNextSegment,
   };
 }

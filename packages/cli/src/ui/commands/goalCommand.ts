@@ -31,6 +31,9 @@ import { MessageType, type HistoryItemGoalStatus } from '../types.js';
 import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 
+// Mirrored by GOAL_CLEAR_KEYWORDS in
+// packages/web-shell/client/utils/goalCondition.ts, whose test reads this
+// literal and fails on drift.
 const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',
@@ -44,13 +47,25 @@ function formatLegacyTurns(count: number): string {
   return `${count} ${count === 1 ? 'turn' : 'turns'}`;
 }
 
+function assertNeverTerminalKind(kind: never): never {
+  throw new Error(`Unexpected GoalTerminalKind: ${kind}`);
+}
+
 function formatLegacyTerminalSummary(event: GoalTerminalEvent): string {
-  const title =
-    event.kind === 'achieved'
-      ? 'Goal achieved'
-      : event.kind === 'failed'
-        ? 'Goal could not be achieved'
-        : 'Goal aborted';
+  let title: string;
+  switch (event.kind) {
+    case 'achieved':
+      title = 'Goal achieved';
+      break;
+    case 'failed':
+      title = 'Goal could not be achieved';
+      break;
+    case 'aborted':
+      title = 'Goal aborted';
+      break;
+    default:
+      title = assertNeverTerminalKind(event.kind);
+  }
   const stats: string[] = [];
   if (event.iterations > 0) stats.push(formatLegacyTurns(event.iterations));
   if (typeof event.durationMs === 'number') {

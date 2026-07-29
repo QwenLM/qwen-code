@@ -238,18 +238,22 @@ describe('useMessageQueue', () => {
     });
 
     permit.revision = 99;
-    const submission = result.current.popNextSubmission();
+    let submission: unknown;
+    act(() => {
+      submission = result.current.popNextSubmission();
+    });
 
-    expect(submission?.kind).toBe('goal');
-    if (!submission || submission.kind !== 'goal') {
-      throw new Error('Expected a queued Goal turn');
-    }
-    expect(submission.permit).toEqual({
+    expect(submission).toMatchObject({ kind: 'goal' });
+    const goalSubmission = submission as {
+      kind: 'goal';
+      permit: typeof permit;
+    };
+    expect(goalSubmission.permit).toEqual({
       goalId: 'goal-copy',
       revision: 3,
       turnId: 'turn-copy',
     });
-    expect(submission.permit).not.toBe(permit);
+    expect(goalSubmission.permit).not.toBe(permit);
   });
 
   it('creates a stable direct-user admission that claims a hidden Goal', () => {
@@ -408,19 +412,24 @@ describe('useMessageQueue', () => {
       result.current.addMessage('keep me');
     });
     const queue = result.current as typeof result.current & {
-      removeGoalTurns?: () => number;
+      removeGoalTurns?: () => string[];
     };
 
     expect(queue.removeGoalTurns).toBeTypeOf('function');
-    let removed = 0;
+    let removedKeys: string[] = [];
     act(() => {
-      removed = queue.removeGoalTurns!();
+      removedKeys = queue.removeGoalTurns!();
     });
 
-    expect(removed).toBe(1);
+    expect(removedKeys).toHaveLength(1);
+    expect(removedKeys[0]).toMatch(/^goal-runtime:/);
     expect(result.current.messageQueue).toEqual(['keep me']);
     expect(result.current.pendingSubmissionCount).toBe(1);
-    expect(result.current.popNextSubmission()).toMatchObject({
+    let kept: unknown;
+    act(() => {
+      kept = result.current.popNextSubmission();
+    });
+    expect(kept).toMatchObject({
       kind: 'user',
       modelText: 'keep me',
     });
@@ -514,6 +523,44 @@ describe('useMessageQueue', () => {
       });
 
       expect(removed).toEqual([[reservedKey]]);
+    });
+
+    it('aggregates submittedPrompt when every message has one', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('msg A', false, 'prompt A');
+        result.current.addMessage('msg B', false, 'prompt B');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'msg A\n\nmsg B',
+        submittedPrompt: 'prompt A\n\nprompt B',
+      });
+    });
+
+    it('omits submittedPrompt when any message lacks one', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('msg A', false, 'prompt A');
+        result.current.addMessage('msg B');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'msg A\n\nmsg B',
+      });
+      expect(popped!.submittedPrompt).toBeUndefined();
     });
   });
 
@@ -777,61 +824,6 @@ describe('useMessageQueue', () => {
       });
 
       expect(result.current.messageQueue).toEqual(['steer now', 'newer input']);
-    });
-  });
-
-  describe('popNextSegment', () => {
-    it('returns null when the queue is empty', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      let segment: string | null = null;
-      act(() => {
-        segment = result.current.popNextSegment();
-      });
-      expect(segment).toBeNull();
-    });
-
-    it('pops the first item and leaves the rest queued', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      act(() => {
-        result.current.addMessage('/model');
-        result.current.addMessage('/help');
-      });
-
-      let segment: string | null = null;
-      act(() => {
-        segment = result.current.popNextSegment();
-      });
-      expect(segment).toBe('/model');
-      expect(result.current.messageQueue).toEqual(['/help']);
-    });
-
-    it('drains the queue one item at a time across repeated calls', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      act(() => {
-        result.current.addMessage('/model');
-        result.current.addMessage('/theme');
-        result.current.addMessage('/help');
-      });
-
-      const segments: Array<string | null> = [];
-      act(() => {
-        segments.push(result.current.popNextSegment());
-      });
-      act(() => {
-        segments.push(result.current.popNextSegment());
-      });
-      act(() => {
-        segments.push(result.current.popNextSegment());
-      });
-      act(() => {
-        segments.push(result.current.popNextSegment());
-      });
-
-      expect(segments).toEqual(['/model', '/theme', '/help', null]);
-      expect(result.current.messageQueue).toEqual([]);
     });
   });
 });

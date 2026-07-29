@@ -1304,7 +1304,7 @@ describe('AppContainer State Management', () => {
 
     it('binds one Goal host that enqueues, preempts, and cleans up', async () => {
       const enqueueGoalTurn = vi.fn();
-      const removeGoalTurns = vi.fn().mockReturnValue(1);
+      const removeGoalTurns = vi.fn().mockReturnValue([]);
       const preemptGoalTurn = vi.fn();
       const submitQuery = vi.fn();
       const unbind = vi.fn();
@@ -1861,6 +1861,7 @@ describe('AppContainer State Management', () => {
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         popAllMessages: vi.fn().mockReturnValue({
           modelText,
           submittedPrompt: 'review this',
@@ -1910,6 +1911,7 @@ describe('AppContainer State Management', () => {
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         popAllMessages: vi.fn().mockReturnValue({
           modelText,
           submittedPrompt: 'review this',

@@ -3393,7 +3393,10 @@ export const useGeminiStream = (
             if (submitType !== SendMessageType.Goal) {
               lastPromptErroredRef.current = true;
             }
-            const retryHint = t('Press Ctrl+Y to retry');
+            const retryHint =
+              submitType !== SendMessageType.Goal
+                ? t('Press Ctrl+Y to retry')
+                : undefined;
             // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
               type: 'error' as const,
