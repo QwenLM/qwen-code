@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -187,6 +188,7 @@ describe('GithubChannel', () => {
   });
 
   afterEach(() => {
+    rmSync(process.env.QWEN_HOME!, { recursive: true, force: true });
     if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
     else process.env.QWEN_HOME = savedQwenHome;
   });
@@ -259,6 +261,19 @@ describe('GithubChannel', () => {
       await expect(channel.connect()).resolves.toBeUndefined();
       channel.disconnect();
       expect(config.allowedUsers).toEqual(['alice']);
+    });
+
+    it('forces final-only delivery and appends the publication policy', () => {
+      const config = makeConfig({
+        blockStreaming: 'on',
+        instructions: 'Respond in Chinese.',
+      });
+      new TestableGithubChannel('test-github', config, makeBridge());
+
+      expect(config.blockStreaming).toBe('off');
+      expect(config.instructions).toContain('GitHub publication policy:');
+      expect(config.instructions).toContain('<no-reply/>');
+      expect(config.instructions).toContain('Respond in Chinese.');
     });
   });
 
@@ -996,6 +1011,208 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001']);
+    });
+  });
+
+  describe('publication contract', () => {
+    async function connectForPublication() {
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+      channel.disconnect();
+    }
+
+    it('suppresses the exact no-reply sentinel and audits the outcome', async () => {
+      await connectForPublication();
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        ' \n<no-reply/>\t',
+        'session-publication',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      const audit = readFileSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          'test-github-github-audit.jsonl',
+        ),
+        'utf-8',
+      );
+      expect(audit).toContain('"outcome":"suppressed"');
+      expect(audit).not.toContain('<no-reply/>');
+    });
+
+    it('posts one final comment and audits only its digest and metadata', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2001,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2001',
+        },
+      });
+      await connectForPublication();
+      const response = 'Final public reply';
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish('owner/repo', 'issue:42', response, 'session-publication');
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: response,
+      });
+      const audit = readFileSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          'test-github-github-audit.jsonl',
+        ),
+        'utf-8',
+      );
+      expect(audit).toContain('"outcome":"posted"');
+      expect(audit).toContain('issuecomment-2001');
+      expect(audit).toContain(
+        createHash('sha256').update(response).digest('hex'),
+      );
+      expect(audit).not.toContain(response);
+    });
+
+    it('uses the active prompt thread for final delivery', async () => {
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
+      const sendResponse = (
+        channel as unknown as {
+          sendResponseMessage: (
+            chatId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage.bind(channel);
+      vi.spyOn(
+        channel as unknown as {
+          getResponseThreadId: (sessionId: string) => string | undefined;
+        },
+        'getResponseThreadId',
+      ).mockReturnValue('pr:99');
+
+      await sendResponse('owner/repo', 'Final public reply', 'shared-session');
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 99,
+        body: 'Final public reply',
+      });
+    });
+
+    it('does not retry a failed final delivery', async () => {
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('ambiguous transport failure'),
+      );
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('ambiguous transport failure');
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    });
+
+    it('records the active source message and response thread', async () => {
+      await connectForPublication();
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+      const sourceMessage = vi
+        .spyOn(
+          channel as unknown as {
+            getResponseMessageId: (sessionId: string) => string | undefined;
+          },
+          'getResponseMessageId',
+        )
+        .mockReturnValue('source-message');
+
+      await publish('owner/repo', 'pr:99', '<no-reply/>', 'session-correlated');
+
+      const audit = readFileSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          'test-github-github-audit.jsonl',
+        ),
+        'utf-8',
+      );
+      expect(audit).toContain('"sourceMessageId":"source-message"');
+      expect(audit).toContain('"threadId":"pr:99"');
+      sourceMessage.mockRestore();
+    });
+
+    it('keeps successful publication when its audit write fails', async () => {
+      await connectForPublication();
+      vi.spyOn(channel, 'recordPublicationAudit').mockImplementation(() => {});
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).resolves.toBeUndefined();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        existsSync(
+          join(
+            process.env.QWEN_HOME!,
+            'channels',
+            'test-github-github-audit.jsonl',
+          ),
+        ),
+      ).toBe(false);
     });
   });
 

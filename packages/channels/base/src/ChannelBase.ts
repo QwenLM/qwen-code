@@ -2003,6 +2003,25 @@ export abstract class ChannelBase {
   }
 
   /**
+   * Adapter hook for delivery-only metadata. The response delivery path can read
+   * the active prompt while it exists; adapters must not retain its raw content.
+   */
+  protected getResponseMessageId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.messageId;
+  }
+
+  /**
+   * Returns the active prompt's response thread while it remains available for
+   * adapter delivery. Falls back to the session target after prompt cleanup.
+   */
+  protected getResponseThreadId(sessionId: string): string | undefined {
+    return (
+      this.activePrompts.get(sessionId)?.threadId ??
+      this.router.getTarget(sessionId)?.threadId
+    );
+  }
+
+  /**
    * Called when the agent's full response is ready.
    * Override to customize delivery (e.g., finalize an AI card).
    * Default: sends the full response text.

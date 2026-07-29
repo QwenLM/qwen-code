@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { appendFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import process from 'node:process';
 import { Octokit } from '@octokit/rest';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -7,7 +10,11 @@ import type {
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
-import { PollingChannelBase } from '@qwen-code/channel-base';
+import {
+  getGlobalQwenDir,
+  PollingChannelBase,
+  sanitizeLogText,
+} from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
@@ -77,6 +84,33 @@ interface NotificationContext {
   reason: string;
 }
 
+interface PostedGithubComment {
+  id?: number;
+  html_url?: string;
+}
+
+interface PublicationAuditRecord {
+  at: string;
+  type: 'github_publication';
+  outcome: 'posted' | 'suppressed' | 'failed';
+  channel: string;
+  sessionId: string;
+  sourceMessageId?: string;
+  threadId?: string;
+  commentId?: number;
+  commentUrl?: string;
+  bodySha256: string;
+  bodyChars: number;
+}
+
+const NO_REPLY_SENTINEL = '<no-reply/>';
+const GITHUB_PUBLICATION_INSTRUCTIONS = [
+  'GitHub publication policy:',
+  '- Do not use gh, curl, or the GitHub API to create, edit, delete, or review GitHub content. The channel adapter publishes your final response exactly once.',
+  `- If no public reply is needed, output exactly ${NO_REPLY_SENTINEL} and nothing else.`,
+  '- Do not include reasoning, tool transcripts, or private operational details in the final response.',
+].join('\n');
+
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
@@ -88,6 +122,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
+    config.blockStreaming = 'off';
+    config.instructions = [
+      config.instructions?.trim(),
+      GITHUB_PUBLICATION_INSTRUCTIONS,
+    ]
+      .filter((instruction): instruction is string => Boolean(instruction))
+      .join('\n\n');
     super(name, config, bridge, options);
   }
 
@@ -165,8 +206,82 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string | undefined,
     text: string,
   ): Promise<void> {
+    await this.createIssueComment(chatId, threadId, text);
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.publishFinalResponse(
+      chatId,
+      this.getResponseThreadId(sessionId),
+      text,
+      sessionId,
+    );
+  }
+
+  protected async publishFinalResponse(
+    chatId: string,
+    threadId: string | undefined,
+    fullText: string,
+    sessionId: string,
+  ): Promise<void> {
+    const auditBase = {
+      channel: this.name,
+      sessionId,
+      sourceMessageId: this.getResponseMessageId(sessionId),
+      threadId,
+      bodySha256: createHash('sha256').update(fullText).digest('hex'),
+      bodyChars: fullText.length,
+    };
+    if (fullText.trim() === NO_REPLY_SENTINEL) {
+      this.recordPublicationAudit({
+        ...auditBase,
+        at: new Date().toISOString(),
+        type: 'github_publication',
+        outcome: 'suppressed',
+      });
+      return;
+    }
+
+    try {
+      const comment = await this.createIssueComment(
+        chatId,
+        threadId,
+        fullText,
+        1,
+      );
+      this.recordPublicationAudit({
+        ...auditBase,
+        at: new Date().toISOString(),
+        type: 'github_publication',
+        outcome: 'posted',
+        commentId: comment.id,
+        commentUrl: comment.html_url,
+      });
+    } catch (err) {
+      this.recordPublicationAudit({
+        ...auditBase,
+        at: new Date().toISOString(),
+        type: 'github_publication',
+        outcome: 'failed',
+      });
+      throw err;
+    }
+  }
+
+  private async createIssueComment(
+    chatId: string,
+    threadId: string | undefined,
+    text: string,
+    retries = 3,
+  ): Promise<PostedGithubComment> {
     if (!threadId) {
-      return super.sendThreadMessage(chatId, threadId, text);
+      throw new Error(
+        `[Channel:${this.name}] sendMessage requires a threadId; use sendThreadMessage`,
+      );
     }
     const match = threadId.match(/^(?:issue|pr):(\d+)$/);
     if (!match) {
@@ -175,16 +290,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     const issueNumber = Number(match[1]);
-    await this.githubApi(
+    const [owner, repo] = chatId.split('/');
+    const response = await this.githubApi(
       () =>
         this.octokit.rest.issues.createComment({
-          owner: chatId.split('/')[0],
-          repo: chatId.split('/')[1],
+          owner,
+          repo,
           issue_number: issueNumber,
           body: text,
         }),
       `createComment(${threadId})`,
+      retries,
     );
+    return response.data;
   }
 
   protected async pollOnce(): Promise<void> {
@@ -590,6 +708,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
       await this.postErrorComment(envelope.chatId, issueNumber);
       return false;
+    }
+  }
+
+  protected recordPublicationAudit(record: PublicationAuditRecord): void {
+    try {
+      const encodedName = this.name
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 200);
+      const dir = join(getGlobalQwenDir(), 'channels');
+      const path = join(dir, `${encodedName}-github-audit.jsonl`);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
+      appendFileSync(path, `${JSON.stringify(record)}\n`, {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+      chmodSync(path, 0o600);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] publication audit write failed: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
     }
   }
 
