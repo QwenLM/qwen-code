@@ -15,11 +15,13 @@ jobs:
     env:
       LANG: 'en_US.UTF-8'
       LC_ALL: 'C'
-      TEMP: '${{ runner.temp }}'
-      TMP: '${{ runner.temp }}'
     steps:
-      - name: 'Configure Git for test fixtures'
-        run: 'git config --global core.autocrlf false'
+      - name: 'Configure Windows test environment'
+        shell: 'powershell'
+        run: |-
+          git config --global core.autocrlf false
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
