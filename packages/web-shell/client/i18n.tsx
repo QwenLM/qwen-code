@@ -477,7 +477,6 @@ const EN: Messages = {
     `${v?.label ?? 'Selection'} copied to the clipboard`,
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
-  'echartsChart.defaultTitle': 'Chart Loading',
   'echartsChart.noData': 'No data',
   'echartsChart.tableNotice': (v) => {
     const omittedRows = Number(v?.omittedRows ?? 0);
@@ -491,7 +490,6 @@ const EN: Messages = {
     return `Showing ${v?.visibleRows ?? 0} of ${v?.totalRows ?? 0} rows`;
   },
   'echartsChart.rendering': 'Rendering chart',
-  'echartsChart.runtimeUnavailable': 'Chart runtime is unavailable.',
   'echartsChart.renderFailed': 'Chart render failed.',
   'echartsChart.viewMode': 'View mode',
   'echartsChart.showChart': 'Show chart',
@@ -2978,7 +2976,6 @@ const ZH: Messages = {
   'copy.toClipboard': (v) => `${v?.label ?? '内容'} 已复制到剪贴板`,
   'code.copy': '复制',
   'code.copied': '已复制！',
-  'echartsChart.defaultTitle': '图表加载中',
   'echartsChart.noData': '暂无数据',
   'echartsChart.tableNotice': (v) => {
     const omittedRows = Number(v?.omittedRows ?? 0);
@@ -2992,7 +2989,6 @@ const ZH: Messages = {
     return `显示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行`;
   },
   'echartsChart.rendering': '正在渲染图表',
-  'echartsChart.runtimeUnavailable': '图表运行时不可用。',
   'echartsChart.renderFailed': '图表渲染失败。',
   'echartsChart.viewMode': '视图模式',
   'echartsChart.showChart': '显示图表',
