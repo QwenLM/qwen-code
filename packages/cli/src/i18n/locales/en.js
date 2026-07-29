@@ -2463,6 +2463,7 @@ export default {
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
+  'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

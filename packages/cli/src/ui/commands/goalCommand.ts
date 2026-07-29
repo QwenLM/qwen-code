@@ -31,7 +31,7 @@ import { MessageType, type HistoryItemGoalStatus } from '../types.js';
 import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 
-const LEGACY_CLEAR_KEYWORDS = new Set([
+const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',
   'off',
@@ -95,7 +95,7 @@ async function runLegacyGoalCommand(
     };
   }
 
-  if (LEGACY_CLEAR_KEYWORDS.has(objective.toLowerCase())) {
+  if (CLEAR_KEYWORDS.has(objective.toLowerCase())) {
     const cleared = unregisterGoalHook(config, sessionId);
     if (!cleared) {
       return {

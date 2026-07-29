@@ -2208,6 +2208,7 @@ export default {
     '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
+  'Set or control a session goal': '设定或控制会话目标',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
