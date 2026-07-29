@@ -59,6 +59,131 @@ describe('createChannelWorkerSupervisor', () => {
     vi.unstubAllEnvs();
   });
 
+  it('accepts loop MCP registration before the worker ready signal', async () => {
+    const child = new FakeChild();
+    const registerChannelLoopMcp = vi.fn(async () => {});
+    const unregisterChannelLoopMcp = vi.fn(async () => {});
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      registerChannelLoopMcp,
+      unregisterChannelLoopMcp,
+    });
+    const started = supervisor.start();
+
+    child.emit('message', {
+      type: 'channel_loop_mcp_register',
+      id: 'register-before-ready',
+      sessionId: 'session-early',
+    });
+
+    await vi.waitFor(() =>
+      expect(registerChannelLoopMcp).toHaveBeenCalledWith({
+        sessionId: 'session-early',
+        ownerId: expect.stringMatching(/^channel-worker:/),
+        sendMessage: expect.any(Function),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(child.send).toHaveBeenCalledWith({
+        type: 'channel_loop_mcp_control_result',
+        id: 'register-before-ready',
+        ok: true,
+      }),
+    );
+
+    child.emit('message', {
+      type: 'ready',
+      channels: ['telegram'],
+    });
+    await started;
+    await supervisor.stop();
+  });
+
+  it('correlates exact-session loop MCP traffic and unregisters on exit', async () => {
+    const child = new FakeChild();
+    let reverseSender: ((payload: unknown) => Promise<unknown>) | undefined;
+    let ownerId: string | undefined;
+    const registerChannelLoopMcp = vi.fn(
+      async (request: {
+        sessionId: string;
+        ownerId: string;
+        sendMessage: (payload: unknown) => Promise<unknown>;
+      }) => {
+        ownerId = request.ownerId;
+        reverseSender = request.sendMessage;
+      },
+    );
+    const unregisterChannelLoopMcp = vi.fn(async () => {});
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+      registerChannelLoopMcp,
+      unregisterChannelLoopMcp,
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      channels: ['telegram'],
+    });
+    await started;
+
+    child.emit('message', {
+      type: 'channel_loop_mcp_register',
+      id: 'register-1',
+      sessionId: 'session-1',
+    });
+    await vi.waitFor(() => expect(registerChannelLoopMcp).toHaveBeenCalled());
+    expect(registerChannelLoopMcp).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      ownerId: expect.stringMatching(/^channel-worker:/),
+      sendMessage: expect.any(Function),
+    });
+    await vi.waitFor(() =>
+      expect(child.send).toHaveBeenCalledWith({
+        type: 'channel_loop_mcp_control_result',
+        id: 'register-1',
+        ok: true,
+      }),
+    );
+
+    const response = reverseSender?.({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    });
+    const request = child.send.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message) =>
+          (message as { type?: string }).type === 'channel_loop_mcp_message',
+      ) as { id: string; sessionId: string };
+    expect(request.sessionId).toBe('session-1');
+    child.emit('message', {
+      type: 'channel_loop_mcp_result',
+      id: request.id,
+      ok: true,
+      payload: { jsonrpc: '2.0', id: 1, result: { tools: [] } },
+    });
+    await expect(response).resolves.toMatchObject({
+      result: { tools: [] },
+    });
+
+    await supervisor.stop();
+    await vi.waitFor(() =>
+      expect(unregisterChannelLoopMcp).toHaveBeenCalledWith(
+        'session-1',
+        ownerId,
+      ),
+    );
+  });
+
   it('passes daemon connection details through env without putting token in argv', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'stale-daemon-token');

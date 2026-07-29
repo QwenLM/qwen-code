@@ -172,7 +172,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -1063,6 +1063,8 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_monitor_tool_correlation` → monitor entries from `GET /session/:id/tasks`
+  include `toolUseId` for transcript-to-task correlation
 - `session_status` → `GET /session/:id/status`
 - `session_info` → `GET /workspace/:id/session-info` and `GET /workspaces/:workspace/session-info`
 - `session_transcript` → `GET /session/:id/transcript`
@@ -1571,9 +1573,23 @@ Filesystem errors use this JSON shape:
 #### `GET /file`
 
 Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
-`limit`. The daemon rejects binary files and files above the text read cap.
-The response includes `hash`, a SHA-256 digest over the raw on-disk bytes for
-the whole file, even when `line`, `limit`, or `maxBytes` returned a slice.
+`limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
+cap require a finite `limit`; no-limit, line-only, and maxBytes-only requests
+remain `file_too_large`. A finite large-file window is streamed and its returned
+UTF-8 content remains capped at 256 KiB. `maxBytes` always applies to the UTF-8
+response bytes after decoding, including when the source uses another supported
+encoding within the full-snapshot cap.
+
+For files within the full-snapshot cap, the response includes `hash`, a SHA-256
+digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,
+or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
+complete `sizeBytes`, set `truncated: true`, and return
+`originalLineCount: null` when the stream stops before EOF. A streamed result
+is returned only when the file remains stable. Concurrent changes detected by
+the post-read device/inode, size, modification-time, and change-time checks
+return `hash_mismatch`, including when the same mutation also causes decoding
+to fail. Stable binary content remains `binary_file`, and path replacement
+retains the existing `symlink_escape` protection.
 
 ```json
 {

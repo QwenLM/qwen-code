@@ -36,6 +36,31 @@ import type {
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
 
+const lstatFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  remainingFailures: 0,
+  calls: 0,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    lstat: async (filePath: Parameters<typeof actual.lstat>[0]) => {
+      if (filePath === lstatFault.path) {
+        lstatFault.calls++;
+        if (lstatFault.remainingFailures > 0) {
+          lstatFault.remainingFailures--;
+          throw Object.assign(new Error('temporary I/O failure'), {
+            code: 'EIO',
+          });
+        }
+      }
+      return actual.lstat(filePath);
+    },
+  };
+});
+
 const helperPath = fileURLToPath(
   new URL('./session-writer-lease.test-helper.ts', import.meta.url),
 );
@@ -134,6 +159,9 @@ function record(
 }
 
 afterEach(async () => {
+  lstatFault.path = undefined;
+  lstatFault.remainingFailures = 0;
+  lstatFault.calls = 0;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -207,6 +235,7 @@ describe('SessionWriterLease', () => {
           model: 'test-model',
           chatRecording: true,
           experimentalZedIntegration: true,
+          sessionWriterLeaseEnabled: true,
           bareMode: true,
           telemetry: { enabled: false },
           usageStatisticsEnabled: false,
@@ -318,6 +347,7 @@ describe('SessionWriterLease', () => {
           model: 'test-model',
           chatRecording: true,
           experimentalZedIntegration: true,
+          sessionWriterLeaseEnabled: true,
           bareMode: true,
           telemetry: { enabled: false },
           usageStatisticsEnabled: false,
@@ -369,6 +399,7 @@ describe('SessionWriterLease', () => {
           model: 'test-model',
           chatRecording: true,
           experimentalZedIntegration: true,
+          sessionWriterLeaseEnabled: true,
           bareMode: true,
           telemetry: { enabled: false },
           usageStatisticsEnabled: false,
@@ -723,7 +754,7 @@ describe('SessionWriterLease', () => {
   );
 
   it.runIf(process.platform !== 'freebsd')(
-    'retries release after a transient filesystem failure',
+    'keeps a failed release terminal stable instead of retrying the primary path',
     async () => {
       const fixture = await createFixture();
       const lease = await SessionWriterLease.acquire(fixture.options);
@@ -735,15 +766,66 @@ describe('SessionWriterLease', () => {
       await fs.rename(lockPath, backupPath);
       await fs.mkdir(lockPath);
 
-      await expect(lease.release()).rejects.toBeInstanceOf(
-        SessionWriterUnavailableError,
-      );
+      const firstRelease = lease.release();
+      const secondRelease = lease.release();
+      expect(secondRelease).toBe(firstRelease);
+      await expect(firstRelease).rejects.toBeInstanceOf(SessionWriterLostError);
 
       await fs.rmdir(lockPath);
       await fs.rename(backupPath, lockPath);
-      await expect(lease.release()).resolves.toBeUndefined();
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await fs.unlink(lockPath);
     },
   );
+
+  it('retries a transient ownership precheck failure before release', async () => {
+    const fixture = await createFixture();
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    lstatFault.path = lockPath;
+    lstatFault.remainingFailures = 1;
+
+    await expect(lease.release()).resolves.toBeUndefined();
+    expect(lstatFault.calls).toBe(2);
+    expect(lease.isReleased).toBe(true);
+    lstatFault.path = undefined;
+    await expect(fs.lstat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('never reclaims a dead local owner when managed policy is enabled', async () => {
+    const fixture = await createFixture();
+    const owner = startLeaseProcess();
+    expect(
+      await requestChild(owner, { type: 'acquire', options: fixture.options }),
+    ).toMatchObject({ ok: true });
+    owner.kill('SIGKILL');
+    await waitForClose(owner);
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it('cannot remove a successor lock after release commits', async () => {
+    const fixture = await createFixture();
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.release();
+    const successor = await SessionWriterLease.acquire(fixture.options);
+
+    await expect(first.release()).resolves.toBeUndefined();
+    await expect(successor.appendJsonLine({ successor: true })).resolves.toBe(
+      undefined,
+    );
+    await successor.release();
+  });
 
   it('elects only one stale-lock reclaimer across processes', async () => {
     const fixture = await createFixture();

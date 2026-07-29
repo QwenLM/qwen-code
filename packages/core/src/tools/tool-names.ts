@@ -21,6 +21,7 @@ export const ToolNames = {
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
+  ZOOM_IMAGE: 'zoom_image',
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
@@ -66,6 +67,8 @@ export const ToolNames = {
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  GET_GOAL: 'get_goal',
+  UPDATE_GOAL: 'update_goal',
 } as const;
 
 /**
@@ -77,6 +80,7 @@ export const ToolDisplayNames = {
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
+  ZOOM_IMAGE: 'ZoomImage',
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
@@ -117,6 +121,8 @@ export const ToolDisplayNames = {
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  GET_GOAL: 'Goal',
+  UPDATE_GOAL: 'UpdateGoal',
 } as const;
 
 // Migration from old tool names to new tool names

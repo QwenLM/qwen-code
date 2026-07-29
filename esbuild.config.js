@@ -158,6 +158,7 @@ const external = [
   '@teddyzhu/clipboard-linux-arm64-gnu',
   '@teddyzhu/clipboard-win32-x64-msvc',
   '@teddyzhu/clipboard-win32-arm64-msvc',
+  'sharp',
 ];
 
 // Name of the directory under `dist/` that esbuild emits shared chunks into.
@@ -187,6 +188,7 @@ const mainBuild = esbuild.build({
   },
   alias: {
     'is-in-ci': path.resolve(__dirname, 'packages/cli/src/patches/is-in-ci.ts'),
+    'jsonc-parser': require.resolve('jsonc-parser/lib/esm/main.js'),
     '@qwen-code/web-templates': path.resolve(
       __dirname,
       'packages/web-templates/src/index.ts',

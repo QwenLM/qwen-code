@@ -18,6 +18,7 @@ import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
+import { VirtualViewportContext } from './contexts/VirtualViewportContext.js';
 import {
   UIActionsContext,
   type UIActions,
@@ -67,6 +68,7 @@ import {
   ToolConfirmationOutcome,
   type WaitingToolCall,
   ToolNames,
+  SendMessageType,
   clearWorktreeSession,
   restoreWorktreeContext,
   GitWorktreeService,
@@ -125,6 +127,10 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
@@ -189,7 +195,10 @@ import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
-import { useMessageQueue } from './hooks/useMessageQueue.js';
+import {
+  useMessageQueue,
+  type QueuedSubmission,
+} from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
@@ -454,6 +463,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
 }
 
@@ -470,7 +480,8 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult } = props;
+  const { settings, config, initializationResult, initialUseVirtualViewport } =
+    props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
@@ -1057,6 +1068,35 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
+  const restoredSubmissionRef = useRef<QueuedSubmission | null>(null);
+  const submittedPromptProvenanceUnavailableRef = useRef(false);
+  const setBufferTextRef = useRef<
+    ReturnType<typeof useTextBuffer>['setText'] | null
+  >(null);
+  const invalidateSubmittedPromptProvenance = useCallback(() => {
+    restoredSubmissionRef.current = null;
+    submittedPromptProvenanceUnavailableRef.current = true;
+  }, []);
+  const handleBufferChange = useCallback((text: string) => {
+    if (text.length === 0) {
+      if (
+        restoredSubmissionRef.current !== null ||
+        submittedPromptProvenanceUnavailableRef.current
+      ) {
+        setBufferTextRef.current?.('', { clearUndoHistory: true });
+      }
+      restoredSubmissionRef.current = null;
+      submittedPromptProvenanceUnavailableRef.current = false;
+      return;
+    }
+    if (
+      restoredSubmissionRef.current !== null &&
+      restoredSubmissionRef.current.modelText !== text
+    ) {
+      restoredSubmissionRef.current = null;
+      submittedPromptProvenanceUnavailableRef.current = true;
+    }
+  }, []);
 
   const buffer = useTextBuffer({
     initialText: '',
@@ -1066,7 +1106,10 @@ export const AppContainer = (props: AppContainerProps) => {
     isValidPath,
     shellModeActive,
     preferredEditor,
+    onChange: handleBufferChange,
   });
+  const setBufferText = buffer.setText;
+  setBufferTextRef.current = setBufferText;
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1074,9 +1117,11 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
     restoredPromptStashTargetsRef.current.add(promptStashTargetDir);
-    restorePromptStash(promptStashTargetDir, buffer.text, (text) =>
-      buffer.setText(text),
-    );
+    restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
+      restoredSubmissionRef.current = null;
+      submittedPromptProvenanceUnavailableRef.current = true;
+      buffer.setText(text);
+    });
   }, [buffer, promptStashTargetDir]);
 
   useEffect(() => {
@@ -1107,12 +1152,20 @@ export const AppContainer = (props: AppContainerProps) => {
   // cursorTo+eraseDown would be a wasted flash and would also corrupt the
   // in-app scroll position. The remount-key bump is also a near-no-op for
   // VP: nothing in the VP render path is keyed by historyRemountKey, so
-  // the only reason to bump it is to keep the legacy `<Static>` branch in
-  // sync if the user toggles `useTerminalBuffer` off mid-session. The
-  // visible refresh in VP mode comes for free from the React tree
+  // keeping the bump is harmless because the startup-scoped VP decision
+  // is intentionally restart-only to match Ink's alternateScreen lifetime.
+  // The visible refresh in VP mode comes for free from the React tree
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
-  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const [useTerminalBuffer] = useState(
+    () =>
+      initialUseVirtualViewport ??
+      shouldUseVirtualViewport(
+        settings.merged.ui?.useTerminalBuffer,
+        config.getScreenReader(),
+        isInteractiveTerminal(),
+      ),
+  );
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     // While the transcript (alt-screen) owns the whole screen, suppress static
@@ -1404,6 +1457,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { vimEnabled, vimMode } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
+
+  useLayoutEffect(() => {
+    if (vimEnabled && buffer.text.length > 0) {
+      // Vim registers outlive buffer clears, so provenance cannot be recovered
+      // by pasting register contents and then disabling Vim.
+      invalidateSubmittedPromptProvenance();
+    }
+  }, [buffer.text, invalidateSubmittedPromptProvenance, vimEnabled]);
 
   const {
     isSubagentCreateDialogOpen,
@@ -2019,12 +2080,33 @@ export const AppContainer = (props: AppContainerProps) => {
     popAllMessages,
     restoreMessages,
     drainQueue,
-    popNextSegment,
+    popNextTurn,
   } = useMessageQueue();
+
+  const submitUserQuery = useCallback(
+    (submission: QueuedSubmission) =>
+      submitQuery(
+        submission.modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        submission.submittedPrompt === undefined
+          ? undefined
+          : { submittedPrompt: submission.submittedPrompt },
+      ),
+    [submitQuery],
+  );
+
+  const popAllQueuedMessages = useCallback((): string | null => {
+    const submission = popAllMessages();
+    if (submission === null) return null;
+    restoredSubmissionRef.current = submission;
+    submittedPromptProvenanceUnavailableRef.current = false;
+    return submission.modelText;
+  }, [popAllMessages]);
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
-  // stays consistent with popNextSegment even before React re-renders.
+  // stays consistent with popNextTurn even before React re-renders.
   midTurnDrainRef.current = drainQueue;
   midTurnRestoreRef.current = restoreMessages;
 
@@ -2158,7 +2240,40 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
-    (submittedValue: string, options?: { deferUntilIdle?: boolean }) => {
+    (
+      submittedValue: string,
+      options?: {
+        deferUntilIdle?: boolean;
+        submittedPrompt?: string;
+      },
+    ) => {
+      const consumesComposerState = options !== undefined;
+      const restoredSubmission = consumesComposerState
+        ? restoredSubmissionRef.current
+        : null;
+      const submittedPromptProvenanceUnavailable =
+        consumesComposerState &&
+        submittedPromptProvenanceUnavailableRef.current;
+      if (consumesComposerState) {
+        restoredSubmissionRef.current = null;
+        submittedPromptProvenanceUnavailableRef.current = false;
+      }
+      const submittedPromptCandidate = options?.submittedPrompt;
+      const provenanceEnabled =
+        !vimEnabled && submittedPromptCandidate !== undefined;
+      const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
+      const submittedPrompt =
+        submittedPromptProvenanceUnavailable || !provenanceEnabled
+          ? undefined
+          : restoredSubmission === null
+            ? trimmedSubmittedPrompt || undefined
+            : restoredSubmission.modelText === submittedValue
+              ? restoredSubmission.submittedPrompt
+              : undefined;
+      if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
+        setBufferText('', { clearUndoHistory: true });
+      }
+
       // Route to active in-process agent if viewing a sub-agent tab.
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
@@ -2226,14 +2341,17 @@ export const AppContainer = (props: AppContainerProps) => {
           submittedValue;
       }
       if (options?.deferUntilIdle) {
-        addMessage(submittedValue, true);
+        addMessage(submittedValue, true, submittedPrompt);
         return;
       }
       if (
         streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
-        void submitQuery(submittedValue);
+        void submitUserQuery({
+          modelText: submittedValue,
+          submittedPrompt,
+        });
         return;
       }
 
@@ -2339,7 +2457,7 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch(() => {
             // Fallback: submit normally
-            addMessage(submittedValue);
+            addMessage(submittedValue, false, submittedPrompt);
           });
         speculationRef.current = IDLE_SPECULATION;
         return;
@@ -2356,23 +2474,28 @@ export const AppContainer = (props: AppContainerProps) => {
         !isProcessing &&
         isSlashCommand(submittedValue)
       ) {
-        void submitQuery(submittedValue);
+        void submitUserQuery({
+          modelText: submittedValue,
+          submittedPrompt,
+        });
         return;
       }
 
-      addMessage(submittedValue);
+      addMessage(submittedValue, false, submittedPrompt);
     },
     [
       addMessage,
       agentViewState,
       streamingState,
       isProcessing,
-      submitQuery,
+      submitUserQuery,
       handleSlashCommand,
       config,
       geminiClient,
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
+      setBufferText,
+      vimEnabled,
     ],
   );
 
@@ -2472,8 +2595,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // tool-execution cancels — never silently drop the user's queued work).
       const popped = popAllMessages();
       if (popped) {
+        restoredSubmissionRef.current = popped;
+        submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
-        buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
+        buffer.setText(
+          currentText
+            ? `${popped.modelText}\n${currentText}`
+            : popped.modelText,
+        );
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -2520,6 +2649,16 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
+      const restoreCancelledPrompt = () => {
+        restoredSubmissionRef.current = {
+          modelText: cancelledTurnUserItem.text,
+          ...(cancelledTurnUserItem.submittedPrompt === undefined
+            ? {}
+            : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
+        };
+        submittedPromptProvenanceUnavailableRef.current = false;
+        buffer.setText(cancelledTurnUserItem.text);
+      };
 
       if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
         debugLogger.debug(
@@ -2539,7 +2678,7 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug(
           'auto-restore: preserving streamed output and restoring prompt text',
         );
-        buffer.setText(cancelledTurnUserItem.text);
+        restoreCancelledPrompt();
         return;
       }
       if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
@@ -2559,7 +2698,7 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug(
           'auto-restore: preserving committed output and restoring prompt text',
         );
-        buffer.setText(cancelledTurnUserItem.text);
+        restoreCancelledPrompt();
         return;
       }
 
@@ -2600,7 +2739,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // cancelled prompt twice — once in scrollback and once pre-filled
       // in the input buffer.
       refreshStatic();
-      buffer.setText(lastUserItem.text);
+      restoreCancelledPrompt();
       // Third cleanup leg: the in-memory chat history. `GeminiChat`
       // appends the user content before the stream generator runs, and
       // the abort path doesn't pop it. Without this strip, the NEXT
@@ -2618,9 +2757,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // errors and returns false, but attach a .catch as defence so a
       // future code path that throws doesn't surface as an
       // UnhandledPromiseRejection.
-      void logger?.removeLastUserMessage().catch((err: unknown) => {
-        debugLogger.debug('Failed to undo cancelled prompt from log:', err);
-      });
+      if (info?.canUndoLastLoggedUserMessage) {
+        void logger?.removeLastUserMessage().catch((err: unknown) => {
+          debugLogger.debug('Failed to undo cancelled prompt from log:', err);
+        });
+      }
     },
     [
       buffer,
@@ -3303,6 +3444,8 @@ export const AppContainer = (props: AppContainerProps) => {
           refreshStatic();
 
           if (userItem.type === 'user' && userItem.text) {
+            restoredSubmissionRef.current = null;
+            submittedPromptProvenanceUnavailableRef.current = true;
             buffer.setText(userItem.text);
           }
 
@@ -4018,13 +4161,11 @@ export const AppContainer = (props: AppContainerProps) => {
     if (isTranscriptOpenRef.current) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
-    const plainPrompts = drainQueue(true);
-    const submission =
-      plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
+    const submission = popNextTurn();
     if (submission === null) return;
 
     queueDrainingRef.current = true;
-    Promise.resolve(submitQuery(submission)).finally(() => {
+    Promise.resolve(submitUserQuery(submission)).finally(() => {
       queueDrainingRef.current = false;
       setQueueDrainNonce((n) => n + 1);
     });
@@ -4036,9 +4177,8 @@ export const AppContainer = (props: AppContainerProps) => {
     // Re-run the drain when the transcript closes so queued messages resume.
     isTranscriptOpen,
     messageQueue,
-    drainQueue,
-    popNextSegment,
-    submitQuery,
+    popNextTurn,
+    submitUserQuery,
     queueDrainNonce,
   ]);
 
@@ -4379,7 +4519,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
-      popAllQueuedMessages: popAllMessages,
+      popAllQueuedMessages,
+      invalidateSubmittedPromptProvenance,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -4469,7 +4610,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
-      popAllMessages,
+      popAllQueuedMessages,
+      invalidateSubmittedPromptProvenance,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       handleWorktreeExit,
@@ -4535,43 +4677,45 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   return (
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <ConfigContext.Provider value={config}>
-          <AppContext.Provider
-            value={{
-              version: props.version,
-              startupWarnings,
-            }}
-          >
-            <ThoughtExpandedProvider value={thoughtExpandedValue}>
-              <RenderModeProvider value={renderModeValue}>
-                <TerminalOutputProvider value={writeRaw}>
-                  <ShellFocusContext.Provider value={isFocused}>
-                    {transcriptFreeze ? (
-                      // TranscriptView renders as a sibling of <App/>, which
-                      // owns the StreamingContext.Provider — so the frozen
-                      // transcript subtree has no provider of its own. A
-                      // pending tool group captured in the snapshot can hold a
-                      // tool in the Executing state, whose spinner calls
-                      // useStreamingContext and would otherwise throw. Provide
-                      // the context here so the transcript renders.
-                      <StreamingContext.Provider value={streamingState}>
-                        <TranscriptView
-                          items={transcriptItems}
-                          useAlternateScreen={!useTerminalBuffer}
-                        />
-                      </StreamingContext.Provider>
-                    ) : (
-                      <App />
-                    )}
-                  </ShellFocusContext.Provider>
-                </TerminalOutputProvider>
-              </RenderModeProvider>
-            </ThoughtExpandedProvider>
-          </AppContext.Provider>
-        </ConfigContext.Provider>
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
+    <VirtualViewportContext.Provider value={useTerminalBuffer}>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          <ConfigContext.Provider value={config}>
+            <AppContext.Provider
+              value={{
+                version: props.version,
+                startupWarnings,
+              }}
+            >
+              <ThoughtExpandedProvider value={thoughtExpandedValue}>
+                <RenderModeProvider value={renderModeValue}>
+                  <TerminalOutputProvider value={writeRaw}>
+                    <ShellFocusContext.Provider value={isFocused}>
+                      {transcriptFreeze ? (
+                        // TranscriptView renders as a sibling of <App/>, which
+                        // owns the StreamingContext.Provider — so the frozen
+                        // transcript subtree has no provider of its own. A
+                        // pending tool group captured in the snapshot can hold a
+                        // tool in the Executing state, whose spinner calls
+                        // useStreamingContext and would otherwise throw. Provide
+                        // the context here so the transcript renders.
+                        <StreamingContext.Provider value={streamingState}>
+                          <TranscriptView
+                            items={transcriptItems}
+                            useAlternateScreen={!useTerminalBuffer}
+                          />
+                        </StreamingContext.Provider>
+                      ) : (
+                        <App />
+                      )}
+                    </ShellFocusContext.Provider>
+                  </TerminalOutputProvider>
+                </RenderModeProvider>
+              </ThoughtExpandedProvider>
+            </AppContext.Provider>
+          </ConfigContext.Provider>
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </VirtualViewportContext.Provider>
   );
 };

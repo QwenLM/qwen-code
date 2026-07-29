@@ -553,6 +553,7 @@ export class PermissionManager {
    */
   private static readonly CORE_TOOLS = new Set([
     'read_file',
+    'zoom_image',
     'write_file',
     'edit',
     'notebook_edit',

@@ -12,6 +12,7 @@ import {
   appendToLastTextPart,
   prependToFirstTextPart,
 } from './partUtils.js';
+import { createOpenAIReasoningThoughtPart } from './thoughtUtils.js';
 import type { GenerateContentResponse, Part, PartUnion } from '@google/genai';
 
 const mockResponse = (
@@ -86,9 +87,35 @@ describe('partUtils', () => {
       expect(partToString(part, verboseOptions)).toBe('[Video Metadata]');
     });
 
-    it('should return descriptive string for thought part', () => {
-      const part = { thought: 'thinking' } as unknown as Part;
+    // `Part.thought` is a boolean flag; the reasoning is in `part.text`. The
+    // previous expectation was built from `{ thought: 'thinking' }`, a shape
+    // that only type-checks through `as unknown as Part` and that the SDK
+    // never produces.
+    it('should return the reasoning text for a thought part', () => {
+      const part: Part = { thought: true, text: 'thinking' };
       expect(partToString(part, verboseOptions)).toBe('[Thought: thinking]');
+    });
+
+    it('should label a thought part that carries no text', () => {
+      const part: Part = { thought: true };
+      expect(partToString(part, verboseOptions)).toBe('[Thought]');
+    });
+
+    it('should render a part flagged thought: false as its own text', () => {
+      const part: Part = { thought: false, text: 'ordinary' };
+      expect(partToString(part, verboseOptions)).toBe('ordinary');
+    });
+
+    it('should render a thought part built by the real constructor', () => {
+      const part = createOpenAIReasoningThoughtPart('step one');
+      expect(partToString(part, verboseOptions)).toBe('[Thought: step one]');
+    });
+
+    // Guard against over-correcting: without verbose, a thought part is still
+    // just its text. Passes both before and after.
+    it('should return the plain text for a thought part when not verbose', () => {
+      const part: Part = { thought: true, text: 'thinking' };
+      expect(partToString(part)).toBe('thinking');
     });
 
     it('should return descriptive string for codeExecutionResult part', () => {

@@ -155,6 +155,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts Goal state and runtime records as known subtypes', () => {
+    const prepared = prepareTranscriptRecords([
+      record('goal-state', null, {
+        type: 'system',
+        subtype: 'goal_state',
+        message: undefined,
+      }),
+      record('goal-runtime', 'goal-state', {
+        subtype: 'goal_runtime',
+      }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('rejects mixed sessions and an explicit artifact leaf', () => {
     expect(() =>
       prepareTranscriptRecords([

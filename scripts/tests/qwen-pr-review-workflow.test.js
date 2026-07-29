@@ -54,17 +54,21 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
   try {
     const bin = join(dir, 'bin');
     const attemptFile = join(dir, 'attempts');
+    const durationFile = join(dir, 'durations');
     writeFileSync(attemptFile, '');
+    writeFileSync(durationFile, '');
     const write = (name, body) => {
       const p = join(bin, name);
       writeFileSync(p, body);
       chmodSync(p, 0o755);
     };
     execFileSync('mkdir', ['-p', bin]);
-    // timeout: drop `--kill-after=Xs` and the duration, exec the rest.
+    // timeout: record the per-attempt duration (`$2`, e.g. `10800s`) so tests
+    // can assert the budget each attempt was given, then drop
+    // `--kill-after=Xs` and that duration and exec the rest.
     write(
       'timeout',
-      '#!/bin/bash\nif [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi\nshift\nshift\nexec "$@"\n',
+      '#!/bin/bash\necho "$2" >> "$DUR"\nif [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi\nshift\nshift\nexec "$@"\n',
     );
     write('sleep', '#!/bin/bash\nexit 0\n');
     write(
@@ -113,6 +117,7 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
           PATH: `${bin}:${process.env.PATH}`,
           SCENARIO: scenario,
           ATT: attemptFile,
+          DUR: durationFile,
         },
       });
     } catch (e) {
@@ -124,7 +129,15 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         .split('\n')
         .filter((l) => l.startsWith('OK ') || l.startsWith('FAIL '))
         .pop() ?? stdout.trim();
-    return { line, attempts: Number(readFileSync(attemptFile, 'utf8').trim()) };
+    const durations = readFileSync(durationFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((d) => Number.parseInt(d, 10));
+    return {
+      line,
+      attempts: Number(readFileSync(attemptFile, 'utf8').trim()),
+      durations,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -261,6 +274,40 @@ describe('qwen pr review transient retry', () => {
     expect(r.line).toContain('FAIL');
     expect(r.line).toContain('ran out of time budget');
     expect(r.attempts).toBe(0);
+  });
+
+  it('gives the retry the remaining budget, not a fixed cap', () => {
+    // A retry re-runs the whole review from scratch, so the 300s cap this
+    // replaced killed it mid-preamble on any large PR and reported a timeout.
+    // The stub timeout used to discard the duration argument, so no test
+    // observed what each attempt was actually given: reintroducing a cap here
+    // would leave the suite green while making every retry unusable again.
+    const r = runScenario('transient_then_success');
+    expect(r.attempts).toBe(2);
+    expect(r.durations).toHaveLength(2);
+    expect(r.durations[0]).toBeGreaterThan(10_000); // ~10800s == 180min budget
+    expect(r.durations[1]).toBeGreaterThan(300); // the cap this replaced
+    expect(r.durations[1]).toBeGreaterThan(10_000); // the rest of the budget
+    // Attempts share one budget, so the retry can never exceed what is left.
+    expect(r.durations[1]).toBeLessThanOrEqual(r.durations[0]);
+  });
+
+  it('does NOT start a retry that the remaining budget cannot finish', () => {
+    // 8min budget: over the old 360s gate, under the current 660s one. Pins
+    // the gate — dropping RETRY_MIN_SECONDS back to the old cap would retry
+    // here into a review that cannot complete.
+    const r = runScenario('transient_then_success', { timeoutMinutes: 8 });
+    expect(r.line).toContain('FAIL');
+    expect(r.line).not.toContain('kind=[timeout]'); // reports the transient
+    expect(r.attempts).toBe(1);
+  });
+
+  it('still retries once the remaining budget clears the gate', () => {
+    // 12min budget, just over the 660s gate: the other side of the boundary,
+    // so a RETRY_MIN_SECONDS raised too far cannot pass unnoticed.
+    const r = runScenario('transient_then_success', { timeoutMinutes: 12 });
+    expect(r.line).toContain('OK outcome=success');
+    expect(r.attempts).toBe(2);
   });
 
   it('keeps the fallback comment quota-aware', () => {
