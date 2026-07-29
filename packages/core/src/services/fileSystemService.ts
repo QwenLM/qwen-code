@@ -51,23 +51,29 @@ export type CoreReadTextFileRequest = Omit<
 
 /**
  * Handle-bound range read used by filesystem security boundaries. The caller
- * owns the handle lifecycle and must pass the Stats captured from that handle.
+ * opens the descriptor, keeps it open for the duration, and closes it; this
+ * request never transfers ownership.
  *
- * Both bounds are required rather than optional: what makes a large-file read
- * safe at a boundary is that the *returned* bytes and the *scanned* bytes are
- * each capped. A finite `limit` is not one of those bounds — `limit: 20` at
+ * Declared standalone rather than derived from {@link CoreReadTextFileRequest}:
+ * a handle-bound read shares only `line` and `signal` with a path-bound one, so
+ * an `Omit` chain would strip more than it kept and would keep re-admitting
+ * fields — `path`, `stats` — that this path has no use for.
+ *
+ * Both byte bounds are required rather than optional: what makes a large-file
+ * read safe at a boundary is that the *returned* bytes and the *scanned* bytes
+ * are each capped. A finite `limit` is not one of those bounds — `limit: 20` at
  * `line: 900_000_000` still walks the whole file — so it stays optional and
  * `maxScanBytes` is what actually keeps the read affordable.
  */
-export type CoreReadTextFileHandleRequest = Omit<
-  CoreReadTextFileRequest,
-  'limit' | 'stats' | 'maxOutputBytes'
-> & {
+export interface CoreReadTextFileHandleRequest {
   fileHandle: FileHandle;
+  /** 0-based start line, matching {@link CoreReadTextFileRequest}. */
+  line?: number | null;
   limit?: number;
   maxOutputBytes: number;
   maxScanBytes: number;
-};
+  signal?: AbortSignal;
+}
 
 /**
  * Supported file encodings for new files.

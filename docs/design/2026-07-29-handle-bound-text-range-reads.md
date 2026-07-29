@@ -70,6 +70,15 @@ decoder and raising the generic `'invalid-utf8'` variant. The refusal is
 unchanged; the message improves. The Serve boundary maps both to `binary_file`,
 so nothing downstream moves.
 
+A second, smaller delta comes with the merge: `detectFileEncoding` catches all
+errors and falls back to `'utf-8'`, whereas `detectFileHandleEncoding` had no
+handler and let an I/O failure propagate. The failure is not lost — a handle bad
+enough to fail the 8 KiB probe fails the streaming read immediately after, and a
+file that is not really UTF-8 is still refused by the `fatal: true` decoder — so
+the error surfaces from a different call rather than disappearing. Accepted for
+the single fallback policy; noted because it is a real change in which call
+reports the problem.
+
 ### Two entry points
 
 ```ts
@@ -115,18 +124,31 @@ untouched.
 - `detectFileEncoding` is public via `export * from './utils/fileUtils.js'`.
   Widening a parameter is source-compatible.
 - The only cross-package importer of the touched modules is
-  `packages/cli/src/serve/fs/workspace-file-system.ts`. Its one change is
-  deleting a `stats:` argument that the handle path no longer accepts — see
-  below; the `decodeBufferWithEncodingInfoAsync` import it also carries is
-  untouched.
+  `packages/cli/src/serve/fs/workspace-file-system.ts`. Its only change is
+  dropping two arguments the handle path no longer accepts — see below; the
+  `decodeBufferWithEncodingInfoAsync` import it also carries is untouched.
 
-`CoreReadTextFileHandleRequest` drops its required `stats` field. The handle
-path always streams and the encoding probe does its own `fstat`, so nothing
-downstream ever read it — and because the ACP request type it extends permits
-extra properties, TypeScript accepted the dead argument silently rather than
-flagging it. Removing the field is what surfaced the one CLI line.
+### `CoreReadTextFileHandleRequest` becomes standalone
 
-258 production logic lines change in `packages/core`, net −71 lines overall.
+It was `Omit<CoreReadTextFileRequest, 'limit' | 'stats' | 'maxOutputBytes'> &
+{...}`, which left two fields the handle path never reads:
+
+- **`stats`** was documented as required — "must pass the Stats captured from
+  that handle" — and nothing downstream read it. The handle path always streams,
+  so it never needs a size to choose a strategy, and the encoding probe does its
+  own `fstat`.
+- **`path`** became dead once `readTextRangeFromHandle` replaced the
+  path-plus-handle call: the read is bound to the descriptor, and errors are
+  labelled with the path by the Serve boundary that owns it.
+
+Neither was caught by the compiler. The ACP `ReadTextFileRequest` this type
+derived from permits extra properties, so passing a field the type had removed
+raised nothing. That is the argument for declaring the type standalone rather
+than deriving it: the `Omit` chain was stripping four of six inherited fields
+and quietly re-admitting the rest.
+
+282 production logic lines change in `packages/core`; across `packages/` the
+change is net −68 lines.
 
 ## Testing
 

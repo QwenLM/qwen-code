@@ -198,7 +198,6 @@ describe('StandardFileSystemService', () => {
 
       await expect(
         fileSystem.readTextFileFromHandle({
-          path: '/test/large.txt',
           fileHandle,
           limit: 20,
           maxOutputBytes: 262_144,
@@ -217,7 +216,6 @@ describe('StandardFileSystemService', () => {
 
       await expect(
         fileSystem.readTextFileFromHandle({
-          path: '/test/large.txt',
           fileHandle,
           limit,
           maxOutputBytes: 262_144,
