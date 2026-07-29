@@ -781,7 +781,9 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    if (scopeOverride && !persistDefault) {
+    const isImageModelCommand =
+      args === '--image' || args.startsWith('--image ');
+    if (scopeOverride && !persistDefault && !isImageModelCommand) {
       return {
         type: 'message',
         messageType: 'error',
@@ -791,8 +793,6 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const isImageModelCommand =
-      args === '--image' || args.startsWith('--image ');
     if (isImageModelCommand) {
       const modelName = args.replace('--image', '').trim();
       if (!modelName) {
@@ -965,22 +965,23 @@ export const modelCommand: SlashCommand = {
             ),
           };
         }
-        // Scope flags are silently consumed by parseScopeFlags but the inline
-        // prompt path doesn't persist the model. Reject the combination to avoid
-        // surprising the user with a "(this project)" confirmation that never
-        // took effect.
-        if (scopeOverride) {
-          const scopeFlag = hasProject
-            ? '--project'
-            : hasGlobal
-              ? '--global'
-              : '';
+        // Persistence flags are consumed before the inline prompt path, which
+        // does not persist the model. Reject them instead of silently dropping
+        // the requested behavior.
+        if (persistDefault || scopeOverride) {
+          const flag = persistDefault
+            ? '--default'
+            : hasProject
+              ? '--project'
+              : hasGlobal
+                ? '--global'
+                : '';
           return {
             type: 'message',
             messageType: 'error',
             content: t(
               "Cannot combine {{flag}} with an inline prompt. Run '/model {{flag}} {{model}}' first, then send your prompt.",
-              { flag: scopeFlag },
+              { flag, model: modelName },
             ),
           };
         }

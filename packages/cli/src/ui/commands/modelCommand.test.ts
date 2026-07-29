@@ -299,6 +299,45 @@ describe('modelCommand', () => {
     });
   });
 
+  it('rejects --default with an inline prompt', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --default qwen-max explain this code',
+        name: 'model',
+        args: '--default qwen-max explain this code',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--default qwen-max explain this code',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Cannot combine --default with an inline prompt. Run '/model --default qwen-max' first, then send your prompt.",
+    });
+  });
+
   it('rejects an inline prompt when the model id is not available', async () => {
     const switchModel = vi.fn();
     mockContext = createMockCommandContext({
