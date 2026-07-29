@@ -217,12 +217,15 @@ export class McpPromptLoader implements ICommandLoader {
                 unusedOptional.push(flag);
               }
             }
-            // Suggest required args first. Only suggest optional args while
-            // the user is typing one (non-empty partialArg); with no required
-            // args left, an empty partial returns [] so Enter executes (#7991).
+            // With an empty partial, suggest only required args (or nothing
+            // when all required are filled) so Enter executes (#7991). With a
+            // non-empty partial, include optional args too so the user can
+            // discover them mid-keystroke.
             const unusedArguments =
               unusedRequired.length > 0
-                ? unusedRequired
+                ? partialArg.length > 0
+                  ? [...unusedRequired, ...unusedOptional]
+                  : unusedRequired
                 : partialArg.length > 0
                   ? unusedOptional
                   : [];

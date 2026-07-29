@@ -414,6 +414,23 @@ describe('McpPromptLoader', () => {
         expect(suggestions).toEqual([]);
       });
 
+      it('should handle multi-word quoted positional arguments', async () => {
+        const loader = new McpPromptLoader(mockConfigWithPrompts);
+        const commands = await loader.loadCommands(
+          new AbortController().signal,
+        );
+        const completion = commands[0].completion!;
+        const context = {
+          invocation: {
+            raw: '/find "Fluffy Cat" 5 ',
+            name: 'find',
+            args: '"Fluffy Cat" 5',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '');
+        expect(suggestions).toEqual(['--species="']);
+      });
+
       it('should suggest all arguments when none are present', async () => {
         const loader = new McpPromptLoader(mockConfigWithPrompts);
         const commands = await loader.loadCommands(
@@ -551,6 +568,23 @@ describe('McpPromptLoader', () => {
         } as CommandContext;
         const suggestions = await completion(context, '--s');
         expect(suggestions).toEqual(['--species="']);
+      });
+
+      it('should suggest optional arguments matching a partial even when required args are missing', async () => {
+        const loader = new McpPromptLoader(mockConfigWithPrompts);
+        const commands = await loader.loadCommands(
+          new AbortController().signal,
+        );
+        const completion = commands[0].completion!;
+        const context = {
+          invocation: {
+            raw: '/find --enc',
+            name: 'find',
+            args: '--enc',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '--enc');
+        expect(suggestions).toEqual(['--enclosure="']);
       });
 
       it('should suggest arguments even when a partial argument is parsed as a value', async () => {
