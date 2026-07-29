@@ -359,6 +359,38 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('maps the Kitty Super (Command) bit to meta so Cmd+C does not leak "c"', () => {
+      // A Kitty-protocol terminal forwards Cmd+C as ESC [ 99 ; 9 u (keycode 99
+      // = "c", modifier 9 = base 1 + Super bit 8) while performing the copy
+      // itself. If the Super bit is dropped, this parses as a bare printable
+      // "c" (meta: false) and the text buffer inserts it. Super must surface as
+      // meta so the input handler skips insertion. See issue #7990.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;9u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          kittyProtocol: true,
+          ctrl: false,
+          meta: true,
+          shift: false,
+        }),
+      );
+    });
+
     it('decodes Shift+Enter modifyOtherKeys form without Kitty enabled', () => {
       // Ghostty (and other xterm modifyOtherKeys terminals) send Shift+Enter as
       // ESC [ 27 ; 2 ; 13 ~ when the Kitty protocol is not negotiated. readline

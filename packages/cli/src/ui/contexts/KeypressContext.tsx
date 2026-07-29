@@ -42,6 +42,7 @@ import {
   MODIFIER_SHIFT_BIT,
   MODIFIER_ALT_BIT,
   MODIFIER_CTRL_BIT,
+  MODIFIER_SUPER_BIT,
 } from '../utils/platformConstants.js';
 import { clipboardHasImage } from '../utils/clipboardUtils.js';
 
@@ -439,7 +440,11 @@ export function KeypressProvider({
           mods -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
         }
         const bits = mods - KITTY_MODIFIER_BASE;
-        const alt = (bits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
+        // Fold the Super (Command) bit into `alt` so it surfaces as `meta`,
+        // matching the CSI-u path.
+        const alt =
+          (bits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT ||
+          (bits & MODIFIER_SUPER_BIT) === MODIFIER_SUPER_BIT;
         const ctrl = (bits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
         return {
           key: {
@@ -468,7 +473,11 @@ export function KeypressProvider({
         }
         const bits = mods - KITTY_MODIFIER_BASE;
         const shift = (bits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
-        const alt = (bits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
+        // Fold the Super (Command) bit into `alt` so it surfaces as `meta`,
+        // matching the CSI-u path above.
+        const alt =
+          (bits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT ||
+          (bits & MODIFIER_SUPER_BIT) === MODIFIER_SUPER_BIT;
         const ctrl = (bits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
         const sym = m[2];
         const symbolToName: { [k: string]: string } = {
@@ -518,7 +527,15 @@ export function KeypressProvider({
         const modifierBits = modifiers - KITTY_MODIFIER_BASE;
         const shift =
           (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
-        const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
+        // The rest of the codebase models the macOS Command / Windows Super key
+        // as `meta` (see keyMatchers, where a binding's `command` maps to
+        // key.meta), so fold the Kitty Super bit into `alt` — which feeds the
+        // emitted `meta` flag — instead of dropping it. Otherwise a Super-only
+        // combo such as Cmd+C parses as a bare printable key and the character
+        // leaks into text input (the terminal performs the copy itself).
+        const alt =
+          (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT ||
+          (modifierBits & MODIFIER_SUPER_BIT) === MODIFIER_SUPER_BIT;
         const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
         const terminator = m[4];
 
