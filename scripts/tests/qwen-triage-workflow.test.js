@@ -21,6 +21,7 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -550,6 +551,42 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(order).toContain('(2b-bis)');
     expect(order).toContain('not an enrichment');
+  });
+
+  it('makes the not-verified sentence a mechanical 2b-bis trigger', () => {
+    // Post-merge measurement of #7917 (2026-07-29): 9 eligible PRs, two
+    // considered-and-declined mentions, zero positive recommendations — and
+    // the one clear behavioural candidate (#7947, bounded reads) wrote
+    // "author tested on macOS only" in its own Stage 2 comment and never
+    // named a lane. The judgement-based rule ("when 2b cannot settle it")
+    // failed exactly where the comment had already written the gap down. So
+    // the trigger is now textual: the draft's own admission is the trigger,
+    // and pending CI does not lift it.
+    const section = prSkill
+      .slice(
+        prSkill.indexOf('#### 2b-bis.'),
+        prSkill.indexOf('#### 2c. Real-Scenario'),
+      )
+      .replace(/\s+/g, ' ');
+    expect(section).toContain('mechanical, not a judgement call');
+    expect(section).toContain('grep your own draft');
+    // The trigger phrases are the ones real comments actually emit — the
+    // first two are verbatim from #7947's and #7951's Stage 2 comments.
+    expect(section).toContain('not verified');
+    expect(section).toContain('author tested on <one platform> only');
+    expect(section).toContain('not independently re-run');
+    // Pending CI must not lift the trigger: #7947's likely out was "the
+    // ubuntu Test job is still in progress".
+    expect(section).toContain('"CI is still running" does not lift');
+    // The mechanical rule must sit BEFORE the skip cases, or the skip cases
+    // read as outs from it rather than the other way around.
+    expect(section.indexOf('mechanical, not a judgement call')).toBeLessThan(
+      section.indexOf('Skip it — explicitly'),
+    );
+    // And the skip cases themselves must survive — the trigger tightens the
+    // rule, it does not replace the two legitimate outs.
+    expect(section).toContain('No behavioural claim to settle');
+    expect(section).toContain('The author lacks write access');
   });
 
   it('names /verify on the high-risk paths, not just tmux', () => {
@@ -1256,8 +1293,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(chown).toBeGreaterThan(repin);
     expect(launch).toBeGreaterThan(home);
     // Killing is not enough on its own: surviving build processes must
-    // fail the step rather than race the sweeps that follow.
-    expect(runStep).toContain('pgrep -u node');
+    // fail the step rather than race the sweeps that follow. The check
+    // disregards zombies — see the build-process-guard suite for why.
+    expect(runStep).toContain('live_build_processes');
     expect(runStep).toContain('refusing to start the agent');
     expect(runStep).toContain('"HOME=$AGENT_HOME"');
     // The proxy must require this run's bearer, not just a fixed dummy key.
@@ -1535,6 +1573,24 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // The whole report is already inside a <details> on the PR. With the
+  // Chinese summary as the last item, reaching it meant expanding that fold
+  // and scrolling the entire English report — ~90 lines on a real one.
+  it('puts the report Chinese summary next to the verdict, not last', () => {
+    const struct = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(struct).toBeTruthy();
+    const zh = struct.indexOf('中文摘要');
+    expect(zh).toBeGreaterThan(-1);
+    expect(zh).toBeLessThan(struct.indexOf('Central claim + A/B table'));
+    expect(zh).toBeLessThan(struct.indexOf('**Not covered**'));
+    expect(zh).toBeLessThan(struct.indexOf('**Methodology**'));
+    // Moved, not duplicated — two summaries would drift apart.
+    expect(struct.match(/中文摘要/g)?.length).toBe(1);
+  });
+
   // Only a validated assertions object counts as evidence.
   it('rejects inconsistent assertions objects', () => {
     const publishStep = step('Post verification report comment');
@@ -1695,6 +1751,100 @@ describe('qwen-triage verify publish fidelity', () => {
 
   // Only bodies carrying findings are substantive; weak notices must not be
   // snapshotted as the previous round's report.
+  // The scope disclaimer under the headline has been bilingual since the
+  // lane shipped, but the verdict itself — the one line a reader acts on —
+  // was English-only. A Chinese reader got the caveat and not the
+  // conclusion.
+  it('renders every verdict headline in both languages', () => {
+    const dir = fixture();
+    try {
+      const ARMS = [
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' },
+          'merge-ready (agent verdict)',
+          '可合入（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
+          'findings reported (agent verdict)',
+          '报告了发现（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
+          'blocked (agent verdict)',
+          '阻塞（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
+          'inconclusive (agent verdict)',
+          '结论不足（agent 判定）',
+        ],
+        [
+          { VERDICT: 'pass' },
+          'completed (no usable structured verdict)',
+          '已完成（无可用的结构化判定）',
+        ],
+        [{ VERDICT: 'fail' }, 'agent run failed', 'agent 运行失败'],
+        [
+          { VERDICT: 'timeout' },
+          'timeout — partial evidence',
+          '超时——证据不完整',
+        ],
+        [
+          { VERDICT: 'infra-error' },
+          'infra-error (crash, OOM, or unwritable results)',
+          '基础设施故障（崩溃、OOM 或结果不可写）',
+        ],
+        [{ VERDICT: 'bogus' }, 'unknown', '未知'],
+      ];
+      const seenZh = new Set();
+      ARMS.forEach(([env, en, zh], i) => {
+        const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
+        expect(body).toContain(`**Sandboxed verification: ${en}**`);
+        expect(body).toContain(`**沙箱验证：${zh}**`);
+        seenZh.add(zh);
+      });
+      // Distinct per arm. A single hardcoded Chinese string — or one that
+      // renders the English text twice — satisfies a per-arm containment
+      // check, so the pairing has to be pinned as a bijection.
+      expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the assertion count in both languages', () => {
+    const dir = fixture();
+    try {
+      const body = render(dir, {
+        NAME: 'assertzh',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed · 0 failed · 10 total',
+      );
+      expect(body).toContain('脚本断言：10 通过 · 0 失败 · 10 总计');
+
+      // The Chinese line rides the same validated object as the English one:
+      // an inconsistent assertions.json must suppress BOTH, or the comment
+      // grows a number that no gate checked.
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1,"fail":0,"total":0}',
+      );
+      const bad = render(dir, {
+        NAME: 'assertbad',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(bad).not.toContain('Scripted assertions:');
+      expect(bad).not.toContain('脚本断言');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('marks only finding-bearing bodies as substantive', () => {
     const dir = fixture();
     const M = 'qwen-triage:verify-substantive';
@@ -2442,7 +2592,9 @@ describe('qwen-triage verify maintainer-review round', () => {
     // A mid-body stall closes the response (curl 18), not a hang until the
     // client's own timeout (curl 28).
     expect(out).toContain('stall_exit=18');
-  });
+    // 20 chunks x 200 ms is 4 s before the stall arm even starts, so this
+    // cannot fit vitest's 5 s default. It was timing out on main.
+  }, 30000);
 
   // GitHub cancels the OLDER pending run in a concurrency group, so the
   // requester's own /verify proceeds — the earlier "queued behind other
@@ -2715,7 +2867,9 @@ describe('qwen-triage tmux lane parity', () => {
     const out = runProxyWatchdogTest(proxy);
     expect(out).toContain('chunks=20');
     expect(out).toContain('stall_exit=18');
-  });
+    // Same reason as its verify-lane twin: the stream alone outlasts the
+    // 5 s default.
+  }, 30000);
 
   // PR lifecycle scripts run before the agent and can plant a
   // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
@@ -2821,7 +2975,7 @@ describe('qwen-triage tmux lane parity', () => {
     const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
     expect(runStep).toContain('pkill -KILL -u node');
     expect(runStep).toContain(
-      'Processes owned by the build user survived; refusing to start the agent.',
+      'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
     );
     // Before the sweep and the proxy: the cleanup must not race a live
     // process, and no leftover child may be alive when the proxy binds.
@@ -2925,4 +3079,123 @@ describe('qwen-triage tmux lane parity', () => {
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
+});
+
+describe('qwen-triage build-process guard', () => {
+  // The guard fired on a real run (job 30267953352) and failed the job with
+  // nothing but "processes survived" — no pid, no state, no command line.
+  // Nobody could tell a genuine leftover from a harmless one, including the
+  // person who wrote it. Both lanes now name what survived.
+  it('names the surviving processes instead of just refusing', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(runStep, `${lane} lost the guard`).toContain(
+        'live_build_processes',
+      );
+      expect(runStep).toContain('surviving process:');
+      expect(runStep).toContain(
+        'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
+      );
+    }
+  });
+
+  // `ps -u node` exits 1 when the user owns zero processes. Under
+  // `set -euo pipefail` the bare assignment would die silently on the
+  // success path — the `|| true` absorbs the no-match status.
+  it('"survivors" assignment tolerates zero processes under pipefail', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(
+        runStep,
+        `${lane}: survivors assignment must survive ps exit 1`,
+      ).toContain('survivors="$(live_build_processes)" || true');
+    }
+  });
+
+  // A zombie cannot be killed and cannot execute anything, so counting one
+  // means this check can never clear.
+  //
+  // PLATFORM NOTE, and the reason this test is split in two: Linux pgrep
+  // reports defunct processes ("Defunct processes are reported." — pgrep(1),
+  // procps-ng), which is why the original `pgrep -u node` guard could hang
+  // on a zombie in CI. macOS pgrep does NOT list them, so the behavioural
+  // arm below cannot discriminate the old implementation from the new one
+  // here — verified directly: ps lists our zombie, pgrep does not. The
+  // structural assertion is therefore the one that holds on every platform.
+  it('excludes zombies from the surviving-process check', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      const body = runStep
+        .match(/live_build_processes\(\) \{\n([\s\S]*?)\n\s*\}/)?.[1]
+        ?.trim();
+      expect(body, `${lane}: no live_build_processes body`).toBeTruthy();
+      // It must read process STATE and drop zombies. `pgrep` alone cannot:
+      // on Linux it reports defunct processes and offers no default filter.
+      expect(body, `${lane}: the filter must inspect process state`).toMatch(
+        /stat=/,
+      );
+      expect(body, `${lane}: the filter must exclude zombies`).toMatch(
+        /\/\^Z\//,
+      );
+      expect(body).not.toMatch(/^pgrep\b/);
+    }
+  });
+
+  // The OS property the exclusion rests on: a zombie survives SIGKILL and
+  // ps still lists it, so an unfiltered check would never clear.
+  it('confirms a zombie survives SIGKILL and stays visible to ps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zombie-'));
+    try {
+      writeFileSync(
+        join(dir, 'mkzombie.py'),
+        [
+          'import os, time',
+          'pid = os.fork()',
+          'if pid == 0:',
+          '    os._exit(0)',
+          'print(pid, flush=True)',
+          'time.sleep(8)',
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        `python3 "$1/mkzombie.py" > "$1/zpid" &`,
+        'PP=$!',
+        'sleep 1',
+        'Z="$(tr -d " \n" < "$1/zpid")"',
+        '[ -n "$Z" ] || { echo "no-zombie"; kill $PP 2>/dev/null; exit 0; }',
+        'kill -9 "$Z" 2>/dev/null',
+        'sleep 0.5',
+        'echo "state=$(ps -o stat= -p "$Z" 2>/dev/null | tr -d " ")"',
+        'echo "unfiltered=$(ps -o pid= -p "$Z" 2>/dev/null | wc -l | tr -d " ")"',
+        `echo "filtered=$(ps -o pid=,stat=,args= -p "$Z" 2>/dev/null | awk '$2 !~ /^Z/' | wc -l | tr -d ' ')"`,
+        'kill $PP 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 30000,
+      }).stdout;
+      if (out.includes('no-zombie')) return;
+      expect(out).toMatch(/state=Z/);
+      expect(out).toContain('unfiltered=1');
+      expect(out).toContain('filtered=0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
 });

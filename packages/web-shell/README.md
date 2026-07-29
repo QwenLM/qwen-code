@@ -266,47 +266,53 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 自定义内容仍使用内置的展开、收起行为，`expanded` 会随状态更新；文件夹行右侧的内置操作不会渲染。
 未提供 `lockWorkspaceCwd` 时，该 renderer 不会执行。
 
-## 可选图表 Renderer
+## Markdown 图表接入
 
-`WebShell` 支持宿主通过 `customization.markdown.renderCodeBlock` 接管特定
-fenced code block 的渲染。图表类场景可以注册内置的
-`echarts-fulldata` renderer：
+`WebShell` 已内置 `markdown-chart` renderer 和 ECharts 运行时。宿主只需将
+[`markdown-chart` skill](https://github.com/datafe/markdown-chart/tree/main/skills/markdown-chart)
+安装到 Qwen Code 的项目级或用户级 skills 目录；例如项目级安装结果为：
 
-```tsx
-import { createEchartsFullDataRenderer } from '@qwen-code/web-shell';
-
-<WebShellWithProviders
-  markdown={{
-    renderCodeBlock: createEchartsFullDataRenderer({
-      loadEcharts: () => window.echarts,
-      resolveDataRef: async (ref, meta) =>
-        loadControlledChartDataset(ref, meta),
-    }),
-  }}
-/>;
+```text
+.qwen/skills/markdown-chart/SKILL.md
 ```
 
-renderer 会把 `echarts-fulldata` code block 替换为图表卡片，并内置图表/数据
-icon 切换；ECharts runtime 由宿主通过 `loadEcharts` 提供。若启用
-`data.kind="ref"` envelope，数据只能通过宿主提供的 `resolveDataRef` 解析，
-renderer 不会自己读取 URL 或本地路径。
+安装 skill 后按原方式使用 WebShell，不需要额外安装或导入 ECharts，也不需要传入
+图表配置：
 
-如果需要让模型主动输出 `echarts-fulldata` block，宿主应在自己的 skills 来源中
-提供对应 skill，并且只在确认当前 Web Shell 宿主已经注册 renderer 时启用。
-`@qwen-code/web-shell` 不内置或自动加载这个 skill；可从
-`packages/web-shell/docs/examples/qwencode-viz/SKILL.md` 复制模板到宿主的
-`.qwen/skills/qwencode-viz/SKILL.md`，或通过宿主自己的 skill 注入机制提供等价
-说明。
+```tsx
+<WebShellWithProviders baseUrl="http://127.0.0.1:4170" />
+```
 
-`echarts-fulldata` 的 block body 可以是旧版纯 JSON ECharts option，也可以是
-`{ "version": 1, "data": ..., "option": ... }` envelope。新版 inline envelope
-使用 `data.dimensions: string[]` 和 `data.source` array-of-arrays；renderer 会先
-normalize 成原生 ECharts option，并注入 `option.dataset`，再渲染图表和数据视图。
-新版 ref envelope 必须使用受控 `artifact://` 或 `session-file://` ref，并提供
-`data.format`（`csv` 或 `json`）和 `data.dimensions`，这些元信息会传给宿主的
-`resolveDataRef(ref, meta)`。
-宿主应使用 `JSON.parse` 解析，不能用 `eval`、`new Function` 或 script injection
-执行模型生成内容。
+skill 默认输出 `data.kind="inline"` 的 canonical `markdown-chart` block。
+WebShell 负责严格 JSON 校验、流式渲染、ECharts 生命周期以及 Chart/Data
+切换；已经闭合的图表会立即渲染，只有末尾尚未闭合的 fence 显示 loading。
+
+只有需要支持 skill 输出 `data.kind="ref"` 时，宿主才需要提供受控的
+`resolveDataRef`：
+
+```tsx
+import {
+  createMarkdownChartRegistry,
+  WebShellWithProviders,
+} from '@qwen-code/web-shell';
+
+const chartRegistry = createMarkdownChartRegistry({
+  resolveDataRef: async (ref, context) =>
+    loadControlledChartDataset(ref, context),
+});
+const markdown = { chart: { registry: chartRegistry } };
+
+<WebShellWithProviders baseUrl="http://127.0.0.1:4170" markdown={markdown} />;
+```
+
+`resolveDataRef` 是 ref 数据的唯一读取入口；WebShell 不会自行读取 URL 或本地
+路径。默认只接受规范化的 `artifact://` 和 `session-file://` ref，将 ref
+规范化后交给 resolver，并在 30 秒后终止等待。`markdown` 及其中的 `chart`
+对象应在图表挂载期间保持引用稳定。
+Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言；需要覆盖个别
+文案时可在稳定的 `chart` 对象上提供 `labels`。
+协议和数据格式见
+[`markdown-chart`](https://github.com/datafe/markdown-chart)。
 
 ## 架构说明
 
