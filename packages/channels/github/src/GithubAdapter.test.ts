@@ -1255,48 +1255,47 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
     });
 
-    it('retries final delivery when GitHub definitely did not write', async () => {
-      await connectForPublication();
-      const sleep = vi.fn().mockResolvedValue(undefined);
-      (
-        channel as unknown as {
-          abortableSleep: (ms: number) => Promise<void>;
-        }
-      ).abortableSleep = sleep;
-      mockOctokit.rest.issues.createComment
-        .mockRejectedValueOnce(
-          Object.assign(new Error('rate limited'), {
-            status: 429,
-            response: {
-              headers: {
-                'x-ratelimit-remaining': '0',
-                'x-ratelimit-reset': String(Math.floor(Date.now() / 1000)),
-              },
-            },
-          }),
-        )
-        .mockResolvedValueOnce({ data: {} });
-      const publish = (
-        channel as unknown as {
-          publishFinalResponse: (
-            chatId: string,
-            threadId: string,
-            text: string,
-            sessionId: string,
-          ) => Promise<void>;
-        }
-      ).publishFinalResponse.bind(channel);
+    it.each([
+      Object.assign(new Error('rate limited'), { status: 429 }),
+      Object.assign(new Error('rate limited'), {
+        status: 403,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      }),
+    ])(
+      'retries final delivery when GitHub definitely did not write',
+      async (error) => {
+        await connectForPublication();
+        const sleep = vi.fn().mockResolvedValue(undefined);
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = sleep;
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(error)
+          .mockResolvedValueOnce({ data: {} });
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
 
-      await publish(
-        'owner/repo',
-        'issue:42',
-        'Final reply',
-        'session-publication',
-      );
+        await publish(
+          'owner/repo',
+          'issue:42',
+          'Final reply',
+          'session-publication',
+        );
 
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
-      expect(sleep).toHaveBeenCalled();
-    });
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+        expect(sleep).toHaveBeenCalled();
+      },
+    );
 
     it('does not post an error comment after final delivery fails', async () => {
       await connectForPublication();

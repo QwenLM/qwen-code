@@ -136,7 +136,7 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
     response?: { headers?: Record<string, string | number> };
   };
   const remaining = Number(e.response?.headers?.['x-ratelimit-remaining']);
-  return (e.status === 403 || e.status === 429) && remaining === 0;
+  return e.status === 429 || (e.status === 403 && remaining === 0);
 }
 
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
