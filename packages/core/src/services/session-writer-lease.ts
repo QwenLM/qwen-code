@@ -692,7 +692,7 @@ async function installLockRecord(
       await fs.link(temporaryPath, lockPath);
       return true;
     } catch (error) {
-      const state = await inspectExactRecord(lockPath, recordRaw);
+      const { state } = await inspectExactRecord(lockPath, recordRaw);
       if (state === 'exact') return true;
       if (
         state === 'other' ||
@@ -789,19 +789,30 @@ async function removeExactRecord(
   }
 }
 
+type ExactRecordState = 'exact' | 'missing' | 'other' | 'unknown';
+
+interface RecordInspection<State extends string> {
+  state: State;
+  cause?: Error;
+}
+
 async function inspectExactRecord(
   candidatePath: string,
   expectedRaw: string,
-): Promise<'exact' | 'missing' | 'other' | 'unknown'> {
+): Promise<RecordInspection<ExactRecordState>> {
   try {
     const stat = await fs.lstat(candidatePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return 'other';
+    if (!stat.isFile() || stat.isSymbolicLink()) return { state: 'other' };
     const raw = await fs.readFile(candidatePath, 'utf8');
-    return raw === expectedRaw ? 'exact' : 'other';
+    return { state: raw === expectedRaw ? 'exact' : 'other' };
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? 'missing'
-      : 'unknown';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { state: 'missing' };
+    }
+    return {
+      state: 'unknown',
+      cause: error instanceof Error ? error : undefined,
+    };
   }
 }
 
@@ -811,7 +822,10 @@ async function removeTransitionClaimAfterFailure(
   claimPath: string,
   claimRaw: string,
 ): Promise<void> {
-  const primaryState = await inspectExactRecord(lockPath, expectedPrimaryRaw);
+  const { state: primaryState } = await inspectExactRecord(
+    lockPath,
+    expectedPrimaryRaw,
+  );
   if (primaryState !== 'exact') {
     throw new SessionWriterUnavailableError({
       cause: new Error(
@@ -840,7 +854,7 @@ async function releaseTransitionClaim(
     await fs.unlink(claimPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    const state = await inspectExactRecord(claimPath, claimRaw);
+    const { state } = await inspectExactRecord(claimPath, claimRaw);
     if (state === 'missing' || state === 'other') return;
     throw new SessionWriterUnavailableError({
       cause: error instanceof Error ? error : undefined,
@@ -859,22 +873,29 @@ async function inspectClaimedPrimary(
   lockPath: string,
   sourceRaw: string,
   sessionId: string,
-): Promise<ClaimedPrimaryState> {
+): Promise<RecordInspection<ClaimedPrimaryState>> {
   try {
     const stat = await fs.lstat(lockPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return 'other';
+    if (!stat.isFile() || stat.isSymbolicLink()) return { state: 'other' };
     const raw = await fs.readFile(lockPath, 'utf8');
-    if (raw === sourceRaw) return 'source';
+    if (raw === sourceRaw) return { state: 'source' };
     const record = parseLockRecord(raw);
-    return record?.schema_version === LOCK_SCHEMA_VERSION &&
-      record.state === 'active' &&
-      record.session_id === sessionId
-      ? 'candidate'
-      : 'other';
+    return {
+      state:
+        record?.schema_version === LOCK_SCHEMA_VERSION &&
+        record.state === 'active' &&
+        record.session_id === sessionId
+          ? 'candidate'
+          : 'other',
+    };
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? 'missing'
-      : 'unknown';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { state: 'missing' };
+    }
+    return {
+      state: 'unknown',
+      cause: error instanceof Error ? error : undefined,
+    };
   }
 }
 
@@ -882,7 +903,7 @@ async function assertExactTransitionClaim(
   claimPath: string,
   claimRaw: string,
 ): Promise<void> {
-  const claimState = await inspectExactRecord(claimPath, claimRaw);
+  const { state: claimState } = await inspectExactRecord(claimPath, claimRaw);
   if (claimState !== 'exact') {
     throw new SessionWriterUnavailableError({
       cause: new Error('Session writer transition claim ownership was lost'),
@@ -916,7 +937,11 @@ async function linkClaimedPrimary(
       await fs.link(sourcePath, lockPath);
       return;
     } catch (error) {
-      const state = await inspectClaimedPrimary(lockPath, sourceRaw, sessionId);
+      const { state } = await inspectClaimedPrimary(
+        lockPath,
+        sourceRaw,
+        sessionId,
+      );
       if (state === 'source') return;
       if (state === 'candidate') {
         // A schema-v2 acquirer can pass its first claim check immediately
@@ -943,19 +968,25 @@ async function removeClaimedPrimary(
   let candidateWaitAttempts = 0;
   for (;;) {
     await assertExactTransitionClaim(claimPath, claimRaw);
-    const state = await inspectClaimedPrimary(lockPath, sourceRaw, sessionId);
+    const { state, cause } = await inspectClaimedPrimary(
+      lockPath,
+      sourceRaw,
+      sessionId,
+    );
     if (state === 'missing') return;
     if (state === 'candidate') {
       await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
       continue;
     }
     if (state === 'other') throw new SessionWriterLostError();
-    if (state === 'unknown') throw new SessionWriterUnavailableError();
+    if (state === 'unknown') {
+      throw new SessionWriterUnavailableError({ cause });
+    }
     try {
       await fs.unlink(lockPath);
       return;
     } catch (error) {
-      const afterState = await inspectClaimedPrimary(
+      const { state: afterState } = await inspectClaimedPrimary(
         lockPath,
         sourceRaw,
         sessionId,
@@ -986,16 +1017,16 @@ async function transitionExactPrimary(
   try {
     await fs.rename(lockPath, retiredPath);
   } catch (error) {
-    const [primaryExpectedState, retiredState] = await Promise.all([
+    const [primaryExpected, retired] = await Promise.all([
       inspectExactRecord(lockPath, expectedRaw),
       inspectExactRecord(retiredPath, expectedRaw),
     ]);
-    if (primaryExpectedState === 'exact' && retiredState === 'missing') {
+    if (primaryExpected.state === 'exact' && retired.state === 'missing') {
       throw new SessionWriterUnavailableError({
         cause: error instanceof Error ? error : undefined,
       });
     }
-    if (retiredState !== 'exact') {
+    if (retired.state !== 'exact') {
       throw new SessionWriterUnavailableError({
         cause: error instanceof Error ? error : undefined,
       });
@@ -1051,11 +1082,11 @@ async function rollbackExactTransition(
     claimPath,
     claimRaw,
   );
-  const retiredState = await inspectExactRecord(retiredPath, expectedRaw);
-  if (retiredState !== 'exact') {
-    throw retiredState === 'other'
+  const retired = await inspectExactRecord(retiredPath, expectedRaw);
+  if (retired.state !== 'exact') {
+    throw retired.state === 'other'
       ? new SessionWriterLostError()
-      : new SessionWriterUnavailableError();
+      : new SessionWriterUnavailableError({ cause: retired.cause });
   }
   try {
     await linkClaimedPrimary(
@@ -1379,7 +1410,7 @@ export class SessionWriterLease {
     } catch (error) {
       const cleanupFailures: unknown[] = [];
       const claimState = claimAcquired
-        ? await inspectExactRecord(claimPath, claimRaw)
+        ? (await inspectExactRecord(claimPath, claimRaw)).state
         : 'missing';
       if (claimState === 'unknown') {
         cleanupFailures.push(
@@ -1795,7 +1826,7 @@ export class SessionWriterLease {
     } catch (error) {
       const cleanupFailures: unknown[] = [];
       const claimState = claimAcquired
-        ? await inspectExactRecord(this.claimPath, this.lockRecordRaw)
+        ? (await inspectExactRecord(this.claimPath, this.lockRecordRaw)).state
         : 'missing';
       if (claimState === 'unknown') {
         cleanupFailures.push(
@@ -1843,7 +1874,7 @@ export class SessionWriterLease {
         cleanupFailures.push(cleanupError);
       }
       if (
-        (await inspectExactRecord(this.lockPath, this.lockRecordRaw)) !==
+        (await inspectExactRecord(this.lockPath, this.lockRecordRaw)).state !==
         'exact'
       ) {
         this.released = true;

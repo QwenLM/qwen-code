@@ -1183,6 +1183,12 @@ export class ChatRecordingService {
       flushFailure = error;
     }
     if (this.handoffRequested && flushFailure !== undefined) {
+      // Fail closed: a handoff whose final flush did not durably land must
+      // neither seal (the proof would be incomplete) nor release (a successor
+      // could take over records that were never persisted). Unlike the
+      // release-then-throw normal-close path below, it retains the active lock
+      // so write ownership stays unambiguous until an external writer fence
+      // recovers it.
       this.state = 'integrity_failed';
       throw flushFailure;
     }

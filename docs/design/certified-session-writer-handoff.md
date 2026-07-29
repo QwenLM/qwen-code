@@ -186,6 +186,15 @@ accepts schema v1 active records, but an older reader does not understand
 schema v2. Rollback therefore requires draining all new writers and confirming
 that no active, sealed, or claim record from this protocol remains.
 
+A writer that does not acquire a lease — for example a plain `qwen --resume`
+session, because standalone, interactive, and headless recorders run outside
+this protocol — can still append to a transcript a managed writer has sealed.
+That append invalidates the sealed proof, so a later certified takeover of the
+same session fails closed with `session_transcript_changed` and the daemon
+stays fenced until an authoritative external writer fence clears the residual
+record. Rollout must therefore keep non-lease writers away from any transcript
+that participates in certified handoff.
+
 Hashing is intentionally performed at seal and takeover instead of adding an
 incremental digest to every append. This keeps the first implementation small
 and makes the proof independent of process memory. A very large transcript may
