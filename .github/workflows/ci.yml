@@ -151,6 +151,20 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
+      # Pre-checkout cleanup: remove .qwen/ left by a previous job on a
+      # reused runner. Without this, git checkout fails with "unable to
+      # unlink old '.qwen/...': Permission denied" when the stale files
+      # have restrictive permissions (e.g. from a verify/tmux job that
+      # ran chmod -R a-w .qwen/).
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          if [ -d .qwen ]; then
+            chmod -R u+w .qwen 2>/dev/null || true
+            rm -rf .qwen
+          fi
+
+
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
