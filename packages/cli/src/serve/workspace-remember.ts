@@ -87,8 +87,13 @@ export interface WorkspaceRememberRouteDeps {
   captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
+type WorkspaceRememberResolvedRouteDeps = Omit<
+  WorkspaceRememberRouteDeps,
+  'mutate'
+>;
+
 function requireTrustedWorkspace(
-  deps: WorkspaceRememberRouteDeps,
+  deps: WorkspaceRememberResolvedRouteDeps,
   res: Response,
 ): boolean {
   if (deps.isWorkspaceTrusted?.() !== false) return true;
@@ -662,7 +667,7 @@ export class WorkspaceRememberTaskLane {
 }
 
 function validateOriginatorClientId(
-  deps: WorkspaceRememberRouteDeps,
+  deps: WorkspaceRememberResolvedRouteDeps,
   req: Request,
   res: Response,
 ): string | undefined | null {
@@ -682,7 +687,7 @@ function validateOriginatorClientId(
 }
 
 async function validateManagedMemoryAvailable(
-  deps: WorkspaceRememberRouteDeps,
+  deps: WorkspaceRememberResolvedRouteDeps,
   res: Response,
   kind: WorkspaceMemoryTaskKind,
   assertGenerationOpen?: () => void,
@@ -712,7 +717,7 @@ async function validateManagedMemoryAvailable(
 type WorkspaceRememberRouteDepsResolver = (
   req: Request,
   res: Response,
-) => WorkspaceRememberRouteDeps | null;
+) => WorkspaceRememberResolvedRouteDeps | null;
 
 function mountWorkspaceMemoryRememberRoutesAt(
   app: Application,

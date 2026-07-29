@@ -1444,7 +1444,6 @@ export function createServeApp(
       return {
         bridge: runtime.bridge,
         lane,
-        mutate,
         parseClientId: parseClientIdHeader,
         safeBody,
         isWorkspaceTrusted: () => runtime.trusted,

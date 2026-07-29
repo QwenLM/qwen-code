@@ -1266,6 +1266,43 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('returns runtime unavailable when a workspace has no managed-memory lane', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const lateCwd = canonicalizeWorkspace(path.join(h.scratch, 'late'));
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const lateId = hashDaemonWorkspace(lateCwd);
+      h.workspaceRegistry.add({
+        workspaceId: lateId,
+        workspaceCwd: lateCwd,
+        primary: false,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: makeBridge(),
+        workspaceService: makeWorkspaceService('late'),
+        routeFileSystemFactory: createWorkspaceFileSystemFactory({
+          boundWorkspaces: [lateCwd],
+          trusted: true,
+          emit: () => {},
+        }),
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+        generationGuard: createWorkspaceGenerationGuard(),
+      });
+
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(lateId)}/memory/remember`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Late workspace' });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(res.headers['retry-after']).toBe('1');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('rejects global and user scope on workspace-qualified memory routes', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {

@@ -270,16 +270,16 @@ describe('workspace memory remember routes', () => {
     );
     const app = express();
     app.use(express.json({ limit: '1mb' }));
+    const mutate = createMutationGate({
+      tokenConfigured: true,
+      requireAuth: false,
+    });
     const common = {
-      mutate: createMutationGate({
-        tokenConfigured: true,
-        requireAuth: false,
-      }),
       parseClientId: () => undefined,
       safeBody: (req: express.Request) => req.body as Record<string, unknown>,
     };
     mountWorkspaceQualifiedMemoryRememberRoutes(app, {
-      mutate: common.mutate,
+      mutate,
       resolveRouteDeps: (req, res) => {
         if (req.params['workspace'] !== 'secondary-id') {
           res.status(400).json({ code: 'workspace_mismatch' });
