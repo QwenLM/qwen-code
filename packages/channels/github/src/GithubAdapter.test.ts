@@ -1528,6 +1528,30 @@ describe('GithubChannel', () => {
       await reactionPending;
     });
 
+    it('does not create a duplicate reaction while one is pending', async () => {
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      liveChannel.startPromptForTest('owner/repo', 'session-2', '1001');
+
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).toHaveBeenCalledTimes(1);
+      resolveReaction({ data: { id: 9000 } });
+      await reactionPending;
+    });
+
     it('removes the working reaction when the prompt finishes', async () => {
       const { promise: reactionPending, resolve: resolveReaction } =
         Promise.withResolvers<{ data: { id: number } }>();
