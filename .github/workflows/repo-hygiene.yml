@@ -33,9 +33,36 @@ env:
   WORKDIR: '/tmp/hygiene'
 
 jobs:
+  # ── Phase 0: Dedup (skip the whole patrol while a hygiene PR is open) ───
+  dedup:
+    name: 'Dedup'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+    outputs:
+      open_prs_present: '${{ steps.dedup.outputs.open_prs_present }}'
+    steps:
+      - name: 'Skip when a hygiene PR is already open'
+        id: 'dedup'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --json number,headRefName --jq '[.[] | select(.headRefName | startswith("hygiene/")) | .number | tostring] | join(", ")')"
+          if [[ -n "${OPEN_PRS}" ]]; then
+            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping this patrol."
+            echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
+          fi
+
   # ── Phase 1: Scan (read-only, no code changes) ──────────────────────────
   scan:
     name: 'Scan'
+    if: '${{ needs.dedup.outputs.open_prs_present == ''false'' }}'
+    needs: 'dedup'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 75
     permissions:
