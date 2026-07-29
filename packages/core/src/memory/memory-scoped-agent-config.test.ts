@@ -171,6 +171,12 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: path.join(memoryRoot, 'pinned-notes', 'ordinary.md'),
       }),
     ).resolves.toBe('allow');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(memoryRoot, 'project', 'pinned', 'notes.md'),
+      }),
+    ).resolves.toBe('allow');
     expect(
       protectedPm.findMatchingDenyRule({
         toolName: ToolNames.EDIT,
