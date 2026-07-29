@@ -1537,6 +1537,39 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // Four techniques lifted from maintainer-written verification rounds that
+  // the skill could not previously have produced. Each is pinned to the
+  // failure it exists for, because a rule stated without its failure reads
+  // as advice and gets skipped.
+  it('carries the four maintainer-round techniques', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    // #7914 §4: the PR added write_file as a second writer into the shared
+    // artifact store, and the store's pre-existing first-writer-wins merge
+    // then silently discarded record_artifact's curated title. Nothing in
+    // the old skill pointed at collisions between writers.
+    expect(flat).toContain('new writer into a shared store');
+    expect(flat).toContain('in both orders');
+    expect(flat).toContain('what the loser is told');
+
+    // ...and that finding surfaced from a control that existed to validate
+    // the BASE probe, run identically on head.
+    expect(flat).toContain('Run every control on BOTH arms');
+
+    // #7998: the hardware cursor was read with a tmux query, then
+    // corroborated by a post-exit marker — a second effect of the same fact
+    // whose failure mode does not involve the query.
+    expect(flat).toContain('corroborate it with a mechanism that does not use');
+
+    // #7998 nit: re-running patch-package produced a byte-different file,
+    // proving the committed hunks were hand-written.
+    expect(flat).toContain('Re-run the generator and diff');
+
+    // #7998 "what I did not verify": a blank harness was proved
+    // environmental by booting base and head identically.
+    expect(flat).toContain('A/A control');
+  });
+
   // The whole report is already inside a <details> on the PR. With the
   // Chinese summary as the last item, reaching it meant expanding that fold
   // and scrolling the entire English report — ~90 lines on a real one.

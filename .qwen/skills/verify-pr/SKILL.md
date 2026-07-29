@@ -173,6 +173,25 @@ differs only by the change under test; the verdict is the pair of counts.
   artifacts it will see in production** (the shipped chunks, the real
   module namespaces, the actual wire payloads). A guard that is too strict
   fails in production on a path no mocked test covers.
+- **Run every control on BOTH arms, not just the arm that needs it.** A
+  control usually exists to validate the probe on one side — "the empty list
+  on base is a real absence, so let the model call the API explicitly and
+  watch an entry appear". Run that same step on head anyway. The single
+  highest-value finding of a real round came from exactly this: the
+  base-side positive control, executed identically on head, showed the
+  curated title being silently discarded. The control was not looking for a
+  bug; running it symmetrically is what found one.
+- **A new writer into a shared store is an ordering change, not just an
+  addition.** When the PR makes some new path write into a store that
+  already has writers — an artifact list, a cache, a registry, a settings
+  merge — the bug is rarely in the new writer. It is in the _collision_:
+  the store's existing merge policy (first-writer-wins, last-writer-wins,
+  shallow merge) was chosen when only one writer existed, and the PR
+  changes who arrives first. Enumerate the other writers, exercise the
+  collision **in both orders**, and check what the loser is told — a silent
+  no-op that reports success is a finding even when the merge policy itself
+  is pre-existing and correct. Name the pre-existing cause and the PR's
+  contribution separately, so the author is not blamed for the policy.
 
 ### Vacuity check on new/changed tests
 
@@ -235,6 +254,16 @@ inconclusive.
 - Assert **both sides of the wire** where a protocol is involved: what the
   peer actually received (method, path, headers, exact body, request count)
   and what the caller observed — plus that stderr stayed clean.
+- **When the oracle is an instrument, corroborate it with a mechanism that
+  does not use that instrument.** A tool's _report_ about the system is not
+  the system: a cursor query, a profiler number, a coverage percentage can
+  each be wrong in ways your assertion cannot see. Find a second effect of
+  the same physical fact whose failure mode is independent. Worked example:
+  the hardware cursor row was read with `tmux display-message -p
+'#{cursor_y}'`, then confirmed by letting the TUI exit and printing a
+  marker — anything printed after exit lands wherever the cursor actually
+  was, so the marker's row corroborates the query without trusting it.
+  Two agreeing instruments turn a measurement into evidence.
 - Every assertion is a scripted comparison that can fail. Keep harnesses as
   `.mjs` files inside the artifact dir so a maintainer can rerun them.
 
@@ -278,6 +307,16 @@ since the merge-base, say so and re-measure there.
   whether it is a coverage gap or a real defect, and prove which
   independently rather than by reading the code. Confirm the unmutated
   control is green, or the kills mean nothing.
+- **Committed generated artifacts** (a `patch-package` patch, a lockfile, a
+  generated schema or `.d.ts`, a checked-in snapshot): the description
+  usually says it was regenerated with the tool. **Re-run the generator and
+  diff its output against what was committed.** A byte-difference proves the
+  file was hand-edited rather than generated, which is a maintenance hazard
+  even when the content is functionally identical and applies cleanly — the
+  next regeneration will produce a confusing diff. Worked example: re-running
+  `npx patch-package ink` produced hunk headers carrying the function-context
+  suffix that the committed `.d.ts` hunks lacked. Report it at the severity
+  it deserves (usually a nit), and say plainly that the content matched.
 - **Multi-commit PRs**: verify each commit's claim separately when the
   commits are reachable. In CI they usually are **not** — the checkout is
   depth 2, giving only the merge commit, the base tip (`HEAD^1`), and the PR
@@ -369,7 +408,13 @@ central claim from being tested — say why.
    collapsed minimal suggested fix that preserves the original commit's
    intent.
 6. **Not covered** — every claim, surface, or gate you skipped. A silent cap
-   reads as "covered everything"; never allow that.
+   reads as "covered everything"; never allow that. When something failed to
+   run rather than being skipped by choice, **prove it was environmental
+   before saying so**: boot the identical thing on base and on head and show
+   both fail the same way (an A/A control). "The dev harness renders blank —
+   base and head both blank, so this is my sandbox, not a regression" is a
+   claim a reader can check; "seems environmental" is not, and the two look
+   identical in a report.
 7. **Methodology** — one paragraph: environment, how each harness drove the
    code, where the raw logs live.
 
