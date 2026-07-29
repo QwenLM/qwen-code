@@ -307,6 +307,22 @@ describe('classifyProbeRun', () => {
     expect(only(got).verdict).toBe('gated');
   });
 
+  it('matches Windows result paths to repository-relative probes', () => {
+    const got = classifyProbeRun(
+      0,
+      json({
+        testResults: [
+          {
+            name: 'C:\\w\\packages\\lib\\src\\inert.test.ts',
+            assertionResults: [{ status: 'passed' }],
+          },
+        ],
+      }),
+      ['packages/lib/src/inert.test.ts'],
+    );
+    expect(only(got).verdict).toBe('inert');
+  });
+
   it('does not let a gating test cover for an inert one in the same run', () => {
     // The bug the LIVE run found and the unit tests did not. One `vitest run`
     // covers every probe; a run-level verdict scored BOTH files `gated` because

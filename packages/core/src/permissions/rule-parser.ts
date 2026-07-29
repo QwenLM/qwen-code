@@ -30,12 +30,7 @@ const debugLogger = createDebugLogger('PERMISSIONS');
  *   toPosixPath('/home/user/project') → '/home/user/project' (no-op on POSIX)
  */
 function toPosixPath(p: string): string {
-  const withoutNamespace = p.startsWith('\\\\?\\UNC\\')
-    ? `\\\\${p.slice(8)}`
-    : p.startsWith('\\\\?\\')
-      ? p.slice(4)
-      : p;
-  return withoutNamespace.replace(/\\/g, '/');
+  return p.replace(/\\/g, '/');
 }
 import type {
   PermissionCheckContext,

@@ -5595,7 +5595,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           sourcePath: 'qwen-invoke.yml',
           path: '.github/workflows/qwen-invoke.yml',
           status: 'failed',
-          error: 'ENOSPC: open /ws/.github/workflows/qwen-invoke.yml',
+          error: `ENOSPC: open ${path.join(TEST_WORKSPACE, '.github', 'workflows', 'qwen-invoke.yml')}`,
         },
       ],
       gitignore: { path: '.gitignore', status: 'created' },
@@ -5630,7 +5630,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workflows: [
         {
           ...partial.workflows[0],
-          error: 'ENOSPC: open <workspace>/.github/workflows/qwen-invoke.yml',
+          error: `ENOSPC: open <workspace>${path.sep}.github${path.sep}workflows${path.sep}qwen-invoke.yml`,
         },
       ],
     };

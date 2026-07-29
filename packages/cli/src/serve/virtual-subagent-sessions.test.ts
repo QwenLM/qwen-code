@@ -243,7 +243,7 @@ describe('VirtualSubagentSessions', () => {
   it('releases the subscriber count when the initial refresh fails', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
     tempDirs.push(dir);
-    const outputFile = dir;
+    const outputFile = path.join(dir, 'invalid\0transcript');
     const runtime = {
       workspaceId: 'workspace-refresh-error',
       workspaceCwd: '/workspace',

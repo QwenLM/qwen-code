@@ -773,11 +773,28 @@ describe('matchesPathPattern', () => {
         link,
       );
 
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
       expect(
-        matchesPathPattern('/outside/safe/**', link, root, root, 'canonical'),
+        matchesPathPattern(
+          `/${targetRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
       ).toBe(true);
       expect(
-        matchesPathPattern('/project/safe/**', link, root, root, 'canonical'),
+        matchesPathPattern(
+          `/${otherRoot}/safe/**`,
+          link,
+          root,
+          root,
+          'canonical',
+        ),
       ).toBe(false);
     });
   });
@@ -796,9 +813,14 @@ describe('matchesPathPattern', () => {
       fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
       const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
 
+      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
+      // the symlink first and applies `..` to its target.
+      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
+
       expect(
         matchesPathPattern(
-          '/outside/safe/**',
+          `/${targetRoot}/safe/**`,
           filePath,
           root,
           root,
@@ -807,7 +829,7 @@ describe('matchesPathPattern', () => {
       ).toBe(true);
       expect(
         matchesPathPattern(
-          '/project/safe/**',
+          `/${otherRoot}/safe/**`,
           filePath,
           root,
           root,

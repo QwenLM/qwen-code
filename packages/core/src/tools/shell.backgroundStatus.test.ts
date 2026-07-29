@@ -57,6 +57,16 @@ function readStatus(statusPath: string): Record<string, unknown> {
   >;
 }
 
+function isProcessRunning(pid: number | undefined): boolean {
+  if (pid === undefined) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('background shell status sidecar (integration, real spawn)', () => {
   let shellTool: ShellTool;
   let registry: BackgroundShellRegistry;
@@ -107,7 +117,7 @@ describe('background shell status sidecar (integration, real spawn)', () => {
   afterEach(async () => {
     registry.abortAll();
     await waitFor(() =>
-      registry.getAll().every((task) => task.status !== 'running'),
+      registry.getAll().every((task) => !isProcessRunning(task.pid)),
     );
     for (const dir of tmpDirs) {
       rmSync(dir, {

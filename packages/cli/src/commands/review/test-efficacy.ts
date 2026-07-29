@@ -190,9 +190,10 @@ export function classifyProbeRun(
     // on a path-separator boundary, so `src/a.test.ts` cannot be satisfied by
     // `/w/vendor/other-src/a.test.ts` — a bare `endsWith` would take the wrong
     // file's verdict and never say so.
-    const result = byFile.find(
-      (r) => (r.name ?? '').endsWith(`/${file}`) || r.name === file,
-    );
+    const result = byFile.find((r) => {
+      const name = (r.name ?? '').replace(/\\/g, '/');
+      return name.endsWith(`/${file}`) || name === file;
+    });
     const assertions = result?.assertionResults ?? [];
     const failed = assertions.filter((a) => a.status === 'failed').length;
     const passed = assertions.filter((a) => a.status === 'passed').length;
