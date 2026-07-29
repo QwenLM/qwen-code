@@ -128,6 +128,16 @@
   font-size: 12px;
 }
 
+.densityTrigger:focus,
+.densityTrigger:focus-visible,
+.densityTrigger[data-state='open'] {
+  border-color: transparent;
+  box-shadow: none;
+  outline: none;
+  --tw-ring-color: transparent;
+  --tw-ring-shadow: 0 0 #0000;
+}
+
 .densityTrigger svg,
 .densityMenu svg {
   width: 14px;
@@ -160,6 +170,7 @@
 }
 
 .scroller {
+  position: relative;
   container: table-scroller / inline-size;
   max-width: 100%;
   max-height: min(75vh, 720px);
@@ -168,23 +179,35 @@
   outline: none;
 }
 
-.scrollerWithDetail {
-  max-height: none;
+.frozenColumnShadow {
+  position: absolute;
+  top: 38px;
+  bottom: 0;
+  z-index: 9;
+  width: 14px;
+  pointer-events: none;
+  transform: translateX(-1px);
+  background: linear-gradient(90deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
 }
 
-.scroller:focus-visible {
-  outline: 2px solid var(--agent-blue-500);
-  outline-offset: -2px;
+.scrollerWithDetail {
+  max-height: none;
 }
 
 .table {
   --action-column-width: 40px;
 
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   font-size: 13px;
+  table-layout: fixed;
+}
+
+.actionColumn {
+  width: var(--action-column-width);
+  min-width: var(--action-column-width);
+  max-width: var(--action-column-width);
 }
 
 .headerCell,
@@ -410,9 +433,7 @@ tr:hover .selectedCell {
 
 .hasFrozenColumn .frozenHeaderCell,
 .hasFrozenColumn .frozenCell {
-  box-shadow:
-    8px 0 14px -12px rgb(0 0 0 / 55%),
-    inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
+  box-shadow: inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
 }
 
 .stickyActionHeaderCell,
