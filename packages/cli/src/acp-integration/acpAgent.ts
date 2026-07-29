@@ -10062,15 +10062,19 @@ class QwenAgent implements Agent {
 
         const newSessionId = randomUUID();
         const sessionService = sourceConfig.getSessionService();
-        if (isSideTask) {
-          await sessionService.forkSession(sessionId, newSessionId, {
-            source: {
-              sourceType: 'side_task',
-              sourceId: sessionId,
-            },
-          });
+        const fork = () =>
+          isSideTask
+            ? sessionService.forkSession(sessionId, newSessionId, {
+                source: {
+                  sourceType: 'side_task',
+                  sourceId: sessionId,
+                },
+              })
+            : sessionService.forkSession(sessionId, newSessionId);
+        if (isSideTask && recording) {
+          await recording.runWithWriteBarrier(fork);
         } else {
-          await sessionService.forkSession(sessionId, newSessionId);
+          await fork();
         }
 
         let title: string;

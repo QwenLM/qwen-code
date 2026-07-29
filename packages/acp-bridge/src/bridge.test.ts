@@ -10872,6 +10872,52 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('creates a side task while the parent prompt is active', async () => {
+      const promptGate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await promptGate.promise;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+            return { newSessionId: 'side-active', title: 'Side task' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            return { persisted: true };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const parent = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const prompt = bridge.sendPrompt(parent.sessionId, {
+        sessionId: parent.sessionId,
+        prompt: [{ type: 'text', text: 'keep working' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      await expect(
+        bridge.createSideTaskSession(parent.sessionId, { name: 'Side task' }),
+      ).resolves.toMatchObject({
+        sessionId: 'side-active',
+        parentSessionId: parent.sessionId,
+      });
+      expect(bridge.getSessionSummary(parent.sessionId)).toMatchObject({
+        hasActivePrompt: true,
+      });
+
+      promptGate.resolve();
+      await prompt;
+      await bridge.shutdown();
+    });
+
     it('does not replace the source when single scope attaches', async () => {
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,

@@ -4127,19 +4127,8 @@ describe('App session callbacks', () => {
     } as typeof ResizeObserver;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
       function () {
-        if (this.dataset['testid'] !== 'chat-pane-container')
-          return new DOMRect();
-        const panel = document.querySelector<HTMLElement>(
-          '[data-testid="environment-panel"]',
-        );
-        const panelIsDocked =
-          panel && !panel.hidden && panel.dataset['floating'] === 'false';
-        return new DOMRect(
-          0,
-          0,
-          availableMessageWidth - (panelIsDocked ? 332 : 0),
-          600,
-        );
+        if (this.dataset['testid'] !== 'context-body') return new DOMRect();
+        return new DOMRect(0, 0, availableMessageWidth, 600);
       },
     );
     testState.messages = [
@@ -4192,6 +4181,53 @@ describe('App session callbacks', () => {
         .querySelector('[data-testid="environment-panel"]:not([hidden])')
         ?.getAttribute('data-floating'),
     ).toBe('true');
+    globalThis.ResizeObserver = originalResizeObserver;
+  });
+
+  it('opens environment information floating beside an open right panel', async () => {
+    const resizeCallbacks = new Set<ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        resizeCallbacks.add(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeCallbacks.delete(this.callback);
+      }
+    } as typeof ResizeObserver;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function () {
+        if (this.dataset['testid'] !== 'context-body') return new DOMRect();
+        return new DOMRect(0, 0, 1_000, 600);
+      },
+    );
+    const { container } = renderApp();
+
+    await act(async () => {
+      resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+
+    const environmentPanel = container.querySelector(
+      '[data-testid="environment-panel"]:not([hidden])',
+    );
+    expect(environmentPanel?.getAttribute('data-floating')).toBe('true');
     globalThis.ResizeObserver = originalResizeObserver;
   });
 
@@ -4384,7 +4420,26 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
-  it('keeps environment information open with its subagent panel', () => {
+  it('keeps environment information open with its subagent panel', async () => {
+    let availableContextWidth = 1_200;
+    const resizeCallbacks = new Set<ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        resizeCallbacks.add(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeCallbacks.delete(this.callback);
+      }
+    } as typeof ResizeObserver;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function () {
+        if (this.dataset['testid'] !== 'context-body') return new DOMRect();
+        return new DOMRect(0, 0, availableContextWidth, 600);
+      },
+    );
     testState.messages = [
       {
         id: 'tools',
@@ -4406,6 +4461,10 @@ describe('App session callbacks', () => {
       },
     ];
     const { container } = renderApp();
+    await act(async () => {
+      resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
+      await Promise.resolve();
+    });
 
     act(() => {
       container
@@ -4443,12 +4502,22 @@ describe('App session callbacks', () => {
       ),
     ).find((button) => button.textContent?.includes('Inspect repository'));
     act(() => agentButton?.click());
+    await act(async () => {
+      availableContextWidth = 900;
+      resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver));
+      await Promise.resolve();
+    });
 
     expect(
       container.querySelector(
         '[data-testid="environment-panel"]:not([hidden])',
       ),
     ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="environment-panel"]:not([hidden])')
+        ?.getAttribute('data-floating'),
+    ).toBe('true');
 
     act(() => {
       container
@@ -4496,6 +4565,7 @@ describe('App session callbacks', () => {
         '[data-testid="environment-panel"]:not([hidden])',
       ),
     ).not.toBeNull();
+    globalThis.ResizeObserver = originalResizeObserver;
   });
 
   it('opens an out-of-band fork task in the right panel', () => {
@@ -7540,7 +7610,7 @@ describe('App session callbacks', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
-  it('opens a new side task for /btw when the capability is available', async () => {
+  it('keeps /btw as a lightweight side question when side tasks are available', async () => {
     mockConnection.capabilities.features = ['session_side_task'];
     const { container } = renderApp();
     await flush();
@@ -7550,24 +7620,56 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.btwSession).toHaveBeenCalledWith(
+      'explain the current implementation',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(container.querySelector('button[title="Side task"]')).toBeNull();
+  });
+
+  it('opens a new side task for /btw side when the capability is available', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/btw side explain the current implementation';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
     expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
   });
 
-  it('passes sider to /fork as a regular background-agent directive', async () => {
+  it('keeps /btw side as a lightweight question without the capability', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/btw side explain the current implementation';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.btwSession).toHaveBeenCalledWith(
+      'side explain the current implementation',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(container.querySelector('button[title="Side task"]')).toBeNull();
+  });
+
+  it('passes a directive to /fork as a regular background-agent directive', async () => {
     mockSessionActions.forkSession.mockResolvedValue({
       sessionId: 'session-1',
-      description: 'sider',
+      description: 'delegate',
       launched: true,
     });
     const { container } = renderApp();
     await flush();
 
-    testState.prompt = '/fork sider';
+    testState.prompt = '/fork delegate';
     await clickSubmit(container);
     await flush();
 
-    expect(mockSessionActions.forkSession).toHaveBeenCalledWith('sider');
+    expect(mockSessionActions.forkSession).toHaveBeenCalledWith('delegate');
     expect(container.querySelector('button[title="Side task"]')).toBeNull();
   });
 

@@ -20,6 +20,12 @@ describe('getLocalCommands', () => {
       getLocalCommands(en).every((c) => c.source === 'builtin-command'),
     ).toBe(true);
     expect(byName.get('fork')?.argumentHint).toBe('<directive>');
+    expect(byName.get('btw')?.argumentHint).toBe('<your question>');
+    expect(
+      getLocalCommands(en, { sideTaskAvailable: true }).find(
+        (command) => command.name === 'btw',
+      )?.argumentHint,
+    ).toBe('[side] <your question>');
   });
 });
 

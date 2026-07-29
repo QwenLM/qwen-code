@@ -12402,6 +12402,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         },
       },
     );
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
     const newSessionId = sessionService.forkSession.mock.calls[0]?.[1];
     expect(sessionService.renameSession).toHaveBeenCalledWith(
       newSessionId,

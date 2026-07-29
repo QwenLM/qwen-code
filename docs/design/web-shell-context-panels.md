@@ -39,9 +39,11 @@ A side task is a distinct daemon thread session in the same workspace as its
 parent. It renders the existing interactive chat pane, including the transcript,
 composer, approval-mode selector, model selector, streaming state, and
 permission handling. Creation uses the dedicated side-task endpoint to snapshot
-the main session's complete model context at that moment, then continues
-independently. Inherited records are not replayed in the side-task transcript;
-only messages created inside the side task are shown.
+the main session's complete persisted model context at that moment, then
+continues independently. The snapshot is serialized against transcript writes,
+so a side task can be created while the parent is responding without observing
+a partial JSONL record. Inherited records are not replayed in the side-task
+transcript; only messages created inside the side task are shown.
 
 Side-task sessions record `sourceType: side_task` and the parent session id as
 `sourceId`. The Web Shell session catalog filters this source type, so side
@@ -51,8 +53,10 @@ action. With no saved task, clicking the row creates one directly. Selecting a
 saved task restores it as a tab. Closing a tab only detaches its client; the
 daemon transcript remains available for later conversation.
 
-`/fork sider` opens a new side-task draft directly. Hosts can trigger the same
-action through `shellRef.current.createSideTask()`.
+`/btw <question>` keeps the lightweight, one-shot BTW interaction.
+`/btw side <question>` opens a new side-task draft and sends the question as
+its first prompt when the daemon advertises `session_side_task`. Hosts can
+trigger the same action through `shellRef.current.createSideTask()`.
 
 ## Environment panel
 

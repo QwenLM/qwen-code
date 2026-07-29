@@ -6214,8 +6214,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         originatorClientId = resolveTrustedClientId(entry, context.clientId);
       }
 
-      const branchResult = entry.promptQueue.then(async () => {
-        if (entry.promptActive) {
+      const concurrentSideTask = isSideTask && entry.promptActive;
+      const branchResult = (
+        concurrentSideTask ? Promise.resolve() : entry.promptQueue
+      ).then(async () => {
+        if (entry.promptActive && !isSideTask) {
           throw new BranchWhilePromptActiveError(sessionId);
         }
 
@@ -6364,10 +6367,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           releaseAdmissionOnce();
         }
       });
-      entry.promptQueue = branchResult.then(
-        () => undefined,
-        () => undefined,
-      );
+      if (!concurrentSideTask) {
+        entry.promptQueue = branchResult.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
       return branchResult;
     },
 

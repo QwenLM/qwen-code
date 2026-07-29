@@ -1424,6 +1424,8 @@ const EN: Messages = {
   'local.btw':
     'Ask a quick side question without affecting the main conversation. Usage: /btw <your question>',
   'btw.empty': 'Please provide a question. Usage: /btw <your question>',
+  'btw.side.empty':
+    'Please provide a question. Usage: /btw side <your question>',
   'btw.emptyAnswer': 'No response received.',
   'btw.failed': 'Failed to answer btw question',
   'btw.answering': '+ Answering...',
@@ -3894,6 +3896,7 @@ const ZH: Messages = {
   'auth.advanced.contextPlaceholder': '上下文窗口（可选）',
   'local.btw': '快速问一个不影响主对话的侧边问题。用法：/btw <your question>',
   'btw.empty': '请提供一个问题。用法：/btw <你的问题>',
+  'btw.side.empty': '请提供一个问题。用法：/btw side <你的问题>',
   'btw.emptyAnswer': '未收到回答。',
   'btw.failed': '回答 btw 问题失败',
   'btw.answering': '+ 正在回答...',

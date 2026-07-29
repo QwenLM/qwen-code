@@ -358,6 +358,7 @@ const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
 const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
+const DOCKED_ENVIRONMENT_PANEL_WIDTH = 332;
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
   'model',
@@ -2023,7 +2024,8 @@ export function App({
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
   const chatPaneRef = useRef<HTMLDivElement | null>(null);
-  const [messageAreaWidth, setMessageAreaWidth] = useState<number | null>(null);
+  const contextBodyRef = useRef<HTMLDivElement | null>(null);
+  const [contextBodyWidth, setContextBodyWidth] = useState<number | null>(null);
   const currentSessionIdRef = useRef(connection.sessionId);
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
@@ -2205,6 +2207,7 @@ export function App({
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const preserveEnvironmentPanelOnArtifactOpenRef = useRef(false);
   useLayoutEffect(() => {
+    preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     setEnvironmentPanelOpen(false);
   }, [connection.sessionId]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
@@ -7180,16 +7183,20 @@ export function App({
             return true;
           }
           if (cmd === 'btw') {
-            if (sideTasksAvailable) {
-              const question = text.slice(match[0].length).trim();
+            const rawQuestion = text.slice(match[0].length).trim();
+            const sideTaskMatch = /^side(?:\s+|$)/i.exec(rawQuestion);
+            if (sideTasksAvailable && sideTaskMatch) {
+              const question = rawQuestion
+                .slice(sideTaskMatch[0].length)
+                .trim();
               if (!question) {
-                pushToast('error', t('btw.empty'));
+                pushToast('error', t('btw.side.empty'));
                 return true;
               }
               createSideTask(question);
               return true;
             }
-            runVisibleBtw(text.slice(match[0].length));
+            runVisibleBtw(rawQuestion);
             return true;
           }
           if (cmd === 'stats') {
@@ -7985,7 +7992,7 @@ export function App({
       mergeCommands(
         retainedCommands,
         refreshedSkillCommands,
-        getLocalCommands(t),
+        getLocalCommands(t, { sideTaskAvailable: sideTasksAvailable }),
       ),
       t,
     )
@@ -8007,6 +8014,7 @@ export function App({
     hiddenCommands,
     loadedSkills,
     loadedSkillsReady,
+    sideTasksAvailable,
     t,
   ]);
 
@@ -8073,8 +8081,9 @@ export function App({
         ? connection.gitBranch
         : (selectedWorkspaceGitStatus?.branch ?? undefined);
   const environmentPanelCanDock =
-    messageAreaWidth === null ||
-    messageAreaWidth >= MIN_DOCKED_MESSAGE_AREA_WIDTH;
+    contextBodyWidth === null ||
+    contextBodyWidth >=
+      MIN_DOCKED_MESSAGE_AREA_WIDTH + DOCKED_ENVIRONMENT_PANEL_WIDTH;
   const environmentPanelFits =
     chatWidthMode !== 'wide' && environmentPanelCanDock;
   const environmentPanelVisible =
@@ -8084,15 +8093,16 @@ export function App({
     mainView === 'chat';
   const handleEnvironmentPanelOpenChange = useCallback((open: boolean) => {
     if (!open) {
+      preserveEnvironmentPanelOnArtifactOpenRef.current = false;
       setEnvironmentPanelOpen(false);
       return;
     }
     setEnvironmentPanelOpen(true);
   }, []);
-  const dismissEnvironmentPanel = useCallback(
-    () => setEnvironmentPanelOpen(false),
-    [],
-  );
+  const dismissEnvironmentPanel = useCallback(() => {
+    preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+    setEnvironmentPanelOpen(false);
+  }, []);
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -8104,22 +8114,25 @@ export function App({
     [closeArtifactPanel],
   );
   useLayoutEffect(() => {
-    const pane = chatPaneRef.current;
-    if (!pane) return;
+    const body = contextBodyRef.current;
+    if (!body) return;
     const updateWidth = () => {
-      const paneWidth = pane.getBoundingClientRect().width;
-      if (paneWidth <= 0) return;
-      const availableWidth = paneWidth;
-      setMessageAreaWidth((current) =>
+      const availableWidth = body.getBoundingClientRect().width;
+      if (availableWidth <= 0) return;
+      setContextBodyWidth((current) =>
         current === availableWidth ? current : availableWidth,
       );
     };
+    const handleWindowResize = () => {
+      preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+      updateWidth();
+    };
     updateWidth();
-    window.addEventListener('resize', updateWidth);
+    window.addEventListener('resize', handleWindowResize);
     const observer = new ResizeObserver(updateWidth);
-    observer.observe(pane);
+    observer.observe(body);
     return () => {
-      window.removeEventListener('resize', updateWidth);
+      window.removeEventListener('resize', handleWindowResize);
       observer.disconnect();
     };
   }, []);
@@ -8128,17 +8141,25 @@ export function App({
     const crossedDockBreakpoint =
       previousEnvironmentCanDockRef.current && !environmentPanelCanDock;
     previousEnvironmentCanDockRef.current = environmentPanelCanDock;
-    if (crossedDockBreakpoint) setEnvironmentPanelOpen(false);
+    if (
+      crossedDockBreakpoint &&
+      !preserveEnvironmentPanelOnArtifactOpenRef.current
+    ) {
+      setEnvironmentPanelOpen(false);
+    }
   }, [environmentPanelCanDock]);
   const previousArtifactPanelOpenForEnvironmentRef = useRef(artifactPanelOpen);
   useLayoutEffect(() => {
     const artifactPanelJustOpened =
       !previousArtifactPanelOpenForEnvironmentRef.current && artifactPanelOpen;
     previousArtifactPanelOpenForEnvironmentRef.current = artifactPanelOpen;
+    if (!artifactPanelOpen) {
+      preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+      return;
+    }
     if (!artifactPanelJustOpened) return;
     const preserveEnvironmentPanel =
       preserveEnvironmentPanelOnArtifactOpenRef.current;
-    preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     if (!preserveEnvironmentPanel && !environmentPanelFits) {
       setEnvironmentPanelOpen(false);
     }
@@ -8804,6 +8825,8 @@ export function App({
                 </div>
               )}
               <div
+                ref={contextBodyRef}
+                data-testid="context-body"
                 className={[
                   styles.contextBody,
                   environmentPanelVisible && environmentPanelFits
