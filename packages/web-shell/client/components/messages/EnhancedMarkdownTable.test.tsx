@@ -1451,6 +1451,17 @@ describe('EnhancedMarkdownTable', () => {
   it('subtracts fixed widths from the flexible column calc()', () => {
     const container = renderTable();
 
+    const initialColumns = Array.from(container.querySelectorAll('col'));
+    // Two flexible columns share the remaining width, so the divisor is 2
+    // (jsdom serializes `/ 2` as `0.5 *`); a `/ 1` mutant would claim the
+    // full width and fail this assertion.
+    expect(initialColumns[1]?.style.width).toContain(
+      '0.5 * (100cqw - 40px - 0px)',
+    );
+    expect(initialColumns[2]?.style.width).toContain(
+      '0.5 * (100cqw - 40px - 0px)',
+    );
+
     act(() => {
       button(container, 'Resize Team').dispatchEvent(
         new KeyboardEvent('keydown', {
@@ -1463,8 +1474,7 @@ describe('EnhancedMarkdownTable', () => {
     const columns = Array.from(container.querySelectorAll('col'));
     expect(columns).toHaveLength(3);
     expect(columns[1]?.style.width).toBe('176px');
-    expect(columns[2]?.style.width).toContain('176px');
-    expect(columns[2]?.style.width).toContain('calc');
+    expect(columns[2]?.style.width).toContain('1 * (100cqw - 40px - 176px)');
     expect(container.querySelector('[class*="fillerColumn"]')).toBeNull();
   });
 
@@ -1748,6 +1758,56 @@ describe('EnhancedMarkdownTable', () => {
     } finally {
       (globalThis as { ResizeObserver?: unknown }).ResizeObserver =
         OriginalResizeObserver;
+    }
+  });
+
+  it('repositions the frozen shadow on window resize without ResizeObserver', () => {
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    // @ts-expect-error -- force the window-resize fallback branch
+    delete globalThis.ResizeObserver;
+
+    try {
+      const container = renderWideTable();
+      const shell = container.querySelector<HTMLElement>(
+        '[class*="tableShell"]',
+      );
+      const header = button(container, 'Sort by Team').closest('th');
+      expect(shell).not.toBeNull();
+      expect(header).not.toBeNull();
+      Object.defineProperty(shell, 'clientLeft', {
+        configurable: true,
+        value: 1,
+      });
+      Object.defineProperty(shell, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 20 }) as DOMRect,
+      });
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 301 }) as DOMRect,
+      });
+
+      freezeFirstColumn(container);
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('280px');
+
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 351 }) as DOMRect,
+      });
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('330px');
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
     }
   });
 
