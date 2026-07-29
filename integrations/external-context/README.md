@@ -1,34 +1,40 @@
 # External Context extension
 
 This private Qwen Code integration connects one interactive CLI process to one
-administrator-bound external context corpus without changing Qwen Core. Phase
-1 exposes exactly one on-demand, retrieval-only MCP tool:
-`context_search({ query })`.
+administrator-bound external context corpus without changing Qwen Core. It has
+two mutually exclusive retrieval-only profiles:
+
+- **On-demand:** version 1 configuration and the MCP
+  `context_search({ query })` tool.
+- **Auto-recall:** version 2 configuration and an administrator-installed
+  `UserPromptSubmit` Hook, with no external-context MCP server.
 
 The built-in adapters support Mem0 Platform V3 search and a small Generic HTTP
-Search V1 contract for existing knowledge or RAG services. There are no hooks,
-automatic recall, write tools, personal memory, trusted user identity,
-per-document ACLs, or tamper-resistant audit in this phase.
+Search V1 contract for existing knowledge or RAG services. There are no write
+tools, personal memory, trusted user identity, per-document ACLs, or
+tamper-resistant audit.
 
 Use the governed Gateway/Orchestrator Profile described in #7449 when those
 controls are required.
 
 ## Trust boundary
 
-The model can provide only the search query. Provider type, endpoint,
-credential, Mem0 `app_id`, and all other corpus selectors are fixed before the
-MCP server starts.
+In the on-demand profile, the model can provide only the search query. In the
+auto-recall profile, the query is derived only from Qwen's optional
+`submitted_prompt` provenance, captured before model-bound expansions.
+Provider type, endpoint, credential, Mem0 `app_id`, and all other corpus
+selectors are fixed before either process starts.
 
 The actual corpus-isolation boundary is the provider-side credential, project,
 index, or corpus. A Mem0 `app_id` or any other client-supplied filter is
 classification, not authorization. The credential must be restricted to the
 intended corpus and should be read-only where the provider supports that.
 
-The extension manifest alone is not a managed binding. Qwen merges MCP servers
-by name, and a settings, project, or command-line server named
-`external-context` can replace the manifest contribution while retaining the
-same permission-rule name. A managed deployment must therefore start Qwen with
-an administrator-owned `--mcp-config` based on
+For on-demand retrieval, the extension manifest alone is not a managed binding.
+Qwen merges MCP servers by name, and a settings, project, or command-line
+server named `external-context` can replace the manifest contribution while
+retaining the same permission-rule name. A managed deployment must therefore
+start Qwen with an administrator-owned `--mcp-config` based on
 `examples/managed-mcp.json`. The Phase 1 launcher must construct the complete
 Qwen argument vector itself and must not pass through arbitrary caller
 arguments. This command-line tier overrides user, project, workspace, and
@@ -60,6 +66,8 @@ during a session. Phase 1 does not provide non-bypassable per-call
 confirmation; use the governed profile when that is required.
 
 ## Configure
+
+### On-demand profile
 
 1. Give the repository its own provider-side project, index, or corpus and a
    credential restricted to it. Verify that the credential cannot access or
@@ -125,10 +133,79 @@ managed settings disable Qwen's `/cd` command as an accidental-misuse guard,
 but cannot prevent every same-UID action. To switch corpora, terminate the old
 Qwen session and start a new one with a new managed configuration path.
 
-Phase 1 emits no local per-request audit record. It does not write queries,
-results, credentials, provider errors, or operation metadata to `stderr`.
-Sanitized startup configuration errors may be written once before the MCP
-server exits; unexpected startup failures remain opaque.
+### Auto-recall profile
+
+Auto-recall sends a sanitized best-effort query to the external provider for
+each eligible ordinary interactive prompt. It requires a non-empty
+`submitted_prompt` captured by the supported interactive TUI before reminders,
+file and resource expansion, extension output, and vision expansion. It never
+falls back to the legacy model-bound `prompt`. Missing or invalid provenance
+fails closed before configuration or credentials are read. Common credential
+shapes are removed from the submitted text, but this is not DLP.
+
+1. Copy `examples/auto-recall-mem0.json` or
+   `examples/auto-recall-generic-http.json` to an
+   administrator-owned location. Set `repositoryRoot` to the one absolute
+   repository bound to the Provider credential. The directory must exist and
+   must not be a filesystem root.
+2. Build this workspace so `dist/auto-recall.js` exists.
+3. Put the applicable
+   `examples/managed-auto-recall-user-settings-posix.json` or
+   `examples/managed-auto-recall-user-settings-windows.json` content in the
+   `settings.json` of a dedicated administrator-controlled `QWEN_HOME`.
+   Replace all placeholders with fixed absolute Node and Hook paths.
+4. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
+   of `examples/managed-auto-recall-system-settings.json`. Its system-level
+   `disableAllHooks: false` prevents lower-precedence workspace settings from
+   suppressing the required Hook.
+5. Use a launcher that accepts no arguments, verifies stdin and stdout are
+   TTYs, starts in `repositoryRoot`, supplies only an administrator-approved
+   environment, and fixes all Qwen, Node, Hook, configuration, settings, and
+   credential paths. It must set
+   `QWEN_CODE_MEMORY_TEAM=0`, `QWEN_CODE_MEMORY_TEAM_SYNC=0`,
+   `QWEN_TELEMETRY_ENABLED=0`, `QWEN_TELEMETRY_LOG_PROMPTS=0`,
+   `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES=0`, and
+   `QWEN_USAGE_STATISTICS_ENABLED=0`.
+   On Windows, the approved `PATH` must resolve `powershell` to the system
+   executable, and PowerShell profiles must be absent or
+   administrator-controlled. A user-controlled shell shim or profile is
+   outside the Direct Profile trust model.
+
+Do not link or enable the external-context Extension Manifest and do not
+install `examples/managed-mcp.json` in the auto-recall process; either action
+would add the on-demand MCP surface and permit duplicate retrieval. The
+shared configuration loader and MCP entry point intentionally understand v2
+for forward compatibility, so the schema version does not enforce this
+deployment separation. The profile supports only a fresh interactive TTY
+session. The managed system settings explicitly disable speculative execution
+because accepted speculation can bypass the normal `UserPromptSubmit` path. It
+does not support
+`-p`, stream-json, ACP, `serve`, YOLO, `--continue`, `--resume`, arbitrary
+launcher arguments, or switching repositories in one process. Mid-turn
+steering messages do not fire `UserPromptSubmit` and therefore do not trigger
+recall; only ordinary submitted turns are eligible.
+
+The Hook reads at most 1 MiB from stdin, emits at most 4000 code units of
+structured `untrusted_external_context`, performs no retries or caching, and
+fails open as `{}` after the Node entry point starts. Failure to spawn the
+pinned Node process and a Qwen outer command timeout retain Qwen's blocking
+command-Hook semantics. The Provider timeout defaults to 1500ms and is capped
+at 5000ms; the internal Hook wall-clock budget is 6500ms and the managed Qwen
+command timeout is 8000ms.
+
+Retrieved results are sent to the model provider as user-layer additional
+context. The managed profile disables Qwen chat recording, native memory,
+usage statistics, and telemetry by default. Provider-side access logs remain
+outside this integration's control.
+
+For Mem0 auto-recall, verify that Memory Decay is disabled for the bound
+Project. If that cannot be verified, use the on-demand profile.
+
+The integration emits no local per-request audit record. It does not write
+queries, results, credentials, provider errors, or operation metadata to
+`stderr`. The on-demand MCP entry point may write a sanitized startup
+configuration error once before it exits; unexpected startup failures remain
+opaque. The auto-recall Hook emits only `{}` on failure.
 Operators who need access records may use provider-side logs, but those are
 outside this integration and are not a tamper-resistant compliance audit.
 
@@ -187,9 +264,14 @@ Provider audit or access logs may still be retained. See
 
 ## Rollout and rollback
 
-Enable the pinned managed MCP for one workspace, validate on-demand search
-quality and provenance, and then expand to other independently configured
-corpora. Removing the pinned configuration from the managed launcher rolls
-back the Qwen integration; local trials can instead disable or remove the
-extension. Phase 1 does not call explicit mutation or deletion APIs, but
-rollback does not remove provider-side search logs or access metadata.
+Start with the pinned on-demand MCP for one workspace and validate search
+quality and provenance. Enable auto-recall only after the administrator accepts
+automatic query forwarding, first with a fake provider, then one trusted
+repository, and finally a small team. Do not run both profiles in one process.
+
+Removing the pinned MCP or auto-recall Hook from the managed launcher rolls
+back the Qwen integration; local on-demand trials can instead disable or remove
+the extension. Restore a preserved v1 configuration before rolling back to a
+binary that does not understand v2. The integration does not call explicit
+mutation or deletion APIs, but rollback does not remove provider-side search
+logs or access metadata.
