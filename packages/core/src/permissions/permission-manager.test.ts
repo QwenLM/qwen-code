@@ -20,6 +20,7 @@ import {
   getSpecifierKind,
   toolMatchesRuleToolName,
   splitCompoundCommand,
+  splitCompoundCommandSegments,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
@@ -555,6 +556,78 @@ describe('splitCompoundCommand', () => {
 
   it('splits a mix of long and bare operators', async () => {
     expect(splitCompoundCommand('a && b & c')).toEqual(['a', 'b', 'c']);
+  });
+
+  // The backward scan for a redirection has to respect escaping. `\>` is a
+  // literal `>` argument, so bash backgrounds the `echo` and then runs the
+  // `rm`; reading it as a redirection kept both in one segment and let the
+  // `echo`'s allow rule authorise the `rm`.
+  it.each([
+    ['echo a \\> & rm -rf /tmp/x', ['echo a \\>', 'rm -rf /tmp/x']],
+    ['echo a \\< & rm -rf /tmp/x', ['echo a \\<', 'rm -rf /tmp/x']],
+  ])('splits %s, where the redirection is escaped', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('keeps an escaped backslash before a real redirection unsplit', async () => {
+    // Two backslashes are a literal backslash, so the `>` really is a
+    // redirection and the `&` really does duplicate a descriptor.
+    expect(splitCompoundCommand('echo a \\\\>& 2')).toEqual([
+      'echo a \\\\>& 2',
+    ]);
+  });
+
+  // Inside `$(( … ))` / `(( … ))` a bare `&` is bitwise AND. Splitting there
+  // produced two fragments that match no rule, so an otherwise allowed command
+  // stopped matching its own allow rule.
+  it.each([
+    ['VAR=$(( FLAGS & MASK ))'],
+    ['(( a & b ))'],
+    ['echo $(( (x & y) + z ))'],
+  ])('does not split %s, where & is arithmetic', async (command) => {
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it('still splits a bare & that follows an arithmetic expansion', async () => {
+    // Over-correction guard: the depth counter has to come back down.
+    expect(splitCompoundCommand('echo $(( a & b )) & rm -rf /tmp/x')).toEqual([
+      'echo $(( a & b ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // The backward scan runs off the front of the string: nothing precedes the
+  // `&`, so it cannot be part of a redirection and is the async operator.
+  it.each([['& echo hi'], ['   & echo hi']])(
+    'treats the leading & in %s as the async operator',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual(['echo hi']);
+    },
+  );
+});
+
+// ─── splitCompoundCommandSegments ────────────────────────────────────────────
+
+describe('splitCompoundCommandSegments', () => {
+  it('reports the operator that terminated each segment', async () => {
+    expect(splitCompoundCommandSegments('a & b && c | d')).toEqual([
+      { command: 'a', terminator: '&' },
+      { command: 'b', terminator: '&&' },
+      { command: 'c', terminator: '|' },
+      { command: 'd', terminator: '' },
+    ]);
+  });
+
+  it('reports an empty terminator for a single command', async () => {
+    expect(splitCompoundCommandSegments('git status')).toEqual([
+      { command: 'git status', terminator: '' },
+    ]);
+  });
+
+  it('keeps the async terminator on a trailing background command', async () => {
+    expect(splitCompoundCommandSegments('npm test &')).toEqual([
+      { command: 'npm test', terminator: '&' },
+    ]);
   });
 });
 
