@@ -8,8 +8,12 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FunctionDeclaration } from '@google/genai';
-import { AgentCore, type ReasoningLoopResult } from './agent-core.js';
+import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
+import {
+  AgentCore,
+  extractParentToolNames,
+  type ReasoningLoopResult,
+} from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
@@ -887,5 +891,80 @@ describe('AgentCore.prepareTools', () => {
     const deniedNames = deniedTools.map((t) => t.name);
     expect(deniedNames).not.toContain(ToolNames.AGENT);
     expect(deniedNames).toContain('read_file');
+  });
+});
+
+describe('extractParentToolNames', () => {
+  const configWithTools = (
+    tools: Array<{ functionDeclarations?: FunctionDeclaration[] }>,
+  ): GenerateContentConfig => ({ tools }) as unknown as GenerateContentConfig;
+
+  it('extracts declaration names from a single group', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: ToolNames.READ_FILE },
+            { name: ToolNames.WRITE_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
+  });
+
+  it('flattens and deduplicates names across multiple functionDeclarations groups', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        { functionDeclarations: [{ name: ToolNames.READ_FILE }] },
+        {
+          functionDeclarations: [
+            { name: ToolNames.READ_FILE },
+            { name: ToolNames.GREP },
+          ],
+        },
+      ]),
+    );
+    // READ_FILE appears in both groups but is returned once.
+    expect(names).toEqual([ToolNames.READ_FILE, ToolNames.GREP]);
+  });
+
+  it('drops tools a subagent must never inherit (EXCLUDED_TOOLS_FOR_SUBAGENTS)', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: ToolNames.WORKFLOW },
+            { name: ToolNames.AGENT },
+            { name: ToolNames.READ_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE]);
+    expect(names).not.toContain(ToolNames.WORKFLOW);
+    expect(names).not.toContain(ToolNames.AGENT);
+  });
+
+  it('filters out empty and non-string declaration names', () => {
+    const names = extractParentToolNames(
+      configWithTools([
+        {
+          functionDeclarations: [
+            { name: '' },
+            { name: undefined } as FunctionDeclaration,
+            { name: ToolNames.READ_FILE },
+          ],
+        },
+      ]),
+    );
+    expect(names).toEqual([ToolNames.READ_FILE]);
+  });
+
+  it('returns an empty array for undefined config or missing tools', () => {
+    expect(extractParentToolNames(undefined)).toEqual([]);
+    expect(extractParentToolNames({} as GenerateContentConfig)).toEqual([]);
+    expect(extractParentToolNames(configWithTools([]))).toEqual([]);
+    expect(extractParentToolNames(configWithTools([{}]))).toEqual([]);
   });
 });

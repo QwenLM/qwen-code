@@ -34,6 +34,7 @@ import { gh, setGhHost } from './lib/gh.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
+  requiredAgents,
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
@@ -47,6 +48,18 @@ import {
 } from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * The floor above which a zero-finding Approve is disclosed as low-signal,
+ * in the plan's `srcDiffLines` — diff lines belonging to `source` files, the
+ * same field the review topology is chosen from (tests, docs and generated
+ * files excluded by construction). A trivial edit stays under it even
+ * scattered one changed line per hunk (~8 diff lines each with context and
+ * hunk header, plus 4 file-header lines), and the smallest diff the topology
+ * gate calls big is 500 — so the floor sits well past the typo-fix class and
+ * well before "big".
+ */
+export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
  * Reads a PR's description body, given its `owner/repo` and number. The one
@@ -160,6 +173,18 @@ export interface ComposeReviewResult {
    * operator which command repairs it. Two registers, two channels.
    */
   remediation: string[];
+  /**
+   * Set on an APPROVE composed from zero findings over a non-trivial source
+   * diff (the plan's `srcDiffLines` above `LOW_SIGNAL_SRC_DIFF_LINES`).
+   * Disclosure only — the event never moves on it: the coverage gate proves
+   * the agents READ the diff, not that the review had discriminating power,
+   * and a dogfooded weak-model run drafted nothing from its whole roster on a
+   * diff where stronger same-condition runs found a verified blocker, then
+   * printed a bare confident Approve. The verdict line names the shape.
+   * `agents` is the plan's required roster — all on record at APPROVE, or
+   * coverage would have capped — and `srcDiffLines` the plan's own count.
+   */
+  lowSignal: { agents: number; srcDiffLines: number } | null;
 }
 
 function withMarker(line: string): string {
@@ -641,6 +666,32 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgradedFrom = 'Request changes';
   }
 
+  // A zero-finding Approve over a non-trivial source diff is disclosed, not
+  // capped. Every gate above proves the agents READ the diff; none proves the
+  // review could tell good code from bad, and a dogfooded weak-model run
+  // drafted nothing from all of its agents on a diff where stronger runs found
+  // a verified blocker — then composed a bare confident Approve. The verdict
+  // stands (nothing was found, and a cap would punish every genuinely clean
+  // diff), but the verdict line must say which kind of Approve this is.
+  // "Non-trivial" is measured in the plan's own risk metric (`srcDiffLines`,
+  // the field the topology is chosen from), so a docs-only or typo-class diff
+  // keeps its bare Approve — there, finding nothing is the expected outcome.
+  let lowSignal: ComposeReviewResult['lowSignal'] = null;
+  if (event === 'APPROVE' && input.planPath) {
+    try {
+      const plan = JSON.parse(
+        readFileSync(input.planPath, 'utf8'),
+      ) as RosterPlan;
+      const src = Number(plan.srcDiffLines ?? 0);
+      if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
+        lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
+      }
+    } catch {
+      // Unreachable on a real APPROVE — the coverage gate already read this
+      // plan — and a disclosure must never take the review down.
+    }
+  }
+
   const footer = `_— ${modelId} via Qwen Code /review_`;
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
@@ -901,6 +952,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       downgraded,
       downgradedFrom,
       remediation,
+      lowSignal,
     };
   }
 
@@ -919,6 +971,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       downgraded,
       downgradedFrom,
       remediation,
+      lowSignal,
     };
   }
 
@@ -1040,6 +1093,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgraded,
     downgradedFrom,
     remediation,
+    lowSignal,
   };
 }
 
@@ -1581,6 +1635,18 @@ export function verdictLine(r: ComposeReviewResult): string {
     // lose and no blocker to hide, but the event did change and the user should see
     // it did.
     line += ' — downgraded by a presubmit check';
+  }
+  // Not a cap and not a downgrade — the Approve stands. But a bare confident
+  // Approve from a run that drafted nothing on a real diff reads as evidence
+  // of quality when it is only absence of signal, so the line says which
+  // Approve this is. Both numbers are the run's own: the roster the plan
+  // required (all on record, or coverage would have capped) and the plan's
+  // source-line count.
+  if (r.event === 'APPROVE' && r.lowSignal) {
+    line +=
+      ` — low signal: none of the ${r.lowSignal.agents} review agents ` +
+      `reported a finding on a non-trivial diff ` +
+      `(${r.lowSignal.srcDiffLines} source diff lines)`;
   }
   return line;
 }
