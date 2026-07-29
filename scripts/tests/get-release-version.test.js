@@ -86,6 +86,17 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
+    it('should keep the nightly base when no stable is published yet', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          throw new Error('npm error code E404');
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.0-preview.0');
+    });
+
     it('should bump the preview base when the latest stable matches it', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))

@@ -473,6 +473,7 @@ describe('package scripts', () => {
         'npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version',
       );
       expect(publishStep).toContain('already published; skipping');
+      expect(publishStep).toContain('exit 0');
       expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
     }
   });
