@@ -1527,6 +1527,9 @@ describe('Markdown streaming throttle', () => {
       );
     });
 
+    expect(container.textContent).toContain('Token 1');
+    expect(container.textContent).not.toContain('Token 1 Token 2 Token 3');
+
     act(() => {
       vi.advanceTimersByTime(80);
     });

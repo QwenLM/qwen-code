@@ -850,10 +850,13 @@ export const Markdown = memo(function Markdown({
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
-  const renderedContent =
-    throttledContent && source && sourceMarkdown?.transformMarkdown
-      ? sourceMarkdown.transformMarkdown(throttledContent, { source })
-      : throttledContent;
+  const renderedContent = useMemo(
+    () =>
+      throttledContent && source && sourceMarkdown?.transformMarkdown
+        ? sourceMarkdown.transformMarkdown(throttledContent, { source })
+        : throttledContent,
+    [throttledContent, source, sourceMarkdown?.transformMarkdown],
+  );
 
   const effectiveTableMode = isStreaming
     ? 'basic'
