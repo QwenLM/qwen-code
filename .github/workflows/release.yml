@@ -557,13 +557,25 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
+          # Only anchor notes to the previous release when it is an ancestor of
+          # this release's target. A preview or nightly cut can lag behind (or
+          # diverge from) the latest stable, and a divergent --notes-start-tag
+          # makes `gh release create --generate-notes` fail, aborting the
+          # publish after the npm packages have already been published.
+          NOTES_START_TAG_FLAG=()
+          if [[ -n "${PREVIOUS_RELEASE_TAG}" ]] && git merge-base --is-ancestor "${PREVIOUS_RELEASE_TAG}" HEAD; then
+            NOTES_START_TAG_FLAG+=(--notes-start-tag "${PREVIOUS_RELEASE_TAG}")
+          elif [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
+            echo "::warning::PREVIOUS_RELEASE_TAG (${PREVIOUS_RELEASE_TAG}) is not an ancestor of HEAD; omitting --notes-start-tag"
+          fi
+
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
             dist/standalone/qwen-code-* \
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
+            "${NOTES_START_TAG_FLAG[@]}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
 
