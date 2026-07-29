@@ -2179,7 +2179,10 @@ describe('qwen-autofix workflow', () => {
       'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
-      'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"',
+    );
+    expect(workflow).toContain(
+      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
@@ -5222,6 +5225,42 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep).toContain('milestone digest failed to post');
   });
 
+  it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
+    // A one-shot push dies `fetch first` whenever anything pushes to the PR
+    // head during the agent's ~50-minute window (observed twice in one day,
+    // #7983/#7985 — a full verified agent run thrown away each time). The
+    // per-PR head-write concurrency group cannot prevent this: it only
+    // serialises THIS repo's workflows, not the PR author or the fork side.
+    // On rejection the report step fetches the moved head, MERGES it into
+    // the local line, and retries a bounded number of times; the merge
+    // result descends from the remote head so the retry is a fast-forward.
+    expect(pushAndReportStep).toContain('for push_attempt in 1 2 3; do');
+    expect(pushAndReportStep).toContain(
+      'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
+    );
+    // Merge, never rebase: the agent's own conflict-resolution rounds create
+    // merge commits, and a rebase would flatten them and can silently
+    // re-introduce the conflicts they resolved.
+    expect(pushAndReportStep).toContain('merge --no-edit FETCH_HEAD');
+    expect(pushAndReportStep).not.toContain('git rebase');
+    // The merge commit needs an explicit identity on a bare runner.
+    expect(pushAndReportStep).toContain('-c user.name="${AUTOFIX_BOT}"');
+    expect(pushAndReportStep).toContain(
+      '-c user.email="${AUTOFIX_BOT}@users.noreply.github.com"',
+    );
+    // A genuine content conflict aborts cleanly and falls through to the
+    // existing failure path — the salvage must never overwrite either side.
+    expect(pushAndReportStep).toContain('git merge --abort || true');
+    // The salvage is disclosed in the round report: the round's verification
+    // ran before the merge, so mid-run commits deserve a re-check.
+    expect(pushAndReportStep).toContain('PUSH_RACE_MERGED');
+    expect(pushAndReportStep).toContain('verification predates that merge');
+    // Bounded: the loop gives up after the last attempt instead of spinning.
+    expect(pushAndReportStep).toContain(
+      'push rejected ${push_attempt} times; giving up',
+    );
+  });
+
   it('pushes autofix branches without rewriting remote history', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
     // No bare -f / +refspec force forms either. (--no-verify is NOT a force
@@ -5233,7 +5272,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
     expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
     expect(pushAndReportStep).toContain(
-      'git push --no-verify origin "${BRANCH}"',
+      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host
