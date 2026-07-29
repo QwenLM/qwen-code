@@ -1998,6 +1998,7 @@ describe('BackgroundAgentResumeService', () => {
               parts: [{ text: 'persisted system instruction' }],
             },
             tools: [{ name: 'Bash' }, { name: 'Read' }],
+            executionAllowedTools: ['Read'],
           },
         }),
         JSON.stringify({
@@ -2086,6 +2087,7 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(createArgs?.[5]).toEqual({
       tools: [{ name: 'Bash' }, { name: 'Read' }],
+      executionAllowedTools: ['Read'],
     });
     expect(execute).toHaveBeenCalledTimes(1);
     const executeCall = execute.mock.calls[0];

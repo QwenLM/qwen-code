@@ -416,10 +416,15 @@ export interface AgentBootstrapRecordPayload {
    */
   systemInstruction?: string | Content;
   /**
-   * Immutable launch-time tool declarations / allowlist for the fork runtime.
+   * Immutable launch-time tool declarations for the fork runtime.
    * Resume must reuse this exact capability set or stay blocked.
    */
   tools?: Array<string | FunctionDeclaration>;
+  /**
+   * Optional execution-layer allowlist. Absence preserves unrestricted
+   * execution for forks launched without `fork_tools`.
+   */
+  executionAllowedTools?: string[];
 }
 
 /**

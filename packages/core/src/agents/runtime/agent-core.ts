@@ -311,6 +311,7 @@ export class AgentCore {
   readonly modelConfig: ModelConfig;
   readonly runConfig: RunConfig;
   readonly toolConfig?: ToolConfig;
+  private readonly executionAllowedTools?: ReadonlySet<string>;
   /**
    * Event emitter for this agent. Always present — if the caller doesn't
    * pass one, AgentCore allocates its own so the observable state below
@@ -390,6 +391,10 @@ export class AgentCore {
     this.modelConfig = modelConfig;
     this.runConfig = runConfig;
     this.toolConfig = toolConfig;
+    this.executionAllowedTools =
+      toolConfig?.executionAllowedTools === undefined
+        ? undefined
+        : new Set(toolConfig.executionAllowedTools);
     this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
     this.runtimeView = runtimeView;
@@ -1357,6 +1362,59 @@ export class AgentCore {
     );
   }
 
+  private isToolExecutionAllowed(toolName: string): boolean {
+    if (!this.executionAllowedTools) {
+      return true;
+    }
+    if (this.executionAllowedTools.has(toolName)) {
+      return true;
+    }
+    if (!toolName.startsWith('mcp__')) {
+      return false;
+    }
+
+    // Match MCP patterns against the registry's raw server/tool identity.
+    // Comparing provider-sanitized prefixes can merge distinct server names
+    // such as "repo.bad" and "repo/bad", so it is unsafe for an allowlist.
+    const registeredTool = this.runtimeContext
+      .getToolRegistry()
+      .getTool(toolName) as
+      | { serverName?: unknown; serverToolName?: unknown }
+      | undefined;
+    if (
+      typeof registeredTool?.serverName !== 'string' ||
+      typeof registeredTool.serverToolName !== 'string'
+    ) {
+      return false;
+    }
+
+    const serverName = registeredTool.serverName;
+    const serverToolName = registeredTool.serverToolName;
+    const serverPattern = `mcp__${serverName}`;
+    const rawToolName = `${serverPattern}__${serverToolName}`;
+    return [...this.executionAllowedTools].some((pattern) => {
+      if (!pattern.startsWith('mcp__')) {
+        return false;
+      }
+      if (
+        pattern === 'mcp__*' ||
+        pattern === serverPattern ||
+        pattern === rawToolName
+      ) {
+        return true;
+      }
+      if (!pattern.endsWith('*')) {
+        return false;
+      }
+
+      const toolPatternPrefix = `${serverPattern}__`;
+      return (
+        pattern.startsWith(toolPatternPrefix) &&
+        serverToolName.startsWith(pattern.slice(toolPatternPrefix.length, -1))
+      );
+    });
+  }
+
   /**
    * Processes a list of function calls via CoreToolScheduler.
    *
@@ -1398,8 +1456,10 @@ export class AgentCore {
       ]),
     );
 
-    // Build allowed tool names set for filtering
-    const allowedToolNames = new Set(toolsList.map((t) => t.name));
+    // The model-visible declarations and the execution allowlist are separate:
+    // forks keep the parent's declaration prefix for cache sharing while
+    // optionally narrowing which declared tools may actually run.
+    const declaredToolNames = new Set(toolsList.map((t) => t.name));
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       uniqueFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
@@ -1430,12 +1490,22 @@ export class AgentCore {
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
-      if (!allowedToolNames.has(fc.name)) {
-        const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
+      let errorMessage: string | undefined;
+      if (!declaredToolNames.has(fc.name)) {
+        errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
           ? getSubagentPlanToolUnavailableMessage(toolName)
           : isLeaderOnlyToolUnavailableInSubagent(toolName)
             ? getLeaderOnlyToolUnavailableMessage(toolName)
             : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+      } else if (!this.isToolExecutionAllowed(toolName)) {
+        const executionAllowedTools = this.executionAllowedTools;
+        errorMessage =
+          executionAllowedTools && executionAllowedTools.size > 0
+            ? `Tool "${toolName}" is not allowed by this agent's execution allowlist (fork_tools). Allowed tools: ${[...executionAllowedTools].join(', ')}.`
+            : `Tool "${toolName}" is not allowed by this agent's execution allowlist (fork_tools). No tools are allowed.`;
+      }
+
+      if (errorMessage) {
         const functionResponsePart = {
           functionResponse: {
             id: callId,

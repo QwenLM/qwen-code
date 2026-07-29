@@ -25,14 +25,27 @@ Only `subagent_type: "fork"` accepts `fork_turns`:
 
 Tool responses and pure system reminders do not count as user turns. Regular named subagents and agent-team teammates do not accept `fork_turns`; they keep their separate conversation context.
 
+## Restricting Fork Tool Execution with `fork_tools`
+
+Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but a call not matched by `fork_tools` is rejected before scheduling or approval.
+
+- Omitting `fork_tools` preserves unrestricted fork execution.
+- An empty array rejects every tool call.
+- `*` is not accepted; omit `fork_tools` when unrestricted execution is intended.
+- `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
+- Shell command argument patterns are not supported. Listing `run_shell_command` allows that tool to proceed through its normal permission checks but does not pre-approve any command.
+
+This is a per-invocation restriction supplied by the caller. It narrows a child fork's capabilities but is not an administrator-enforced security sandbox because the caller can omit or expand the list.
+
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                                                           |
-| ------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                   |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                           |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                            |
+|               | Named Subagent                                                 | Fork Subagent                                                                                                       |
+| ------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                             |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                               |
+| Tools         | Configured declaration set                                     | Keeps the parent-derived declaration set; `fork_tools` can independently narrow execution without changing that set |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                       |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                        |
 
 ### When Fork is Used
 

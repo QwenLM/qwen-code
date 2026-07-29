@@ -174,6 +174,7 @@ describe('agent-transcript', () => {
         bootstrapHistory?: Content[];
         bootstrapSystemInstruction?: string | Content;
         bootstrapTools?: Array<string | FunctionDeclaration>;
+        bootstrapExecutionAllowedTools?: string[];
         launchTaskPrompt?: string;
       } = {},
     ) {
@@ -266,6 +267,7 @@ describe('agent-transcript', () => {
           parts: [{ text: 'fork system' }],
         },
         bootstrapTools: [{ name: 'Bash' }],
+        bootstrapExecutionAllowedTools: [],
         launchTaskPrompt: 'Begin.',
       });
 
@@ -284,6 +286,7 @@ describe('agent-transcript', () => {
           parts: [{ text: 'fork system' }],
         },
         tools: [{ name: 'Bash' }],
+        executionAllowedTools: [],
       });
     });
 

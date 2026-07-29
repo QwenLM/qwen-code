@@ -117,6 +117,7 @@ interface TranscriptRecovery {
     runtimeHistory: Content[];
     systemInstruction?: string | Content;
     tools?: Array<string | FunctionDeclaration>;
+    executionAllowedTools?: string[];
   };
 }
 
@@ -355,6 +356,10 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
             tools: structuredClone(
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
                 .tools,
+            ),
+            executionAllowedTools: structuredClone(
+              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
+                .executionAllowedTools,
             ),
             taskPrompt: (
               launchPromptRecord!.systemPayload as NotificationRecordPayload
@@ -1570,6 +1575,13 @@ export class BackgroundAgentResumeService {
     };
     const toolConfig: ToolConfig = {
       tools: structuredClone(bootstrap.tools!),
+      ...(bootstrap.executionAllowedTools !== undefined
+        ? {
+            executionAllowedTools: structuredClone(
+              bootstrap.executionAllowedTools,
+            ),
+          }
+        : {}),
     };
 
     return AgentHeadless.create(

@@ -550,6 +550,31 @@ describe('AgentTool', () => {
       expect(properties.properties.fork_turns.oneOf).toHaveLength(2);
     });
 
+    it('declares fork_tools as an optional execution-only allowlist', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          fork_tools: {
+            type?: string;
+            default?: string[];
+            description?: string;
+            items?: { type?: string };
+            minItems?: number;
+          };
+        };
+      };
+
+      expect(properties.properties.fork_tools.type).toBe('array');
+      expect(properties.properties.fork_tools.items?.type).toBe('string');
+      expect(properties.properties.fork_tools.default).toBeUndefined();
+      expect(properties.properties.fork_tools.minItems).toBeUndefined();
+      expect(properties.properties.fork_tools.description).toContain(
+        'Only valid with subagent_type "fork"',
+      );
+      expect(properties.properties.fork_tools.description).toContain(
+        'tool declarations remain unchanged',
+      );
+    });
+
     it('documents that working_dir takes precedence over isolation', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {
@@ -772,6 +797,71 @@ describe('AgentTool', () => {
           ...validParams,
           subagent_type: 'fork',
           fork_turns: 'all',
+          name: 'worker',
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('accepts fork_tools, including an empty deny-all list, for forks', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: [ToolNames.READ_FILE, 'mcp__github'],
+        }),
+      ).toBeNull();
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: [],
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects invalid fork_tools entries', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: ['  '],
+        }),
+      ).toMatch(/array of non-empty tool names/i);
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: null as unknown as string[],
+        }),
+      ).toMatch(/array of non-empty tool names/i);
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: ['*'],
+        }),
+      ).toMatch(/omit it for unrestricted execution/i);
+    });
+
+    it.each([undefined, 'file-search'])(
+      'rejects fork_tools for non-fork subagent_type=%s',
+      (subagentType) => {
+        expect(
+          agentTool.validateToolParams({
+            ...validParams,
+            subagent_type: subagentType,
+            fork_tools: [ToolNames.READ_FILE],
+          }),
+        ).toMatch(/only be used with subagent_type "fork"/i);
+      },
+    );
+
+    it('rejects fork_tools for named teammates', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: [ToolNames.READ_FILE],
           name: 'worker',
         }),
       ).toMatch(/named teammate/i);
@@ -3189,6 +3279,47 @@ describe('AgentTool', () => {
       expect(FORK_AGENT.approvalMode).toBe(BUBBLE_APPROVAL_MODE);
     });
 
+    it('passes fork_tools separately from inherited declarations', async () => {
+      const parentToolDecls = [
+        {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: 'object', properties: {} },
+        },
+        {
+          name: ToolNames.EDIT,
+          description: 'Edit a file',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system',
+            tools: [{ functionDeclarations: parentToolDecls }],
+          }),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'read only task',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_tools: [ToolNames.READ_FILE],
+      });
+      await invocation.execute();
+
+      const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      expect(toolConfig?.tools).toStrictEqual(parentToolDecls);
+      expect(JSON.stringify(toolConfig?.tools)).toBe(
+        JSON.stringify(parentToolDecls),
+      );
+      expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+    });
+
     it('omitting subagent_type uses general-purpose, not fork', async () => {
       // Omission resolves to the regular general-purpose subagent, never a
       // context-inheriting fork — even in interactive mode.
@@ -3363,6 +3494,7 @@ describe('AgentTool', () => {
       // ToolConfig inherits wildcard for first-turn fallback.
       const toolConfig = createArgs[5];
       expect(toolConfig?.tools).toEqual(['*']);
+      expect(toolConfig?.executionAllowedTools).toBeUndefined();
 
       // Fork returns the placeholder synchronously.
       const llmText = partToString(result.llmContent);
@@ -5919,6 +6051,7 @@ describe('AgentTool', () => {
         description: 'Fork task',
         prompt: 'Investigate issue',
         subagent_type: 'fork',
+        fork_tools: ['Read'],
         run_in_background: true,
       };
       const generationConfig = {
@@ -5956,6 +6089,7 @@ describe('AgentTool', () => {
         expect.objectContaining({
           bootstrapSystemInstruction: generationConfig.systemInstruction,
           bootstrapTools: generationConfig.tools[0].functionDeclarations,
+          bootstrapExecutionAllowedTools: ['Read'],
         }),
       );
 

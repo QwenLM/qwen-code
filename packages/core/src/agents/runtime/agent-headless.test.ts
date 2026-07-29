@@ -56,6 +56,8 @@ import type {
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
+import { ToolNames } from '../../tools/tool-names.js';
+import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -1392,7 +1394,325 @@ describe('subagent.ts', () => {
           'file1.txt\nfile2.ts',
         );
 
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('keeps declarations unchanged while enforcing the execution allowlist', async () => {
+        const readFileToolDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const editFileToolDef: FunctionDeclaration = {
+          name: ToolNames.EDIT,
+          description: 'Edits a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const { config } = await createMockConfig();
+
+        const readFileInvocation = {
+          params: { path: 'README.md' },
+          getDescription: vi.fn().mockReturnValue('Read README.md'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          }),
+        };
+        const editFileInvocation = {
+          params: { path: 'README.md' },
+          getDescription: vi.fn().mockReturnValue('Edit README.md'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          execute: vi.fn(),
+        };
+        const readFileTool = {
+          name: ToolNames.READ_FILE,
+          displayName: 'Read File',
+          description: 'Reads a file',
+          kind: 'READ' as const,
+          schema: readFileToolDef,
+          build: vi.fn().mockReturnValue(readFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const editFileTool = {
+          name: ToolNames.EDIT,
+          displayName: 'Edit File',
+          description: 'Edits a file',
+          kind: 'EDIT' as const,
+          schema: editFileToolDef,
+          build: vi.fn().mockReturnValue(editFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(config.getToolRegistry().getTool).mockImplementation(
+          (name: string) =>
+            name === ToolNames.READ_FILE
+              ? readFileTool
+              : name === ToolNames.EDIT
+                ? editFileTool
+                : undefined,
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+              {
+                id: 'call_edit',
+                name: ToolNames.EDIT,
+                args: { path: 'README.md', old_string: 'a', new_string: 'b' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const approvalEvents: unknown[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+        eventEmitter.on(
+          AgentEventType.TOOL_WAITING_APPROVAL,
+          (event: unknown) => {
+            approvalEvents.push(event);
+          },
+        );
+
+        const executionAllowedTools: string[] = [ToolNames.READ_FILE];
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [readFileToolDef, editFileToolDef],
+            executionAllowedTools,
+          },
+          eventEmitter,
+        );
+        executionAllowedTools.push(ToolNames.EDIT);
+        await scope.execute(new ContextState());
+
+        const sentDeclarations =
+          mockSendMessageStream.mock.calls[0][1].config.tools[0]
+            .functionDeclarations;
+        expect(sentDeclarations).toStrictEqual([
+          readFileToolDef,
+          editFileToolDef,
+        ]);
+        expect(JSON.stringify(sentDeclarations)).toBe(
+          JSON.stringify([readFileToolDef, editFileToolDef]),
+        );
+        expect(readFileTool.build).toHaveBeenCalled();
+        expect(readFileInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(editFileTool.build).not.toHaveBeenCalled();
+        expect(editFileInvocation.execute).not.toHaveBeenCalled();
+        expect(approvalEvents).toHaveLength(0);
+
+        const secondRoundParts = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          secondRoundParts.map((part) => part.functionResponse?.id),
+        ).toEqual(['call_read', 'call_edit']);
+        const deniedResponse = secondRoundParts.find(
+          (part) => part.functionResponse?.id === 'call_edit',
+        )?.functionResponse;
+        expect(deniedResponse?.name).toBe(ToolNames.EDIT);
+        expect(deniedResponse?.response?.['error']).toContain('fork_tools');
+        expect(deniedResponse?.response?.['error']).not.toContain('not found');
+        expect(toolCallEvents.map((event) => event.callId).sort()).toEqual([
+          'call_edit',
+          'call_read',
+        ]);
+        expect(
+          toolResultEvents
+            .map((event) => ({
+              callId: event.callId,
+              success: event.success,
+            }))
+            .sort((left, right) => left.callId.localeCompare(right.callId)),
+        ).toEqual([
+          { callId: 'call_edit', success: false },
+          { callId: 'call_read', success: true },
+        ]);
+      });
+
+      it('treats an empty execution allowlist as deny-all', async () => {
+        const toolDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const tool = {
+          name: ToolNames.READ_FILE,
+          schema: toolDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn().mockReturnValue(tool),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [toolDef], executionAllowedTools: [] },
+        );
+        await scope.execute(new ContextState());
+
+        expect(tool.build).not.toHaveBeenCalled();
+        const response = (
+          mockSendMessageStream.mock.calls[1][1].message as Part[]
+        )[0]?.functionResponse;
+        expect(response?.id).toBe('call_read');
+        expect(response?.response?.['error']).toContain('No tools are allowed');
+      });
+
+      it('matches long MCP wildcard patterns by raw server identity and boundary', async () => {
+        const serverSuffix = 'a'.repeat(80);
+        const allowedServer = `repo.${serverSuffix}`;
+        const deniedServer = `repo/${serverSuffix}`;
+        const boundaryDeniedServer = `${allowedServer}__evil`;
+        const allowedName = normalizeToolNameForProvider(
+          `mcp__${allowedServer}__read`,
+        );
+        const deniedName = normalizeToolNameForProvider(
+          `mcp__${deniedServer}__read`,
+        );
+        const boundaryDeniedName = normalizeToolNameForProvider(
+          `mcp__${boundaryDeniedServer}__read`,
+        );
+        const allowedDef: FunctionDeclaration = {
+          name: allowedName,
+          description: 'Reads from repo.bad',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const deniedDef: FunctionDeclaration = {
+          name: deniedName,
+          description: 'Reads from repo/bad',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const boundaryDeniedDef: FunctionDeclaration = {
+          name: boundaryDeniedName,
+          description: 'Reads from a server with a shared raw prefix',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const allowedInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Read from repo.bad'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'repo result',
+            returnDisplay: 'repo result',
+          }),
+        };
+        const allowedTool = {
+          name: allowedName,
+          serverName: allowedServer,
+          serverToolName: 'read',
+          schema: allowedDef,
+          build: vi.fn().mockReturnValue(allowedInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const deniedTool = {
+          name: deniedName,
+          serverName: deniedServer,
+          serverToolName: 'read',
+          schema: deniedDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const boundaryDeniedTool = {
+          name: boundaryDeniedName,
+          serverName: boundaryDeniedServer,
+          serverToolName: 'read',
+          schema: boundaryDeniedDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn((name: string) =>
+            name === allowedName
+              ? allowedTool
+              : name === deniedName
+                ? deniedTool
+                : name === boundaryDeniedName
+                  ? boundaryDeniedTool
+                  : undefined,
+          ),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: 'call_repo', name: allowedName, args: {} },
+              { id: 'call_repo2', name: deniedName, args: {} },
+              {
+                id: 'call_boundary',
+                name: boundaryDeniedName,
+                args: {},
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [allowedDef, deniedDef, boundaryDeniedDef],
+            executionAllowedTools: [`mcp__${allowedServer}__*`],
+          },
+        );
+        await scope.execute(new ContextState());
+
+        expect(allowedName).not.toBe(deniedName);
+        expect(allowedInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(deniedTool.build).not.toHaveBeenCalled();
+        expect(boundaryDeniedTool.build).not.toHaveBeenCalled();
+        const responses = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          responses.find((part) => part.functionResponse?.id === 'call_repo2')
+            ?.functionResponse?.response?.['error'],
+        ).toContain('fork_tools');
+        expect(
+          responses.find(
+            (part) => part.functionResponse?.id === 'call_boundary',
+          )?.functionResponse?.response?.['error'],
+        ).toContain('fork_tools');
       });
 
       it('should ignore duplicate provider tool-call ids across rounds', async () => {

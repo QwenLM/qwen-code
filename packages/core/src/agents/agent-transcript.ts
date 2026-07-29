@@ -306,9 +306,13 @@ export interface AttachJsonlOptions {
    */
   bootstrapSystemInstruction?: string | Content;
   /**
-   * Immutable launch-time tool declarations / allowlist for fork resume.
+   * Immutable launch-time tool declarations for fork resume.
    */
   bootstrapTools?: Array<string | FunctionDeclaration>;
+  /**
+   * Immutable launch-time execution allowlist for fork resume.
+   */
+  bootstrapExecutionAllowedTools?: string[];
   /**
    * Launching prompt that should be treated as the first model-facing task
    * prompt during transcript-based resume. For forks this may differ from the
@@ -539,7 +543,8 @@ export function attachJsonlTranscriptWriter(
   const hasBootstrapPayload =
     options.bootstrapHistory !== undefined ||
     options.bootstrapSystemInstruction !== undefined ||
-    options.bootstrapTools !== undefined;
+    options.bootstrapTools !== undefined ||
+    options.bootstrapExecutionAllowedTools !== undefined;
 
   if (hasBootstrapPayload) {
     const payload: AgentBootstrapRecordPayload = {
@@ -554,6 +559,13 @@ export function attachJsonlTranscriptWriter(
         : {}),
       ...(options.bootstrapTools !== undefined
         ? { tools: structuredClone(options.bootstrapTools) }
+        : {}),
+      ...(options.bootstrapExecutionAllowedTools !== undefined
+        ? {
+            executionAllowedTools: structuredClone(
+              options.bootstrapExecutionAllowedTools,
+            ),
+          }
         : {}),
     };
     recordSystem('agent_bootstrap', payload);
