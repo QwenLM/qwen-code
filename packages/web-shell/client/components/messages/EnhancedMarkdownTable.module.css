@@ -206,10 +206,28 @@
   max-width: var(--action-column-width);
 }
 
+.fillerColumn {
+  width: auto;
+}
+
 .headerCell,
 .cell {
   box-sizing: border-box;
   border-bottom: 1px solid var(--border);
+}
+
+.fillerHeaderCell,
+.fillerCell {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+.fillerHeaderCell {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 40px;
 }
 
 .headerCell {
@@ -384,6 +402,10 @@
 }
 
 tr:hover .cell {
+  background: var(--subtle-bg-strong);
+}
+
+tr:hover .fillerCell {
   background: var(--subtle-bg-strong);
 }
 

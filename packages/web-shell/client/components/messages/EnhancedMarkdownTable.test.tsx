@@ -1417,6 +1417,37 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('uses a filler column after every visible column is manually sized', () => {
+    const container = renderTable();
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(container.querySelector('[class*="fillerColumn"]')).toBeNull();
+
+    for (const column of ['Team', 'Score']) {
+      act(() => {
+        button(container, `Resize ${column}`).dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            key: 'ArrowRight',
+          }),
+        );
+      });
+    }
+
+    const columns = Array.from(table!.querySelectorAll('col'));
+    expect(columns).toHaveLength(4);
+    expect(columns[0]?.style.width).toBe('40px');
+    expect(columns[1]?.style.width).toBe('176px');
+    expect(columns[2]?.style.width).toBe('176px');
+    expect(columns[3]?.className).toContain('fillerColumn');
+    expect(table!.querySelector('thead th:last-child')?.className).toContain(
+      'fillerHeaderCell',
+    );
+    expect(table!.querySelector('tbody td:last-child')?.className).toContain(
+      'fillerCell',
+    );
+  });
+
   it('resizes compact auto columns from their rendered width with keyboard arrows', () => {
     const container = renderTable();
     selectValue(button(container, 'Table density'), 'compact');

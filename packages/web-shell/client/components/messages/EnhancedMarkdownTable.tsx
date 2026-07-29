@@ -1824,6 +1824,14 @@ export function EnhancedTable({
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
     : undefined;
+  const fixedVisibleColumnWidth = orderedVisibleColumnIndexes.reduce(
+    (total, index) => total + (columnWidths[index] ?? 0),
+    0,
+  );
+  const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
+    (index) => columnWidths[index] === undefined,
+  ).length;
+  const hasFillerColumn = flexibleColumnCount === 0;
   const currentCellDialogCell = useMemo(() => {
     if (!cellDialog) return null;
     const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
@@ -2176,18 +2184,11 @@ export function EnhancedTable({
     if (width !== undefined) return { width };
     const minWidth =
       density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
-    const fixedWidth = orderedVisibleColumnIndexes.reduce(
-      (total, index) => total + (columnWidths[index] ?? 0),
-      0,
-    );
-    const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
-      (index) => columnWidths[index] === undefined,
-    ).length;
     if (flexibleColumnCount === 0) return { width: minWidth };
     return {
       width: flexibleColumnWidth(
         minWidth,
-        fixedWidth,
+        fixedVisibleColumnWidth,
         flexibleColumnCount,
         '100cqw',
       ),
@@ -2741,6 +2742,7 @@ export function EnhancedTable({
                 style={columnGroupStyle(columnIndex)}
               />
             ))}
+            {hasFillerColumn && <col className={styles.fillerColumn} />}
           </colgroup>
           <thead>
             <tr>
@@ -2878,6 +2880,9 @@ export function EnhancedTable({
                   </th>
                 );
               })}
+              {hasFillerColumn && (
+                <th className={styles.fillerHeaderCell} aria-hidden="true" />
+              )}
             </tr>
           </thead>
           <tbody>
@@ -2958,12 +2963,19 @@ export function EnhancedTable({
                         </td>
                       );
                     })}
+                    {hasFillerColumn && (
+                      <td className={styles.fillerCell} aria-hidden="true" />
+                    )}
                   </tr>
                   {detailOpen && (
                     <tr id={detailId} className={styles.detailRow}>
                       <td
                         className={styles.detailCell}
-                        colSpan={orderedVisibleColumnIndexes.length + 1}
+                        colSpan={
+                          orderedVisibleColumnIndexes.length +
+                          1 +
+                          (hasFillerColumn ? 1 : 0)
+                        }
                       >
                         <div className={styles.detailPanel}>
                           <span className="sr-only">
