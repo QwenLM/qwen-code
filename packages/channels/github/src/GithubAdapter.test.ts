@@ -1068,6 +1068,9 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'Trigger: subscribed.',
       );
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'GitHub publication policy:',
+      );
     });
 
     it('deduplicates replayed comments by node ID', async () => {

@@ -820,7 +820,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private buildRouteMetadata(ctx: NotificationContext): string {
-    return `${this.buildMetadata(ctx.chatId, ctx.threadId, ctx.subjectTitle)}\nTrigger: ${ctx.reason}.`;
+    return `${this.buildMetadata(ctx.chatId, ctx.threadId, ctx.subjectTitle)}\n${GITHUB_PUBLICATION_INSTRUCTIONS}\nTrigger: ${ctx.reason}.`;
   }
 
   private async githubApi<T>(
