@@ -20,9 +20,11 @@ import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
 import { StreamEventType } from '../core/geminiChat.js';
 import {
+  canonicalToolName,
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
+import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
@@ -333,6 +335,25 @@ async function runSpeculativeLoop(
           }
 
           const invocation = tool.build(args);
+          const toolInvocationGuard = config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId: persistenceCallId,
+                toolName: canonicalToolName(name),
+                args: invocation.params as Record<string, unknown>,
+                signal: state.abortController!.signal,
+              },
+            );
+            if (
+              state.abortController!.signal.aborted ||
+              !guardDecision.allowed
+            ) {
+              hitBoundary = true;
+              break;
+            }
+          }
           const result = await invocation.execute(
             state.abortController!.signal,
           );

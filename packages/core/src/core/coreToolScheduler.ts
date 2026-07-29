@@ -177,6 +177,7 @@ import {
   getInvocationContext,
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
+import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -255,6 +256,7 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
+const TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED = 'invocation_guard_denied';
 const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
 const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
 const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
@@ -269,6 +271,8 @@ const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED = 'non_interactive_denied';
 const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
+const TOOL_SPAN_STATUS_INVOCATION_GUARD_DENIED =
+  'Tool execution blocked by host policy';
 
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
@@ -4124,6 +4128,42 @@ export class CoreToolScheduler {
           span,
           TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
           TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+        );
+        return;
+      }
+    }
+
+    const toolInvocationGuard = this.config.getToolInvocationGuard?.();
+    if (toolInvocationGuard) {
+      const guardDecision = await evaluateToolInvocationGuard(
+        toolInvocationGuard,
+        {
+          callId,
+          toolName: canonicalName,
+          args: invocation.params as Record<string, unknown>,
+          signal,
+        },
+      );
+      if (signal.aborted) {
+        this.setStatusInternal(
+          callId,
+          'cancelled',
+          'Tool call cancelled by user.',
+        );
+        setToolSpanCancelled(span);
+        return;
+      }
+      if (!guardDecision.allowed) {
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          new Error(guardDecision.reason),
+          ToolErrorType.EXECUTION_DENIED,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+        setToolSpanFailure(
+          span,
+          TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED,
+          TOOL_SPAN_STATUS_INVOCATION_GUARD_DENIED,
         );
         return;
       }

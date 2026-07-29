@@ -165,6 +165,7 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -1004,6 +1005,11 @@ export interface ConfigParameters {
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
+  /**
+   * Optional host policy evaluated with final tool arguments immediately
+   * before execution. A configured guard fails closed.
+   */
+  toolInvocationGuard?: ToolInvocationGuard;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1725,6 +1731,7 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -2090,6 +2097,7 @@ export class Config {
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -7561,6 +7569,10 @@ export class Config {
 
   getPermissionManager(): PermissionManager | null {
     return this.permissionManager;
+  }
+
+  getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    return this.toolInvocationGuard;
   }
 
   /**
