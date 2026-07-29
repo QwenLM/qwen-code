@@ -82,6 +82,16 @@ export interface DaemonSessionClientOptions {
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
+   * Fallback pagination anchor from the daemon: the oldest
+   * `qwen.session.recordId` in the last persisted transcript page,
+   * read from the transcript when the replay
+   * snapshot's `history_truncated` marker carries none (live sessions
+   * whose in-flight turn capped the journal before any turn boundary).
+   * Clients use it as `beforeRecordId` when no recordId is available
+   * in the retained window.
+   */
+  historyAnchorRecordId?: string;
+  /**
    * True when the daemon reported the replay snapshot as degraded (the
    * compaction engine failed at least once for this session). Consumers
    * should prefer the full transcript over the snapshot when set.
@@ -124,6 +134,13 @@ export class DaemonSessionClient {
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
   /**
+   * Fallback pagination anchor from the daemon load response (see
+   * {@link DaemonSessionClientOptions.historyAnchorRecordId}). Undefined
+   * when the retained window already carries a recordId or the daemon
+   * could not read one from the persisted transcript.
+   */
+  readonly historyAnchorRecordId: string | undefined;
+  /**
    * True when the load response flagged the replay snapshot as degraded
    * (`replayDegraded` — compaction failed at least once, so
    * `replaySnapshot` may lag behind live events). Prefer the full
@@ -155,6 +172,7 @@ export class DaemonSessionClient {
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.historyHasMore = opts.historyHasMore ?? false;
+    this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
@@ -237,6 +255,7 @@ export class DaemonSessionClient {
       compactedReplay,
       liveJournal,
       historyHasMore,
+      historyAnchorRecordId,
       replayDegraded,
       lastEventId: serverLastEventId,
       eventEpoch,
@@ -254,6 +273,7 @@ export class DaemonSessionClient {
         liveJournal: liveJournal ?? [],
       },
       historyHasMore,
+      historyAnchorRecordId,
       replayDegraded,
     });
   }

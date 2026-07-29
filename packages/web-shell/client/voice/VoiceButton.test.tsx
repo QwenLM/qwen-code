@@ -64,12 +64,16 @@ vi.mock('./useVoiceCapture', () => ({
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-function voiceStatus(enabled: boolean, workspaceCwd = '/tmp/workspace') {
+function voiceStatus(
+  enabled: boolean,
+  workspaceCwd = '/tmp/workspace',
+  mode: 'hold' | 'tap' = 'hold',
+) {
   return {
     v: 1 as const,
     workspaceCwd,
     enabled,
-    mode: 'hold' as const,
+    mode,
     language: 'en',
     voiceModel: null,
     availableVoiceModels: [],
@@ -121,9 +125,25 @@ async function render(disabled: boolean): Promise<HTMLButtonElement> {
   return button;
 }
 
-const click = (button: HTMLButtonElement) => {
+const click = (button: HTMLButtonElement, detail = 1) => {
   act(() => {
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail }));
+  });
+};
+
+const pointer = (
+  button: HTMLButtonElement,
+  type: 'pointerdown' | 'pointerup' | 'pointercancel',
+  pointerId = 1,
+  mouseButton = 0,
+) => {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    button: mouseButton,
+  });
+  Object.defineProperty(event, 'pointerId', { value: pointerId });
+  act(() => {
+    button.dispatchEvent(event);
   });
 };
 
@@ -584,6 +604,9 @@ describe('VoiceButton', () => {
   });
 
   it('lets a disabled composer stop active dictation', async () => {
+    mocks.workspaceVoice.mockResolvedValue(
+      voiceStatus(true, '/tmp/workspace', 'tap'),
+    );
     mocks.capture.status = 'recording';
     const button = await render(true);
 
@@ -594,6 +617,9 @@ describe('VoiceButton', () => {
   });
 
   it('lets a disabled composer abort a connecting dictation', async () => {
+    mocks.workspaceVoice.mockResolvedValue(
+      voiceStatus(true, '/tmp/workspace', 'tap'),
+    );
     mocks.capture.status = 'connecting';
     const button = await render(true);
     mocks.capture.abort.mockClear();
@@ -602,6 +628,218 @@ describe('VoiceButton', () => {
     click(button);
 
     expect(mocks.capture.abort).toHaveBeenCalledOnce();
+  });
+
+  it('holds to start and releases to stop dictation', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    const heldButton = button;
+
+    pointer(button, 'pointerdown');
+    expect(mocks.capture.start).toHaveBeenCalledOnce();
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    // The recording pill reuses the icon button's DOM node, so the pointer
+    // capture set on pointerdown survives the status change and the release
+    // still lands on this element.
+    expect(button).toBe(heldButton);
+    pointer(button, 'pointerup');
+    click(button);
+
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+  });
+
+  it('stops a hold that is released while connecting', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown');
+
+    mocks.capture.status = 'connecting';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerup');
+
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+  });
+
+  it('aborts a hold when the pointer is cancelled', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown');
+
+    mocks.capture.status = 'connecting';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointercancel');
+
+    expect(mocks.capture.abort).toHaveBeenCalledOnce();
+  });
+
+  it('aborts a hold cancelled during recording', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown');
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointercancel');
+
+    expect(mocks.capture.abort).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a pointerup from a different pointer', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1);
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerup', 2);
+
+    expect(mocks.capture.stop).not.toHaveBeenCalled();
+  });
+
+  it('ignores a pointercancel from a different pointer', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1);
+
+    mocks.capture.status = 'connecting';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointercancel', 2);
+
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+  });
+
+  it('keeps click-to-toggle behavior in tap mode', async () => {
+    mocks.workspaceVoice.mockResolvedValue(
+      voiceStatus(true, '/tmp/workspace', 'tap'),
+    );
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+
+    click(button);
+    expect(mocks.capture.start).toHaveBeenCalledOnce();
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    click(button);
+
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+  });
+
+  it('ignores pointer hold in tap mode', async () => {
+    mocks.workspaceVoice.mockResolvedValue(
+      voiceStatus(true, '/tmp/workspace', 'tap'),
+    );
+    const button = await render(false);
+    pointer(button, 'pointerdown');
+    expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('ignores mouse click in hold mode', async () => {
+    const button = await render(false);
+
+    click(button); // detail defaults to 1 (real pointer click)
+
+    expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('allows keyboard activation in hold mode', async () => {
+    const button = await render(false);
+
+    click(button, 0);
+
+    expect(mocks.capture.start).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a non-primary pointer in hold mode', async () => {
+    const button = await render(false);
+    pointer(button, 'pointerdown', 1, 2);
+    expect(mocks.capture.start).not.toHaveBeenCalled();
   });
 
   it('reports whether voice capture is active', async () => {

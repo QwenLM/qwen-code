@@ -182,11 +182,13 @@ function createMockConfig(
   overrides: Partial<{
     sessionId: string;
     approvalMode: string;
+    userId: string;
   }> = {},
 ): Config {
   return {
     getSessionId: () => overrides.sessionId ?? 'test-session-id',
     getApprovalMode: () => overrides.approvalMode ?? 'suggest',
+    getTelemetryUserId: () => overrides.userId,
   } as unknown as Config;
 }
 
@@ -207,7 +209,7 @@ describe('session-tracing', () => {
 
   describe('interaction spans', () => {
     it('starts and ends an interaction span with ok status', () => {
-      const config = createMockConfig();
+      const config = createMockConfig({ userId: 'user-1' });
       startInteractionSpan(config, {
         promptId: 'prompt-1',
         model: 'test-model',
@@ -217,6 +219,7 @@ describe('session-tracing', () => {
       expect(mockSpans).toHaveLength(1);
       expect(mockSpans[0]!.name).toBe('qwen-code.interaction');
       expect(mockSpans[0]!.attributes['session.id']).toBe('test-session-id');
+      expect(mockSpans[0]!.attributes['gen_ai.user.id']).toBe('user-1');
       expect(mockSpans[0]!.attributes['qwen-code.prompt_id']).toBe('prompt-1');
       expect(mockSpans[0]!.attributes['qwen-code.model']).toBe('test-model');
 
@@ -239,7 +242,10 @@ describe('session-tracing', () => {
     });
 
     it('runs scoped interaction spans without mutating the global interaction context', async () => {
-      const config = createMockConfig({ sessionId: 'scoped-session' });
+      const config = createMockConfig({
+        sessionId: 'scoped-session',
+        userId: 'scoped-user',
+      });
       const result = await withInteractionSpan(
         config,
         {
@@ -256,6 +262,7 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.name).toBe('qwen-code.interaction');
       expect(mockSpans[0]!.parentContext).toEqual({ parent: 'daemon' });
       expect(mockSpans[0]!.attributes['session.id']).toBe('scoped-session');
+      expect(mockSpans[0]!.attributes['gen_ai.user.id']).toBe('scoped-user');
       expect(mockSpans[0]!.attributes['qwen-code.message_type']).toBe(
         'acp_prompt',
       );
@@ -1314,6 +1321,166 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('gen_ai.user.id propagation', () => {
+    it('propagates from an interaction to LLM and tool spans', () => {
+      startInteractionSpan(
+        createMockConfig({ sessionId: 'session-A', userId: 'user-A' }),
+        {
+          promptId: 'p-a',
+          model: 'm',
+          messageType: 'userQuery',
+        },
+      );
+
+      const llmSpan = startLLMRequestSpan('m', 'p-a');
+      const toolSpan = startToolSpan('Read', { 'tool.call_id': 'call-1' });
+
+      expect(
+        mockSpans.find((span) => span.name === 'qwen-code.llm_request')
+          ?.attributes['gen_ai.user.id'],
+      ).toBe('user-A');
+      expect(
+        mockSpans.find((span) => span.name === 'qwen-code.tool')?.attributes[
+          'gen_ai.user.id'
+        ],
+      ).toBe('user-A');
+
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('ok');
+    });
+
+    it('does not let tool attributes override the interaction user ID', () => {
+      startInteractionSpan(createMockConfig({ userId: 'canonical-user' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const toolSpan = startToolSpan('Read', {
+        'gen_ai.user.id': 'spoofed-user',
+      });
+      const record = mockSpans.find((span) => span.name === 'qwen-code.tool');
+
+      expect(record?.attributes['gen_ai.user.id']).toBe('canonical-user');
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('ok');
+    });
+
+    it('omits the user ID from standalone LLM and tool spans', () => {
+      const llmSpan = startLLMRequestSpan('m', 'p');
+      const toolSpan = startToolSpan('Read');
+
+      for (const record of mockSpans) {
+        expect(record.attributes).not.toHaveProperty('gen_ai.user.id');
+      }
+
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('propagates across tool-result turns by prompt ID without changing span parenting', () => {
+      startInteractionSpan(createMockConfig({ userId: 'continuation-user' }), {
+        promptId: 'continuation-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+
+      const llmSpan = startLLMRequestSpan('m', 'continuation-prompt');
+      const toolSpan = startToolSpan(
+        'Read',
+        { 'tool.call_id': 'call-2' },
+        undefined,
+        'continuation-prompt',
+      );
+
+      const llmRecord = mockSpans.find(
+        (span) => span.name === 'qwen-code.llm_request',
+      );
+      const toolRecord = mockSpans.find(
+        (span) => span.name === 'qwen-code.tool',
+      );
+      expect(llmRecord?.attributes['gen_ai.user.id']).toBe('continuation-user');
+      expect(toolRecord?.attributes['gen_ai.user.id']).toBe(
+        'continuation-user',
+      );
+      expect(llmRecord?.parentContext).not.toHaveProperty('__parentSpan');
+      expect(toolRecord?.parentContext).not.toHaveProperty('__parentSpan');
+
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('expires prompt identity with the existing span TTL', () => {
+      startInteractionSpan(createMockConfig({ userId: 'expired-user' }), {
+        promptId: 'expired-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      const llmSpan = startLLMRequestSpan('m', 'expired-prompt');
+      const llmRecord = mockSpans.find(
+        (span) => span.name === 'qwen-code.llm_request',
+      );
+      expect(llmRecord?.attributes).not.toHaveProperty('gen_ai.user.id');
+      endLLMRequestSpan(llmSpan, { success: true });
+    });
+
+    it('keeps the creation-time user ID across failures and repeated endings', () => {
+      startInteractionSpan(createMockConfig({ userId: 'stable-user' }), {
+        promptId: 'failure-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      const llmSpan = startLLMRequestSpan('m', 'failure-prompt');
+      const toolSpan = startToolSpan('Read');
+
+      endLLMRequestSpan(llmSpan, { success: false, error: 'failed' });
+      endLLMRequestSpan(llmSpan, { success: true });
+      endToolSpan(toolSpan, { success: false, error: 'failed' });
+      endToolSpan(toolSpan, { success: true });
+      endInteractionSpan('cancelled');
+      endInteractionSpan('ok');
+
+      for (const record of mockSpans) {
+        expect(record.attributes['gen_ai.user.id']).toBe('stable-user');
+      }
+    });
+
+    it('isolates user IDs across concurrent scoped interactions', async () => {
+      await Promise.all([
+        withInteractionSpan(
+          createMockConfig({ sessionId: 'session-A', userId: 'user-A' }),
+          { promptId: 'pa', model: 'm', messageType: 'acp_prompt' },
+          async () => {
+            await Promise.resolve();
+            endToolSpan(startToolSpan('Read'), { success: true });
+          },
+        ),
+        withInteractionSpan(
+          createMockConfig({ sessionId: 'session-B', userId: 'user-B' }),
+          { promptId: 'pb', model: 'm', messageType: 'acp_prompt' },
+          async () => {
+            await Promise.resolve();
+            endToolSpan(startToolSpan('Write'), { success: true });
+          },
+        ),
+      ]);
+
+      const readSpan = mockSpans.find(
+        (span) => span.attributes['gen_ai.tool.name'] === 'Read',
+      );
+      const writeSpan = mockSpans.find(
+        (span) => span.attributes['gen_ai.tool.name'] === 'Write',
+      );
+      expect(readSpan?.attributes['gen_ai.user.id']).toBe('user-A');
+      expect(writeSpan?.attributes['gen_ai.user.id']).toBe('user-B');
+    });
+  });
+
   describe('tool execution sub-spans', () => {
     it('creates a tool execution span as child of tool span via runInToolSpanContext', () => {
       const toolSpan = startToolSpan('Bash');
@@ -2060,6 +2227,73 @@ describe('session-tracing', () => {
         'background',
       );
       endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it.each(['foreground', 'fork', 'background'] as const)(
+      '%s invocation and its children inherit the interaction user ID',
+      async (invocationKind) => {
+        startInteractionSpan(createMockConfig({ userId: 'agent-user' }), {
+          promptId: 'p',
+          model: 'm',
+          messageType: 'userQuery',
+        });
+        const span = startSubagentSpan({
+          ...baseOpts,
+          invocationKind,
+        });
+        const record = mockSpans.find(
+          (candidate) => candidate.name === 'qwen-code.subagent',
+        );
+        expect(record?.attributes['gen_ai.user.id']).toBe('agent-user');
+
+        await runInSubagentSpanContext(span, async () => {
+          const llmSpan = startLLMRequestSpan('m', 'subagent-p');
+          const toolSpan = startToolSpan('Read');
+          const childSpans = mockSpans.filter(
+            (candidate) =>
+              candidate.name === 'qwen-code.llm_request' ||
+              candidate.name === 'qwen-code.tool',
+          );
+          expect(childSpans).toHaveLength(2);
+          for (const child of childSpans) {
+            expect(child.attributes['gen_ai.user.id']).toBe('agent-user');
+          }
+          endLLMRequestSpan(llmSpan, { success: true });
+          endToolSpan(toolSpan, { success: true });
+        });
+
+        endSubagentSpan(span, { status: 'completed' });
+        endInteractionSpan('ok');
+      },
+    );
+
+    it('inherits the user ID from an Agent tool on a continuation turn', async () => {
+      startInteractionSpan(createMockConfig({ userId: 'agent-tool-user' }), {
+        promptId: 'agent-tool-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+      const toolSpan = startToolSpan(
+        'agent',
+        undefined,
+        undefined,
+        'agent-tool-prompt',
+      );
+
+      await runInToolSpanContext(toolSpan, async () => {
+        const agentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'background',
+        });
+        const record = mockSpans.find(
+          (candidate) => candidate.name === 'qwen-code.subagent',
+        );
+        expect(record?.attributes['gen_ai.user.id']).toBe('agent-tool-user');
+        endSubagentSpan(agentSpan, { status: 'completed' });
+      });
+
+      endToolSpan(toolSpan, { success: true });
     });
 
     it('captures optional attrs: parentAgentId, invokingRequestId, modelOverride', () => {

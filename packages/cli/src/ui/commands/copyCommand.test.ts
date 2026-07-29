@@ -310,6 +310,132 @@ describe('copyCommand', () => {
     });
   });
 
+  // The argument hint is `[N] [<lang>|code|latex|mermaid] [<index>]`, every
+  // group optional, so "message N, block M" is a documented form. The leading
+  // N is stripped as the message index, leaving a bare number as the whole
+  // selector argument.
+  it('should copy a numbered code block with /copy 1 2', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 2');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('{"second": true}');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy the first code block with /copy 1 1', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 1');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('const first = 1;');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 1 copied to the clipboard',
+    });
+  });
+
+  // Passes before the fix as well, but for the wrong reason: the old code
+  // filtered for a language named "9" and found nothing. Pinned so the
+  // out-of-range path keeps reporting a miss now that the index is real.
+  it('should report a missing block for an out-of-range index with /copy 1 9', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [{ text: ['```ts', 'const only = 1;', '```'].join('\n') }],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 9');
+
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'No matching code block found in the last AI output.',
+    });
+  });
+
+  // Over-correction guard: dropping the pre-assignment must not stop a bare
+  // language from selecting. Passes both before and after.
+  it('should still select by language with /copy 1 json', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```ts',
+              'const first = 1;',
+              '```',
+              '```json',
+              '{"second": true}',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '1 json');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('{"second": true}');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'json code block 1 copied to the clipboard',
+    });
+  });
+
   it('should copy the last matching language code block with /copy code mermaid', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

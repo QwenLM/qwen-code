@@ -172,6 +172,7 @@ export default {
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
+  'toolDisplayName.ZoomImage': '缩放图像',
   'toolDisplayName.Grep': 'Grep',
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': '运行命令',

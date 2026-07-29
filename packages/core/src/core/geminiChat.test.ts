@@ -7575,6 +7575,68 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('retries an SDK-wrapped transport error whose code sits at cause depth 2', async () => {
+      // The OpenAI SDK wraps a pre-header socket reset as APIConnectionError ->
+      // TypeError('fetch failed') -> cause { code: 'ECONNRESET' }, so the code
+      // is two cause levels down. Drive the real inline shouldRetryOnError
+      // predicate through the retryWithBackoff options and assert it retries.
+      const transportError = Object.assign(new Error('Connection error.'), {
+        cause: Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('read ECONNRESET'), {
+            code: 'ECONNRESET',
+          }),
+        }),
+      });
+
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        try {
+          return await apiCall();
+        } catch (error) {
+          expect(options?.shouldRetryOnError?.(error)).toBe(true);
+          return apiCall();
+        }
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockRejectedValueOnce(transportError)
+        .mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Recovered from depth-2 RST' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-sdk-wrapped-depth2',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              'Recovered from depth-2 RST',
+        ),
+      ).toBe(true);
+    });
+
     it('does not retry a transport error that carries an HTTP 4xx status', async () => {
       // A definitive 4xx is a permanent client error; the socket-level cause
       // must not relabel it as retryable (classifier keeps 4xx authoritative).
@@ -7947,6 +8009,47 @@ describe('GeminiChat', async () => {
           ),
         ).toBe(true);
         expect(mockLogContentRetry).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fast-fails a mid-stream quota-exhaustion error instead of scheduling a rate-limit retry', async () => {
+      // A permanent quota-exhaustion 429 can arrive mid-stream as a
+      // StreamContentError while reading, bypassing the retryWithBackoff
+      // fast-fail that only wraps stream establishment. The stream-side
+      // catch must fast-fail it before the rate-limit branch; otherwise
+      // isRateLimitError (code 429) schedules a 1-5 minute delay on an
+      // error that cannot succeed until the reset time.
+      vi.useFakeTimers();
+
+      try {
+        const quotaError = new StreamContentError(
+          '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC."}}',
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            throw quotaError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-quota-fastfail',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+
+        // Fast-fail: the first pull rejects with the friendly message. No
+        // RETRY event is yielded and no rate-limit delay is scheduled.
+        await expect(iterator.next()).rejects.toThrow(/Quota exhausted/);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
       } finally {
         vi.useRealTimers();
       }

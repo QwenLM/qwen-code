@@ -21,6 +21,8 @@ P0a establishes one cross-process writer for each ACP/daemon `(runtime base, ses
 
 P0a does not make session switching, rewind, branch/fork, working-directory migration, archive/delete/rename maintenance, or transcript repair transactional. It also does not introduce an initializing registry entry that serializes every same-daemon load/resume against close; a repeated load reuses the owner after that owner is registered, while the cross-process lease still rejects a second writer during initialization. Full load/close outcome coalescing belongs to P0b. Session switching and persistence-root migration fail closed while an ACP Config owns a lease. ACP's logical working-directory change remains supported because it keeps the recorder and SessionService bound to the original persistence root. Same-owner rewind loads through that Config-pinned SessionService under the recorder write barrier; rename and branch retain their existing recorder or flush-before-copy paths. Daemon archive/delete and maintenance of non-live sessions retain their existing semantics. Concurrent maintenance from outside the live owner remains unsupported and is part of the P0b boundary. Interactive and headless CLI recorders retain their existing unleased behavior so `/clear`, `/resume`, `/branch`, and `/cd` do not regress; they must not write the same session concurrently with an ACP owner until P0b broadens the protocol.
 
+The protocol is gated by `experimental.sessionWriterLease` and is disabled by default. The effective value is snapshotted from the bootstrap Config when the ACP child starts and remains fixed for every session served by that process; per-session settings reloads cannot change it. Enabling it requires a process restart. The setting affects only ACP/daemon recorders; interactive and headless recorders continue to use the legacy path even when the setting is enabled.
+
 ## Invariants
 
 1. At most one cooperating ACP process owns a session writer lease under a runtime base.
@@ -48,7 +50,7 @@ The lease snapshots whether the transcript exists, its file identity and metadat
 
 ## Activation and close
 
-An ACP `Config.initialize()` acquires the lease before extension, hook, tool, model, or scheduler initialization. While holding the lease it resolves active/archive state, reloads the active transcript when one exists, verifies that the transcript did not change during the reload, replaces any pre-lock preview, and activates the recorder. Non-ACP Configs continue through the legacy recorder path without acquiring this P0a lease.
+When the feature gate is enabled, an ACP `Config.initialize()` acquires the lease before extension, hook, tool, model, or scheduler initialization. While holding the lease it resolves active/archive state, reloads the active transcript when one exists, verifies that the transcript did not change during the reload, replaces any pre-lock preview, and activates the recorder. ACP Configs without the opt-in and all non-ACP Configs continue through the legacy recorder path without acquiring this P0a lease.
 
 Any later initialization failure closes the recorder and releases the lease. Normal shutdown and ACP session close finalize pending metadata, drain the recorder queue, release the owner token, and only then remove the live session entry. Cleanup is identity-checked so a failed older initialization cannot close a newer same-ID entry, and an unreturned Config whose first release fails is retried before the daemon creates another fresh session. A definitive child refusal leaves the session live so close can be retried. Close draining is bounded; a timeout or transport failure has an unknown result, so the bridge terminates the shared ACP channel and its process-owned leases become recoverable as stale. Other sessions on that channel are also reaped by that recovery action.
 
@@ -65,7 +67,7 @@ External responses use fixed messages and `errorKind`; they do not expose PID, h
 
 ## Compatibility and rollout
 
-The protocol only coordinates ACP binaries that understand it. Deployment and rollback must drain old ACP/daemon writer processes before the new version starts. Mixed-version ACP operation is not safe because an old writer ignores the lock. Concurrent interactive or headless access to the same persisted session remains outside P0a and is unsupported until P0b.
+The protocol only coordinates ACP writers that have the feature enabled. Deployment and rollback must drain old ACP/daemon writer processes before enabling or disabling the setting. Mixed-version or mixed-configuration ACP operation is not safe because a legacy writer ignores the lock. Concurrent interactive or headless access to the same persisted session remains outside P0a and is unsupported until P0b.
 
 The runtime filesystem must support same-directory hard links with atomic no-replace behavior. If that prerequisite is unavailable, acquisition fails closed with `session_writer_unavailable`.
 
@@ -73,8 +75,8 @@ Existing branched transcripts are not automatically repaired. P0a prevents a new
 
 ## Verification
 
-Unit coverage exercises lock contention, dead-owner and crashed-reclaimer recovery, malformed and non-regular locks, concurrent and retryable owner-token release, truncated and externally changed transcripts, equal-length file replacement, UTF-8 byte accounting, recorder activation/fencing/close, authoritative reload, initialization cleanup, runtime-root pinning, turn admission, same-daemon replay reuse, disabled-recording compatibility, legacy interactive recorder behavior, and error sanitization. Darwin coverage also verifies that processes with different time zones derive the same owner identity. PID-reuse handling is implemented but is not claimed as test evidence because process-start probing is platform dependent.
+Unit coverage exercises the default-off and explicit-opt-in gates, lock contention, dead-owner and crashed-reclaimer recovery, malformed and non-regular locks, concurrent and retryable owner-token release, truncated and externally changed transcripts, equal-length file replacement, UTF-8 byte accounting, recorder activation/fencing/close, authoritative reload, initialization cleanup, runtime-root pinning, turn admission, same-daemon replay reuse, disabled-recording compatibility, legacy interactive recorder behavior, and error sanitization. Darwin coverage also verifies that processes with different time zones derive the same owner identity. PID-reuse handling is implemented but is not claimed as test evidence because process-start probing is platform dependent.
 
-A real two-process regression recreates the incident timing: process A holds the writer after a tool-result tail, process B is rejected before loading as a writer, A appends its final answer and closes, and B then acquires, reloads that final answer, and appends the next user record with the final answer as its parent.
+With the feature gate enabled, a real two-process regression recreates the incident timing: process A holds the writer after a tool-result tail, process B is rejected before loading as a writer, A appends its final answer and closes, and B then acquires, reloads that final answer, and appends the next user record with the final answer as its parent.
 
 Desktop coverage verifies that a writer conflict is surfaced to the user instead of silently replacing the requested persisted session with a fresh session. Live history refresh is served through the owner's write barrier and Config-pinned SessionService, including after a logical `/cd`.
