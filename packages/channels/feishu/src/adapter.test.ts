@@ -1612,6 +1612,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
+      expect(updateCard.mock.calls[0]![1]).toContain('partial answer');
       expect(updateCard.mock.calls[0]![4]).toBe('已失败，请重试');
     });
 
@@ -1657,6 +1658,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
+      expect(updateCard.mock.calls[0]![1]).toContain('partial answer');
       expect(updateCard.mock.calls[0]![4]).toBe('已取消');
     });
 
