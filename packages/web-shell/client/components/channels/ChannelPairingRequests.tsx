@@ -17,7 +17,6 @@ import type {
   DaemonChannelPairingRequestsSnapshot,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { extractErrorDetail } from '../../utils/errorDetail';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Badge } from '../ui/badge';
@@ -47,8 +46,15 @@ function errorCode(error: unknown): string | undefined {
 }
 
 function pairingErrorDetail(error: unknown, unavailable: string): string {
-  const detail = extractErrorDetail(error);
-  return /^(?:GET|POST) \/\S+: HTTP \d{3}$/.test(detail) ? unavailable : detail;
+  if (!error || typeof error !== 'object' || !('status' in error)) {
+    return unavailable;
+  }
+  const body = (error as { body?: unknown }).body;
+  const message =
+    body && typeof body === 'object'
+      ? (body as { error?: unknown }).error
+      : undefined;
+  return typeof message === 'string' && message ? message : unavailable;
 }
 
 export function ChannelPairingRequests({
