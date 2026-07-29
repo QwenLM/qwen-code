@@ -8141,6 +8141,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         maxBytes: undefined,
         line: undefined,
         limit: undefined,
+        cursor: undefined,
       });
     });
 

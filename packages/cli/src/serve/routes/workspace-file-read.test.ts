@@ -146,6 +146,61 @@ describe('GET /file', () => {
     });
   });
 
+  it('pages a large file over HTTP with nextCursor', async () => {
+    const lines = Array.from(
+      { length: 4_000 },
+      (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+    );
+    const body = lines.join('\n');
+    await fsp.writeFile(path.join(h.workspace, 'paged.log'), body);
+
+    const first = await request(h.app)
+      .get('/file?path=paged.log&limit=500')
+      .set('Host', loopbackHost());
+    expect(first.status).toBe(200);
+    expect(first.body.hasMore).toBe(true);
+    expect(typeof first.body.nextCursor).toBe('string');
+
+    const pages: string[] = [first.body.content];
+    let cursor: string | null = first.body.nextCursor;
+    let guard = 0;
+    while (cursor) {
+      if (guard++ > 50) throw new Error('paging did not terminate');
+      const next = await request(h.app)
+        .get(
+          `/file?path=paged.log&limit=500&cursor=${encodeURIComponent(cursor)}`,
+        )
+        .set('Host', loopbackHost());
+      expect(next.status).toBe(200);
+      pages.push(next.body.content);
+      cursor = next.body.nextCursor;
+    }
+    expect(pages.join('\n')).toBe(body);
+  });
+
+  it('rejects a malformed cursor with 400', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'c.txt'), 'a\nb\n');
+    const res = await request(h.app)
+      .get('/file?path=c.txt&cursor=not-a-cursor')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('rejects cursor combined with line', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'cl.txt'), 'a\nb\nc\n');
+    const first = await request(h.app)
+      .get('/file?path=cl.txt&limit=1')
+      .set('Host', loopbackHost());
+    const res = await request(h.app)
+      .get(
+        `/file?path=cl.txt&line=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      )
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
   it('returns a bounded line window for text above MAX_READ_BYTES', async () => {
     const { MAX_READ_BYTES } = await import('../fs/policy.js');
     const lines = Array.from(

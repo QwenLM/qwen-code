@@ -143,6 +143,10 @@ sequenceDiagram
         FS->>FSP: open + read stable full snapshot
         FSP-->>FS: buffer
         FS->>FS: hash full snapshot; apply line/output limits
+    else cursor supplied
+        FS->>FSP: open stable FileHandle
+        FS->>FS: validate cursor {dev,ino,size}; seek to the byte offset
+        FS->>FS: return whole lines; emit the next cursor
     else file > 256 KiB AND an explicit window arg
         FS->>FSP: open stable FileHandle
         FS->>FS: stream requested lines from the same inode
@@ -242,6 +246,7 @@ flowchart LR
 - **`MAX_READ_BYTES` caps what a read returns; `MAX_TEXT_SCAN_BYTES` caps what it costs.** Line offsets are resolved by scanning from byte 0, so `{ line: 900_000_000, limit: 20 }` returns almost nothing and still walks the file. Past 8 MiB of scanning the read is refused with `file_too_large` pointing at `readBytes`, which reaches any offset in O(1).
 - **Streamed windows tolerate appends, not truncation.** The full-snapshot path can demand byte-for-byte stability because it returns the whole file; a prefix window cannot, or every read of a live log fails. The streamed path asserts inode identity plus "did not shrink", so appends pass and truncation / replacement are still rejected. `sizeBytes` reports the size at `open`, describing the snapshot the window was cut from.
 - **Large partial reads omit the full-file hash.** `originalLineCount` is omitted when streaming stops before EOF.
+- **Paging is by byte cursor, not by line.** A read that leaves content behind returns `hasMore` and, where a byte offset is derivable, an opaque `nextCursor`. Resuming from it is O(1); resuming by `line` re-scans from byte 0 and is refused past `MAX_TEXT_SCAN_BYTES`. The cursor carries `{dev, ino, size}`, so a replaced or truncated file yields `hash_mismatch` rather than bytes from the wrong place, while an append leaves it valid. Non-UTF-8 snapshot reads report `hasMore` but no cursor — their decoded text is a UTF-8 re-encoding whose lengths do not map back to file offsets.
 - **`BridgeFileSystem` adapter MUST replicate both inline-proxy gates** (non-regular-file refusal + bounded buffering/streaming). The inline path is fully bypassed when the adapter is injected.
 
 ## References

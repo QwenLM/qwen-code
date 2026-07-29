@@ -10,8 +10,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { iconvEncode } from './iconvHelper.js';
 import {
+  CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
   TextScanBudgetExceededError,
+  readTextCursorWindowFromHandle,
   readTextRange,
   readTextRangeFromHandle,
 } from './read-text-range.js';
@@ -418,5 +420,291 @@ describe('readTextRange', () => {
     setTimeout(() => controller.abort(), 0);
 
     await expect(promise).rejects.toThrow(/abort/i);
+  });
+});
+
+describe('readTextCursorWindowFromHandle', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'text-cursor-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  async function withHandle<T>(
+    name: string,
+    data: string | Buffer,
+    run: (fh: fs.FileHandle, size: number) => Promise<T>,
+  ): Promise<T> {
+    const filePath = path.join(tempDir, name);
+    await fs.writeFile(filePath, data);
+    const size = (await fs.stat(filePath)).size;
+    const fh = await fs.open(filePath, 'r');
+    try {
+      return await run(fh, size);
+    } finally {
+      await fh.close();
+    }
+  }
+
+  /** Page to exhaustion, returning the pages and the byte spans they covered. */
+  async function pageAll(
+    fh: fs.FileHandle,
+    fileSize: number,
+    opts: { limit?: number; maxOutputBytes?: number } = {},
+  ): Promise<{ pages: string[]; spans: Array<[number, number]> }> {
+    const pages: string[] = [];
+    const spans: Array<[number, number]> = [];
+    let offset = 0;
+    for (let guard = 0; guard < 10_000; guard++) {
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: offset,
+        fileSize,
+        limit: opts.limit ?? 3,
+        maxOutputBytes: opts.maxOutputBytes ?? 262_144,
+        maxSnapBytes: 1_048_576,
+      });
+      pages.push(page.content);
+      spans.push([page.startOffset, page.nextOffset ?? fileSize]);
+      if (page.nextOffset === undefined) return { pages, spans };
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    }
+    throw new Error('paging did not terminate');
+  }
+
+  it('reconstructs the file exactly from the spans it reports', async () => {
+    const body = Array.from(
+      { length: 200 },
+      (_, i) => `line-${i} ${'x'.repeat(i % 40)}`,
+    ).join('\n');
+    await withHandle('span.log', body, async (fh, size) => {
+      const { spans } = await pageAll(fh, size);
+      // Spans must tile [0, size) with no gap and no overlap.
+      expect(spans[0][0]).toBe(0);
+      for (let i = 1; i < spans.length; i++) {
+        expect(spans[i][0]).toBe(spans[i - 1][1]);
+      }
+      expect(spans[spans.length - 1][1]).toBe(size);
+
+      const raw = await fs.readFile(path.join(tempDir, 'span.log'));
+      const rebuilt = spans
+        .map(([from, to]) => raw.subarray(from, to).toString('utf8'))
+        .join('');
+      expect(rebuilt).toBe(body);
+    });
+  });
+
+  it('round-trips content when pages are rejoined with a newline', async () => {
+    // No trailing newline: `content` drops the terminator of its last line,
+    // matching the line-addressed readers, so a page boundary that lands
+    // exactly on EOF would otherwise swallow the file's final newline. Byte
+    // spans, asserted above, are the lossless reassembly path.
+    const body = 'alpha\nbeta\ngamma\ndelta';
+    await withHandle('join.log', body, async (fh, size) => {
+      const { pages } = await pageAll(fh, size, { limit: 2 });
+      expect(pages.join('\n')).toBe(body);
+    });
+  });
+
+  it('preserves a trailing newline as split semantics do', async () => {
+    await withHandle('trailing.log', 'a\nb\n', async (fh, size) => {
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(page.content).toBe('a\nb\n');
+      expect(page.nextOffset).toBeUndefined();
+    });
+  });
+
+  it('snaps a mid-line offset forward to the next line start', async () => {
+    await withHandle('snap.log', 'alpha\nbeta\ngamma\n', async (fh, size) => {
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 2, // inside "alpha"
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(page.startOffset).toBe(6);
+      expect(page.content).toBe('beta');
+    });
+  });
+
+  it('refuses a mid-line offset when no line break is within maxSnapBytes', async () => {
+    await withHandle('one-line.log', 'x'.repeat(5_000), async (fh, size) => {
+      await expect(
+        readTextCursorWindowFromHandle(fh, {
+          startOffset: 10,
+          fileSize: size,
+          maxOutputBytes: 1_024,
+          maxSnapBytes: 64,
+        }),
+      ).rejects.toBeInstanceOf(CursorNotAtLineBoundaryError);
+    });
+  });
+
+  it('makes progress when a single line exceeds maxOutputBytes', async () => {
+    const body = `${'y'.repeat(5_000)}\ntail\n`;
+    await withHandle('long-line.log', body, async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        maxOutputBytes: 100,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.truncatedByBytes).toBe(true);
+      expect(first.content).toBe('y'.repeat(100));
+      // The cursor skips to the start of the *next* line rather than stopping
+      // mid-line. Resuming mid-line would make the following call snap forward
+      // and silently drop the rest of this line at the page seam; skipping it
+      // here loses the same bytes but says so via `truncatedByBytes`.
+      expect(first.nextOffset).toBe(5_001);
+
+      const second = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(second.startOffset).toBe(5_001);
+      expect(second.content).toBe('tail\n');
+    });
+  });
+
+  it('mints only line-start cursors, so paging never straddles a line', async () => {
+    const body = `${'q'.repeat(300)}\nshort\n`;
+    await withHandle('seam.log', body, async (fh, size) => {
+      let offset = 0;
+      const starts: number[] = [];
+      for (let i = 0; i < 10; i++) {
+        const page = await readTextCursorWindowFromHandle(fh, {
+          startOffset: offset,
+          fileSize: size,
+          maxOutputBytes: 40,
+          maxSnapBytes: 4_096,
+        });
+        starts.push(page.startOffset);
+        // A cursor that already points at a line start needs no snapping, so
+        // the reader begins exactly where it was told to.
+        expect(page.startOffset).toBe(offset);
+        if (page.nextOffset === undefined) break;
+        offset = page.nextOffset;
+      }
+      expect(starts).toEqual([0, 301]);
+    });
+  });
+
+  it('does not split a multibyte character when truncating', async () => {
+    await withHandle(
+      'multibyte.log',
+      `${'中'.repeat(50)}\n`,
+      async (fh, size) => {
+        const page = await readTextCursorWindowFromHandle(fh, {
+          startOffset: 0,
+          fileSize: size,
+          maxOutputBytes: 7, // two 3-byte chars fit, the third does not
+          maxSnapBytes: 1_024,
+        });
+        expect(page.content).toBe('中中');
+        expect(page.content).not.toContain('\uFFFD');
+        expect(page.truncatedByBytes).toBe(true);
+        // The file is a single line, so skipping its dropped remainder lands at
+        // EOF and there is no next page.
+        expect(page.nextOffset).toBeUndefined();
+      },
+    );
+  });
+
+  it('reports the BOM and keeps offsets absolute across pages', async () => {
+    const body = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from('one\ntwo\nthree\n'),
+    ]);
+    await withHandle('bom.log', body, async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.bom).toBe(true);
+      expect(first.content).toBe('one');
+      // 3 BOM bytes + "one\n"
+      expect(first.nextOffset).toBe(7);
+
+      const second = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(second.bom).toBe(true);
+      expect(second.content).toBe('two');
+    });
+  });
+
+  it('keeps CRLF terminators in the returned text', async () => {
+    await withHandle('crlf.log', 'one\r\ntwo\r\n', async (fh, size) => {
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(page.content).toBe('one\r');
+      expect(page.lineEnding).toBe('crlf');
+      expect(page.nextOffset).toBe(5);
+    });
+  });
+
+  it('returns nothing for an offset at or past EOF', async () => {
+    await withHandle('eof.log', 'a\nb\n', async (fh, size) => {
+      const page = await readTextCursorWindowFromHandle(fh, {
+        startOffset: size,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(page.content).toBe('');
+      expect(page.nextOffset).toBeUndefined();
+    });
+  });
+
+  it('refuses a non-UTF-8 file', async () => {
+    const gbk = iconvEncode('中文日志\n'.repeat(100), 'gbk');
+    await withHandle('gbk.log', gbk, async (fh, size) => {
+      await expect(
+        readTextCursorWindowFromHandle(fh, {
+          startOffset: 0,
+          fileSize: size,
+          maxOutputBytes: 1_024,
+          maxSnapBytes: 1_024,
+        }),
+      ).rejects.toBeInstanceOf(LargeNonUtf8TextError);
+    });
+  });
+
+  it('pages a file larger than one read chunk', async () => {
+    // Forces lines to span chunk boundaries (chunks are 512 KiB).
+    const body = Array.from(
+      { length: 20_000 },
+      (_, i) => `row-${i} ${'z'.repeat(60)}`,
+    ).join('\n');
+    await withHandle('big.log', body, async (fh, size) => {
+      expect(size).toBeGreaterThan(1024 * 1024);
+      const { pages, spans } = await pageAll(fh, size, { limit: 500 });
+      expect(spans[spans.length - 1][1]).toBe(size);
+      expect(pages.join('\n')).toBe(body);
+    });
   });
 });

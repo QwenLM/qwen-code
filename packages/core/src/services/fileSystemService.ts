@@ -11,7 +11,11 @@ import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
-import { readTextRangeFromHandle } from '../utils/read-text-range.js';
+import {
+  readTextCursorWindowFromHandle,
+  readTextRangeFromHandle,
+  type ReadTextCursorWindowResult,
+} from '../utils/read-text-range.js';
 import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
 import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
@@ -32,6 +36,8 @@ export type ReadTextFileResponse = {
     originalLineCountExact?: boolean;
     lineEnding?: LineEnding;
     truncatedByBytes?: boolean;
+    /** Byte offset to resume from; absent once the read reached EOF. */
+    nextByteOffset?: number;
   };
 };
 
@@ -72,6 +78,21 @@ export interface CoreReadTextFileHandleRequest {
   limit?: number;
   maxOutputBytes: number;
   maxScanBytes: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Byte-cursor read used by filesystem security boundaries to page text without
+ * re-scanning from byte 0. Same borrowed-descriptor contract as
+ * {@link CoreReadTextFileHandleRequest}.
+ */
+export interface CoreReadTextCursorRequest {
+  fileHandle: FileHandle;
+  startOffset: number;
+  fileSize: number;
+  limit?: number;
+  maxOutputBytes: number;
+  maxSnapBytes: number;
   signal?: AbortSignal;
 }
 
@@ -363,6 +384,44 @@ export class StandardFileSystemService implements FileSystemService {
     return toReadTextFileResponse(range);
   }
 
+  async readTextCursorFromHandle(
+    params: CoreReadTextCursorRequest,
+  ): Promise<ReadTextCursorWindowResult> {
+    if (!isPositiveSafeInteger(params.maxOutputBytes)) {
+      throw new RangeError(
+        `cursor reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
+      );
+    }
+    if (!isPositiveSafeInteger(params.maxSnapBytes)) {
+      throw new RangeError(
+        `cursor reads require a positive finite maxSnapBytes, got ${params.maxSnapBytes}`,
+      );
+    }
+    if (
+      !Number.isSafeInteger(params.startOffset) ||
+      params.startOffset < 0 ||
+      !Number.isSafeInteger(params.fileSize) ||
+      params.fileSize < 0
+    ) {
+      throw new RangeError(
+        `cursor reads require non-negative integer startOffset and fileSize, got ${params.startOffset}/${params.fileSize}`,
+      );
+    }
+    if (params.limit !== undefined && !isPositiveSafeInteger(params.limit)) {
+      throw new RangeError(
+        `cursor reads require a positive integer limit, got ${params.limit}`,
+      );
+    }
+    return readTextCursorWindowFromHandle(params.fileHandle, {
+      startOffset: params.startOffset,
+      fileSize: params.fileSize,
+      maxOutputBytes: params.maxOutputBytes,
+      maxSnapBytes: params.maxSnapBytes,
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
+    });
+  }
+
   async writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
@@ -421,6 +480,7 @@ function toReadTextFileResponse(readResult: {
   originalLineCountExact?: boolean;
   lineEnding?: LineEnding;
   truncatedByBytes?: boolean;
+  nextByteOffset?: number;
 }): ReadTextFileResponse {
   const detectedLineEnding =
     readResult.lineEnding ?? detectLineEnding(readResult.content);
@@ -434,6 +494,9 @@ function toReadTextFileResponse(readResult: {
       lineEnding: detectedLineEnding,
       ...(readResult.truncatedByBytes !== undefined
         ? { truncatedByBytes: readResult.truncatedByBytes }
+        : {}),
+      ...(readResult.nextByteOffset !== undefined
+        ? { nextByteOffset: readResult.nextByteOffset }
         : {}),
     },
   };

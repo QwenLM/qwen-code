@@ -1591,6 +1591,30 @@ or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
 complete `sizeBytes`, set `truncated: true`, and return
 `originalLineCount: null` when the stream stops before EOF.
 
+##### Paging with `cursor`
+
+Requires the `workspace_file_read_cursor` capability. A response that has more
+to give returns `hasMore: true` and, when a file byte offset is derivable, a
+`nextCursor` token. Passing it back as `cursor` resumes in O(1), where a deep
+`line` offset costs a scan from byte 0 and is refused past 8 MiB.
+
+```
+GET /file?path=big.log&limit=500          → { content, nextCursor, hasMore: true }
+GET /file?path=big.log&limit=500&cursor=… → next page
+```
+
+`cursor` and `line` are mutually exclusive (`parse_error`) — both name a
+starting point. A malformed or over-long cursor is `parse_error`; a cursor
+whose file has been replaced or truncated is `hash_mismatch` (409). Appending
+does **not** invalidate an outstanding cursor, which is the case the feature
+exists for.
+
+`content` omits the terminating newline of its last line, as every other read
+does, so a client reassembling pages joins them with `\n`. `hasMore` is not a
+restatement of `nextCursor`: a small non-UTF-8 file read with a `limit` has
+more content but no derivable byte offset, so it reports `hasMore: true` with
+`nextCursor: null`.
+
 ```json
 {
   "kind": "file",
