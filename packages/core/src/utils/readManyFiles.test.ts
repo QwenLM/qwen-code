@@ -197,7 +197,7 @@ describe('readManyFiles', () => {
       const mockConfig = {
         ...createMockConfig(tempRootDir),
         getFileSystemService: () => fileSystemService,
-      } as Config;
+      } as unknown as Config;
 
       try {
         const result = await readManyFiles(mockConfig, {
