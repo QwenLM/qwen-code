@@ -12671,4 +12671,62 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
     });
   });
+  describe('XML tool call fallback integration', () => {
+    function xmlChunk(
+      text: string,
+      finishReason?: string,
+    ): GenerateContentResponse {
+      return {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text }] },
+            ...(finishReason ? { finishReason } : {}),
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+    }
+
+    it('recovers XML tool calls from plain text content and updates history', async () => {
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield xmlChunk(xml, 'STOP');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      // The synthetic chunk with functionCall parts must be yielded.
+      const syntheticChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      );
+      expect(syntheticChunk).toBeDefined();
+      const fc =
+        syntheticChunk!.candidates![0]!.content!.parts![0]!.functionCall!;
+      expect(fc.name).toBe('read_file');
+      expect(fc.args).toEqual({ file_path: 'a.ts' });
+
+      // History must contain the recovered functionCall parts, not raw XML.
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const hasFunctionCall = lastEntry.parts?.some((p) => p.functionCall);
+      expect(hasFunctionCall).toBe(true);
+      const hasRawXml = lastEntry.parts?.some(
+        (p) => p.text && p.text.includes('<invoke'),
+      );
+      expect(hasRawXml).toBe(false);
+    });
+  });
 });

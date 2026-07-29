@@ -4,21 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
-
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...actual,
-    createDebugLogger: () => ({
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    }),
-  };
-});
+import { describe, expect, it } from 'vitest';
 
 const OPEN = '<' + 'invoke';
 const CLOSE = '</' + 'invoke>';
@@ -33,7 +19,6 @@ function param(name: string, value: string): string {
   return `${PARAM_OPEN} name="${name}">${value}${PARAM_CLOSE}`;
 }
 
-// Imported after the mocks above are registered.
 import {
   containsXmlToolCalls,
   extractXmlToolCalls,
@@ -114,6 +99,19 @@ describe('extractXmlToolCalls', () => {
           plain: 'hello world',
           nil: 'null',
         },
+      },
+    ]);
+  });
+
+  it('preserves raw string for malformed JSON values', () => {
+    const text = invoke(
+      'tool',
+      param('data', '{not valid json') + param('ok', 'yes'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'tool',
+        args: { data: '{not valid json', ok: 'yes' },
       },
     ]);
   });

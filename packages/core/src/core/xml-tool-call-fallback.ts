@@ -4,10 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part } from '@google/genai';
-
-const debugLogger = createDebugLogger('XML_TOOL_CALL_FALLBACK');
 
 const INVOKE_PATTERN = /<invoke\s+name="([^"]+)">([\s\S]*?)<\/invoke>/g;
 const PARAMETER_PATTERN =
@@ -120,10 +117,6 @@ export function tryRecoverXmlToolCalls(text: string): {
     })
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-
-  debugLogger.warn(
-    `Recovered ${extracted.length} XML-style tool call(s) from plain text content: ${extracted.map((t) => t.name).join(', ')}`,
-  );
 
   const functionCallParts: Part[] = extracted.map((toolCall, index) => ({
     functionCall: {
