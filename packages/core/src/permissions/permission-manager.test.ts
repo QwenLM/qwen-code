@@ -754,7 +754,9 @@ describe('matchesPathPattern', () => {
     });
   });
 
-  it('preserves traversal semantics in a dangling symlink target', () => {
+  // Title names the platform assumption so a future realpath-based resolution
+  // in matchesPathPattern is seen to break it, not silently re-asserted.
+  it('preserves traversal semantics in a dangling symlink target (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
@@ -799,7 +801,7 @@ describe('matchesPathPattern', () => {
     });
   });
 
-  it('resolves parent traversal after following a directory symlink', () => {
+  it('resolves parent traversal after following a directory symlink (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');

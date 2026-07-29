@@ -243,6 +243,9 @@ describe('VirtualSubagentSessions', () => {
   it('releases the subscriber count when the initial refresh fails', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
     tempDirs.push(dir);
+    // A NUL byte makes Node's path validation throw on any fs access, forcing
+    // the initial refresh to fail deterministically on every platform (the
+    // EISDIR-via-directory trick is not portable to Windows).
     const outputFile = path.join(dir, 'invalid\0transcript');
     const runtime = {
       workspaceId: 'workspace-refresh-error',

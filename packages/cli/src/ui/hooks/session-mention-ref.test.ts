@@ -36,6 +36,12 @@ describe('sessionMentionRef', () => {
     expect(parseSessionRef('session:My\\ Chat')).toEqual({ title: 'My Chat' });
   });
 
+  it('unescapes the full shared shell-special set, not a subset', () => {
+    // `&` is in SHELL_SPECIAL_CHARS but was missing from the old inline regex,
+    // so `@session:a\&b` resolved on POSIX yet not on Windows. Keep them aligned.
+    expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a&b' });
+  });
+
   it('treats an empty remainder as null (lone prefix)', () => {
     expect(parseSessionRef('session:')).toBeNull();
   });

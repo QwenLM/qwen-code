@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   tmpFile,
   probeWorktreePath,
@@ -40,14 +40,17 @@ describe('tmpFile — target is a single safe component', () => {
     const p = tmpFile('src/foo.ts', 'diff.txt');
     expect(p).not.toContain('src/foo.ts');
     expect(dirname(p)).toBe(join('.qwen', 'tmp'));
-    expect(p.slice(dirname(p).length + 1)).not.toContain(sep);
+    // The separator is flattened to an underscore, so the target survives as a
+    // single component directly under the temp dir.
+    expect(basename(p)).toBe('qwen-review-src_foo.ts-diff.txt');
   });
 
   it('refuses to escape the temp dir with a crafted target', () => {
     const p = tmpFile('../../evil', 'diff.txt');
     expect(dirname(p)).toBe(join('.qwen', 'tmp'));
     expect(p).not.toContain('..');
-    expect(p.slice(dirname(p).length + 1)).not.toContain(sep);
+    // The dot-segment traversal is stripped to a plain component, not nested.
+    expect(basename(p)).toBe('qwen-review-evil-diff.txt');
   });
 });
 

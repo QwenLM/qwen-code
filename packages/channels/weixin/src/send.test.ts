@@ -341,9 +341,18 @@ describe('validateImagePath', () => {
 
   it('returns resolved realpath on success', () => {
     const imagePath = path.resolve('/tmp/photo.png');
-    mockRealpathSync.mockImplementation((p: string) => p);
+    const realImagePath = path.join(
+      path.dirname(imagePath),
+      `real-${path.basename(imagePath)}`,
+    );
+    // A distinguishable realpath (only the image path is remapped, the allowlist
+    // probes stay identity) proves the resolved path is returned rather than the
+    // argument passed through unchanged.
+    mockRealpathSync.mockImplementation((p: string) =>
+      p === imagePath ? realImagePath : p,
+    );
     const result = validateImagePath(imagePath, workspaceDirs);
-    expect(result).toBe(imagePath);
+    expect(result).toBe(realImagePath);
   });
 });
 

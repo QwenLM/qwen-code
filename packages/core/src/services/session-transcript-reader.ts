@@ -185,6 +185,15 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+// Windows derives `Stats.ino` from a 64-bit file index that routinely exceeds
+// 2^53, so a safe-integer check would reject every cursor there. Above 2^53 the
+// value loses precision, so file identity on Windows is approximate; a bigint
+// stat would be the durable fix. Byte offsets (snapshotSize/position) are still
+// arithmetic operands and stay safe-integer via isFiniteNonNegativeInteger.
+function isFiniteNonNegativeFileId(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
 
@@ -326,8 +335,8 @@ function decodeCursorState(
       parsed['v'] !== SESSION_TRANSCRIPT_CURSOR_VERSION ||
       typeof parsed['sessionId'] !== 'string' ||
       !isObjectRecord(fileIdentity) ||
-      !isFiniteNonNegativeInteger(fileIdentity['dev']) ||
-      !isFiniteNonNegativeInteger(fileIdentity['ino']) ||
+      !isFiniteNonNegativeFileId(fileIdentity['dev']) ||
+      !isFiniteNonNegativeFileId(fileIdentity['ino']) ||
       !isFiniteNonNegativeInteger(parsed['snapshotSize']) ||
       !isFiniteNonNegativeInteger(parsed['position']) ||
       (parsed['direction'] !== undefined &&

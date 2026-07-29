@@ -35,7 +35,11 @@ export function getNpmCliPath(
       'npm-cli.js',
     );
   }
-  const platformPath = path.posix;
+  // This branch is POSIX-only; pin path.posix (not the host-default path) so the
+  // separator is correct even when a caller passes an explicit `platform` that
+  // differs from the host, e.g. getNpmCliPath('/usr/bin/node', 'linux') on
+  // Windows.
+  //
   // Prefer the npm symlink that sits next to the node binary and resolve it to
   // the real npm-cli.js. On split layouts where npm is not adjacent to node,
   // fall back to the conventional `<prefix>/lib/node_modules/npm` location
@@ -46,8 +50,8 @@ export function getNpmCliPath(
   // Node version managers (mise, asdf, proto) may replace bin/npm with a shell
   // wrapper instead of a symlink to npm-cli.js. Validate the resolved path is a
   // .js file before returning it; otherwise use the conventional fallback.
-  const npmCliJs = platformPath.join(
-    platformPath.dirname(nodePath),
+  const npmCliJs = path.posix.join(
+    path.posix.dirname(nodePath),
     '..',
     'lib',
     'node_modules',
@@ -55,7 +59,7 @@ export function getNpmCliPath(
     'bin',
     'npm-cli.js',
   );
-  const adjacentNpm = platformPath.join(platformPath.dirname(nodePath), 'npm');
+  const adjacentNpm = path.posix.join(path.posix.dirname(nodePath), 'npm');
   try {
     const resolved = fs.realpathSync(adjacentNpm);
     if (resolved.endsWith('.js')) return resolved;

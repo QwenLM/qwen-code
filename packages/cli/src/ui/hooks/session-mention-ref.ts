@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { unescapeShellSpecials } from '@qwen-code/qwen-code-core';
+
 export const SESSION_MENTION_PREFIX = 'session:';
 
 const UUID_RE =
@@ -20,10 +22,13 @@ export function isSessionId(value: string): boolean {
 
 export function parseSessionRef(pathName: string): SessionRef | null {
   if (!pathName.startsWith(SESSION_MENTION_PREFIX)) return null;
-  const remainder = pathName
-    .slice(SESSION_MENTION_PREFIX.length)
-    .trim()
-    .replace(/\\([,\s;!?()[\]{}])/g, '$1');
+  // unescapePath is a no-op on win32 (backslash is a path separator there), so
+  // an escaped mention like `@session:My\ Chat` would reach here still escaped.
+  // Use the platform-independent shared unescaper so the escape set matches the
+  // rest of the codebase on every OS.
+  const remainder = unescapeShellSpecials(
+    pathName.slice(SESSION_MENTION_PREFIX.length).trim(),
+  );
   if (remainder.length === 0) return null;
   return isSessionId(remainder) ? { id: remainder } : { title: remainder };
 }

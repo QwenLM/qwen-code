@@ -12,8 +12,9 @@ jobs:
     runs-on: ['self-hosted', 'Windows', 'X64', 'ecs-win']
     timeout-minutes: 60
     env:
-      LANG: 'en_US.UTF-8'
-      LC_ALL: 'C'
+      # LC_ALL overrides LANG, so set only LC_ALL. C.UTF-8 keeps deterministic
+      # C collation while preserving UTF-8 output for any non-ASCII assertions.
+      LC_ALL: 'C.UTF-8'
     steps:
       - name: 'Configure Windows test environment'
         shell: 'powershell'
