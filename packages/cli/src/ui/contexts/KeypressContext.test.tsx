@@ -359,6 +359,84 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('maps the Kitty Super (Command) bit to meta so Cmd+C does not leak "c"', () => {
+      // A Kitty-protocol terminal forwards Cmd+C as ESC [ 99 ; 9 u (keycode 99
+      // = "c", modifier 9 = base 1 + Super bit 8) while performing the copy
+      // itself. If the Super bit is dropped, this parses as a bare printable
+      // "c" (meta: false) and the text buffer inserts it. Super must surface as
+      // meta so the input handler skips insertion. See issue #7990.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;9u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          kittyProtocol: true,
+          ctrl: false,
+          meta: true,
+          shift: false,
+        }),
+      );
+    });
+
+    it('maps the Kitty Super bit to meta on the reverse-tab path', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Cmd+Shift+Tab: modifier 10 = base 1 + Shift 1 + Super 8
+      act(() => {
+        stdin.sendKittySequence(`\x1b[1;10Z`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'tab', shift: true, meta: true }),
+      );
+    });
+
+    it('maps the Kitty Super bit to meta on the functional-keys path', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Cmd+Home: modifier 9 = base 1 + Super 8. Use Home (H), not an arrow
+      // (A/B/C/D): readline claims modified arrows before they reach the Kitty
+      // arrowPrefix decoder, so an arrow case would pass even without the fix.
+      act(() => {
+        stdin.sendKittySequence(`\x1b[1;9H`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'home', meta: true }),
+      );
+    });
+
     it('decodes Shift+Enter modifyOtherKeys form without Kitty enabled', () => {
       // Ghostty (and other xterm modifyOtherKeys terminals) send Shift+Enter as
       // ESC [ 27 ; 2 ; 13 ~ when the Kitty protocol is not negotiated. readline
@@ -827,6 +905,26 @@ describe('KeypressContext - Kitty Protocol', () => {
           name: 'backspace',
           kittyProtocol: true,
           ctrl: true,
+        }),
+      );
+    });
+
+    it('should still treat Kitty Ctrl+C as the escape hatch', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Modifier 5 is Ctrl
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;5u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          ctrl: true,
+          shift: false,
+          kittyProtocol: true,
         }),
       );
     });
