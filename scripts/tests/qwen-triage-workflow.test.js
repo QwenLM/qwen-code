@@ -1460,6 +1460,62 @@ describe('qwen-triage verify hardening round 2', () => {
       const comment2 = readFileSync(out2, 'utf8');
       expect(comment2).toContain('Sandboxed verification');
       expect(comment2).not.toContain('Evidence images');
+
+      // FIRST RUN on a PR: the remote is valid but the per-PR branch does
+      // not exist yet, so the clone fails and the orphan-init path runs for
+      // real. Both scenarios above take the clone-failed branch too, but
+      // both then fail to push (one seeded the branch, the other has no
+      // remote), so neither proves orphan-init can actually DELIVER. Without
+      // this, a bug in `checkout --orphan` or a dropped `remote add origin`
+      // would silently discard every image on every PR's first run.
+      sh(`git -C "${dir}/assets.git" branch -D pr-assets/pr7999-verify`);
+      expect(
+        sh(
+          `git -C "${dir}/assets.git" branch --list pr-assets/pr7999-verify`,
+        ).stdout.trim(),
+      ).toBe('');
+      const out3 = join(dir, 'comment3.md');
+      const res3 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out3,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '79',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+        },
+      });
+      expect(res3.status).toBe(0);
+      // The branch was created by orphan-init and carries this run's images.
+      const hosted3 = sh(
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/pr7999-verify | grep verify/ || true`,
+      )
+        .stdout.trim()
+        .split('\n')
+        .filter(Boolean);
+      expect(hosted3.map((p) => p.split('/').pop()).sort()).toEqual([
+        '01-ab.png',
+        '04-edge.png',
+      ]);
+      // Orphan, not a graft onto unrelated history: exactly one commit.
+      expect(
+        sh(
+          `git -C "${dir}/assets.git" rev-list --count pr-assets/pr7999-verify`,
+        ).stdout.trim(),
+      ).toBe('1');
+      expect(readFileSync(out3, 'utf8')).toContain('![01-ab](');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2222,6 +2278,80 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(publish).toContain('pr-assets/pr${PR_NUMBER}-verify');
     expect(publish).toContain('checkout -q --orphan');
     expect(publish).not.toMatch(/--branch pr-assets["\s]/);
+  });
+
+  // Every `pr-assets/*` producer needs a deleter, or its branches are
+  // permanent: one single-commit branch per verified PR, forever, slowing
+  // `git ls-remote` and cluttering the branch list for every contributor.
+  // The verify lane became a second producer and was not added.
+  it('deletes both pr-assets producers when a PR closes', () => {
+    const cleanup = readFileSync(
+      '.github/workflows/web-shell-visuals-cleanup.yml',
+      'utf8',
+    );
+    // Both branch names, built from the same PR number.
+    expect(cleanup).toContain('pr-assets/web-shell-visuals-${PR_NUMBER}');
+    expect(cleanup).toContain('pr-assets/pr${PR_NUMBER}-verify');
+    // Runs in the base context and never touches PR code.
+    expect(cleanup).toContain('pull_request_target');
+    expect(cleanup).not.toContain('actions/checkout');
+    // One branch missing or one delete failing must not stop the other:
+    // most PRs produce neither, so absence is the normal case.
+    expect(cleanup).not.toContain('set -euo pipefail');
+    expect(cleanup).toContain('continue');
+    // ...but a real delete failure still has to be visible.
+    expect(cleanup).toContain('::warning::Failed to delete');
+
+    // Execute it against a stubbed gh: the loop must attempt both refs, and
+    // a missing first branch must not skip the second.
+    const script = cleanup.match(/run: \|-\n([\s\S]*?)$/)?.[1];
+    expect(script).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'assets-cleanup-'));
+    try {
+      const calls = join(dir, 'gh-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GH_CALLS"',
+          // Only the verify branch exists; the visuals one 404s.
+          'case "$*" in',
+          '  *web-shell-visuals*) exit 1 ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-c', script.replace(/^ {10}/gm, '')], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_CALLS: calls,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '7999',
+        },
+      });
+      expect(res.status).toBe(0);
+      const lines = readFileSync(calls, 'utf8').trim().split('\n');
+      const deletes = lines.filter((l) => l.includes('DELETE'));
+      // The missing visuals branch was probed but never deleted...
+      expect(
+        lines.some((l) => l.includes('pr-assets/web-shell-visuals-7999')),
+      ).toBe(true);
+      expect(deletes.some((l) => l.includes('web-shell-visuals'))).toBe(false);
+      // ...and the loop carried on to the verify branch and deleted it.
+      // This is the assertion the whole test exists for: a `set -e` script
+      // would have exited on the first 404 and never reached here.
+      expect(deletes.some((l) => l.includes('pr-assets/pr7999-verify'))).toBe(
+        true,
+      );
+      expect(res.stdout).toContain('Deleted pr-assets/pr7999-verify');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // Cleanups must never descend through a PR-writable parent, and an
