@@ -3279,7 +3279,7 @@ describe('AgentTool', () => {
       expect(FORK_AGENT.approvalMode).toBe(BUBBLE_APPROVAL_MODE);
     });
 
-    it('passes fork_tools separately from inherited declarations', async () => {
+    it('passes fork_tools separately from inherited tool names', async () => {
       const parentToolDecls = [
         {
           name: ToolNames.READ_FILE,
@@ -3313,10 +3313,10 @@ describe('AgentTool', () => {
       await invocation.execute();
 
       const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
-      expect(toolConfig?.tools).toStrictEqual(parentToolDecls);
-      expect(JSON.stringify(toolConfig?.tools)).toBe(
-        JSON.stringify(parentToolDecls),
-      );
+      expect(toolConfig?.tools).toStrictEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+      ]);
       expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
     });
 
@@ -6042,7 +6042,7 @@ describe('AgentTool', () => {
       });
     });
 
-    it('persists fork capability snapshots in the bootstrap transcript', async () => {
+    it('does not persist fork capability snapshots in the bootstrap transcript', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
@@ -6083,15 +6083,20 @@ describe('AgentTool', () => {
       ).createInvocation(forkParams);
       await invocation.execute();
 
-      expect(attachSpy).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.any(String),
-        expect.objectContaining({
-          bootstrapSystemInstruction: generationConfig.systemInstruction,
-          bootstrapTools: generationConfig.tools[0].functionDeclarations,
-          bootstrapExecutionAllowedTools: ['Read'],
-        }),
-      );
+      const writerOptions = attachSpy.mock.calls[0]?.[2];
+      expect(writerOptions).toBeDefined();
+      expect(writerOptions).not.toHaveProperty('bootstrapSystemInstruction');
+      expect(writerOptions).not.toHaveProperty('bootstrapTools');
+      expect(writerOptions).toMatchObject({
+        bootstrapHistory: [{ role: 'model', parts: [{ text: 'Ready' }] }],
+        bootstrapExecutionAllowedTools: ['Read'],
+        launchTaskPrompt: expect.any(String),
+      });
+      const createArgs = createSpy.mock.calls[0];
+      expect(createArgs?.[5]).toEqual({
+        tools: ['Bash', 'Read'],
+        executionAllowedTools: ['Read'],
+      });
 
       attachSpy.mockRestore();
       createSpy.mockRestore();

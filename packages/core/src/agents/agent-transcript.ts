@@ -40,7 +40,7 @@ import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
-import type { FunctionDeclaration, Content } from '@google/genai';
+import type { Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 const MAX_PENDING_STREAM_BYTES = 64 * 1024;
@@ -298,17 +298,9 @@ export interface AttachJsonlOptions {
   initialUserPrompt?: string;
   /**
    * Exact bootstrap history that seeded the agent before its first runtime
-   * turn. Used by transcript-first resume to reconstruct fork constraints.
+   * turn. Used by transcript-first resume to reconstruct fork context.
    */
   bootstrapHistory?: Content[];
-  /**
-   * Immutable launch-time system instruction for fork resume.
-   */
-  bootstrapSystemInstruction?: string | Content;
-  /**
-   * Immutable launch-time tool declarations for fork resume.
-   */
-  bootstrapTools?: Array<string | FunctionDeclaration>;
   /**
    * Immutable launch-time execution allowlist for fork resume.
    */
@@ -542,24 +534,12 @@ export function attachJsonlTranscriptWriter(
 
   const hasBootstrapPayload =
     options.bootstrapHistory !== undefined ||
-    options.bootstrapSystemInstruction !== undefined ||
-    options.bootstrapTools !== undefined ||
     options.bootstrapExecutionAllowedTools !== undefined;
 
   if (hasBootstrapPayload) {
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
       history: structuredClone(options.bootstrapHistory ?? []),
-      ...(options.bootstrapSystemInstruction !== undefined
-        ? {
-            systemInstruction: structuredClone(
-              options.bootstrapSystemInstruction,
-            ),
-          }
-        : {}),
-      ...(options.bootstrapTools !== undefined
-        ? { tools: structuredClone(options.bootstrapTools) }
-        : {}),
       ...(options.bootstrapExecutionAllowedTools !== undefined
         ? {
             executionAllowedTools: structuredClone(

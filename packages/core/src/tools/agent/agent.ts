@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import { extractParentToolNames } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -34,7 +34,7 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -1614,7 +1614,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
-    promptConfig: PromptConfig;
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
@@ -1714,25 +1713,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
-      // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // (including `agent` and cron tools) so the fork's system prompt,
-      // tools, and history exactly match the parent's and share its
-      // DashScope cache prefix. A fork is a context-sharing extension of
-      // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
-      // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
-      const parentToolDecls: FunctionDeclaration[] =
-        (
-          generationConfig.tools as Array<{
-            functionDeclarations?: FunctionDeclaration[];
-          }>
-        )
-          ?.flatMap((t) => t.functionDeclarations ?? [])
-          .filter(
-            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
-          ) ?? [];
+      // Keep the parent's current allowlist, but pass names rather than inline
+      // schemas so AgentCore resolves every declaration through the fork's
+      // current ToolRegistry. This preserves the parent's tool surface and
+      // cache prefix when schemas are unchanged without letting a persisted or
+      // stale declaration bypass the live registry.
+      const parentToolNames = extractParentToolNames(generationConfig);
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -1741,8 +1727,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         initialMessages,
       };
       toolConfig = {
-        tools:
-          parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
+        tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
         ...(this.params.fork_tools !== undefined
           ? { executionAllowedTools: [...this.params.fork_tools] }
           : {}),
@@ -1770,7 +1755,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
+    return { subagent, initialMessages, taskPrompt, toolConfig };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds
@@ -2922,7 +2907,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
       let initialMessages: Content[] | undefined;
-      let promptConfig: PromptConfig | undefined;
       let toolConfig: ToolConfig | undefined;
 
       // Per-spawn cleanup the subagent manager returns. The caller MUST
@@ -2941,7 +2925,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
         initialMessages = fork.initialMessages;
-        promptConfig = fork.promptConfig;
         toolConfig = fork.toolConfig;
       } else {
         const result = await this.subagentManager.createAgentHeadless(
@@ -3042,7 +3025,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const bgSubagent = subagent;
         const bgInitialMessages = initialMessages;
         const bgTaskPrompt = taskPrompt;
-        const bgPromptConfig = promptConfig;
         const bgToolConfig = toolConfig;
         const bgSubagentDispose = subagentDispose;
 
@@ -3165,11 +3147,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            bootstrapSystemInstruction: isFork
-              ? (bgPromptConfig?.renderedSystemPrompt ??
-                bgPromptConfig?.systemPrompt)
-              : undefined,
-            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
             bootstrapExecutionAllowedTools: isFork
               ? bgToolConfig?.executionAllowedTools
               : undefined,
