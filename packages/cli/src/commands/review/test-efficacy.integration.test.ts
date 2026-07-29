@@ -225,6 +225,82 @@ describe('test-efficacy probe isolation (#6832)', () => {
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
   });
 
+  it('runs a deletion mutant end-to-end and reports the survivor', async () => {
+    // The dogfood shape at full scale: the PR adds a reset function whose one
+    // safety statement (`state.clear()`) nothing gates. The fake vitest is
+    // green no matter what, so the baseline run passes, the mutant run passes
+    // — a SURVIVOR — and the revert probe still reads the test as inert. Both
+    // trees end clean: the mutation happened only in the disposable worktree.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function use(k: string) {\n' +
+        '  return state.get(k);\n' +
+        '}\n',
+    );
+    const base = commitAll('base');
+    const prSource =
+      'export const state = new Map<string, string>();\n' +
+      'export function use(k: string) {\n' +
+      '  return state.get(k);\n' +
+      '}\n' +
+      'export function reset() {\n' +
+      '  state.clear();\n' +
+      '}\n';
+    write('packages/lib/src/f.ts', prSource);
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const before = treeState(wt);
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toEqual([
+      {
+        file: 'packages/lib/src/f.ts',
+        line: 6,
+        statement: 'state.clear();',
+        verdict: 'survived',
+        detail: expect.stringContaining('still PASSED'),
+      },
+    ]);
+    expect(out.mutants.survived).toBe(1);
+    expect(out.mutants.skippedForBudget).toBe(0);
+    // The survivor is a finding the orchestrator files; the register matches
+    // the unreachable/inert messages Agent 7's brief already knows how to read.
+    const survivor = (
+      out.findings as Array<{ kind: string; file: string; message: string }>
+    ).find((f) => f.kind === 'mutant-survived');
+    expect(survivor?.file).toBe('packages/lib/src/f.ts');
+    expect(survivor?.message).toContain('state.clear();');
+    // The mutation never touched the shared tree, and the probe tree is gone.
+    expect(treeState(wt)).toBe(before);
+    expect(readFileSync(join(wt, 'packages/lib/src/f.ts'), 'utf8')).toBe(
+      prSource,
+    );
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
     const { wt, base } = scaffoldModifiedPr();
     // A prior probe crashed after `worktree add` but before its cleanup, leaving

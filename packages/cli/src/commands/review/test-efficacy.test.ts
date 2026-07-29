@@ -9,9 +9,15 @@ import {
   isWorkspaceMember,
   planTestEfficacy,
   classifyProbeRun,
+  classifyMutantRun,
   safeRmWithin,
+  selectMutants,
+  parseAddedLines,
+  hasCollocatedNewTest,
+  fitsAnotherMutantRun,
   probeCreateFailureDetail,
   probeCleanupFailureDetail,
+  MAX_MUTANTS,
 } from './test-efficacy.js';
 import {
   mkdtempSync,
@@ -403,5 +409,331 @@ describe('classifyProbeRun', () => {
     );
     expect(got.verdict).toBe('inconclusive');
     expect(got.detail).toContain('none executed');
+  });
+});
+
+describe('parseAddedLines', () => {
+  it('numbers added lines on the NEW side, per post-change path', () => {
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      'index 1111111..2222222 100644',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -10,0 +11,2 @@ ctx',
+      '+first added',
+      '+second added',
+      '@@ -20 +22,0 @@ ctx',
+      '-removed only',
+      'diff --git a/src/gone.ts b/src/gone.ts',
+      'deleted file mode 100644',
+      '--- a/src/gone.ts',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-x',
+      '-y',
+      'diff --git a/src/b.ts b/src/b.ts',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/src/b.ts',
+      '@@ -0,0 +1 @@',
+      '+only line',
+      '',
+    ].join('\n');
+    const got = parseAddedLines(diff);
+    // The `index`/`new file mode` header lines sit between hunks; counting
+    // them as context would shift every number below by the header count.
+    expect(got.get('src/a.ts')).toEqual([11, 12]);
+    expect(got.get('src/b.ts')).toEqual([1]);
+    // A deletion has no new side and must contribute nothing.
+    expect(got.has('src/gone.ts')).toBe(false);
+  });
+
+  it('counts context lines, so a default -U3 diff still numbers correctly', () => {
+    const diff = [
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -4,3 +4,4 @@',
+      ' ctx one',
+      '+added',
+      ' ctx two',
+      ' ctx three',
+      '',
+    ].join('\n');
+    expect(parseAddedLines(diff).get('src/a.ts')).toEqual([5]);
+  });
+});
+
+describe('selectMutants', () => {
+  const src = (lines: string[]) => lines.join('\n');
+  const all = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
+
+  it('selects the dogfood shape: one safety statement inside a guarded branch', () => {
+    // The finding the revert probe is structurally blind to: the sole
+    // statement of a not-continued branch. Deleting it leaves `{}` — legal —
+    // and the file still carries its other, tested behaviour. The comment
+    // above it must not block the walk back to the `{` that proves the line
+    // stands alone.
+    const content = src([
+      'export function onPrompt(continued: boolean) {',
+      '  if (!continued) {',
+      "    // an abandoned task's todos must not bleed into a new prompt",
+      '    reminders.clear();',
+      '  }',
+      '}',
+      '',
+    ]);
+    const got = selectMutants([
+      {
+        file: 'src/todo.ts',
+        content,
+        addedLines: [2, 3, 4, 5],
+        hasNewTests: false,
+      },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/todo.ts', line: 4, statement: 'reminders.clear();' },
+    ]);
+  });
+
+  it('matches the whole safety-verb set', () => {
+    const content = src([
+      'cache.delete(key);',
+      'state.reset();',
+      'ctrl.abort();',
+      "emitter.removeListener('tick', onTick);",
+      'timer.unref();',
+      'this.pending = [];',
+      'this.timers = new Map();',
+      'this.subs = new Map<string, Sub>();',
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(8), hasNewTests: false },
+    ]);
+    expect(got.map((c) => c.line)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it('skips what it cannot delete whole — declarations, headers, fragments', () => {
+    // Every line here contains a safety verb; none is a deletable statement.
+    // False negatives are fine, but each false positive wastes a suite run —
+    // or worse, `if (stale)` above a call would silently rebind the NEXT
+    // statement to the `if` when the call is deleted.
+    const content = src([
+      'const fresh = new Map();', // declaration
+      'if (done) pending.delete(id);', // control-flow header on the line
+      'register(', // opener …
+      '  bar.clear(),', // … argument, not `;`-terminated
+      ');', // … tail
+      'chain', // receiver …
+      '  .clear();', // … fluent tail, starts with `.`
+      'const n = base +', // continuation …
+      '  offsets.delete(k);', // … its tail
+      'if (stale)', // brace-less if …
+      '  cache.clear();', // … its sole statement
+      'this.items = [1];', // not reassignment-to-EMPTY
+      'this.map = new Map(entries);', // not reassignment-to-empty either
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(13), hasNewTests: false },
+    ]);
+    expect(got).toEqual([]);
+  });
+
+  it('skips safety-verb text inside template literals and comment blocks', () => {
+    // Deleting a line of string or commented-out code changes no behaviour, so
+    // its mutant would ALWAYS survive — a guaranteed false finding.
+    const content = src([
+      'const brief = `',
+      '  sessions.clear();',
+      '`;',
+      '/*',
+      'old.clear();',
+      '*/',
+      'live.clear();',
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(7), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 7, statement: 'live.clear();' },
+    ]);
+  });
+
+  it('keeps line accounting across a string that swallows its line end', () => {
+    // A `\`-continued string is legal JS whose literal contains the newline. A
+    // scanner that consumes that newline drops one per-line flag and every
+    // later line reads its NEIGHBOUR's literal-state — here that would admit
+    // line 4, which starts inside a block comment: deleting it removes the
+    // `*/` and comments out the code below, a mutant nobody asked for.
+    const content = src([
+      "const s = 'weird \\",
+      "tail';",
+      '/* block',
+      'note */ cache.clear();',
+      'after.clear();',
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(5), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 5, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('caps at MAX_MUTANTS, preferring files that also have new tests', () => {
+    const line = (i: number) => `store${i}.clear();`;
+    const content = src([...all(5).map(line), '']);
+    const got = selectMutants([
+      // Diff order says untested first; the preference must still put every
+      // candidate from the tested file ahead of it, and the cap then keeps
+      // the untested file's EARLIEST lines.
+      {
+        file: 'src/untested.ts',
+        content,
+        addedLines: all(5),
+        hasNewTests: false,
+      },
+      { file: 'src/tested.ts', content, addedLines: all(5), hasNewTests: true },
+    ]);
+    expect(MAX_MUTANTS).toBe(8);
+    expect(got).toHaveLength(8);
+    expect(got.slice(0, 5).map((c) => c.file)).toEqual(
+      Array(5).fill('src/tested.ts'),
+    );
+    expect(got.slice(5).map((c) => [c.file, c.line])).toEqual([
+      ['src/untested.ts', 1],
+      ['src/untested.ts', 2],
+      ['src/untested.ts', 3],
+    ]);
+  });
+});
+
+describe('hasCollocatedNewTest', () => {
+  it('pairs file.ts with its collocated file.test.ts / file.spec.ts', () => {
+    expect(
+      hasCollocatedNewTest('packages/cli/src/x.ts', [
+        'packages/cli/src/x.test.ts',
+      ]),
+    ).toBe(true);
+    expect(
+      hasCollocatedNewTest('packages/cli/src/x.ts', [
+        'packages/cli/src/x.spec.ts',
+      ]),
+    ).toBe(true);
+    expect(
+      hasCollocatedNewTest('packages/cli/src/Comp.tsx', [
+        'packages/cli/src/Comp.test.tsx',
+      ]),
+    ).toBe(true);
+  });
+
+  it('does not pair across directories or by basename suffix', () => {
+    expect(
+      hasCollocatedNewTest('packages/cli/src/x.ts', [
+        'packages/core/src/x.test.ts',
+      ]),
+    ).toBe(false);
+    // `xy.test.ts` must not satisfy `y.ts` — stem equality, not endsWith.
+    expect(
+      hasCollocatedNewTest('packages/cli/src/y.ts', [
+        'packages/cli/src/xy.test.ts',
+      ]),
+    ).toBe(false);
+  });
+});
+
+describe('classifyMutantRun', () => {
+  // Verdicts flow through the SAME per-file classifier the revert probe uses,
+  // so these fixtures are the vitest-JSON shapes classifyProbeRun already
+  // understands — what is under test is the mutant-level aggregation.
+  const perFile = (exit: number, json: unknown, probes: string[]) =>
+    classifyProbeRun(exit, JSON.stringify(json), probes);
+
+  it('SURVIVED when every affected test still passes', () => {
+    const got = classifyMutantRun(
+      perFile(
+        0,
+        {
+          testResults: [
+            { name: '/w/a.test.ts', assertionResults: [{ status: 'passed' }] },
+          ],
+        },
+        ['a.test.ts'],
+      ),
+    );
+    expect(got).toBe('survived');
+  });
+
+  it('KILLED when any assertion fails — the deletion was caught', () => {
+    const got = classifyMutantRun(
+      perFile(
+        1,
+        {
+          testResults: [
+            { name: '/w/a.test.ts', assertionResults: [{ status: 'passed' }] },
+            { name: '/w/b.test.ts', assertionResults: [{ status: 'failed' }] },
+          ],
+        },
+        ['a.test.ts', 'b.test.ts'],
+      ),
+    );
+    expect(got).toBe('killed');
+  });
+
+  it('INCONCLUSIVE when the mutant breaks the compile, never killed', () => {
+    // The revert probe's trap, inherited: a run that collected nothing is not
+    // a test catching the deletion.
+    const got = classifyMutantRun(
+      perFile(1, { testResults: [] }, ['a.test.ts']),
+    );
+    expect(got).toBe('inconclusive');
+  });
+
+  it('does not let a green sibling upgrade a non-collected file to SURVIVED', () => {
+    // The file that failed to collect might be the very one that would have
+    // caught the deletion — "survived" requires every file to have run.
+    const got = classifyMutantRun(
+      perFile(
+        0,
+        {
+          testResults: [
+            { name: '/w/a.test.ts', assertionResults: [{ status: 'passed' }] },
+          ],
+        },
+        ['a.test.ts', 'b.test.ts'],
+      ),
+    );
+    expect(got).toBe('inconclusive');
+  });
+
+  it('a kill outranks an inconclusive sibling — red is red', () => {
+    const got = classifyMutantRun(
+      perFile(
+        1,
+        {
+          testResults: [
+            { name: '/w/a.test.ts', assertionResults: [{ status: 'failed' }] },
+          ],
+        },
+        ['a.test.ts', 'b.test.ts'],
+      ),
+    );
+    expect(got).toBe('killed');
+  });
+
+  it('an empty run proves nothing', () => {
+    expect(classifyMutantRun([])).toBe('inconclusive');
+  });
+});
+
+describe('fitsAnotherMutantRun', () => {
+  it('requires room for TWO runs — the mutant and the reserved revert probe', () => {
+    expect(fitsAnotherMutantRun(120_000, 60_000)).toBe(true);
+    // One run's worth left: the slot belongs to the revert probe, not a mutant.
+    expect(fitsAnotherMutantRun(119_999, 60_000)).toBe(false);
+    expect(fitsAnotherMutantRun(0, 60_000)).toBe(false);
   });
 });

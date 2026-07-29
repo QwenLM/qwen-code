@@ -860,7 +860,9 @@ export function buildRoleBrief(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
-          'different claims:',
+          'different claims. Give this call `timeout: 600000` too — besides the revert ' +
+          'probe it runs up to 8 single-statement deletion mutants, each a suite run, and ' +
+          'it budgets itself to finish inside that ceiling:',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,
@@ -872,11 +874,16 @@ export function buildRoleBrief(
         'Read its `findings[]`. `kind: "unreachable"` is a test the project\'s test command ' +
           'never collects — it did not run here and it does not run in CI. `kind: "inert"` is ' +
           'a test that **still passed with the change reverted**: it is green whether or not ' +
-          'the feature exists, so it cannot catch a regression in it. Report each as a ' +
+          'the feature exists, so it cannot catch a regression in it. `kind: "mutant-survived"` ' +
+          'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
+          'reset-to-empty) that was **deleted and every affected test stayed green** — the ' +
+          'invariant it enforces has no test that would fail without it, which the whole-file ' +
+          "revert cannot see when the file's other, tested behaviours mask it. Report each as a " +
           '**Suggestion** with `Source: [test]`, saying plainly which behaviour ships ' +
-          'unprotected. **`inconclusive` is not a finding** — reverting the source often ' +
-          "breaks the test's own compile, and that is not the test catching anything. Note it " +
-          'and move on.',
+          'unprotected. **`inconclusive` is not a finding** — for probes and mutants alike, ' +
+          "reverting or mutating the source often breaks the test's own compile, and that is " +
+          'not the test catching anything. Mutants counted in `mutants.skippedForBudget` never ' +
+          'ran — not findings either. Note them and move on.',
       );
     }
   }
