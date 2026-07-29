@@ -43,6 +43,12 @@ function makeBridge(): AcpSessionBridge {
     permissionPolicy: 'first-responder',
     knownClientIds: () => new Set<string>(['client-1']),
     publishWorkspaceEvent: vi.fn(),
+    isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
+    runWorkspaceMemoryRemember: vi.fn(async () => ({
+      summary: 'saved',
+      filesTouched: ['/mem/project/secondary.md'],
+      touchedScopes: ['project'],
+    })),
     manageMcpServer: vi.fn(async (serverName, action, clientId) => ({
       serverName,
       action,
@@ -262,6 +268,8 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    primaryBridge: primary.bridge,
+    secondaryBridge: secondary.bridge,
     secondaryWorkspaceService,
     persistSetting,
     workspaceRegistry,
@@ -1155,6 +1163,44 @@ describe('workspace-qualified core REST', () => {
           }),
         ]),
       );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes managed-memory tasks to the selected workspace bridge', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const queued = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Secondary only' });
+      expect(queued.status).toBe(202);
+
+      await vi.waitFor(() => {
+        expect(
+          h.secondaryBridge.runWorkspaceMemoryRemember,
+        ).toHaveBeenCalledWith({
+          content: 'Secondary only',
+          contextMode: 'workspace',
+        });
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+
+      const completed = await request(h.app)
+        .get(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember/${queued.body.taskId}`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(completed.status).toBe(200);
+      expect(completed.body).toMatchObject({
+        status: 'completed',
+        result: { touchedScopes: ['project'] },
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

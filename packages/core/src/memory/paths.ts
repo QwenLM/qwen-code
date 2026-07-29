@@ -60,18 +60,67 @@ export function getMemoryBaseDir(): string {
   return Storage.getRuntimeBaseDir();
 }
 
-// Memoize by projectRoot plus the runtime-specific base dir. In daemon mode,
-// different sessions can share a project root while writing to different output dirs.
+// Memoize by projectRoot, project scope, and the runtime-specific base dir.
 const _autoMemoryRootCache = new Map<string, string>();
 
 // Memoized on projectRoot alone: the team root resolves via findGitRoot, which
 // does sync fs I/O — and isTeamAutoMemPath runs on every file write.
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
+function resolveWorkspaceProjectStateDir(
+  memoryBaseDir: string,
+  projectRoot: string,
+): string {
+  const stateDir = path.join(
+    memoryBaseDir,
+    'projects',
+    sanitizeCwd(path.resolve(projectRoot)),
+  );
+  let resolvedBaseDir: string;
+  try {
+    resolvedBaseDir = fs.realpathSync(memoryBaseDir);
+  } catch {
+    return stateDir;
+  }
+  let stateStat: fs.Stats;
+  try {
+    stateStat = fs.lstatSync(stateDir);
+  } catch {
+    return stateDir;
+  }
+  let resolvedStateDir: string;
+  try {
+    resolvedStateDir = fs.realpathSync(stateDir);
+  } catch {
+    if (stateStat.isSymbolicLink()) {
+      throw new Error(
+        `Managed memory project state alias is unavailable: ${stateDir}`,
+      );
+    }
+    return stateDir;
+  }
+  const relative = path.relative(resolvedBaseDir, resolvedStateDir);
+  if (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  ) {
+    return resolvedStateDir;
+  }
+  throw new Error(
+    `Managed memory project state alias escapes its base directory: ${stateDir}`,
+  );
+}
+
 export function getAutoMemoryRoot(projectRoot: string): string {
   const useLocalMemory = process.env['QWEN_CODE_MEMORY_LOCAL'] === '1';
+  const useWorkspaceRoot =
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] === 'workspace';
   const memoryBaseDir = useLocalMemory ? '' : getMemoryBaseDir();
-  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${projectRoot}`;
+  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${
+    useWorkspaceRoot ? 'workspace' : 'git-root'
+  }\0${projectRoot}`;
   const cached = _autoMemoryRootCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
@@ -83,13 +132,14 @@ export function getAutoMemoryRoot(projectRoot: string): string {
     // to their canonical repository root: each worktree gets its own memory,
     // consistent with the per-worktree isolation of chats/, workflows/, and
     // team memory (getTeamAutoMemoryRoot). See #6449.
-    const gitRoot = findGitRoot(projectRoot) ?? path.resolve(projectRoot);
-    result = path.join(
-      memoryBaseDir,
-      'projects',
-      sanitizeCwd(gitRoot),
-      AUTO_MEMORY_DIRNAME,
-    );
+    const projectStateDir = useWorkspaceRoot
+      ? resolveWorkspaceProjectStateDir(memoryBaseDir, projectRoot)
+      : path.join(
+          memoryBaseDir,
+          'projects',
+          sanitizeCwd(findGitRoot(projectRoot) ?? path.resolve(projectRoot)),
+        );
+    result = path.join(projectStateDir, AUTO_MEMORY_DIRNAME);
   }
   _autoMemoryRootCache.set(cacheKey, result);
   return result;

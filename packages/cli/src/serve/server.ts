@@ -73,6 +73,7 @@ import {
 } from './workspace-memory.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from './workspace-remember.js';
 import {
@@ -188,7 +189,9 @@ import {
 } from './managed-scratch-workspace.js';
 import {
   isPortableAbsolutePath,
+  requireTrustedWorkspaceRuntime,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveWorkspaceRuntimeFromParam,
 } from './workspace-route-runtime.js';
 import {
   registerWorkspaceLifecycleRoutes,
@@ -1414,6 +1417,43 @@ export function createServeApp(
     safeBody,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+    mutate,
+    resolveRouteDeps: (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
+        return null;
+      const lane = acpHandleRef.current?.getWorkspaceRememberLane(
+        runtime.workspaceId,
+      );
+      if (!lane) {
+        res.set('Retry-After', '1');
+        res.status(503).json({
+          error: 'Workspace runtime is not active.',
+          code: 'workspace_runtime_unavailable',
+          workspaceCwd: runtime.workspaceCwd,
+          workspaceId: runtime.workspaceId,
+        });
+        return null;
+      }
+      return {
+        bridge: runtime.bridge,
+        lane,
+        mutate,
+        parseClientId: parseClientIdHeader,
+        safeBody,
+        isWorkspaceTrusted: () => runtime.trusted,
+        captureGenerationAssertion: () => {
+          const guard = runtime.generationGuard;
+          return guard ? () => guard.assertOpen() : undefined;
+        },
+      };
+    },
   });
   mountWorkspaceAgentsRoutes(app, {
     bridge: primaryBridge,

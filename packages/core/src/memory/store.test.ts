@@ -29,6 +29,8 @@ import { sanitizeCwd } from '../utils/paths.js';
 
 const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
 const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+const originalMemoryProjectScope =
+  process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
 const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 
 describe('auto-memory storage scaffold', () => {
@@ -47,6 +49,12 @@ describe('auto-memory storage scaffold', () => {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     } else {
       process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+    }
+    if (originalMemoryProjectScope === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] =
+        originalMemoryProjectScope;
     }
     if (originalRuntimeDir === undefined) {
       delete process.env['QWEN_RUNTIME_DIR'];
@@ -71,6 +79,12 @@ describe('auto-memory storage scaffold', () => {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     } else {
       process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+    }
+    if (originalMemoryProjectScope === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] =
+        originalMemoryProjectScope;
     }
     if (originalRuntimeDir === undefined) {
       delete process.env['QWEN_RUNTIME_DIR'];
@@ -119,6 +133,82 @@ describe('auto-memory storage scaffold', () => {
         sanitizeCwd(path.resolve(projectRoot)),
         'memory',
       ),
+    );
+  });
+
+  it('shares managed auto-memory across nested directories in the same git checkout by default', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    const repo = path.join(tempDir, 'repo');
+    const workspaceA = path.join(repo, 'workspaces', 'agent');
+    const workspaceB = path.join(repo, 'workspaces', 'nambz');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(workspaceA, { recursive: true });
+    await fs.mkdir(workspaceB, { recursive: true });
+
+    expect(getAutoMemoryRoot(workspaceA)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+    );
+    expect(getAutoMemoryRoot(workspaceB)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+    );
+  });
+
+  it('isolates managed auto-memory by exact workspace when workspace scope is enabled', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    const repo = path.join(tempDir, 'repo');
+    const workspaceA = path.join(repo, 'workspaces', 'agent');
+    const workspaceB = path.join(repo, 'workspaces', 'nambz');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(workspaceA, { recursive: true });
+    await fs.mkdir(workspaceB, { recursive: true });
+
+    expect(getAutoMemoryRoot(workspaceA)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(workspaceA), 'memory'),
+    );
+    expect(getAutoMemoryRoot(workspaceB)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(workspaceB), 'memory'),
+    );
+  });
+
+  it('resolves workspace project aliases that stay inside the managed base directory', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    const workspace = path.join(tempDir, 'product', 'w', 'agent');
+    const projectsDir = path.join(runtimeDir, 'projects');
+    const primaryStateDir = path.join(projectsDir, 'primary');
+    const workspaceStateDir = path.join(projectsDir, sanitizeCwd(workspace));
+    Storage.setRuntimeBaseDir(runtimeDir);
+    await fs.mkdir(primaryStateDir, { recursive: true });
+    await fs.symlink(primaryStateDir, workspaceStateDir, 'dir');
+
+    expect(getAutoMemoryRoot(workspace)).toBe(
+      path.join(await fs.realpath(primaryStateDir), 'memory'),
+    );
+  });
+
+  it('does not resolve workspace project aliases outside the managed base directory', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    const workspace = path.join(tempDir, 'product', 'w', 'agent');
+    const projectsDir = path.join(runtimeDir, 'projects');
+    const outsideStateDir = path.join(tempDir, 'outside');
+    const workspaceStateDir = path.join(projectsDir, sanitizeCwd(workspace));
+    Storage.setRuntimeBaseDir(runtimeDir);
+    await fs.mkdir(projectsDir, { recursive: true });
+    await fs.mkdir(outsideStateDir, { recursive: true });
+    await fs.symlink(outsideStateDir, workspaceStateDir, 'dir');
+
+    expect(() => getAutoMemoryRoot(workspace)).toThrow(
+      'Managed memory project state alias escapes its base directory',
     );
   });
 
