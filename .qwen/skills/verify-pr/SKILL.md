@@ -200,6 +200,30 @@ differs only by the change under test; the verdict is the pair of counts.
   artifacts it will see in production** (the shipped chunks, the real
   module namespaces, the actual wire payloads). A guard that is too strict
   fails in production on a path no mocked test covers.
+- **When one fix bundles two changes, build the intermediate variants.** An
+  A/B against base proves the pair works; it says nothing about what each
+  half does or whether both are needed. Compile a third build with one half
+  reverted and put all three in one table. Worked example, on a first-poll
+  drain fix that both replaced `Math.max(...spread)` with `reduce()` and
+  moved `initialized = true` after the fallible work:
+
+  | build                         | RangeError | prompts dispatched     | cursor saved |
+  | ----------------------------- | ---------- | ---------------------- | ------------ |
+  | base (`Math.max`, flag first) | yes        | **2,999 and climbing** | none         |
+  | flag moved only               | yes        | 0                      | none         |
+  | both (head)                   | no         | 0                      | saved        |
+
+  The ordering change is what converts a backlog flood into a fail-safe
+  retry; `reduce()` is what restores liveness. Either alone leaves a channel
+  that floods or wedges — a conclusion the two-cell A/B cannot reach.
+
+- **A limit measured in isolation does not transfer to the real call site.**
+  Argument-count caps, stack depth, buffer sizes and timeouts all move with
+  context: the same `Math.max` spread threw between 110k and 130k elements
+  inside a deep async stack, well below what a standalone micro-benchmark
+  suggests. Bisect the threshold **through the real code path**, and quote
+  the harness you bisected with — a limit quoted from documentation or from
+  a toy loop is a guess about the system under test.
 - **When the same predicate is checked in two places, verify they see the
   same state.** A guard duplicated across a process boundary — a route and
   the child it spawns, a parent and a worker, a cache and its source — is
@@ -273,6 +297,14 @@ for aborting mid-stream never streamed. Every assertion passed. Fixing the
 race also restored the coverage the tests were named for
 (`modelRequestsInFlightAtAbort=1`), which is the tell that the original
 green meant nothing.
+
+The mirror of it: **count at the destination, not at the component
+boundary.** What a component emits and what survives to the end of the
+pipeline are different numbers, and the gates live in between — "envelopes
+the adapter emitted" versus "prompts that actually reached the agent" differ
+by every filter on the path. Assert the number a user would experience; a
+count taken at the seam can be right while the feature is silently dropped
+downstream.
 
 **Timing-triggered assertions have a threshold — measure it, do not sample
 it.** When an assertion's outcome depends on a wall-clock timer racing an

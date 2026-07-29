@@ -1613,6 +1613,20 @@ describe('qwen-triage verify hardening round 2', () => {
     // #7899: the shipped script was run verbatim against the live repo with
     // every mutating call hard-failing — real data, no possible side effect.
     expect(flat).toContain('interpose a refusing proxy on the write path');
+
+    // #7862 R4: the fix bundled reduce() with an ordering change. A third
+    // build with only the ordering change showed each half does a different
+    // job — either alone leaves a channel that floods or wedges, which the
+    // two-cell A/B cannot reach.
+    expect(flat).toContain('build the intermediate variants');
+    // ...and the same round bisected the RangeError threshold through the
+    // real async stack, where it fired far below a micro-benchmark's number.
+    expect(flat).toContain(
+      'A limit measured in isolation does not transfer to the real call site',
+    );
+    // ...counting emitted envelopes instead of delivered prompts would have
+    // hidden every gate on the path.
+    expect(flat).toContain('count at the destination, not at the component');
   });
 
   // The whole report is already inside a <details> on the PR. With the
