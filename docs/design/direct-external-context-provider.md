@@ -1,6 +1,6 @@
 # Direct External Context Provider
 
-**Status:** Phase 1 implemented
+**Status:** Phase 1 implemented; optional auto-recall profile implemented
 
 **Date:** 2026-07-23
 
@@ -12,7 +12,10 @@
 
 Phase 1 is intentionally limited to a tool-invoked, retrieval-only surface. It
 adds one private Qwen Code extension with one MCP tool:
-`context_search({ query })`.
+`context_search({ query })`. The optional Phase 2 profile adds deterministic
+retrieval through an administrator-installed `UserPromptSubmit` Hook. Its
+detailed design is in
+[Direct External Context Auto Recall](./direct-external-context-auto-recall.md).
 
 The extension supports two explicit read adapters:
 
@@ -20,10 +23,9 @@ The extension supports two explicit read adapters:
 - Generic HTTP Search V1 for an existing knowledge base, RAG service, or
   enterprise search endpoint.
 
-Hooks, automatic recall, write tools, personal memory, and managed replacement
-of Qwen's native memory are deferred. This is the smallest version whose
-provider binding and failure behavior can be enforced and reviewed
-independently.
+Write tools, personal memory, and managed replacement of Qwen's native memory
+remain deferred. On-demand and auto-recall are mutually exclusive deployment
+profiles so one turn cannot query the same provider twice.
 
 ## Problem
 
@@ -51,7 +53,8 @@ client-provided metadata into authorization.
 
 ## Non-goals
 
-- Automatic prompt recall or context injection.
+- Automatic recall from an input path that does not provide
+  `submitted_prompt`, or without administrator opt-in.
 - Any add, update, delete, ingestion, or shared-memory write operation.
 - Trusted personal identity, personal memory, or per-user audit.
 - Per-document user ACL evaluation or OAuth token brokerage.
@@ -70,7 +73,9 @@ flowchart TD
     C -- "Yes" --> G
     C -- "No" --> D{"Single interactive CLI process for trusted collaborators?"}
     D -- "No" --> G
-    D -- "Yes" --> E["Use Direct Provider Phase 1"]
+    D -- "Yes" --> E{"Automatic outbound retrieval accepted?"}
+    E -- "No" --> O["Use Direct on-demand profile"]
+    E -- "Yes" --> R["Use Direct auto-recall profile"]
 ```
 
 The Direct Profile and Governed Profile solve different trust problems. The
@@ -96,9 +101,9 @@ flowchart LR
 ```
 
 Each MCP subprocess loads configuration once, constructs one adapter, and
-remains bound to that provider and corpus for its lifetime. There is no hook
-process, shared cache, runtime plugin loading, or mutable selector state inside
-that subprocess.
+remains bound to that provider and corpus for its lifetime. The auto-recall
+profile instead uses an isolated Hook process for each eligible prompt. The
+profiles share no cache, runtime plugin loading, or mutable selector state.
 
 ### Internal interface
 
@@ -129,9 +134,10 @@ The extension always registers exactly one tool:
 context_search({ query: string });
 ```
 
-There is no prompt-submission hook, so search runs only when Qwen invokes the
-tool. With the documented `permissions.allow` setting, the model may do so
-without per-call user confirmation. In interactive non-YOLO mode,
+In the on-demand profile there is no prompt-submission hook, so search runs
+only when Qwen invokes the tool. With the documented `permissions.allow`
+setting, the model may do so without per-call user confirmation. In
+interactive non-YOLO mode,
 `permissions.ask` requests per-call confirmation. YOLO mode auto-approves
 ordinary tools even when their rule is `ask`, and users can change approval
 mode during a session. Phase 1 therefore does not provide non-bypassable
@@ -154,14 +160,15 @@ The returned payload is JSON with this envelope:
 }
 ```
 
-At most five items are returned. Each content field is capped at 1000
-characters and the serialized envelope is capped at 4000 characters. Optional
-metadata is bounded separately. These are independent maxima rather than a
-guarantee that five maximum-sized items fit simultaneously. Results remain a
-prefix of provider ranking: low-value metadata is removed before provenance,
-the final fitting item may have its content shortened against the serialized
-JSON budget, and lower-ranked items are omitted once the next item cannot
-retain non-empty content.
+At most five items are returned. Each content field is capped at 1000 Unicode
+code points and the serialized envelope is capped at 4000 JavaScript code
+units. Literal angle brackets are emitted as JSON Unicode escapes and counted
+in that final budget. Optional metadata is bounded separately. These are
+independent maxima rather than a guarantee that five maximum-sized items fit
+simultaneously. Results remain a prefix of provider ranking: low-value metadata
+is removed before provenance, the final fitting item may have its content
+shortened against the serialized JSON budget, and lower-ranked items are
+omitted once the next item cannot retain non-empty content.
 
 JSON serialization preserves the data envelope, but it cannot guarantee that a
 model will ignore prompt injection embedded in retrieved content. Provider
@@ -192,7 +199,9 @@ outside this integration and are not a tamper-resistant compliance audit.
 
 `QWEN_EXTERNAL_CONTEXT_CONFIG` points to an absolute, versioned JSON file. The
 file names the credential environment variable rather than containing the
-secret.
+secret. Version 1 selects on-demand MCP retrieval; version 2 selects the
+auto-recall Hook profile and additionally binds a canonical repository root
+and a shorter provider timeout.
 
 ```json
 {
@@ -388,16 +397,17 @@ that provider-side state.
 
 ## Deferred phases
 
+The optional auto-recall profile is implemented separately in
+[Direct External Context Auto Recall](./direct-external-context-auto-recall.md).
 The broader proposal in #7585 retains possible later phases:
 
-- Automatic recall through a hook, with separate privacy and latency review.
 - Explicit shared-memory writes, only after provider-side write authorization,
   confirmation semantics, idempotency, and audit are defined.
 - Additional provider-specific adapters where the Generic HTTP contract is not
   sufficient.
 
-These are not latent switches in Phase 1. They require separate review and
-implementation.
+The remaining items are not latent switches in either direct profile. They
+require separate review and implementation.
 
 ## Alternatives considered
 
