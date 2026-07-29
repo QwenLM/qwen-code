@@ -82,6 +82,16 @@ export interface DaemonSessionClientOptions {
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
+   * Fallback pagination anchor from the daemon: the oldest
+   * `qwen.session.recordId` in the last persisted transcript page,
+   * read from the transcript when the replay
+   * snapshot's `history_truncated` marker carries none (live sessions
+   * whose in-flight turn capped the journal before any turn boundary).
+   * Clients use it as `beforeRecordId` when no recordId is available
+   * in the retained window.
+   */
+  historyAnchorRecordId?: string;
+  /**
    * True when the daemon reported the replay snapshot as degraded (the
    * compaction engine failed at least once for this session). Consumers
    * should prefer the full transcript over the snapshot when set.
@@ -124,6 +134,13 @@ export class DaemonSessionClient {
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
   /**
+   * Fallback pagination anchor from the daemon load response (see
+   * {@link DaemonSessionClientOptions.historyAnchorRecordId}). Undefined
+   * when the retained window already carries a recordId or the daemon
+   * could not read one from the persisted transcript.
+   */
+  readonly historyAnchorRecordId: string | undefined;
+  /**
    * True when the load response flagged the replay snapshot as degraded
    * (`replayDegraded` — compaction failed at least once, so
    * `replaySnapshot` may lag behind live events). Prefer the full
@@ -140,6 +157,7 @@ export class DaemonSessionClient {
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
+  private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
@@ -155,6 +173,7 @@ export class DaemonSessionClient {
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.historyHasMore = opts.historyHasMore ?? false;
+    this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
@@ -237,6 +256,7 @@ export class DaemonSessionClient {
       compactedReplay,
       liveJournal,
       historyHasMore,
+      historyAnchorRecordId,
       replayDegraded,
       lastEventId: serverLastEventId,
       eventEpoch,
@@ -254,6 +274,7 @@ export class DaemonSessionClient {
         liveJournal: liveJournal ?? [],
       },
       historyHasMore,
+      historyAnchorRecordId,
       replayDegraded,
     });
   }
@@ -360,7 +381,7 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.client.cancel(this.sessionId, this.clientId).catch(() => {});
+          this.cancel().catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -455,7 +476,16 @@ export class DaemonSessionClient {
   }
 
   async cancel(): Promise<void> {
-    await this.client.cancel(this.sessionId, this.clientId);
+    const cancelling =
+      this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
+    this.cancelling = cancelling;
+    try {
+      await cancelling;
+    } finally {
+      if (this.cancelling === cancelling) {
+        this.cancelling = undefined;
+      }
+    }
   }
 
   /**

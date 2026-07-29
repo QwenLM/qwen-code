@@ -9,6 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import {
+  WebShellCustomizationProvider,
+  type WebShellComposerToolbarRenderInfo,
+  type WebShellCustomization,
+} from '../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -101,6 +106,11 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
 let messagesState: any[];
 vi.mock('../hooks/useMessages', () => ({
   useMessages: () => messagesState,
+  useMessagesFromBlocks: () => messagesState,
+}));
+
+vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptBlocks: () => [],
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -136,7 +146,7 @@ vi.mock('./ChatEditor', () => ({
       insertText,
     }));
     return (
-      <div>
+      <div data-web-shell-composer>
         <button
           data-testid="pane-submit"
           onClick={() => props.onSubmit('hello there')}
@@ -219,6 +229,7 @@ const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
   connectionState = {
@@ -268,15 +279,35 @@ afterEach(() => {
   container = null;
 });
 
-function render(props: Record<string, unknown> = {}): void {
+function render(
+  props: Record<string, unknown> = {},
+  customization: WebShellCustomization = EMPTY_CUSTOMIZATION,
+): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() =>
     root!.render(
-      <I18nProvider language="en">
-        <ChatPane {...props} />
-      </I18nProvider>,
+      <WebShellCustomizationProvider value={customization}>
+        <I18nProvider language="en">
+          <ChatPane {...props} />
+        </I18nProvider>
+      </WebShellCustomizationProvider>,
+    ),
+  );
+}
+
+function rerender(
+  props: Record<string, unknown> = {},
+  customization: WebShellCustomization = EMPTY_CUSTOMIZATION,
+): void {
+  act(() =>
+    root!.render(
+      <WebShellCustomizationProvider value={customization}>
+        <I18nProvider language="en">
+          <ChatPane {...props} />
+        </I18nProvider>
+      </WebShellCustomizationProvider>,
     ),
   );
 }
@@ -286,6 +317,80 @@ function testid(id: string): HTMLElement | null {
 }
 
 describe('ChatPane', () => {
+  it('renders the custom composer footer directly after the pane editor', () => {
+    const footerProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      footerProps.push(props);
+      return <div data-testid="pane-composer-footer">pane footer</div>;
+    };
+
+    render({}, { renderComposerFooter: ComposerFooter });
+
+    const composer = container!.querySelector('[data-web-shell-composer]');
+    const footer = testid('pane-composer-footer');
+    expect(composer?.nextElementSibling).toBe(footer);
+    expect(footer?.parentElement).toBe(composer?.parentElement);
+    expect(footerProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: false,
+      currentMode: 'default',
+      currentModel: '',
+      sessionName: 'Refactor core',
+    });
+  });
+
+  it('updates the custom composer footer with pane-scoped state', () => {
+    const footerProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      footerProps.push(props);
+      return <div data-testid="pane-composer-footer" />;
+    };
+    const customization = { renderComposerFooter: ComposerFooter };
+    render({}, customization);
+
+    streamingStateValue = 'responding';
+    connectionState.catchingUp = true;
+    connectionState.currentMode = 'plan';
+    connectionState.currentModel = 'qwen-next';
+    connectionState.displayName = 'Pane Two';
+    rerender({}, customization);
+
+    expect(footerProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: true,
+      currentMode: 'plan',
+      currentModel: 'qwen-next',
+      sessionName: 'Pane Two',
+    });
+
+    connectionState.catchingUp = false;
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+    };
+    rerender({}, customization);
+
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(footerProps.at(-1)?.disabled).toBe(true);
+  });
+
+  it('adds no composer footer DOM when omitted or returning null', () => {
+    render();
+    const composer = container!.querySelector('[data-web-shell-composer]');
+    const children = Array.from(composer?.parentElement?.children ?? []);
+    expect(composer?.nextElementSibling).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
+
+    rerender({}, { renderComposerFooter: () => null });
+
+    const nullComposer = container!.querySelector('[data-web-shell-composer]');
+    expect(nullComposer?.nextElementSibling).toBeNull();
+    expect(
+      Array.from(nullComposer?.parentElement?.children ?? []),
+    ).toHaveLength(children.length);
+  });
+
   it('renders the session transcript and header label', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
@@ -384,13 +489,7 @@ describe('ChatPane', () => {
     expect(voiceTarget).toBeDefined();
 
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
-    act(() => {
-      root?.render(
-        <I18nProvider language="en">
-          <ChatPane workspaceCwd="/w" />
-        </I18nProvider>,
-      );
-    });
+    rerender({ workspaceCwd: '/w' });
 
     expect(latestChatEditorProps.dialogOpen).toBe(true);
     expect(latestChatEditorProps.disabled).toBe(true);
@@ -443,13 +542,7 @@ describe('ChatPane', () => {
     render({ workspaceCwd: '/work/other' });
     expect(latestChatEditorProps.voiceTarget).toBeUndefined();
 
-    act(() => {
-      root?.render(
-        <I18nProvider language="en">
-          <ChatPane workspaceCwd="/work/api" hidden />
-        </I18nProvider>,
-      );
-    });
+    rerender({ workspaceCwd: '/work/api', hidden: true });
     expect(latestChatEditorProps.voiceTarget).toBeUndefined();
   });
 

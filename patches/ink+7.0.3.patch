@@ -18,7 +18,7 @@ index 1d7bf6b..29401a6 100644
 -export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 +export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, selectable, selectionFlow, selectionBreakAfter, selectionJoiner, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 diff --git a/node_modules/ink/build/components/Text.js b/node_modules/ink/build/components/Text.js
-index 2e4b9ff..1ec2ae6 100644
+index 2e4b9ff..77ed0f6 100644
 --- a/node_modules/ink/build/components/Text.js
 +++ b/node_modules/ink/build/components/Text.js
 @@ -6,7 +6,7 @@ import { backgroundContext } from './BackgroundContext.js';
@@ -38,6 +38,78 @@ index 2e4b9ff..1ec2ae6 100644
 +    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform, selectable: selectable, selectionFlow: selectionFlow, selectionBreakAfter: selectionBreakAfter, selectionJoiner: selectionJoiner }, childrenOrAriaLabel));
  }
  //# sourceMappingURL=Text.js.map
+\ No newline at end of file
+diff --git a/node_modules/ink/build/cursor-helpers.d.ts b/node_modules/ink/build/cursor-helpers.d.ts
+index c6e9466..6dd4c0f 100644
+--- a/node_modules/ink/build/cursor-helpers.d.ts
++++ b/node_modules/ink/build/cursor-helpers.d.ts
+@@ -11,9 +11,11 @@
+ export declare const cursorPositionChanged: (a: CursorPosition | undefined, b: CursorPosition | undefined) => boolean;
+ /**
+ Build escape sequence to move cursor from bottom of output to the target position and show it.
+-Assumes cursor is at (col 0, line visibleLineCount) — i.e. just after the last output line.
++When hasTrailingNewline is true the terminal cursor sits at (col 0, line visibleLineCount)
++— i.e. just after the last output line. When false (fullscreen mode) it sits at the END
++of the last visible line (line visibleLineCount - 1), so one fewer cursorUp is needed.
+ */
+-export declare const buildCursorSuffix: (visibleLineCount: number, cursorPosition: CursorPosition | undefined) => string;
++export declare const buildCursorSuffix: (visibleLineCount: number, cursorPosition: CursorPosition | undefined, hasTrailingNewline?: boolean) => string;
+ /**
+ Build escape sequence to move cursor from previousCursorPosition back to the bottom of output.
+ This must be done before eraseLines or any operation that assumes cursor is at the bottom.
+@@ -25,6 +27,7 @@
+     previousCursorPosition: CursorPosition | undefined;
+     visibleLineCount: number;
+     cursorPosition: CursorPosition | undefined;
++    hasTrailingNewline?: boolean;
+ };
+ /**
+ Build the escape sequence for cursor-only updates (output unchanged, cursor moved).
+diff --git a/node_modules/ink/build/cursor-helpers.js b/node_modules/ink/build/cursor-helpers.js
+index be49354..14215f0 100644
+--- a/node_modules/ink/build/cursor-helpers.js
++++ b/node_modules/ink/build/cursor-helpers.js
+@@ -8,13 +8,15 @@ Compare two cursor positions. Returns true if they differ.
+ export const cursorPositionChanged = (a, b) => a?.x !== b?.x || a?.y !== b?.y;
+ /**
+ Build escape sequence to move cursor from bottom of output to the target position and show it.
+-Assumes cursor is at (col 0, line visibleLineCount) — i.e. just after the last output line.
++When hasTrailingNewline is true the terminal cursor sits at (col 0, line visibleLineCount)
++— i.e. just after the last output line. When false (fullscreen mode) it sits at the END
++of the last visible line (line visibleLineCount - 1), so one fewer cursorUp is needed.
+ */
+-export const buildCursorSuffix = (visibleLineCount, cursorPosition) => {
++export const buildCursorSuffix = (visibleLineCount, cursorPosition, hasTrailingNewline = true) => {
+     if (!cursorPosition) {
+         return '';
+     }
+-    const moveUp = visibleLineCount - cursorPosition.y;
++    const moveUp = (hasTrailingNewline ? visibleLineCount : visibleLineCount - 1) - cursorPosition.y;
+     return ((moveUp > 0 ? ansiEscapes.cursorUp(moveUp) : '') +
+         ansiEscapes.cursorTo(cursorPosition.x) +
+         showCursorEscape);
+@@ -27,8 +29,10 @@ export const buildReturnToBottom = (previousLineCount, previousCursorPosition) =
+     if (!previousCursorPosition) {
+         return '';
+     }
+-    // PreviousLineCount includes trailing newline, so visible lines = previousLineCount - 1
+-    // cursor is at previousCursorPosition.y, need to go to line (previousLineCount - 1)
++    // previousLineCount is lines.length from str.split('\n'), which already
++    // includes the trailing empty element when the output ends with '\n'.
++    // The bottom line is therefore always previousLineCount - 1 regardless
++    // of whether a trailing newline was present.
+     const down = previousLineCount - 1 - previousCursorPosition.y;
+     return ((down > 0 ? ansiEscapes.cursorDown(down) : '') + ansiEscapes.cursorTo(0));
+ };
+@@ -39,7 +43,7 @@ Hides cursor if it was previously shown, returns to bottom, then repositions.
+ export const buildCursorOnlySequence = (input) => {
+     const hidePrefix = input.cursorWasShown ? hideCursorEscape : '';
+     const returnToBottom = buildReturnToBottom(input.previousLineCount, input.previousCursorPosition);
+-    const cursorSuffix = buildCursorSuffix(input.visibleLineCount, input.cursorPosition);
++    const cursorSuffix = buildCursorSuffix(input.visibleLineCount, input.cursorPosition, input.hasTrailingNewline);
+     return hidePrefix + returnToBottom + cursorSuffix;
+ };
+ /**
 diff --git a/node_modules/ink/build/frame-controller.d.ts b/node_modules/ink/build/frame-controller.d.ts
 new file mode 100644
 index 0000000..c294036
@@ -153,7 +225,7 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..6e97480 100644
+index ef659f3..767d861 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
 @@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
@@ -219,6 +291,167 @@ index ef659f3..6e97480 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
+diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
+index cdb5fc4..89925ea 100644
+--- a/node_modules/ink/build/log-update.js
++++ b/node_modules/ink/build/log-update.js
+@@ -12,6 +12,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+     let cursorDirty = false;
+     let previousCursorPosition;
+     let cursorWasShown = false;
++    let previousHasTrailingNewline = true;
+     const getActiveCursor = () => (cursorDirty ? cursorPosition : undefined);
+     const hasChanges = (str, activeCursor) => {
+         const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
+@@ -32,7 +33,8 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+         }
+         const lines = str.split('\n');
+         const visibleCount = visibleLineCount(lines, str);
+-        const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor);
++        const hasTrailingNewline = str.endsWith('\n');
++        const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor, hasTrailingNewline);
+         if (str === previousOutput && cursorChanged) {
+             stream.write(buildCursorOnlySequence({
+                 cursorWasShown,
+@@ -40,6 +42,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+                 previousCursorPosition,
+                 visibleLineCount: visibleCount,
+                 cursorPosition: activeCursor,
++                hasTrailingNewline: previousHasTrailingNewline,
+             }));
+         }
+         else {
+@@ -50,6 +53,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+                 str +
+                 cursorSuffix);
+             previousLineCount = lines.length;
++            previousHasTrailingNewline = hasTrailingNewline;
+         }
+         previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
+         cursorWasShown = activeCursor !== undefined;
+@@ -62,12 +66,14 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+         previousLineCount = 0;
+         previousCursorPosition = undefined;
+         cursorWasShown = false;
++        previousHasTrailingNewline = true;
+     };
+     render.done = () => {
+         previousOutput = '';
+         previousLineCount = 0;
+         previousCursorPosition = undefined;
+         cursorWasShown = false;
++        previousHasTrailingNewline = true;
+         if (!showCursor) {
+             cliCursor.show(stream);
+             hasHiddenCursor = false;
+@@ -78,6 +84,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+         previousLineCount = 0;
+         previousCursorPosition = undefined;
+         cursorWasShown = false;
++        previousHasTrailingNewline = true;
+     };
+     render.sync = (str) => {
+         const activeCursor = cursorDirty ? cursorPosition : undefined;
+@@ -85,11 +92,12 @@ const createStandard = (stream, { showCursor = false } = {}) => {
+         const lines = str.split('\n');
+         previousOutput = str;
+         previousLineCount = lines.length;
++        previousHasTrailingNewline = str.endsWith('\n');
+         if (!activeCursor && cursorWasShown) {
+             stream.write(hideCursorEscape);
+         }
+         if (activeCursor) {
+-            stream.write(buildCursorSuffix(visibleLineCount(lines, str), activeCursor));
++            stream.write(buildCursorSuffix(visibleLineCount(lines, str), activeCursor, previousHasTrailingNewline));
+         }
+         previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
+         cursorWasShown = activeCursor !== undefined;
+@@ -110,6 +118,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+     let cursorDirty = false;
+     let previousCursorPosition;
+     let cursorWasShown = false;
++    let previousHasTrailingNewline = true;
+     const getActiveCursor = () => (cursorDirty ? cursorPosition : undefined);
+     const hasChanges = (str, activeCursor) => {
+         const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
+@@ -138,6 +147,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+                 previousCursorPosition,
+                 visibleLineCount: visibleCount,
+                 cursorPosition: activeCursor,
++                hasTrailingNewline: previousHasTrailingNewline,
+             }));
+             previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
+             cursorWasShown = activeCursor !== undefined;
+@@ -145,7 +155,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+         }
+         const returnPrefix = buildReturnToBottomPrefix(cursorWasShown, previousLines.length, previousCursorPosition);
+         if (str === '\n' || previousOutput.length === 0) {
+-            const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor);
++            const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor, str.endsWith('\n'));
+             stream.write(returnPrefix +
+                 ansiEscapes.eraseLines(previousLines.length) +
+                 str +
+@@ -154,6 +164,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+             previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
+             previousOutput = str;
+             previousLines = nextLines;
++            previousHasTrailingNewline = str.endsWith('\n');
+             return true;
+         }
+         const hasTrailingNewline = str.endsWith('\n');
+@@ -187,13 +198,14 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+                 // has no trailing newline (fullscreen mode).
+                 (isLastLine && !hasTrailingNewline ? '' : '\n'));
+         }
+-        const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor);
++        const cursorSuffix = buildCursorSuffix(visibleCount, activeCursor, hasTrailingNewline);
+         buffer.push(cursorSuffix);
+         stream.write(buffer.join(''));
+         cursorWasShown = activeCursor !== undefined;
+         previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
+         previousOutput = str;
+         previousLines = nextLines;
++        previousHasTrailingNewline = hasTrailingNewline;
+         return true;
+     };
+     render.clear = () => {
+@@ -203,12 +215,14 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+         previousLines = [];
+         previousCursorPosition = undefined;
+         cursorWasShown = false;
++        previousHasTrailingNewline = true;
+     };
+     render.done = () => {
+         previousOutput = '';
+         previousLines = [];
+         previousCursorPosition = undefined;
+         cursorWasShown = false;
++        previousHasTrailingNewline = true;
+         if (!showCursor) {
+             cliCursor.show(stream);
+             hasHiddenCursor = false;
+@@ -219,6 +233,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+         previousLines = [];
+         previousCursorPosition = undefined;
+         cursorWasShown = false;
++        previousHasTrailingNewline = true;
+     };
+     render.sync = (str) => {
+         const activeCursor = cursorDirty ? cursorPosition : undefined;
+@@ -226,11 +241,12 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
+         const lines = str.split('\n');
+         previousOutput = str;
+         previousLines = lines;
++        previousHasTrailingNewline = str.endsWith('\n');
+         if (!activeCursor && cursorWasShown) {
+             stream.write(hideCursorEscape);
+         }
+         if (activeCursor) {
+-            stream.write(buildCursorSuffix(visibleLineCount(lines, str), activeCursor));
++            stream.write(buildCursorSuffix(visibleLineCount(lines, str), activeCursor, previousHasTrailingNewline));
+         }
+         previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
+         cursorWasShown = activeCursor !== undefined;
 diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
 index 0f4523f..a3ef634 100644
 --- a/node_modules/ink/build/output.d.ts
@@ -254,7 +487,7 @@ index 0f4523f..a3ef634 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..ac81f2e 100644
+index c763b77..bfd3d08 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
 @@ -1,6 +1,26 @@
@@ -451,8 +684,70 @@ index c763b77..ac81f2e 100644
          };
      }
  }
+diff --git a/node_modules/ink/build/reconciler.js b/node_modules/ink/build/reconciler.js
+index 5b4a9d7..25cc017 100644
+--- a/node_modules/ink/build/reconciler.js
++++ b/node_modules/ink/build/reconciler.js
+@@ -53,6 +53,25 @@ const cleanupYogaNode = (node) => {
+     node?.unsetMeasureFunc();
+     node?.freeRecursive();
+ };
++// Clear staticNode when the node it points at is removed as part of a larger
++// subtree. The previous identity check (staticNode === removeNode) only caught
++// direct removal of <Static>; removing an ancestor left a dangling reference
++// whose freed WASM memory crashed the next render (QwenLM/qwen-code#6820).
++// Must be called BEFORE removeChildNode breaks the parent chain.
++const clearStaticNodeIfContained = (removeNode) => {
++    const staticNode = currentRootNode?.staticNode;
++    if (!staticNode) {
++        return;
++    }
++    let current = staticNode;
++    while (current) {
++        if (current === removeNode) {
++            currentRootNode.staticNode = undefined;
++            return;
++        }
++        current = current.parentNode;
++    }
++};
+ let currentUpdatePriority = NoEventPriority;
+ let currentRootNode;
+ async function loadPackageJson() {
+@@ -212,13 +231,10 @@ export default createReconciler({
+     appendChildToContainer: appendChildNode,
+     insertInContainerBefore: insertBeforeNode,
+     removeChildFromContainer(node, removeNode) {
++        clearStaticNodeIfContained(removeNode);
+         removeChildNode(node, removeNode);
+         cleanupYogaNode(removeNode.yogaNode);
+-        // Only clear staticNode if it still points at the removed node. On key-driven remounts, `createInstance` already registered the new node before this removal fires.
+-        if (removeNode.internal_static &&
+-            currentRootNode?.staticNode === removeNode) {
+-            currentRootNode.staticNode = undefined;
+-        }
++        removeNode.yogaNode = undefined;
+     },
+     commitUpdate(node, _type, oldProps, newProps) {
+         if (currentRootNode && node.internal_static) {
+@@ -254,13 +270,10 @@ export default createReconciler({
+         setTextNodeValue(node, newText);
+     },
+     removeChild(node, removeNode) {
++        clearStaticNodeIfContained(removeNode);
+         removeChildNode(node, removeNode);
+         cleanupYogaNode(removeNode.yogaNode);
+-        // Same guard as removeChildFromContainer: only clear if this is still the active static node.
+-        if (removeNode.internal_static &&
+-            currentRootNode?.staticNode === removeNode) {
+-            currentRootNode.staticNode = undefined;
+-        }
++        removeNode.yogaNode = undefined;
+     },
+     setCurrentUpdatePriority(newPriority) {
+         currentUpdatePriority = newPriority;
 diff --git a/node_modules/ink/build/render-background.js b/node_modules/ink/build/render-background.js
-index db5c807..bb54771 100644
+index db5c807..3ac805a 100644
 --- a/node_modules/ink/build/render-background.js
 +++ b/node_modules/ink/build/render-background.js
 @@ -18,7 +18,10 @@ const renderBackground = (x, y, node, output) => {
@@ -482,7 +777,7 @@ index 127c620..6d5a005 100644
  }) => void;
  export default renderNodeToOutput;
 diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
-index f00a278..07a98d0 100644
+index f00a278..e6bc4ca 100644
 --- a/node_modules/ink/build/render-node-to-output.js
 +++ b/node_modules/ink/build/render-node-to-output.js
 @@ -1,7 +1,6 @@
@@ -615,7 +910,7 @@ index 8c35aea..26e3196 100644
 +declare const renderer: (node: DOMElement, isScreenReaderEnabled: boolean, selection?: ScreenSelection | null) => Result;
  export default renderer;
 diff --git a/node_modules/ink/build/renderer.js b/node_modules/ink/build/renderer.js
-index bf23246..81d72e9 100644
+index bf23246..7fa831f 100644
 --- a/node_modules/ink/build/renderer.js
 +++ b/node_modules/ink/build/renderer.js
 @@ -1,6 +1,6 @@
@@ -678,7 +973,7 @@ index 935cfb8..3dddced 100644
 +};
  export default wrapText;
 diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-text.js
-index 51f696c..d96d438 100644
+index 51f696c..1f66ca0 100644
 --- a/node_modules/ink/build/wrap-text.js
 +++ b/node_modules/ink/build/wrap-text.js
 @@ -1,5 +1,6 @@
@@ -740,3 +1035,4 @@ index 51f696c..d96d438 100644
 +};
  export default wrapText;
  //# sourceMappingURL=wrap-text.js.map
+\ No newline at end of file

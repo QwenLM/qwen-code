@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { DaemonVoiceMode } from '@qwen-code/sdk';
 import {
   useConnection,
   useWorkspace,
@@ -110,10 +111,13 @@ export function VoiceButton({
   const [voiceGate, setVoiceGate] = useState<{
     queryKey: string | undefined;
     enabled: boolean;
+    mode: DaemonVoiceMode;
   }>(() => ({
     queryKey,
     enabled: false,
+    mode: 'hold',
   }));
+  const holdPointerIdRef = useRef<number | null>(null);
   const targetRef = useRef(target);
   targetRef.current = target;
   const requestGenerationRef = useRef(0);
@@ -135,6 +139,7 @@ export function VoiceButton({
     setVoiceGate({
       queryKey,
       enabled: false,
+      mode: 'hold',
     });
     if (
       !requestTarget ||
@@ -151,6 +156,7 @@ export function VoiceButton({
           setVoiceGate({
             queryKey,
             enabled: voice.enabled === true,
+            mode: voice.mode,
           });
         }
       })
@@ -303,6 +309,63 @@ export function VoiceButton({
   // composer is disabled (e.g. mid-turn) — only starting a new one is blocked.
   const canCancel = isRecording || isConnecting;
 
+  const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (voiceGate.mode === 'hold' && event.detail !== 0) return;
+    if (isRecording) {
+      stop();
+    } else if (isConnecting) {
+      abort();
+    } else if (!disabled) {
+      setNoticeMessage(undefined);
+      start();
+    }
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (
+      voiceGate.mode !== 'hold' ||
+      event.button !== 0 ||
+      disabled ||
+      isConnecting ||
+      isRecording
+    ) {
+      return;
+    }
+    event.preventDefault();
+    holdPointerIdRef.current = event.pointerId;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; release on the button still works.
+    }
+    setNoticeMessage(undefined);
+    start();
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (
+      voiceGate.mode !== 'hold' ||
+      holdPointerIdRef.current !== event.pointerId
+    ) {
+      return;
+    }
+    holdPointerIdRef.current = null;
+    if (isConnecting || isRecording) stop();
+  };
+
+  const handlePointerCancel = (
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => {
+    if (
+      voiceGate.mode !== 'hold' ||
+      holdPointerIdRef.current !== event.pointerId
+    ) {
+      return;
+    }
+    holdPointerIdRef.current = null;
+    if (isConnecting || isRecording) abort();
+  };
+
   const label = isRecording
     ? t('voice.stopDictation')
     : isTranscribing
@@ -321,7 +384,10 @@ export function VoiceButton({
       <button
         type="button"
         className={styles.pill}
-        onClick={() => stop()}
+        onClick={handleClick}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         aria-label={label}
         title={label}
       >
@@ -365,17 +431,10 @@ export function VoiceButton({
       <button
         type="button"
         className={iconClass}
-        onClick={() => {
-          if (isConnecting) {
-            abort();
-          } else if (disabled) {
-            return;
-          } else {
-            // idle / error / notice → (re)start
-            setNoticeMessage(undefined);
-            start();
-          }
-        }}
+        onClick={handleClick}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         disabled={Boolean(disabled) && !canCancel}
         aria-label={label}
         title={errorMessage ?? noticeMessage ?? label}

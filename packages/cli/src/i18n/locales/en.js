@@ -180,6 +180,7 @@ export default {
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
+  'toolDisplayName.ZoomImage': 'toolDisplayName.ZoomImage',
   'toolDisplayName.Grep': 'toolDisplayName.Grep',
   'toolDisplayName.Glob': 'toolDisplayName.Glob',
   'toolDisplayName.Shell': 'toolDisplayName.Shell',

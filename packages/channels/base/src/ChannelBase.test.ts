@@ -6,9 +6,13 @@ import { join } from 'node:path';
 import type {
   ChannelConfig,
   ChannelMemoryEntry,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   Envelope,
   SessionTarget,
+  UserInputPresentationResult,
 } from './types.js';
 import type {
   ChannelAgentBridge,
@@ -61,13 +65,35 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     messageIds: string[];
   }> = [];
-  responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
-    [];
-  responseBoundaries: Array<{ chatId: string; sessionId: string }> = [];
+  responseChunks: Array<{
+    chatId: string;
+    chunk: string;
+    sessionId: string;
+    segment?: unknown;
+  }> = [];
+  responseBoundaries: Array<{
+    chatId: string;
+    sessionId: string;
+    segment?: unknown;
+    reason?: unknown;
+  }> = [];
+  responseCompletions: Array<{
+    chatId: string;
+    text: string;
+    sessionId: string;
+    segment?: unknown;
+  }> = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
   proactiveError?: Error;
+  userInputPresentations: ChannelUserInputRequestContext[] = [];
+  userInputPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  userInputPresentationHandler?: (
+    context: ChannelUserInputRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -88,6 +114,16 @@ class TestChannel extends ChannelBase {
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     this.taskEvents.push(event);
+  }
+
+  protected async presentUserInputRequest(
+    context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.userInputPresentations.push(context);
+    if (this.userInputPresentationHandler) {
+      return this.userInputPresentationHandler(context);
+    }
+    return this.userInputPresentationResult;
   }
 
   override supportsProactiveSend(): boolean {
@@ -132,6 +168,14 @@ class TestChannel extends ChannelBase {
 
   cancelPromptForTest(sessionId: string): Promise<boolean> {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
+  cancelRunForTest(sessionId: string, runId: string): Promise<boolean> {
+    return this.requestPromptRunCancellation(
+      sessionId,
+      runId,
+      'cancel_command',
+    );
   }
 
   debugPayloadForTest(platform: string, payload: unknown): void {
@@ -187,22 +231,32 @@ class TestChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: unknown,
   ): void {
-    this.responseChunks.push({ chatId, chunk, sessionId });
+    this.responseChunks.push({ chatId, chunk, sessionId, segment });
   }
 
   protected override onResponseBoundary(
     chatId: string,
     sessionId: string,
+    segment?: unknown,
+    reason?: unknown,
   ): void {
-    this.responseBoundaries.push({ chatId, sessionId });
+    this.responseBoundaries.push({ chatId, sessionId, segment, reason });
   }
 
   protected override async onResponseComplete(
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: unknown,
   ): Promise<void> {
+    this.responseCompletions.push({
+      chatId,
+      text: fullText,
+      sessionId,
+      segment,
+    });
     await this.responseCompleteGate;
     await super.onResponseComplete(chatId, fullText, sessionId);
   }
@@ -240,6 +294,7 @@ function createBridge(): ChannelAgentBridge {
     loadSession: vi.fn(),
     prompt: vi.fn().mockResolvedValue('agent response'),
     cancelSession: vi.fn().mockResolvedValue(undefined),
+    discardSession: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     start: vi.fn(),
     isConnected: true,
@@ -1019,6 +1074,66 @@ describe('ChannelBase', () => {
       });
     }
 
+    function emitUserQuestion(sessionId: string, requestId: string): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'other',
+            title: 'AskUserQuestion: Ask user 1 question',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+              ],
+            },
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Submit',
+            },
+            { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+          ],
+        },
+      });
+    }
+
     async function startSession(
       ch: TestChannel,
       env: Partial<Envelope> = {},
@@ -1028,6 +1143,837 @@ describe('ChannelBase', () => {
         .results;
       return results[results.length - 1]!.value as string;
     }
+
+    async function startActiveSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<{
+      sessionId: string;
+      finish(response?: string): Promise<void>;
+    }> {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const running = ch.handleInbound(
+        envelope({ text: 'run tests', messageId: 'active-message', ...env }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      return {
+        sessionId,
+        async finish(response = '') {
+          resolvePrompt(response);
+          await running;
+        },
+      };
+    }
+
+    const inputCorrelationCases = (
+      ['user', 'thread', 'chat_thread', 'single'] as const
+    ).flatMap((sessionScope) =>
+      (['collect', 'steer', 'followup'] as const).map((dispatchMode) => ({
+        sessionScope,
+        dispatchMode,
+        first: {
+          chatId: 'matrix-chat',
+          threadId: 'matrix-thread',
+          senderId: 'alice',
+          isGroup: true,
+          isMentioned: true,
+        },
+        second: {
+          chatId: 'matrix-chat',
+          threadId: 'matrix-thread',
+          senderId: sessionScope === 'user' ? 'alice' : 'bob',
+          isGroup: true,
+          isMentioned: true,
+        },
+      })),
+    );
+
+    it.each(inputCorrelationCases)(
+      'keeps input correlation for $sessionScope + $dispatchMode',
+      async ({ sessionScope, dispatchMode, first, second }) => {
+        const promptResolvers: Array<(value: string) => void> = [];
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+          () =>
+            new Promise<string>((resolve) => {
+              promptResolvers.push(resolve);
+            }),
+        );
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
+          () => {
+            promptResolvers[0]?.('');
+            return Promise.resolve();
+          },
+        );
+        const ch = createChannel({
+          sessionScope,
+          dispatchMode,
+          groupPolicy: 'open',
+        });
+        ch.userInputPresentationResult = { kind: 'presented' };
+
+        const firstTurn = ch.handleInbound(
+          envelope({ ...first, messageId: 'matrix-1', text: 'first' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const firstSessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+        emitUserQuestion(firstSessionId, 'matrix-request-1');
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(1),
+        );
+        const firstContext = ch.userInputPresentations[0]!;
+        const firstSettled = vi.fn();
+        firstContext.onSettled(firstSettled);
+        const cancellationVisibleAtSettlement = vi.fn(() =>
+          ch.taskEvents.some(
+            (event) =>
+              event.type === 'cancelled' &&
+              event.runId === firstContext.runId &&
+              event.reason === 'steer',
+          ),
+        );
+        firstContext.onSettled(cancellationVisibleAtSettlement);
+
+        const secondTurn = ch.handleInbound(
+          envelope({ ...second, messageId: 'matrix-2', text: 'second' }),
+        );
+        if (dispatchMode !== 'steer') {
+          await firstContext.respond({
+            outcome: { outcome: 'selected', optionId: 'proceed_once' },
+            answers: { '0': 'Beijing' },
+          });
+          promptResolvers[0]?.('');
+        }
+        await firstTurn;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const secondSessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[1]![0] as string;
+        emitUserQuestion(secondSessionId, 'matrix-request-2');
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(2),
+        );
+        const secondContext = ch.userInputPresentations[1]!;
+
+        expect(secondSessionId).toBe(firstSessionId);
+        expect(secondContext.runId).not.toBe(firstContext.runId);
+        expect(firstContext.owner.id).toBe(first.senderId);
+        expect(secondContext.owner.id).toBe(second.senderId);
+        expect(firstContext.target).toMatchObject({
+          chatId: first.chatId,
+          threadId: first.threadId,
+          senderId: first.senderId,
+          isGroup: first.isGroup,
+        });
+        expect(secondContext.target).toMatchObject({
+          chatId: second.chatId,
+          threadId: second.threadId,
+          senderId: second.senderId,
+          isGroup: second.isGroup,
+        });
+        if (dispatchMode === 'steer') {
+          expect(firstSettled).toHaveBeenCalledWith('run_cancelled');
+          expect(cancellationVisibleAtSettlement).toHaveReturnedWith(true);
+          await expect(
+            firstContext.respond({
+              outcome: { outcome: 'selected', optionId: 'proceed_once' },
+              answers: { '0': 'late' },
+            }),
+          ).resolves.toBe(false);
+        } else {
+          expect(respondToPermissionMock()).toHaveBeenCalledWith(
+            'matrix-request-1',
+            expect.objectContaining({ answers: { '0': 'Beijing' } }),
+          );
+        }
+        expect(respondToPermissionMock()).not.toHaveBeenCalledWith(
+          'matrix-request-2',
+          expect.anything(),
+        );
+
+        promptResolvers[1]?.('');
+        await secondTurn;
+      },
+    );
+
+    it('presents canonical semantic user input with normalized questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-question',
+            kind: 'other',
+            title: 'AskUserQuestion: Ask user 2 questions',
+            rawInput: { questions: [{ question: 'stale legacy question' }] },
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+                {
+                  header: 'Signals',
+                  question: 'Which signals?',
+                  options: [
+                    { label: 'Logs', description: 'Collect logs.' },
+                    { label: 'Metrics', description: 'Collect metrics.' },
+                  ],
+                  multiSelect: true,
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Submit',
+            },
+            { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.userInputPresentations[0]).toMatchObject({
+        requestId: 'req-question',
+        sessionId: active.sessionId,
+        runId: expect.any(String),
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner-1',
+          chatId: 'chat1',
+        },
+        submitOptionId: 'proceed_once',
+        questions: [
+          {
+            answerKey: '0',
+            header: 'Region',
+            question: 'Which region?',
+            options: [
+              {
+                label: 'Beijing',
+                description: 'Use Beijing staging.',
+              },
+              {
+                label: 'Shanghai',
+                description: 'Use Shanghai staging.',
+              },
+            ],
+            multiSelect: false,
+          },
+          {
+            answerKey: '1',
+            header: 'Signals',
+            question: 'Which signals?',
+            options: [
+              { label: 'Logs', description: 'Collect logs.' },
+              { label: 'Metrics', description: 'Collect metrics.' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      });
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it.each([
+      {
+        sessionScope: 'user',
+        inbound: {
+          senderId: 'alice',
+          chatId: 'group-user',
+          isGroup: true,
+          isMentioned: true,
+        },
+        expectedTarget: {
+          senderId: 'alice',
+          chatId: 'group-user',
+          isGroup: true,
+        },
+      },
+      {
+        sessionScope: 'thread',
+        inbound: {
+          senderId: 'bob',
+          chatId: 'group-thread',
+          threadId: 'topic-1',
+          isGroup: true,
+          isMentioned: true,
+        },
+        expectedTarget: {
+          senderId: 'bob',
+          chatId: 'group-thread',
+          threadId: 'topic-1',
+          isGroup: true,
+        },
+      },
+      {
+        sessionScope: 'single',
+        inbound: {
+          senderId: 'carol',
+          chatId: 'carol-dm',
+          isGroup: false,
+        },
+        expectedTarget: {
+          senderId: 'carol',
+          chatId: 'carol-dm',
+          isGroup: false,
+        },
+      },
+    ] as const)(
+      'captures the active owner and target for $sessionScope scope',
+      async ({ sessionScope, inbound, expectedTarget }) => {
+        const ch = createChannel({ sessionScope, groupPolicy: 'open' });
+        ch.userInputPresentationResult = { kind: 'presented' };
+        const active = await startActiveSession(ch, inbound);
+
+        emitUserQuestion(active.sessionId, `req-${sessionScope}`);
+
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(1),
+        );
+        expect(ch.userInputPresentations[0]).toMatchObject({
+          requestId: `req-${sessionScope}`,
+          sessionId: active.sessionId,
+          owner: { kind: 'channel_user', id: inbound.senderId },
+          target: {
+            channelName: 'test-chan',
+            ...expectedTarget,
+          },
+        });
+
+        await active.finish();
+      },
+    );
+
+    it('presents direct user input without allocating an output segment', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-direct-question');
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(
+        (
+          ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
+            precedingSegmentId?: string;
+          }
+        ).precedingSegmentId,
+      ).toBeUndefined();
+
+      await active.finish();
+    });
+
+    it('ends visible output before presenting user input without projecting a legacy boundary', async () => {
+      const ch = createChannel();
+      const order: string[] = [];
+      Object.assign(ch, {
+        onOutputSegmentEnd: async (
+          _chatId: string,
+          _sessionId: string,
+          _segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => {
+          order.push(reason);
+        },
+      });
+      ch.userInputPresentationHandler = async () => {
+        order.push('present');
+        return { kind: 'presented' };
+      };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        active.sessionId,
+        'Need more information.',
+      );
+      await vi.waitFor(() => expect(ch.responseChunks).toHaveLength(1));
+      emitUserQuestion(active.sessionId, 'req-after-output');
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const segment = ch.responseChunks[0]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      expect(segment?.segmentId).toEqual(expect.any(String));
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(order).toEqual(['input_requested', 'present']);
+      expect(
+        (
+          ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
+            precedingSegmentId?: string;
+          }
+        ).precedingSegmentId,
+      ).toBe(segment?.segmentId);
+
+      await active.finish();
+    });
+
+    it('presents identified legacy user input from rawInput questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-legacy-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-legacy-question',
+            kind: 'ask_user_question',
+            title: 'Ask user',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', name: 'Submit' },
+            { optionId: 'cancel', name: 'Cancel' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.userInputPresentations[0]!.questions).toEqual([
+        {
+          answerKey: '0',
+          header: 'Region',
+          question: 'Which region?',
+          options: [
+            { label: 'A', description: 'Use A.' },
+            { label: 'B', description: 'Use B.' },
+          ],
+          multiSelect: false,
+        },
+      ]);
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('does not fall back to legacy input when canonical questions are malformed', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-malformed-canonical',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-malformed-canonical',
+            kind: 'ask_user_question',
+            title: 'Ask user',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+            _meta: {
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [],
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', kind: 'allow_once', name: 'Submit' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('does not present unrelated tools that happen to contain questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-unrelated',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-unrelated',
+            kind: 'other',
+            title: 'Configure survey',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Allow once',
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('falls back when handled is returned without responding', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'handled' };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-unhandled');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('accepts handled only when the hook synchronously invokes respond', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationHandler = async (context) => {
+        void context.respond({
+          outcome: { outcome: 'selected', optionId: 'cancel' },
+        });
+        return { kind: 'handled' };
+      };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-handled-response');
+
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledOnce(),
+      );
+      expect(ch.sent).toEqual([]);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-handled-response',
+        { outcome: { outcome: 'selected', optionId: 'cancel' } },
+      );
+
+      await active.finish();
+    });
+
+    it('does not let permission commands bypass an in-flight card presentation', async () => {
+      let finishPresentation!: (result: UserInputPresentationResult) => void;
+      const ch = createChannel();
+      ch.userInputPresentationHandler = () =>
+        new Promise<UserInputPresentationResult>((resolve) => {
+          finishPresentation = resolve;
+        });
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-presenting');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/approve req-presenting',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Submit this question through its interactive card',
+      );
+
+      finishPresentation({ kind: 'unsupported' });
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+      await active.finish();
+    });
+
+    it('does not relay a fallback after an in-flight card request is denied', async () => {
+      let finishPresentation!: (result: UserInputPresentationResult) => void;
+      const ch = createChannel();
+      ch.userInputPresentationHandler = () =>
+        new Promise<UserInputPresentationResult>((resolve) => {
+          finishPresentation = resolve;
+        });
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-presenting-deny');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-presenting-deny',
+        }),
+      );
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+
+      finishPresentation({ kind: 'unsupported' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(ch.sent).toHaveLength(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      await active.finish();
+    });
+
+    it('uses one response promise and emits one typed user input settlement', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-one-shot');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockImplementation(
+        async (requestId: string, response: { outcome: unknown }) => {
+          (bridge as unknown as EventEmitter).emit('permissionResolved', {
+            requestId,
+            outcome: response.outcome,
+          });
+          return true;
+        },
+      );
+      const response = {
+        outcome: { outcome: 'selected' as const, optionId: 'proceed_once' },
+        answers: { '0': 'Beijing' },
+      };
+
+      const first = context.respond(response);
+      const second = context.respond(response);
+
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('resolved_outside_presenter');
+
+      await active.finish();
+    });
+
+    it('settles a rejected user input response as cancelled', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-response-error');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockRejectedValueOnce(
+        new Error('bridge response failed'),
+      );
+
+      await expect(
+        context.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Beijing' },
+        }),
+      ).rejects.toThrow('bridge response failed');
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('settles a synchronously throwing user input responder as cancelled', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-sync-response-error');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockImplementationOnce(() => {
+        throw new Error('synchronous bridge failure');
+      });
+
+      await expect(
+        context.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Beijing' },
+        }),
+      ).rejects.toThrow('synchronous bridge failure');
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('settles semantic user input when another client resolves it', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-external');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const settled = vi.fn();
+      const unsubscribed = vi.fn();
+      const context = ch.userInputPresentations[0]!;
+      context.onSettled(settled);
+      const unsubscribe = context.onSettled(unsubscribed);
+      unsubscribe();
+
+      (bridge as unknown as EventEmitter).emit('permissionResolved', {
+        requestId: 'req-external',
+        outcome: { outcome: 'cancelled' },
+      });
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+      expect(unsubscribed).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('settles semantic user input with run cancellation before bridge cleanup', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-run-cancel');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+
+      await expect(
+        ch.cancelRunForTest(active.sessionId, context.runId),
+      ).resolves.toBe(true);
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('run_cancelled');
+
+      await active.finish();
+    });
+
+    it('requires card-presented questions to be submitted or denied', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-card-command');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const settled = vi.fn();
+      ch.userInputPresentations[0]!.onSettled(settled);
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/approve req-card-command',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Submit this question through its interactive card',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-card-command',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-card-command',
+        { outcome: { outcome: 'selected', optionId: 'cancel' } },
+      );
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('rejects card-presented denial from another shared-session user', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'single',
+      });
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, {
+        chatId: 'group-1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'owner-1',
+      });
+      emitUserQuestion(active.sessionId, 'req-owner-only');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group-1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'other-user',
+          text: '/deny req-owner-only',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await active.finish();
+    });
 
     it('sends permission requests to the owning chat and approves with /approve', async () => {
       const ch = createChannel();
@@ -5679,6 +6625,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/clear' }));
       expect(ch.sent).toHaveLength(1);
       expect(ch.sent[0]!.text).toContain('Session cleared');
+      expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
     });
 
     it('/clear purges the session from every per-session map (no leak)', async () => {
@@ -5920,6 +6867,98 @@ describe('ChannelBase', () => {
           mode: 'metadata-only',
         },
       });
+    });
+
+    it('uses one run identity and owner across an attended prompt lifecycle', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async (sessionId: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sessionId,
+            'chunk',
+          );
+          return 'agent response';
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(
+        envelope({
+          messageId: 'm-run-1',
+          senderId: 'owner-1',
+          senderName: 'Owner 1',
+        }),
+      );
+
+      const events = ch.taskEvents as Array<
+        ChannelTaskLifecycleEvent & {
+          runId?: string;
+          owner?: { kind: string; id: string };
+        }
+      >;
+      expect(events.map((event) => event.type)).toEqual([
+        'started',
+        'text_chunk',
+        'completed',
+      ]);
+      expect(events[0]!.runId).toEqual(expect.any(String));
+      expect(new Set(events.map((event) => event.runId))).toEqual(
+        new Set([events[0]!.runId]),
+      );
+      expect(
+        events.every((event) => event.owner?.kind === 'channel_user'),
+      ).toBe(true);
+      expect(events.every((event) => event.owner?.id === 'owner-1')).toBe(true);
+    });
+
+    it('assigns a new run identity to the next prompt in one session', async () => {
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'm-run-1' }));
+      await ch.handleInbound(envelope({ messageId: 'm-run-2' }));
+
+      const started = ch.taskEvents.filter(
+        (event) => event.type === 'started',
+      ) as Array<ChannelTaskLifecycleEvent & { runId?: string }>;
+      expect(started).toHaveLength(2);
+      expect(started[0]!.sessionId).toBe(started[1]!.sessionId);
+      expect(started[0]!.runId).toEqual(expect.any(String));
+      expect(started[1]!.runId).toEqual(expect.any(String));
+      expect(started[1]!.runId).not.toBe(started[0]!.runId);
+    });
+
+    it('cancels only the current exact run identity', async () => {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-exact-run' }));
+      await vi.waitFor(() =>
+        expect(ch.taskEvents.some((event) => event.type === 'started')).toBe(
+          true,
+        ),
+      );
+      const started = ch.taskEvents.find(
+        (event) => event.type === 'started',
+      ) as ChannelTaskLifecycleEvent & { runId?: string };
+      expect(started.runId).toEqual(expect.any(String));
+
+      await expect(
+        ch.cancelRunForTest(started.sessionId, 'stale-run'),
+      ).resolves.toBe(false);
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+      await expect(
+        ch.cancelRunForTest(started.sessionId, started.runId!),
+      ).resolves.toBe(true);
+      expect(bridge.cancelSession).toHaveBeenCalledWith(started.sessionId);
+
+      resolvePrompt('late response');
+      await prompt;
     });
 
     it('uses configured channel identity and memory namespace in lifecycle metadata', async () => {
@@ -10767,6 +11806,83 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('allocates output segments lazily and rotates them at response boundaries', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'first ');
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'second');
+          return Promise.resolve('second');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'segment-message' }));
+
+      expect(ch.taskEvents[0]).toMatchObject({ type: 'started' });
+      expect(ch.taskEvents[0]).not.toHaveProperty('segmentId');
+      expect(ch.responseChunks).toHaveLength(3);
+      const firstSegment = ch.responseChunks[0]!.segment as
+        | { runId?: string; segmentId?: string }
+        | undefined;
+      const repeatedSegment = ch.responseChunks[1]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      const secondSegment = ch.responseChunks[2]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      expect(firstSegment).toMatchObject({
+        runId: expect.any(String),
+        segmentId: expect.any(String),
+      });
+      expect(repeatedSegment?.segmentId).toBe(firstSegment?.segmentId);
+      expect(secondSegment?.segmentId).not.toBe(firstSegment?.segmentId);
+      expect(ch.responseBoundaries).toEqual([
+        {
+          chatId: 'chat1',
+          sessionId: 's-1',
+          segment: undefined,
+          reason: undefined,
+        },
+      ]);
+      expect(ch.responseCompletions).toEqual([
+        expect.objectContaining({
+          text: 'second',
+          segment: expect.objectContaining({
+            segmentId: secondSegment?.segmentId,
+          }),
+        }),
+      ]);
+    });
+
+    it('closes streamed output when the provider completes without a response body', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'streamed only',
+          );
+          return Promise.resolve('');
+        },
+      );
+      const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
+
+      await ch.handleInbound(envelope());
+
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'completed',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
+    });
+
     it('does not expose mutable lifecycle metadata references', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
       const ch = createChannel({
@@ -10892,21 +12008,36 @@ describe('ChannelBase', () => {
     });
 
     it('emits failed lifecycle event when prompting rejects', async () => {
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('agent boom'),
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'partial');
+          return Promise.reject(new Error('agent boom'));
+        },
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
 
       await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
 
-      expect(ch.taskEvents).toEqual([
-        expect.objectContaining({ type: 'started' }),
-        expect.objectContaining({
-          type: 'failed',
-          error: 'agent boom',
-          phase: 'agent',
-        }),
-      ]);
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'started' }),
+          expect.objectContaining({
+            type: 'failed',
+            error: 'agent boom',
+            phase: 'agent',
+          }),
+        ]),
+      );
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'failed',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('contains a throwing onTaskLifecycle hook and logs it', async () => {
@@ -10940,7 +12071,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('logs turn errors that arrive after cancellation', async () => {
+    it('logs and contains turn errors that arrive after cancellation', async () => {
       let rejectPrompt!: (error: Error) => void;
       (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
         new Promise<string>((_resolve, reject) => {
@@ -10958,7 +12089,7 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/cancel' }));
         rejectPrompt(new Error('bridge crashed'));
 
-        await expect(prompt).rejects.toThrow('bridge crashed');
+        await expect(prompt).resolves.toBeUndefined();
         expect(
           ch.taskEvents.filter((event) => event.type === 'failed'),
         ).toEqual([]);
@@ -11034,10 +12165,19 @@ describe('ChannelBase', () => {
         pendingPrompt,
       );
       const ch = createChannel();
+      const outputSegmentEnd = vi.fn();
+      Object.assign(ch, { onOutputSegmentEnd: outputSegmentEnd });
       ch.enableCancelCommand();
 
       const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'partial',
+      );
       await ch.handleInbound(envelope({ text: '/cancel' }));
       resolvePrompt('late');
       await prompt;
@@ -11056,6 +12196,14 @@ describe('ChannelBase', () => {
           expect.objectContaining({ type: 'completed' }),
         ]),
       );
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(outputSegmentEnd).toHaveBeenCalledWith(
+        'chat1',
+        's-1',
+        expect.objectContaining({ segmentId }),
+        'cancelled',
+      );
+      expect(ch.responseBoundaries).toEqual([]);
     });
 
     it('suppresses lifecycle activity while cancel command is still awaiting bridge cancellation', async () => {
@@ -11297,7 +12445,7 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
       await ch.handleInbound(envelope({ text: '/cancel' }));
       rejectPrompt(new Error('bridge cancelled'));
-      await expect(prompt).rejects.toThrow('bridge cancelled');
+      await expect(prompt).resolves.toBeUndefined();
 
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({
@@ -11327,7 +12475,7 @@ describe('ChannelBase', () => {
       const cancel = ch.cancelPromptForTest('s-1');
       expect(cancel).toBeDefined();
       rejectPrompt(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-      await expect(prompt).rejects.toThrow('aborted');
+      await expect(prompt).resolves.toBeUndefined();
       await expect(cancel).resolves.toBe(true);
 
       expect(ch.taskEvents).toEqual([
@@ -11884,11 +13032,13 @@ describe('ChannelBase', () => {
       await prompt;
 
       expect(ch.responseBoundaries).toEqual([]);
-      expect(ch.responseChunks).toContainEqual({
-        chatId: 'chat1',
-        chunk: 'held while cancel pending',
-        sessionId: 's-1',
-      });
+      expect(ch.responseChunks).toContainEqual(
+        expect.objectContaining({
+          chatId: 'chat1',
+          chunk: 'held while cancel pending',
+          sessionId: 's-1',
+        }),
+      );
     });
 
     it('does not emit buffered stream text after cancellation', async () => {
@@ -14565,7 +15715,7 @@ describe('ChannelBase', () => {
         }
       });
 
-      it('emits lifecycle events and response chunks for webhook bridge chunks', async () => {
+      it('emits lifecycle events with an unattended run identity for webhook bridge chunks', async () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
           (sid: string) => {
             (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
@@ -14595,6 +15745,17 @@ describe('ChannelBase', () => {
         expect(ch.responseChunks).toEqual([
           { chatId: 'group-1', chunk: 'part', sessionId: 's-1' },
         ]);
+        const events = ch.taskEvents as Array<
+          ChannelTaskLifecycleEvent & {
+            runId?: string;
+            owner?: { kind: string; id: string };
+          }
+        >;
+        expect(events[0]!.runId).toEqual(expect.any(String));
+        expect(new Set(events.map((event) => event.runId))).toEqual(
+          new Set([events[0]!.runId]),
+        );
+        expect(events.every((event) => event.owner === undefined)).toBe(true);
       });
 
       it('routes webhook permission requests to the configured thread target', async () => {
@@ -15585,7 +16746,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('emits lifecycle events for loop chunks and completion', async () => {
+    it('emits lifecycle events with an unattended run identity for loop chunks and completion', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
@@ -15625,6 +16786,17 @@ describe('ChannelBase', () => {
         }),
         expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
       ]);
+      const events = ch.taskEvents as Array<
+        ChannelTaskLifecycleEvent & {
+          runId?: string;
+          owner?: { kind: string; id: string };
+        }
+      >;
+      expect(events[0]!.runId).toEqual(expect.any(String));
+      expect(new Set(events.map((event) => event.runId))).toEqual(
+        new Set([events[0]!.runId]),
+      );
+      expect(events.every((event) => event.owner === undefined)).toBe(true);
     });
 
     it('suppresses loop chunks while cancellation is pending', async () => {
@@ -15969,6 +17141,7 @@ describe('ChannelBase', () => {
           message: 'loop timed out',
         });
         expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
         expect(
           (
             ch as unknown as {
