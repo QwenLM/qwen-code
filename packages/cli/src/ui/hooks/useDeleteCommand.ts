@@ -81,7 +81,9 @@ export function useDeleteCommand(
             .catch((error) => {
               config
                 .getDebugLogger()
-                .warn(`SessionDelete hook failed: ${String(error)}`);
+                .warn(
+                  `SessionDelete hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
             });
           addItem?.(
             {
@@ -177,7 +179,9 @@ export function useDeleteCommand(
             .catch((error) => {
               config
                 .getDebugLogger()
-                .warn(`SessionDelete hook failed: ${String(error)}`);
+                .warn(
+                  `SessionDelete hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
             });
         }
 

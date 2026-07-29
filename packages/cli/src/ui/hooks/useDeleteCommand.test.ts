@@ -549,6 +549,42 @@ describe('useDeleteCommand', () => {
       expect(hookSystem.fireSessionDeleteEvent).toHaveBeenNthCalledWith(1, 'a');
       expect(hookSystem.fireSessionDeleteEvent).toHaveBeenNthCalledWith(2, 'b');
     });
+
+    it('reports batch deletion success when SessionDelete hooks reject', async () => {
+      const { config, debugLogger } = createConfig({
+        currentSessionId: 'current',
+        removeSessions: vi.fn().mockResolvedValue({
+          removed: ['a', 'b'],
+          notFound: [],
+          errors: [],
+        }),
+        fireSessionDeleteEvent: vi.fn().mockRejectedValue(new Error('failed')),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a', 'b']);
+        await flushAsync();
+      });
+
+      expect(debugLogger.warn).toHaveBeenCalledTimes(2);
+      expect(debugLogger.warn).toHaveBeenNthCalledWith(
+        1,
+        'SessionDelete hook failed: failed',
+      );
+      expect(debugLogger.warn).toHaveBeenNthCalledWith(
+        2,
+        'SessionDelete hook failed: failed',
+      );
+      const [item] = addItem.mock.calls.at(-1) as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(item).toEqual({ type: 'info', text: 'Deleted 2 session(s).' });
+    });
   });
 
   describe('handleDelete', () => {
@@ -607,7 +643,7 @@ describe('useDeleteCommand', () => {
         'deleted-id',
       );
       expect(debugLogger.warn).toHaveBeenCalledWith(
-        'SessionDelete hook failed: Error: failed',
+        'SessionDelete hook failed: failed',
       );
       expect(addItem).toHaveBeenCalledWith(
         expect.objectContaining({
