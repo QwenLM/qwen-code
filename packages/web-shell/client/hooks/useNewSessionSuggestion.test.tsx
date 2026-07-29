@@ -34,7 +34,11 @@ const testState = {
 };
 
 function Host() {
-  const { suggestion } = useNewSessionSuggestion(testState);
+  const { inputText, ...options } = testState;
+  const { suggestion, updateInput } = useNewSessionSuggestion(options);
+  React.useEffect(() => {
+    updateInput(inputText);
+  }, [inputText, updateInput]);
   latestSuggestion = suggestion;
   return null;
 }
@@ -164,6 +168,47 @@ describe('useNewSessionSuggestion', () => {
     await flush(3);
 
     expect(latestSuggestion).toBeNull();
+  });
+
+  it('reclassifies a preserved draft after the session changes', async () => {
+    vi.useFakeTimers();
+    testState.inputText = '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案';
+    testState.messages = [
+      {
+        id: 'm-1',
+        role: 'user',
+        content: '先看一下当前实现',
+        timestamp: 1,
+      },
+      {
+        id: 'm-2',
+        role: 'assistant',
+        content: '这里是当前实现的说明',
+        timestamp: 2,
+      },
+    ] as Message[];
+    testState.generateContent.mockImplementation(async function* () {
+      yield {
+        type: 'delta',
+        requestId: 'req-1',
+        seq: 0,
+        text: JSON.stringify({
+          suggestion: 'new_session',
+          confidence: 0.9,
+        }),
+      };
+    });
+
+    await renderHost();
+    testState.sessionId = 'session-2';
+    await rerenderHost();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush(3);
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion?.sourceSessionId).toBe('session-2');
   });
 
   // The classifier is instructed to return JSON only, but live it sometimes
