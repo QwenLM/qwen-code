@@ -346,6 +346,16 @@ describe('FirstOutputTracker', () => {
     const replayEcho = userEcho('prompt-1', 2);
     replayEcho._meta = { 'qwen.session.recordId': 'replay-record' };
     tracker.push(replayEcho, 9.5);
+    const updateLevelReplayedEcho = sessionUpdate(
+      'prompt-1',
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'benchmark prompt' },
+        _meta: { qwenTranscript: { sourceRecordIds: ['record-1'] } },
+      },
+      6,
+    );
+    tracker.push(updateLevelReplayedEcho, 9.6);
     tracker.push(userEcho('prompt-1', 3), 10);
     tracker.push(answer('prompt-1', 'answer', 4), 20);
     tracker.push(turnComplete('prompt-1', 5), 30);
