@@ -212,9 +212,11 @@ export function EnvironmentPanel({
                 <FileDiffIcon />
                 <span>{t('environment.changes')}</span>
                 <span className={styles.value}>
-                  {gitDetails.length > 0
-                    ? gitDetails.join(' · ')
-                    : t('environment.clean')}
+                  {gitStatus === undefined
+                    ? t('environment.unavailable')
+                    : gitDetails.length > 0
+                      ? gitDetails.join(' · ')
+                      : t('environment.clean')}
                 </span>
               </button>
               <div className={styles.row} title={workspaceCwd}>

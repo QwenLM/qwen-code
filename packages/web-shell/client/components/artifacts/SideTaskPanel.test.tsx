@@ -235,6 +235,38 @@ it('names a restored empty side task from its first prompt', async () => {
   );
 });
 
+it('truncates the first-prompt title by code point, not code unit', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  act(() => {
+    renderSideTask({ onTitleChange });
+  });
+
+  const longPrompt = `${'a'.repeat(199)}\u{1F600} trailing`;
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )(longPrompt);
+    await Promise.resolve();
+  });
+
+  const expected = `${'a'.repeat(199)}\u{1F600}`;
+  expect(renameSession).toHaveBeenCalledWith(expected);
+  expect(onTitleChange).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+    expected,
+    true,
+  );
+});
+
 it('sends the /btw question as the first side-task prompt', async () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Side task';

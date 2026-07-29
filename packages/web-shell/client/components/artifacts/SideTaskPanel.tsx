@@ -213,7 +213,7 @@ function SideTaskSession({
   }, [connection.displayName, onTitleChange, tabId]);
   const nameFromFirstPrompt = useCallback(
     (text: string) => {
-      const nextTitle = text.trim().slice(0, 200);
+      const nextTitle = Array.from(text.trim()).slice(0, 200).join('');
       if (!nextTitle) return;
       onTitleChange(tabId, nextTitle);
       void (async () => {

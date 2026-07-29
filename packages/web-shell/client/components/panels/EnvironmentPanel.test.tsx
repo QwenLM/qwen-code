@@ -91,6 +91,14 @@ describe('EnvironmentPanel', () => {
     expect(view.textContent).toContain('feat/context-panels');
   });
 
+  it('reports unavailable rather than clean when no Git snapshot exists', () => {
+    const view = mount({ gitStatus: undefined });
+
+    expect(view.textContent).toContain('Environment');
+    expect(view.textContent).toContain('Unavailable');
+    expect(view.textContent).not.toContain('Clean');
+  });
+
   it('filters sections through environment-panel items', () => {
     const view = mount({
       items: ['subagents'],

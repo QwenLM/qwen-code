@@ -1530,6 +1530,17 @@ export function App({
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
+  // The environment panel is only reachable through the chat header toggle,
+  // so its sections replace the composer git entry / footer task pills only
+  // when that header is actually enabled. Embeddings that omit the header keep
+  // the legacy entries.
+  const environmentPanelReachable =
+    chatHeaderEnabled && environmentHeaderItemVisible;
+  const environmentGitReplacementEnabled =
+    environmentPanelReachable && environmentPanelItems.includes('environment');
+  const environmentTasksReplacementEnabled =
+    environmentPanelReachable &&
+    environmentPanelItems.includes('backgroundTasks');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readSidebarCollapsed(sidebarOptions.defaultCollapsed),
   );
@@ -2675,9 +2686,12 @@ export function App({
     (
       task: TurnOutputScheduledTask,
       tabWorkspaceActions?: ReturnType<typeof useWorkspaceActions>,
+      sourceSessionId?: string,
     ) => {
       const tab: ArtifactPanelTab = {
-        id: `scheduled-task:${task.toolCallId}`,
+        id: sourceSessionId
+          ? `scheduled-task:${sourceSessionId}:${task.toolCallId}`
+          : `scheduled-task:${task.toolCallId}`,
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
         task,
@@ -2867,7 +2881,11 @@ export function App({
         return;
       }
       if (request.kind === 'scheduled_task') {
-        openScheduledTaskPanel(request.task, request.workspaceActions);
+        openScheduledTaskPanel(
+          request.task,
+          request.workspaceActions,
+          request.sourceSessionId,
+        );
         return;
       }
       if (request.kind === 'subagent') {
@@ -9790,7 +9808,8 @@ export function App({
                           chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={
                             composerToolbarActions ??
-                            (isChatEmptyState
+                            (isChatEmptyState ||
+                            !environmentGitReplacementEnabled
                               ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
                               : DEFAULT_COMPOSER_TOOLBAR_ACTIONS)
                           }
@@ -9922,7 +9941,12 @@ export function App({
                           ref={statusBarRef}
                           onOpenTasks={() => openTasksPanel()}
                           onReturnToInput={handleReturnToEditor}
-                          tasks={isChatEmptyState ? backgroundTasks : []}
+                          tasks={
+                            isChatEmptyState ||
+                            !environmentTasksReplacementEnabled
+                              ? backgroundTasks
+                              : []
+                          }
                           activeGoal={activeGoal}
                           onOpenGoals={openGoals}
                           hideSettings={hideSettings}

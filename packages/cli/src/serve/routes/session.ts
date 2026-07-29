@@ -2268,7 +2268,9 @@ export function registerSessionRoutes(
           typeof body?.['name'] === 'string' ? body['name'] : undefined;
         if (name) {
           // eslint-disable-next-line no-control-regex
-          name = name.replace(/[\x00-\x1F\x7F-\x9F]/g, '').slice(0, 200);
+          name = Array.from(name.replace(/[\x00-\x1F\x7F-\x9F]/g, ''))
+            .slice(0, 200)
+            .join('');
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
