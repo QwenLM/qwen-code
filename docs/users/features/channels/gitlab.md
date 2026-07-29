@@ -56,14 +56,14 @@ For self-hosted instances, set `baseUrl`:
 
 ## Configuration Options
 
-| Option                   | Default                   | Description                                    |
-| ------------------------ | ------------------------- | ---------------------------------------------- |
-| `token`                  | (required)                | PAT with `read_api` + `api` scopes             |
-| `pollInterval`           | `60000`                   | Poll interval in ms                            |
-| `baseUrl`                | `https://gitlab.com`      | GitLab instance URL                            |
-| `action_prompt_template` | (required for processing) | Maps GitLab action names to metadata templates |
-| `groupPolicy`            | `"disabled"`              | Must be `"open"` for todos to flow             |
-| `senderPolicy`           | `"allowlist"`             | Who can trigger the bot                        |
+| Option                   | Default                   | Description                                                |
+| ------------------------ | ------------------------- | ---------------------------------------------------------- |
+| `token`                  | (required)                | PAT with `read_api` + `api` scopes                         |
+| `pollInterval`           | `60000`                   | Poll interval in ms                                        |
+| `baseUrl`                | `https://gitlab.com`      | GitLab instance URL                                        |
+| `action_prompt_template` | (required for processing) | Maps GitLab action names to metadata templates             |
+| `groupPolicy`            | `"disabled"`              | Must be `"open"`, or `"allowlist"` with the project listed |
+| `senderPolicy`           | `"allowlist"`             | Who can trigger the bot                                    |
 
 ## action_prompt_template
 
@@ -136,9 +136,9 @@ Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public pr
 
 The adapter always sets `isMentioned = true` on dispatched envelopes, because GitLab has already determined the mention when creating the todo. The `action_prompt_template` config is the real event filter — only actions with a configured template are processed. The `@bot` mention is stripped from the message text before dispatch via `stripBotMention`.
 
-### ⚠️ groupPolicy Must Be "open"
+### ⚠️ groupPolicy Must Be "open" or "allowlist"
 
-`groupPolicy` **must be set to `"open"`** for todos to be processed. The default value `"disabled"` silently drops all mentions: todos are marked done and the cursor advances, but no dispatch occurs and no error is logged. If your bot is not responding to mentions, check that `groupPolicy` is not `"disabled"`.
+`groupPolicy` must be set to `"open"`, or `"allowlist"` with the project explicitly listed, for todos to be processed. The default value `"disabled"` drops all mentions: todos are marked done and the cursor advances, but no dispatch occurs. A rejection is logged (`preflight rejected reason=group_disabled`) but the todo is still consumed. If your bot is not responding to mentions, check that `groupPolicy` is not `"disabled"`.
 
 ## How It Works
 
@@ -151,7 +151,7 @@ The adapter uses GitLab's Todos API as the message source:
 5. **Detect mention type** via `target_url` anchor:
    - `#note_123` present → comment mention → text is `todo.body` (the comment)
    - No anchor → description mention → text is the issue/MR description
-6. **Dispatch** the envelope through `handleInbound` (requires `groupPolicy: "open"`)
+6. **Dispatch** the envelope through `handleInbound` (requires `groupPolicy: "open"` or `"allowlist"` with the project listed)
 7. **Advance cursor** and **mark todo done** (best-effort)
 
 The cursor (`lastProcessedId`) advances regardless of dispatch success or failure. Failed dispatches post a ⚠️ error comment on the issue/MR and are not retried — the user can re-mention the bot to trigger a new todo.
