@@ -3244,6 +3244,8 @@ describe('qwen-autofix workflow', () => {
       '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
     const PUSH_HEADLINE =
       '🤖 Addressed the latest review feedback (round 2/100). What changed…';
+    const NOOP_HEADLINE =
+      '🤖 Reviewed the latest feedback — no changes needed. Why, point by point:…';
     const mk = (headline, win, at, login = 'qwen-code-dev-bot') => ({
       user: { login },
       created_at: at,
@@ -3280,6 +3282,20 @@ describe('qwen-autofix workflow', () => {
         [
           mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
           mk(PUSH_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('1');
+    // A no-op round RESETS the narrowing too: the reset alternation has a
+    // `no changes needed` branch the push case above never touches, so a
+    // no-op between two timeouts must also collapse the count to the single
+    // trailing timeout.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(NOOP_HEADLINE, K, '2026-07-29T05:00:00Z'),
           mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
         ],
         K,
