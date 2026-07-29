@@ -83,8 +83,13 @@ full-snapshot refusal.
 
 - A mixed-EOL large file reports the ending style present in the returned
   slice.
-- Concurrent append, truncation, same-size rewrite, pathname replacement, and
-  symlink replacement are rejected.
+- Concurrent append, truncation, pathname replacement, and symlink replacement
+  are rejected. A same-size in-place rewrite is rejected whenever the change
+  lands in a later timestamp quantum: the checks compare modification time and
+  change time, so a rewrite that also restores modification time is caught only
+  by change time advancing, which is best-effort at the kernel's coarse-clock
+  resolution rather than an absolute guarantee, though still strictly stronger
+  than the prior size + modification time full-snapshot comparison.
 - Handle-bound range reads never use the full-buffer fast path and reuse their
   streaming buffer.
 - A deep offset beyond 10 MiB succeeds with a finite line limit.
