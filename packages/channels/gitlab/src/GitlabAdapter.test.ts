@@ -260,6 +260,35 @@ describe('GitlabChannel', () => {
       expect(channel.cursor.initialized).toBe(true);
     });
 
+    it('drains a very large backlog without dispatching', async () => {
+      await channel.connect();
+      channel.disconnect();
+
+      const many = Array.from({ length: 150_000 }, (_, i) =>
+        makeTodo({ id: i + 1 }),
+      );
+      mockApi.TodoLists.all.mockResolvedValueOnce(many);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.lastProcessedId).toBe(150_000);
+      expect(channel.cursor.initialized).toBe(true);
+    });
+
+    it('leaves the cursor uninitialized when the first-poll drain throws', async () => {
+      await channel.connect();
+      channel.disconnect();
+
+      mockApi.TodoLists.done.mockImplementationOnce(() => {
+        throw new Error('drain boom');
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([makeTodo({ id: 10 })]);
+
+      await expect(pollOnce()).rejects.toThrow('drain boom');
+      expect(channel.cursor.initialized).toBe(false);
+    });
+
     it('processes new todos after first poll drain', async () => {
       await channel.connect();
       channel.disconnect();
