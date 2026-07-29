@@ -5,16 +5,33 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig, type, printDebugInfo } from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  fakeToolCall,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
+import {
+  TestRig,
+  type,
+  printDebugInfo,
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 describe('Interactive file system', () => {
   let rig: TestRig;
+  let fakeServer: FakeOpenAIServer | undefined;
+  let restoreNoProxy: () => void;
 
   beforeEach(() => {
     rig = new TestRig();
+    restoreNoProxy = applyContainerSandboxNoProxy();
   });
 
   afterEach(async () => {
+    await fakeServer?.close();
+    fakeServer = undefined;
+    restoreNoProxy();
     await rig.cleanup();
   });
 
@@ -22,8 +39,45 @@ describe('Interactive file system', () => {
     'should perform a read-then-write sequence in interactive mode',
     async () => {
       const fileName = 'version.txt';
+
+      // Drive the conversation with a deterministic fake model instead of a
+      // live LLM. A real model made this multi-turn test flaky: it could pick
+      // different tools, phrase the read result without the literal version,
+      // or settle the first turn on its own schedule. The fake model scripts
+      // the exact read-then-write turn sequence so the interactive mechanics
+      // (typed input, tool execution, file mutation) are what get tested.
+      let filePath = '';
+      fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [fakeToolCall('read_file', { file_path: filePath })],
+          };
+        }
+        if (requestIndex === 1) {
+          return { content: 'The current version is 1.0.0.' };
+        }
+        if (requestIndex === 2) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: filePath,
+                content: '1.0.1',
+              }),
+            ],
+          };
+        }
+        return { content: 'Done. The version is now 1.0.1.' };
+      }, fakeServerHostOptions());
+
       await rig.setup('interactive-read-then-write', {
         settings: {
+          memory: {
+            enableManagedAutoMemory: false,
+            enableManagedAutoDream: false,
+          },
+          ui: {
+            enableFollowupSuggestions: false,
+          },
           security: {
             auth: {
               selectedType: 'openai',
@@ -31,62 +85,72 @@ describe('Interactive file system', () => {
           },
         },
       });
-      rig.createFile(fileName, '1.0.0');
+      filePath = rig.createFile(fileName, '1.0.0');
 
-      const { ptyProcess } = rig.runInteractive();
+      const { ptyProcess, promise } = rig.runInteractive(
+        '--auth-type',
+        'openai',
+        '--openai-api-key',
+        'fake-key',
+        '--openai-base-url',
+        fakeServer.baseUrl,
+        '--model',
+        'fake-model',
+      );
 
-      // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message');
-      expect(
-        isReady,
-        'CLI did not start up in interactive mode correctly',
-      ).toBe(true);
+      try {
+        // Wait for the app to be ready
+        const isReady = await rig.waitForText('Type your message');
+        expect(
+          isReady,
+          'CLI did not start up in interactive mode correctly',
+        ).toBe(true);
 
-      // Step 1: Read the file
-      const readPrompt = `Read the version from ${fileName}`;
-      await type(ptyProcess, readPrompt);
-      await type(ptyProcess, '\r');
+        // Step 1: Read the file
+        const readPrompt = `Read the version from ${fileName}`;
+        await type(ptyProcess, readPrompt);
+        await type(ptyProcess, '\r');
 
-      const readCall = await rig.waitForToolCall('read_file');
-      expect(readCall, 'Expected to find a read_file tool call').toBe(true);
+        const readCall = await rig.waitForToolCall('read_file');
+        expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
-      const containsExpectedVersion = await rig.waitForText('1.0.0');
-      expect(
-        containsExpectedVersion,
-        'Expected to see version "1.0.0" in output',
-      ).toBe(true);
+        const containsExpectedVersion = await rig.waitForText('1.0.0');
+        expect(
+          containsExpectedVersion,
+          'Expected to see version "1.0.0" in output',
+        ).toBe(true);
 
-      // Step 2: Write the file
-      const writePrompt = `now change the version to 1.0.1 in the file`;
-      await type(ptyProcess, writePrompt);
-      await type(ptyProcess, '\r');
+        // Step 2: Write the file
+        const writePrompt = `now change the version to 1.0.1 in the file`;
+        await type(ptyProcess, writePrompt);
+        await type(ptyProcess, '\r');
 
-      const toolCall = await rig.waitForAnyToolCall(['write_file', 'edit']);
+        const toolCall = await rig.waitForAnyToolCall(['write_file', 'edit']);
 
-      if (!toolCall) {
-        printDebugInfo(rig, rig._interactiveOutput, {
+        if (!toolCall) {
+          printDebugInfo(rig, rig._interactiveOutput, {
+            toolCall,
+          });
+        }
+
+        expect(
           toolCall,
-        });
-      }
+          'Expected to find a write_file or edit tool call',
+        ).toBe(true);
 
-      expect(toolCall, 'Expected to find a write_file or edit tool call').toBe(
-        true,
-      );
-
-      // The tool call is logged once the model issues it, but the turn may
-      // still be settling (a failed edit can be retried) and the model may
-      // write more than just '1.0.1'. Poll the file until it contains the new
-      // version, matching the lenient assertion used by the non-interactive
-      // sibling test (file-system.test.ts uses .toContain('1.0.1')).
-      const updated = await rig.poll(
-        () => rig.readFile(fileName).includes('1.0.1'),
-        rig.getDefaultTimeout(),
-        200,
-      );
-      if (!updated) {
-        printDebugInfo(rig, rig._interactiveOutput, { toolCall });
+        const updated = await rig.poll(
+          () => rig.readFile(fileName).includes('1.0.1'),
+          rig.getDefaultTimeout(),
+          200,
+        );
+        if (!updated) {
+          printDebugInfo(rig, rig._interactiveOutput, { toolCall });
+        }
+        expect(updated, 'Expected file content to contain 1.0.1').toBe(true);
+      } finally {
+        ptyProcess.kill();
+        await promise;
       }
-      expect(updated, 'Expected file content to contain 1.0.1').toBe(true);
     },
   );
 });
