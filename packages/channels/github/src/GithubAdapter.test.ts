@@ -1562,6 +1562,68 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('handles direct working reaction removal failures', async () => {
+      mockOctokit.rest.reactions.deleteForIssueComment.mockRejectedValue(
+        new Error('403'),
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      await Promise.resolve();
+      await Promise.resolve();
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '1001');
+
+      await vi.waitFor(() =>
+        expect(
+          mockOctokit.rest.reactions.deleteForIssueComment,
+        ).toHaveBeenCalledTimes(3),
+      );
+      expect(
+        mockOctokit.rest.reactions.deleteForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        reaction_id: 9000,
+      });
+    });
+
+    it('retries acknowledgement after a create failure', async () => {
+      const error = new Error('403');
+      mockOctokit.rest.reactions.createForIssueComment
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
+        .mockResolvedValue({ data: { id: 9002 } });
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      await vi.waitFor(() =>
+        expect(
+          mockOctokit.rest.reactions.createForIssueComment,
+        ).toHaveBeenCalledTimes(3),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-2', '1001');
+      await vi.waitFor(() =>
+        expect(
+          mockOctokit.rest.reactions.createForIssueComment,
+        ).toHaveBeenCalledTimes(4),
+      );
+    });
+
     it('does not react to a synthetic direct review-request trigger', async () => {
       const liveChannel = new LiveGithubChannel(
         'test-github',
