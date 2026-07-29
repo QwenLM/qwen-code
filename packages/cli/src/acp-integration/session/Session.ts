@@ -916,11 +916,15 @@ const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 export function resolveExistingFile(
   resolved: string,
   resolveRealPath: (path: string) => string = realpathSync,
-  statFile: (path: string) => { isFile(): boolean } = statSync,
+  statFile: (path: string) => {
+    isFile(): boolean;
+    isDirectory?(): boolean;
+  } = statSync,
 ): string | undefined {
   try {
     const canonicalPath = resolveRealPath(resolved);
-    return statFile(canonicalPath).isFile() ? canonicalPath : undefined;
+    const stats = statFile(canonicalPath);
+    return stats.isFile() || stats.isDirectory?.() ? canonicalPath : undefined;
   } catch {
     return undefined;
   }
@@ -8542,7 +8546,7 @@ export class Session implements SessionContext {
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
-    const textPathSpecsToRead = new Set<string>();
+    const textPathSpecsToRead = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -8573,7 +8577,7 @@ export class Session implements SessionContext {
                 .getFileService()
                 .shouldIgnoreFile(canonicalPath, filteringOptions)
             ) {
-              textPathSpecsToRead.add(canonicalPath);
+              textPathSpecsToRead.set(canonicalPath, pathSpec);
             }
           }
           return { text: part.text };
@@ -8637,14 +8641,24 @@ export class Session implements SessionContext {
       { dev: number; ino: number }
     >();
     const candidatePathsToRead = [
-      ...textPathSpecsToRead,
-      ...atPathCommandParts.map((part) => part.fileData!.fileUri!),
+      ...textPathSpecsToRead.entries(),
+      ...atPathCommandParts.flatMap((part) => {
+        const fileUri = part.fileData!.fileUri!;
+        const resolved = path.resolve(this.config.getTargetDir(), fileUri);
+        const canonicalPath = resolveExistingFile(resolved);
+        return canonicalPath ? [[canonicalPath, fileUri] as const] : [];
+      }),
     ];
-    for (const textPath of candidatePathsToRead) {
+    const displayPaths = new Map<string, string>();
+    const acceptedFileUris = new Set<string>();
+    for (const [textPath, displayPath] of candidatePathsToRead) {
       try {
         if (
           resolveExistingFile(textPath) !== textPath ||
           !this.config.getWorkspaceContext().isPathWithinWorkspace(textPath) ||
+          this.config
+            .getFileService()
+            .shouldIgnoreFile(displayPath, filteringOptions) ||
           this.config
             .getFileService()
             .shouldIgnoreFile(textPath, filteringOptions)
@@ -8653,6 +8667,8 @@ export class Session implements SessionContext {
         }
         const stats = statSync(textPath);
         revalidatedTextPaths.push(textPath);
+        displayPaths.set(textPath, displayPath);
+        acceptedFileUris.add(displayPath);
         validatedPathIdentities.set(textPath, {
           dev: stats.dev,
           ino: stats.ino,
@@ -8662,6 +8678,10 @@ export class Session implements SessionContext {
       }
     }
     const pathSpecsToRead = [...new Set(revalidatedTextPaths)];
+    const partsToSend = parts.filter(
+      (part) =>
+        !('fileData' in part) || acceptedFileUris.has(part.fileData!.fileUri!),
+    );
 
     if (
       pathSpecsToRead.length === 0 &&
@@ -8670,7 +8690,7 @@ export class Session implements SessionContext {
       mcpServerParts.length === 0
     ) {
       return this.#applyBridgeConversionsIfNeeded(
-        parts,
+        partsToSend,
         abortSignal,
         options.onFullTurnModel,
       );
@@ -8678,7 +8698,7 @@ export class Session implements SessionContext {
 
     if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
       return this.#applyBridgeConversionsIfNeeded(
-        [...parts, ...extensionParts, ...mcpServerParts],
+        [...partsToSend, ...extensionParts, ...mcpServerParts],
         abortSignal,
         options.onFullTurnModel,
       );
@@ -8686,8 +8706,8 @@ export class Session implements SessionContext {
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
-    for (let i = 0; i < parts.length; i++) {
-      const chunk = parts[i];
+    for (let i = 0; i < partsToSend.length; i++) {
+      const chunk = partsToSend[i];
       if ('text' in chunk) {
         initialQueryText += chunk.text;
       } else if ('fileData' in chunk) {
@@ -8728,6 +8748,7 @@ export class Session implements SessionContext {
         ...(validatedPathIdentities.size > 0
           ? { validatedPathIdentities }
           : {}),
+        ...(displayPaths.size > 0 ? { displayPaths } : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)

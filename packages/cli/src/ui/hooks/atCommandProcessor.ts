@@ -220,6 +220,7 @@ export async function resolveAtCommandQuery({
   const pathSpecsToRead: string[] = [];
   const atPathToResolvedSpecMap = new Map<string, string>();
   const contentLabelsForDisplay: string[] = [];
+  const displayPaths = new Map<string, string>();
   const ignoredByReason: Record<string, string[]> = {
     git: [],
     qwen: [],
@@ -443,6 +444,7 @@ export async function resolveAtCommandQuery({
         pathSpecsToRead.push(canonicalPath);
         atPathToResolvedSpecMap.set(originalAtPath, pathName);
         contentLabelsForDisplay.push(pathName);
+        displayPaths.set(canonicalPath, pathName);
         resolvedSuccessfully = true;
       } catch (error) {
         if (isNodeError(error) && error.code === 'ENOENT') {
@@ -465,48 +467,42 @@ export async function resolveAtCommandQuery({
     }
   }
 
-  // Construct the initial part of the query for the LLM
-  let initialQueryText = '';
-  for (let i = 0; i < commandParts.length; i++) {
-    const part = commandParts[i];
-    if (part.type === 'text') {
-      initialQueryText += part.content;
-    } else {
-      // type === 'atPath'
-      const resolvedSpec = atPathToResolvedSpecMap.get(part.content);
-      if (
-        i > 0 &&
-        initialQueryText.length > 0 &&
-        !initialQueryText.endsWith(' ')
-      ) {
-        // Add space if previous part was text and didn't end with space, or if previous was @path
-        const prevPart = commandParts[i - 1];
-        if (
-          prevPart.type === 'text' ||
-          (prevPart.type === 'atPath' &&
-            atPathToResolvedSpecMap.has(prevPart.content))
-        ) {
-          initialQueryText += ' ';
-        }
-      }
-      if (resolvedSpec) {
-        initialQueryText += `@${resolvedSpec}`;
+  const buildInitialQueryText = () => {
+    let text = '';
+    for (let i = 0; i < commandParts.length; i++) {
+      const part = commandParts[i];
+      if (part.type === 'text') {
+        text += part.content;
       } else {
-        // If not resolved for reading (e.g. lone @ or invalid path that was skipped),
-        // add the original @-string back, ensuring spacing if it's not the first element.
-        if (
-          i > 0 &&
-          initialQueryText.length > 0 &&
-          !initialQueryText.endsWith(' ') &&
-          !part.content.startsWith(' ')
-        ) {
-          initialQueryText += ' ';
+        const resolvedSpec = atPathToResolvedSpecMap.get(part.content);
+        if (i > 0 && text.length > 0 && !text.endsWith(' ')) {
+          const prevPart = commandParts[i - 1];
+          if (
+            prevPart.type === 'text' ||
+            (prevPart.type === 'atPath' &&
+              atPathToResolvedSpecMap.has(prevPart.content))
+          ) {
+            text += ' ';
+          }
         }
-        initialQueryText += part.content;
+        if (resolvedSpec) {
+          text += `@${resolvedSpec}`;
+        } else {
+          if (
+            i > 0 &&
+            text.length > 0 &&
+            !text.endsWith(' ') &&
+            !part.content.startsWith(' ')
+          ) {
+            text += ' ';
+          }
+          text += part.content;
+        }
       }
     }
-  }
-  initialQueryText = initialQueryText.trim();
+    return text.trim();
+  };
+  let initialQueryText = buildInitialQueryText();
 
   // Inform user about ignored paths
   const totalIgnored =
@@ -843,10 +839,21 @@ export async function resolveAtCommandQuery({
   const fileParts: Part[] = [];
   let fileDisplays: IndividualToolCallDisplay[] = [];
   const revalidatedPathSpecs: string[] = [];
+  const revalidatedDisplayPaths = new Map<string, string>();
   const validatedPathIdentities = new Map<
     string,
     { dev: number; ino: number }
   >();
+  const pruneSkippedPath = (approvedPath: string) => {
+    const displayPath = displayPaths.get(approvedPath) ?? approvedPath;
+    for (const [originalAtPath, resolvedSpec] of atPathToResolvedSpecMap) {
+      if (resolvedSpec === displayPath) {
+        atPathToResolvedSpecMap.delete(originalAtPath);
+      }
+    }
+    const index = contentLabelsForDisplay.indexOf(displayPath);
+    if (index >= 0) contentLabelsForDisplay.splice(index, 1);
+  };
   for (const approvedPath of pathSpecsToRead) {
     try {
       const currentPath = await fs.realpath(approvedPath);
@@ -860,21 +867,26 @@ export async function resolveAtCommandQuery({
         getIgnoreReason(currentPath) === undefined
       ) {
         revalidatedPathSpecs.push(currentPath);
+        const displayPath = displayPaths.get(approvedPath);
+        if (displayPath) revalidatedDisplayPaths.set(currentPath, displayPath);
         validatedPathIdentities.set(currentPath, {
           dev: stats.dev,
           ino: stats.ino,
         });
       } else {
+        pruneSkippedPath(approvedPath);
         onDebugMessage(
           `Path ${approvedPath} failed revalidation and will be skipped.`,
         );
       }
     } catch {
+      pruneSkippedPath(approvedPath);
       onDebugMessage(
         `Path ${approvedPath} changed before it could be read and will be skipped.`,
       );
     }
   }
+  initialQueryText = buildInitialQueryText();
   if (revalidatedPathSpecs.length > 0) {
     try {
       const result = await readManyFiles(config, {
@@ -882,6 +894,7 @@ export async function resolveAtCommandQuery({
         signal,
         preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
         validatedPathIdentities,
+        displayPaths: revalidatedDisplayPaths,
       });
 
       const parts = Array.isArray(result.contentParts)

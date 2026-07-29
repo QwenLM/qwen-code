@@ -959,6 +959,10 @@ export async function runNonInteractive(
                 error instanceof Error ? error.message : String(error)
               }`,
             );
+            emitVisionNotice(
+              'vision_bridge_failed',
+              'Vision bridge failed; proceeding without the image(s).',
+            );
             initialParts = splitImageParts(initialParts).nonImageParts;
           }
         }

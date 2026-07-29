@@ -230,12 +230,12 @@ describe('resolveExistingFile', () => {
     ).toBeUndefined();
   });
 
-  it('returns undefined when the path is not a file', () => {
+  it('returns undefined when the path is not a file or directory', () => {
     expect(
       resolveExistingFile(
         '/tmp/dir',
         (resolved) => resolved,
-        () => ({ isFile: () => false }),
+        () => ({ isFile: () => false, isDirectory: () => false }),
       ),
     ).toBeUndefined();
   });
@@ -260,6 +260,16 @@ describe('resolveExistingFile', () => {
         () => ({ isFile: () => true }),
       ),
     ).toBe('/tmp/image.png');
+  });
+
+  it('returns the canonical path for an existing directory', () => {
+    expect(
+      resolveExistingFile(
+        '/tmp/alias',
+        () => '/tmp/dir',
+        () => ({ isFile: () => false, isDirectory: () => true }),
+      ),
+    ).toBe('/tmp/dir');
   });
 });
 
@@ -4457,6 +4467,7 @@ describe('Session', () => {
           signal: expect.any(AbortSignal),
           preserveUnsupportedImageForBridge: true,
           validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[imagePath, imagePath]]),
         });
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
@@ -4696,8 +4707,13 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
+      const targetDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-editor-')),
+      );
 
       try {
+        await fs.writeFile(path.join(targetDir, 'editor.ts'), 'editor', 'utf8');
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [
@@ -4728,6 +4744,7 @@ describe('Session', () => {
         expect(promptIndex).toBeGreaterThan(fileIndex);
       } finally {
         readManyFilesSpy.mockRestore();
+        await fs.rm(targetDir, { recursive: true, force: true });
       }
     });
 
@@ -11493,6 +11510,7 @@ describe('Session', () => {
 
       try {
         await fs.writeFile(filePath, '# Test\n', 'utf8');
+        const canonicalFilePath = await fs.realpath(filePath);
 
         mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
         mockChat.sendMessageStream = vi
@@ -11514,12 +11532,56 @@ describe('Session', () => {
         await session.prompt(promptRequest);
 
         expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
-          paths: [fileName],
+          paths: [canonicalFilePath],
           signal: expect.any(AbortSignal),
+          validatedPathIdentities: expect.any(Map),
+          displayPaths: new Map([[canonicalFilePath, fileName]]),
         });
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops resource links that fail workspace revalidation', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.png');
+      const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+
+      try {
+        await fs.writeFile(outsidePath, 'secret', 'utf8');
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            pathSpec.startsWith(`${tempDir}${path.sep}`),
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: 'secret.png',
+              uri: `file://${outsidePath}`,
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+        expect(firstSentMessage()).toEqual([{ text: 'Check this file' }]);
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 

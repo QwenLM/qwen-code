@@ -1074,7 +1074,7 @@ export async function processSingleFileContent(
           llmContent:
             'Could not read file because no file was found at the specified path.',
           returnDisplay: 'File not found.',
-          error: `File not found: ${filePath}`,
+          error: `File not found: ${displayPath}`,
           errorType: ToolErrorType.FILE_NOT_FOUND,
         };
       }
@@ -1085,7 +1085,7 @@ export async function processSingleFileContent(
         llmContent:
           'Could not read file because the provided path is a directory, not a file.',
         returnDisplay: 'Path is a directory.',
-        error: `Path is a directory, not a file: ${filePath}`,
+        error: `Path is a directory, not a file: ${displayPath}`,
         errorType: ToolErrorType.TARGET_IS_DIRECTORY,
       };
     }
@@ -1099,7 +1099,7 @@ export async function processSingleFileContent(
       return {
         llmContent: `Cannot read file: ${path.basename(filePath)} is not a regular file (e.g. device, socket, or pipe).`,
         returnDisplay: 'Not a regular file.',
-        error: `Not a regular file: ${filePath}`,
+        error: `Not a regular file: ${displayPath}`,
         errorType: ToolErrorType.READ_CONTENT_FAILURE,
       };
     }
@@ -1192,7 +1192,7 @@ export async function processSingleFileContent(
       return {
         llmContent: `PDF file is too large for full text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document into smaller files before retrying.`,
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB).`,
-        error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        error: `PDF exceeds extraction size limit: ${displayPath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
         stats,
       };
@@ -1201,7 +1201,7 @@ export async function processSingleFileContent(
       return {
         llmContent: `PDF file is too large for page-range text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB limit. Split the document into smaller files before retrying.`,
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB).`,
-        error: `PDF exceeds page-range extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        error: `PDF exceeds page-range extraction size limit: ${displayPath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
         stats,
       };
@@ -1251,7 +1251,7 @@ export async function processSingleFileContent(
       return {
         llmContent: 'Image file exceeds the 100 MB source limit.',
         returnDisplay: 'Image file exceeds the 100 MB source limit.',
-        error: `Image file exceeds the 100 MB source limit: ${filePath}`,
+        error: `Image file exceeds the 100 MB source limit: ${displayPath}`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
@@ -1264,7 +1264,7 @@ export async function processSingleFileContent(
       return {
         llmContent: 'File size exceeds the 10MB limit.',
         returnDisplay: 'File size exceeds the 10MB limit.',
-        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        error: `File size exceeds the 10MB limit: ${displayPath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
@@ -1505,7 +1505,7 @@ export async function processSingleFileContent(
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
-            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${displayPath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
             errorType: ToolErrorType.FILE_TOO_LARGE,
           };
         }
@@ -1530,7 +1530,7 @@ export async function processSingleFileContent(
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
-            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${displayPath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
             errorType: ToolErrorType.FILE_TOO_LARGE,
           };
         }
@@ -1558,7 +1558,7 @@ export async function processSingleFileContent(
             return {
               llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
               returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
-              error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+              error: `File exceeds the 10MB data URI limit after base64 encoding: ${displayPath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
               errorType: ToolErrorType.FILE_TOO_LARGE,
             };
           }
@@ -1855,7 +1855,7 @@ export async function processSingleFileContent(
           return {
             llmContent: `Error parsing notebook ${relativePathForDisplay}: ${msg}`,
             returnDisplay: `Error reading notebook: ${relativePathForDisplay}`,
-            error: `Error parsing notebook ${filePath}: ${msg}`,
+            error: `Error parsing notebook ${displayPath}: ${msg}`,
             errorType: ToolErrorType.READ_CONTENT_FAILURE,
           };
         }
@@ -1866,7 +1866,7 @@ export async function processSingleFileContent(
         return {
           llmContent: `Unhandled file type: ${exhaustiveCheck}`,
           returnDisplay: `Skipped unhandled file type: ${relativePathForDisplay}`,
-          error: `Unhandled file type for ${filePath}`,
+          error: `Unhandled file type for ${displayPath}`,
         };
       }
     }
@@ -1881,7 +1881,7 @@ export async function processSingleFileContent(
     return {
       llmContent: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
       returnDisplay: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
-      error: `Error reading file ${filePath}: ${errorMessage}`,
+      error: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }

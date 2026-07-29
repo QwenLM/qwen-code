@@ -132,6 +132,21 @@ describe('readManyFiles', () => {
       expect(content).toContain('--- End of content ---');
     });
 
+    it('uses display paths for canonical reads', async () => {
+      const { absolutePath } = await createTestFile('target.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, {
+        paths: [absolutePath],
+        displayPaths: new Map([[absolutePath, 'alias.txt']]),
+      });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Content from alias.txt');
+      expect(content).not.toContain(`Content from ${absolutePath}`);
+      expect(result.files[0]!.filePath).toBe('alias.txt');
+    });
+
     it('should read multiple files', async () => {
       await createTestFile('file1.txt');
       await createTestFile('file2.txt');
@@ -598,6 +613,7 @@ describe('readManyFiles', () => {
       // Downstream callers (e.g. atCommandProcessor) inspect this field to
       // render the read as failed rather than successful.
       expect(result.files[0]!.error).toMatch(/exceeds the 10MB limit/i);
+      expect(result.files[0]!.error).not.toContain('qwen-validated-read-');
     });
   });
 

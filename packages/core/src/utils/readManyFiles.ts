@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from '../core/inlineMediaLimit.js';
 import { getErrorMessage, isAbortError } from './errors.js';
 import type { ProcessedFileReadResult } from './fileUtils.js';
 import {
@@ -46,6 +47,12 @@ export interface ReadManyFilesOptions {
    * replaced symlink or file is dropped instead of entering model context.
    */
   validatedPathIdentities?: ReadonlyMap<string, ReadManyFilesPathIdentity>;
+
+  /**
+   * User-facing labels for canonical paths. Callers that validate a realpath'd
+   * target can keep the original @ reference in content delimiters.
+   */
+  displayPaths?: ReadonlyMap<string, string>;
 }
 
 export interface ReadManyFilesPathIdentity {
@@ -122,6 +129,7 @@ export async function readManyFiles(
     preserveUnsupportedImageForBridge,
     signal,
     validatedPathIdentities,
+    displayPaths,
   } = options;
 
   const seenFiles = new Set<string>();
@@ -135,6 +143,7 @@ export async function readManyFiles(
       signal?.throwIfAborted();
       const normalizedPattern = rawPattern.replace(/\\/g, '/');
       const fullPath = path.resolve(projectRoot, normalizedPattern);
+      const displayPath = displayPaths?.get(fullPath) ?? fullPath;
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
       if (
         validatedIdentity &&
@@ -148,6 +157,7 @@ export async function readManyFiles(
         const { contentParts: dirParts, info } = await readDirectory(
           config,
           fullPath,
+          displayPath,
           signal,
         );
         if (
@@ -163,10 +173,12 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const snapshot = validatedIdentity
+        const needsSnapshot =
+          validatedIdentity && stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES;
+        const snapshot = needsSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
           : undefined;
-        if (validatedIdentity && !snapshot) continue;
+        if (needsSnapshot && !snapshot) continue;
         let readResult;
         try {
           readResult = await readFileContent(
@@ -174,7 +186,7 @@ export async function readManyFiles(
             snapshot?.filePath ?? fullPath,
             preserveUnsupportedImageForBridge,
             signal,
-            fullPath,
+            displayPath,
             snapshot?.stats,
           );
         } finally {
@@ -314,6 +326,7 @@ async function snapshotValidatedFile(
 async function readDirectory(
   config: Config,
   directoryPath: string,
+  displayPath = directoryPath,
   signal?: AbortSignal,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo }> {
   signal?.throwIfAborted();
@@ -324,14 +337,14 @@ async function readDirectory(
   signal?.throwIfAborted();
 
   const contentParts: Part[] = [
-    { text: `\nContent from ${directoryPath}:\n` },
+    { text: `\nContent from ${displayPath}:\n` },
     { text: structure },
   ];
 
   return {
     contentParts,
     info: {
-      filePath: directoryPath,
+      filePath: displayPath,
       content: structure,
       isDirectory: true,
     },

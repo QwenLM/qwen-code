@@ -2867,6 +2867,83 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('emits a stream-json system message for headless vision bridge notices', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-json',
+    );
+
+    const systemMessage = writes
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (message) =>
+          message.type === 'system' && message.subtype === 'vision_bridge',
+      );
+    expect(systemMessage).toMatchObject({
+      subtype: 'vision_bridge',
+      data: { notice: expect.stringContaining('Converted 1 image(s)') },
+    });
+  });
+
+  it('emits a notice when a non-agent vision bridge fails', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockRejectedValue(new Error('bridge unavailable'));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-failed',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-failed',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Vision bridge failed; proceeding without the image(s).\n',
+    );
+  });
+
   it('strips headless images when a non-agent vision bridge is skipped', async () => {
     setupMetricsMock();
     await mockHeadlessImageInput();

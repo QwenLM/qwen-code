@@ -194,6 +194,10 @@ describe('handleAtCommand', () => {
         ? result.processedQuery
         : [result.processedQuery];
       expect(parts).toContainEqual({ text: 'plain text target' });
+      expect(parts).toContainEqual({ text: `\nContent from ${imageAlias}:\n` });
+      expect(parts).not.toContainEqual({
+        text: `\nContent from ${textPath}:\n`,
+      });
       expect(
         parts.some(
           (part) => typeof part !== 'string' && part && 'inlineData' in part,
@@ -1566,6 +1570,10 @@ describe('handleAtCommand', () => {
           expect(JSON.stringify(result.processedQuery)).not.toContain(
             'outside secret',
           );
+          expect(
+            (result.processedQuery as Array<{ text?: string }>)[0].text,
+          ).toContain(`@${filePath}`);
+          expect(result.filesRead).not.toContain(filePath);
           expect(mockOnDebugMessage).toHaveBeenCalledWith(
             `Path ${filePath} failed revalidation and will be skipped.`,
           );
