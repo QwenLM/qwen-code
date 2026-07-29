@@ -82,6 +82,25 @@ describe('renderExternalContext', () => {
     );
   });
 
+  it('escapes angle brackets and budgets their expanded representation', () => {
+    const rendered = renderExternalContext([
+      {
+        id: '<source>',
+        content: '<untrusted>value</untrusted>'.repeat(200),
+      },
+    ]);
+    const item = JSON.parse(rendered).untrusted_external_context.items[0] as {
+      id: string;
+      content: string;
+    };
+
+    expect(rendered).not.toContain('<');
+    expect(rendered).not.toContain('>');
+    expect(rendered.length).toBeLessThanOrEqual(4000);
+    expect(item.id).toBe('<source>');
+    expect(item.content).toContain('<untrusted>');
+  });
+
   it('drops low-value metadata before provenance under budget pressure', () => {
     const rendered = renderExternalContext(
       Array.from({ length: 5 }, (_, index) => ({
