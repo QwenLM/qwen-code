@@ -2448,18 +2448,31 @@ describe('qwen-autofix workflow', () => {
       /IDLE_PRS=" \$\(jq -rs[\s\S]*?\) "/,
     )?.[0];
     expect(setSrc).toBeTruthy();
+    expect(setSrc).toContain('takeover-prs.json');
     const predSrc = reviewScanJob.match(
       /if \[\[ "\$\{IDLE_PRS\}" == \*" \$\{PR\} "\* &&[^\n]*\]\]; then/,
     )?.[0];
     expect(predSrc).toBeTruthy();
-    const runBackoff = ({ pr, updatedAt, slotNow, listed = true }) => {
+    const runBackoff = ({
+      pr,
+      updatedAt,
+      slotNow,
+      listed = true,
+      inTakeover = false,
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'idle-backoff-'));
       try {
         const row = listed
           ? [{ number: Number(pr), updatedAt }]
           : [{ number: 99999, updatedAt: '2026-01-01T00:00:00Z' }];
-        writeFileSync(join(dir, 'bot-prs.json'), JSON.stringify(row));
-        writeFileSync(join(dir, 'takeover-prs.json'), '[]');
+        writeFileSync(
+          join(dir, 'bot-prs.json'),
+          inTakeover ? '[]' : JSON.stringify(row),
+        );
+        writeFileSync(
+          join(dir, 'takeover-prs.json'),
+          inTakeover ? JSON.stringify(row) : '[]',
+        );
         return execFileSync(
           'bash',
           [
@@ -2506,6 +2519,15 @@ describe('qwen-autofix workflow', () => {
     expect(runBackoff({ pr: '8001', updatedAt: null, slotNow: 0 })).toBe(
       'inspect',
     );
+    // Idle candidate in takeover-prs.json (the cohort this targets) → deferred.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        inTakeover: true,
+      }),
+    ).toBe('skip');
 
     // Visible in the fleet dashboard, like the busy skip.
     expect(reviewScanJob).toContain("'idle-backoff'");
