@@ -2994,6 +2994,19 @@ export interface DaemonChannelPairingApprovalResult
   approved: DaemonChannelPairingRequest;
 }
 
+export interface DaemonChannelPairingApprovalsSnapshot {
+  senderIds: string[];
+}
+
+export interface DaemonChannelPairingRevocationRequest {
+  senderId: string;
+}
+
+export interface DaemonChannelPairingRevocationResult
+  extends DaemonChannelPairingApprovalsSnapshot {
+  revoked: string;
+}
+
 export interface DaemonChannelManagementOptions {
   clientId?: string;
   timeoutMs?: number;
