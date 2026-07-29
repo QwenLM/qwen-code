@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1475,6 +1476,9 @@ export function EnhancedTable({
   const [cellDialog, setCellDialog] = useState<CellDialogState | null>(null);
   const [longTextExpanded, setLongTextExpanded] = useState(false);
   const [density, setDensity] = useState<TableDensity>('standard');
+  const [frozenColumnShadowLeft, setFrozenColumnShadowLeft] = useState<
+    number | null
+  >(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
@@ -1495,6 +1499,7 @@ export function EnhancedTable({
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
   const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
   const cellDialogRef = useRef<HTMLDivElement | null>(null);
   const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
@@ -2144,34 +2149,37 @@ export function EnhancedTable({
     };
   };
 
-  const frozenColumnShadowStyle = (): CSSProperties | undefined => {
-    if (!freezeFirstColumn || frozenColumnIndex === undefined) return undefined;
-    const width = columnWidths[frozenColumnIndex];
-    if (width !== undefined) {
-      return { left: ACTION_COLUMN_WIDTH + width };
+  useLayoutEffect(() => {
+    if (!freezeFirstColumn || frozenColumnIndex === undefined) {
+      setFrozenColumnShadowLeft(null);
+      return;
     }
-    const minWidth =
-      density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
-    const fixedWidth = orderedVisibleColumnIndexes.reduce(
-      (total, index) => total + (columnWidths[index] ?? 0),
-      0,
-    );
-    const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
-      (index) => columnWidths[index] === undefined,
-    ).length;
-    const columnWidth =
-      flexibleColumnCount === 0
-        ? `${minWidth}px`
-        : flexibleColumnWidth(
-            minWidth,
-            fixedWidth,
-            flexibleColumnCount,
-            '100%',
-          );
-    return {
-      left: `calc(${ACTION_COLUMN_WIDTH}px + ${columnWidth})`,
+    const shell = shellRef.current;
+    const frozenHeader = frozenHeaderCellRef.current;
+    if (!shell || !frozenHeader) return;
+    const updateShadowPosition = () => {
+      const shellRect = shell.getBoundingClientRect();
+      const headerRect = frozenHeader.getBoundingClientRect();
+      setFrozenColumnShadowLeft(
+        Math.max(0, headerRect.right - shellRect.left - shell.clientLeft),
+      );
     };
-  };
+    updateShadowPosition();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateShadowPosition);
+      return () => window.removeEventListener('resize', updateShadowPosition);
+    }
+    const resizeObserver = new ResizeObserver(updateShadowPosition);
+    resizeObserver.observe(shell);
+    resizeObserver.observe(frozenHeader);
+    return () => resizeObserver.disconnect();
+  }, [
+    columnWidths,
+    density,
+    freezeFirstColumn,
+    frozenColumnIndex,
+    orderedVisibleColumnIndexes,
+  ]);
 
   const startColumnResize = (
     event: ReactMouseEvent<HTMLButtonElement>,
@@ -2731,6 +2739,7 @@ export function EnhancedTable({
                 return (
                   <th
                     key={header.key}
+                    ref={isFrozenColumn ? frozenHeaderCellRef : undefined}
                     className={`${styles.headerCell} ${
                       isFrozenColumn ? styles.frozenHeaderCell : ''
                     } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
@@ -2955,10 +2964,10 @@ export function EnhancedTable({
           </div>
         )}
       </div>
-      {freezeFirstColumn && (
+      {freezeFirstColumn && frozenColumnShadowLeft !== null && (
         <div
           className={styles.frozenColumnShadow}
-          style={frozenColumnShadowStyle()}
+          style={{ left: frozenColumnShadowLeft }}
           aria-hidden="true"
         />
       )}
