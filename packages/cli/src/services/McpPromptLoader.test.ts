@@ -381,8 +381,16 @@ describe('McpPromptLoader', () => {
           new AbortController().signal,
         );
         const completion = commands[0].completion!;
-        const context = {} as CommandContext;
-        const suggestions = await completion(context, 'test-name 6 tiger');
+        const context = {
+          invocation: {
+            raw: '/find "Fluffy" 5 "Cat" ',
+            name: 'find',
+            args: '"Fluffy" 5 "Cat"',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '');
+        // Positional args fill the required params, so nothing is suggested
+        // and Enter executes the prompt (#7991).
         expect(suggestions).toEqual([]);
       });
 
@@ -405,7 +413,7 @@ describe('McpPromptLoader', () => {
         expect(suggestions).toEqual(['--name="', '--age="', '--species="']);
       });
 
-      it('should suggest remaining optional arguments when all required are present', async () => {
+      it('should suggest no arguments when all required arguments are present', async () => {
         const loader = new McpPromptLoader(mockConfigWithPrompts);
         const commands = await loader.loadCommands(
           new AbortController().signal,
@@ -422,6 +430,42 @@ describe('McpPromptLoader', () => {
         // All required args are filled; only optional remain → empty list
         // so Enter executes the prompt with defaults (#7991).
         expect(suggestions).toEqual([]);
+      });
+
+      it('should suggest optional arguments matching a partial argument once required are filled', async () => {
+        const loader = new McpPromptLoader(mockConfigWithPrompts);
+        const commands = await loader.loadCommands(
+          new AbortController().signal,
+        );
+        const completion = commands[0].completion!;
+        const context = {
+          invocation: {
+            raw: '/find --name="test-name" --age="6" --species="tiger" --enc',
+            name: 'find',
+            args: '--name="test-name" --age="6" --species="tiger" --enc',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '--enc');
+        // Required args are filled; typing an optional flag discovers it
+        // without blocking Enter-to-execute for an empty partial (#7991).
+        expect(suggestions).toEqual(['--enclosure="']);
+      });
+
+      it('should recognize unquoted named arguments as provided', async () => {
+        const loader = new McpPromptLoader(mockConfigWithPrompts);
+        const commands = await loader.loadCommands(
+          new AbortController().signal,
+        );
+        const completion = commands[0].completion!;
+        const context = {
+          invocation: {
+            raw: '/find --name=alice --age=6 ',
+            name: 'find',
+            args: '--name=alice --age=6',
+          },
+        } as CommandContext;
+        const suggestions = await completion(context, '');
+        expect(suggestions).toEqual(['--species="']);
       });
 
       it('should suggest all arguments when required args are still missing', async () => {

@@ -178,30 +178,49 @@ export class McpPromptLoader implements ICommandLoader {
             while ((m = namedArgRegex.exec(argsString)) !== null) {
               providedArgNames.add(m[1]);
             }
+            // Arguments can also be given by position. Count the tokens that
+            // are neither named assignments nor `--`-prefixed partial flags,
+            // then map them onto the still-unfilled args required-first,
+            // mirroring parseArgs.
+            const positionalTokens =
+              argsString
+                .replace(namedArgRegex, ' ')
+                .match(/(?:"(?:\\.|[^"\\])*"|[^ ]+)/g) || [];
+            const positionalCount = positionalTokens.filter(
+              (token) => !token.startsWith('--'),
+            ).length;
+            if (positionalCount > 0) {
+              const unfilled = prompt.arguments
+                .filter((arg) => !providedArgNames.has(arg.name))
+                .sort((a, b) =>
+                  a.required === b.required ? 0 : a.required ? -1 : 1,
+                );
+              for (let i = 0; i < positionalCount && i < unfilled.length; i++) {
+                providedArgNames.add(unfilled[i].name);
+              }
+            }
             // Separate required and optional unused arguments so optional
             // params don't block Enter-to-execute (#7991).
             const unusedRequired: string[] = [];
             const unusedOptional: string[] = [];
             for (const arg of prompt.arguments) {
-              const isProvided = providedArgNames.has(arg.name);
-              // The trailing partial arg (e.g. user typed --spe and we're
-              // completing it) should still be treated as unused.
+              if (providedArgNames.has(arg.name)) continue;
               const flag = `--${arg.name}="`;
-              const isTrailingPartial =
-                flag.startsWith(partialArg) &&
-                partialArg.length > 0 &&
-                !isProvided;
-              if (isProvided && !isTrailingPartial) continue;
               if (arg.required) {
                 unusedRequired.push(flag);
               } else {
                 unusedOptional.push(flag);
               }
             }
-            // Only suggest required args as completions. If none remain,
-            // return empty so Enter executes the prompt with defaults.
+            // Suggest required args first. Only suggest optional args while
+            // the user is typing one (non-empty partialArg); with no required
+            // args left, an empty partial returns [] so Enter executes (#7991).
             const unusedArguments =
-              unusedRequired.length > 0 ? unusedRequired : [];
+              unusedRequired.length > 0
+                ? unusedRequired
+                : partialArg.length > 0
+                  ? unusedOptional
+                  : [];
 
             const exactlyMatchingArgumentAtTheEnd = prompt.arguments
               .map((argument) => `--${argument.name}="`)
