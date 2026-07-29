@@ -2398,9 +2398,46 @@ describe('qwen-autofix workflow', () => {
     // starve the oldest tail forever once the pool exceeds the budget.
     expect(reviewScanJob).toContain('ROT_OFF=');
     expect(reviewScanJob).toContain('.[$o:] + .[:$o]');
+    // The free skips (busy, idle-backoff) both come before the budget
+    // increment — neither may consume inspection budget.
     expect(reviewScanJob).toMatch(
-      /BUSY_PRS[\s\S]{0,240}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
+      /BUSY_PRS[\s\S]{0,1600}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
     );
+    expect(reviewScanJob).toMatch(
+      /fleet_row "\$\{PR\}" 'idle-backoff'[\s\S]{0,120}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
+    );
+  });
+
+  it('backs off idle candidates without spending inspection budget', () => {
+    // Measured 2026-07-29: 28 open takeover PRs, 8 of them idle in
+    // "nothing new" state for 10+ hours — every scan re-confirmed their
+    // idleness while #8002 (freshly engaged) was admitted and then
+    // deferred by the 10-target cap. Candidates idle >24h are inspected
+    // on roughly every 4th scan instead of every one.
+    // The staleness signal is the list's own updatedAt — no extra API
+    // call per candidate.
+    expect(
+      reviewScanJob.split('maintainerCanModify,updatedAt').length - 1,
+    ).toBe(2);
+    expect(reviewScanJob).toContain(`IDLE_CUTOFF="$(date -u -d '24 hours ago'`);
+    // Deterministic slotting by PR number and UTC hour — one eligible hour
+    // in every four, so no PR is unlucky forever.
+    expect(reviewScanJob).toContain(
+      'IDLE_SLOT_NOW="$(( ($(date -u +%s) / 3600) % 4 ))"',
+    );
+    expect(reviewScanJob).toContain('"$(( PR % 4 ))" != "${IDLE_SLOT_NOW}"');
+    // Fail-open on the forced-dispatch path: it never builds the list
+    // files, so the lookup stays empty and a forced PR is always
+    // inspected. Same for a PR missing from the lookup.
+    expect(reviewScanJob).toContain("IDLE_UPDATED='{}'");
+    expect(reviewScanJob).toMatch(
+      /if \[\[ -f "\$\{WORKDIR\}\/bot-prs\.json" && -f "\$\{WORKDIR\}\/takeover-prs\.json" \]\]; then\n\s+IDLE_UPDATED=/,
+    );
+    expect(reviewScanJob).toContain(
+      '[[ -n "${PR_UPDATED}" && "${PR_UPDATED}" < "${IDLE_CUTOFF}"',
+    );
+    // Visible in the fleet dashboard, like the busy skip.
+    expect(reviewScanJob).toContain("'idle-backoff'");
   });
 
   it('behaviorally replays the takeover-command toggle across all four paths', () => {

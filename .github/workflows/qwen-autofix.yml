@@ -1669,10 +1669,10 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/bot-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify,updatedAt > "${WORKDIR}/bot-prs.json"
             gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/takeover-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify,updatedAt > "${WORKDIR}/takeover-prs.json"
             # Skip-labeled PRs are excluded HERE, not only at the address
             # gate: that gate discards without writing a marker, so the
             # watermark never advances and an unfiltered scan would re-emit
@@ -1815,6 +1815,30 @@ jobs:
           )
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
+          # Idle backoff, from the list's own updatedAt (no extra API call):
+          # a candidate with no activity for >24h gets inspected on roughly
+          # every 4th scan instead of every one. The pool doubled in two
+          # days (28 takeover PRs, 8 of them idle in "nothing new" state for
+          # 10+ hours), and idle candidates crowd the SHARED inspection and
+          # target budgets — #8002 was admitted and then deferred by the
+          # 10-target cap while long-idle PRs re-confirmed "nothing new".
+          # Safe because every real wake-up path bumps updatedAt (reviews,
+          # comments, labels, pushes) or routes in real time anyway; the only
+          # thing deferred is the scheduled re-confirmation of idleness, plus
+          # worst-case ~a few hours of latency on base-conflict detection for
+          # a PR nobody has touched in a day. Slotting is deterministic —
+          # one eligible hour in every four, keyed by PR number — so no PR
+          # is unlucky forever. The forced-dispatch path never builds the
+          # list files, so a forced PR is always inspected.
+          IDLE_UPDATED='{}'
+          if [[ -f "${WORKDIR}/bot-prs.json" && -f "${WORKDIR}/takeover-prs.json" ]]; then
+            IDLE_UPDATED="$(jq -cs 'add | unique_by(.number)
+              | map({(.number | tostring): (.updatedAt // "")}) | add // {}' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json" 2> /dev/null || echo '{}')"
+          fi
+          IDLE_CUTOFF="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          IDLE_SLOT_NOW="$(( ($(date -u +%s) / 3600) % 4 ))"
+
           TARGETS='[]'
           INSPECTED=0
           for PR in ${CANDIDATES}; do
@@ -1823,6 +1847,14 @@ jobs:
             if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
               fleet_row "${PR}" 'busy' 'address run in flight'
+              continue
+            fi
+            # The idle-backoff skip is free too (in-memory lookup) — it must
+            # not consume inspection budget either.
+            PR_UPDATED="$(jq -r --arg pr "${PR}" '.[$pr] // ""' <<< "${IDLE_UPDATED}")"
+            if [[ -n "${PR_UPDATED}" && "${PR_UPDATED}" < "${IDLE_CUTOFF}" && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then
+              echo "😴 #${PR}: idle since ${PR_UPDATED} (>24h) — deferring to its rotation slot (slot $(( PR % 4 )), current ${IDLE_SLOT_NOW})"
+              fleet_row "${PR}" 'idle-backoff' "idle since ${PR_UPDATED}; inspected roughly every 4th scan"
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
