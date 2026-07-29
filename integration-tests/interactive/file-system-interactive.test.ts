@@ -69,7 +69,7 @@ describe('Interactive file system', () => {
       // content alone still passes.
       const toolCall = await rig.waitForAnyToolCall(
         ['write_file', 'edit'],
-        30000,
+        rig.getDefaultTimeout(),
       );
 
       // The tool call is logged once the model issues it, but the turn may
