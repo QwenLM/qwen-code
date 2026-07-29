@@ -18,13 +18,13 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 70 * 60 * 1000;
 const specs = {
   'scan': {
     inputs: [],
-    outputs: ['findings.json', 'report-only.md'],
+    outputs: ['findings.json'],
     required: [],
     invocation: (o) => `Scan phase. --workdir ${o.workdir}`,
   },
   'fix': {
     inputs: ['findings.json'],
-    outputs: ['findings.json', 'report-only.md'],
+    outputs: ['findings.json'],
     required: ['branch'],
     invocation: (o) =>
       `Fix phase. --workdir ${o.workdir} --branch ${o.branch}`,
