@@ -39,6 +39,18 @@ describe('nodeIdentity', () => {
     const run = stub({ 'tailscale status --json': fail(1, 'stopped') });
     expect(await nodeIdentity(run)).toBeNull();
   });
+  it('returns null when status exits 0 but stdout is not JSON', async () => {
+    const run = stub({ 'tailscale status --json': ok('not json') });
+    expect(await nodeIdentity(run)).toBeNull();
+  });
+  it('returns null when JSON lacks Self.DNSName/TailscaleIPs', async () => {
+    const run = stub({
+      'tailscale status --json': ok(
+        JSON.stringify({ BackendState: 'Running', Self: {} }),
+      ),
+    });
+    expect(await nodeIdentity(run)).toBeNull();
+  });
 });
 
 describe('ensureUp', () => {
@@ -82,5 +94,18 @@ describe('ensureUp', () => {
       return fail(1, 'x');
     };
     expect(await ensureUp(run)).toEqual({ kind: 'needs-operator' });
+  });
+  it('error fallback for an unrecognized failure', async () => {
+    const run: RunCommand = async (argv) => {
+      if (argv.join(' ') === 'tailscale status --json')
+        return ok(JSON.stringify({ BackendState: 'Stopped', Self: {} }));
+      if (argv[1] === 'up') return fail(1, 'connection timed out');
+      return fail(1, 'x');
+    };
+    const out = await ensureUp(run);
+    expect(out.kind).toBe('error');
+    if (out.kind === 'error') {
+      expect(out.message).toContain('connection timed out');
+    }
   });
 });

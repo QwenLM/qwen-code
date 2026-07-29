@@ -28,7 +28,11 @@ export async function ensureCert(
   host: string,
   dir: string,
 ): Promise<CertOutcome> {
-  mkdirSync(dir, { recursive: true });
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    return { kind: 'error', message: (e as Error).message };
+  }
   const certPath = join(dir, `${host}.crt`);
   const keyPath = join(dir, `${host}.key`);
   const r = await run([
@@ -42,7 +46,7 @@ export async function ensureCert(
   ]);
   if (r.code === 0) return { kind: 'ok', pair: { certPath, keyPath } };
   const out = `${r.stdout}\n${r.stderr}`;
-  if (/https .*not enabled|enable https|admin console/i.test(out)) {
+  if (/https .*not enabled|enable https/i.test(out)) {
     return { kind: 'https-not-enabled' };
   }
   return { kind: 'error', message: out.trim().slice(0, 500) };
