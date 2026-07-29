@@ -20,6 +20,10 @@ import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
+import {
+  planRecurrenceField,
+  type AccumulationCandidate,
+} from './lib/recurrence.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
@@ -55,6 +59,8 @@ type PlanDiffResult = PlanReport & {
   ownerRepo?: string;
   /** The review's effort, recorded so the roster reads one value everywhere. */
   effort?: ReviewEffort;
+  /** Accumulation sites the performance agent must adjudicate; only when any. */
+  recurrenceCandidates?: AccumulationCandidate[];
 };
 
 function runPlanDiff(args: PlanDiffArgs): void {
@@ -96,6 +102,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
     // coverage, which is what Step 3B needs, is not.
     ...buildPlanReport(plan, null),
     ...planEffortField(args.effort),
+    ...planRecurrenceField(diffText),
   };
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });

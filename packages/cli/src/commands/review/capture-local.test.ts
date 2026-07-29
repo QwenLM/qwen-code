@@ -203,6 +203,41 @@ describe('capture-local (command boundary)', () => {
     expect(plan.effort).toBeUndefined();
   });
 
+  it('records accumulation candidates in the plan when the diff has any', () => {
+    const accumDiff = [
+      'diff --git a/src/session.ts b/src/session.ts',
+      '--- a/src/session.ts',
+      '+++ b/src/session.ts',
+      '@@ -4,2 +4,3 @@ export class Session {',
+      '   record(entry: Entry) {',
+      '+    this.history.push(entry);',
+      '   }',
+      '',
+    ].join('\n');
+    capture({ diff: Buffer.from(accumDiff, 'utf8') });
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.recurrenceCandidates).toEqual([
+      {
+        file: 'src/session.ts',
+        line: 5,
+        snippet: 'this.history.push(entry);',
+        receiver: 'this.history',
+        kind: 'push',
+      },
+    ]);
+    expect(errs.join('')).toContain('1 accumulation candidate(s)');
+  });
+
+  it('omits recurrenceCandidates when the diff has no accumulation site', () => {
+    capture(); // the default DIFF adds a bare function — nothing accumulates
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.recurrenceCandidates).toBeUndefined();
+  });
+
   it('escapes a filename carrying terminal control characters', () => {
     // A filename is workspace-controlled, and git permits an ESC or a newline in
     // one. Printed raw it can forge a second warning line or drive the user's

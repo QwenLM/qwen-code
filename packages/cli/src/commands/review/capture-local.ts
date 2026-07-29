@@ -22,6 +22,10 @@ import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
+import {
+  planRecurrenceField,
+  type AccumulationCandidate,
+} from './lib/recurrence.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
@@ -43,6 +47,8 @@ interface CaptureLocalArgs {
 type CaptureLocalResult = PlanReport & {
   /** The review's effort, recorded so the roster reads one value everywhere. */
   effort?: ReviewEffort;
+  /** Accumulation sites the performance agent must adjudicate; only when any. */
+  recurrenceCandidates?: AccumulationCandidate[];
   diffPath: string;
   diffPathAbsolute: string;
   /** Untracked files whose contents are in the diff — `git diff` shows none. */
@@ -98,6 +104,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...planEffortField(args.effort),
+    ...planRecurrenceField(diffText),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');

@@ -48,6 +48,7 @@ import {
   type DiffChunk,
 } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
+import type { AccumulationCandidate } from './lib/recurrence.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
@@ -100,6 +101,7 @@ interface PlanReport {
   ownerRepo?: unknown;
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
+  recurrenceCandidates?: unknown;
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -269,6 +271,25 @@ export function buildChunkAgentPrompt(
       'A receipt for a range you only half read makes the coverage guarantee a lie, ' +
       'which is worse than not having one.',
   ];
+
+  // In fan-out mode there is no dedicated performance agent — a chunk agent
+  // owns every dimension inside its territory, so the accumulation candidates
+  // living in its files are welded here, exactly as role 4 receives them in
+  // classic mode. Measured before this existed: a big diff fanned out into
+  // territory chunks, the role-4 gate never fired, and the candidate list —
+  // including the one covering a real blocker — reached no agent at all. The
+  // filter keeps each agent's list to files it can actually adjudicate.
+  const chunkFilePaths = new Set(
+    (Array.isArray(chunk.files) ? chunk.files : [])
+      .map((f) => (f && typeof f.path === 'string' ? f.path : ''))
+      .filter(Boolean),
+  );
+  const chunkCandidates = recurrenceCandidatesFrom(report).filter((c) =>
+    chunkFilePaths.has(c.file),
+  );
+  if (chunkCandidates.length > 0) {
+    parts.push('', ...recurrenceSection(chunkCandidates));
+  }
 
   if (unreachable) {
     parts.push(
@@ -610,6 +631,101 @@ function inertPath(p: string): string {
   return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
 }
 
+/**
+ * How each accumulation kind reads in the welded candidate line. `Partial` over
+ * `string` on purpose: the plan is parsed off disk, so `kind` is only known to
+ * be a string — an unrecognised one falls back rather than rendering
+ * `undefined`.
+ */
+const RECURRENCE_KIND_LABEL: Partial<Record<string, string>> = {
+  push: 'push into',
+  'map-set': 'map/set write into',
+  append: 'append to',
+  listener: 'listener registration on',
+};
+
+/**
+ * The plan's accumulation candidates, validated element by element. The plan is
+ * parsed off disk with an unchecked cast, so a malformed entry is dropped
+ * rather than rendered as `undefined:NaN` in the one section whose entries the
+ * agent is REQUIRED to adjudicate one by one.
+ */
+function recurrenceCandidatesFrom(report: PlanReport): AccumulationCandidate[] {
+  const raw = report.recurrenceCandidates;
+  if (!Array.isArray(raw)) return [];
+  return (raw as AccumulationCandidate[]).filter(
+    (c) =>
+      !!c &&
+      typeof c.file === 'string' &&
+      c.file.length > 0 &&
+      Number.isSafeInteger(c.line) &&
+      c.line >= 1 &&
+      typeof c.snippet === 'string' &&
+      typeof c.receiver === 'string' &&
+      typeof c.kind === 'string',
+  );
+}
+
+/**
+ * The accumulation-candidate weld for the performance agent (Agent 4).
+ *
+ * A live dogfood missed a real blocker — a per-tool-turn append whose target
+ * was pushed verbatim, one hop away, into conversation history nothing
+ * reclaims — because every agent read the diff hunk-locally and no lens asked
+ * what bounds the container a recurring write flows into. The candidates are
+ * enumerated deterministically at capture time (see lib/recurrence.ts); this
+ * section is the other half of the enumerate-then-judge pattern: the list is
+ * welded in MECHANICALLY, like the chunk ranges, because this project has
+ * measured that prose exhortation alone does not move models — the
+ * enumeration plus the required per-item record is the mechanism. The three
+ * questions themselves are defined once, in the agent's brief.
+ */
+function recurrenceSection(candidates: AccumulationCandidate[]): string[] {
+  const items = candidates.flatMap((c, i) => {
+    const kind =
+      RECURRENCE_KIND_LABEL[c.kind] ?? `${inertPath(c.kind)} write into`;
+    const head =
+      `${i + 1}. \`${inertPath(c.file)}:${c.line}\` — ` +
+      `\`${inertPath(c.snippet)}\` (${kind} \`${inertPath(c.receiver)}\`)`;
+    const flows = (Array.isArray(c.downstream) ? c.downstream : [])
+      .filter(
+        (d): d is { line: number; snippet: string } =>
+          !!d &&
+          typeof d.line === 'number' &&
+          Number.isFinite(d.line) &&
+          typeof d.snippet === 'string' &&
+          d.snippet.length > 0,
+      )
+      .map(
+        (d) =>
+          `   - flows onward at line ${d.line}: \`${inertPath(d.snippet)}\` — the trace continues THERE`,
+      );
+    return [head, ...flows];
+  });
+  return [
+    '## Accumulation candidates — adjudicate EVERY one',
+    '',
+    `A deterministic pre-scan found ${candidates.length} added line(s) that ` +
+      'write into a container that may outlive the write. For EACH candidate ' +
+      'below, your findings record MUST answer three questions: ' +
+      '(a) how often the write fires, (b) what bounds the container the ' +
+      'value ULTIMATELY rests in — a per-turn or staging local is NOT a ' +
+      'container, and clearing on one is the measured failure mode: follow ' +
+      'the value through every hand-off (arguments, aliases, returns) until ' +
+      'it reaches long-lived state (a class field, module state, ' +
+      'conversation history, a file) or provably dies — and (c) who reclaims ' +
+      'old entries from that resting place, and whether the reclaimer covers ' +
+      'this kind of entry. Where a candidate lists "flows onward" sites, the ' +
+      'scanner has already found the next hand-off: open those lines before ' +
+      'you answer (b). "Recurs / unbounded / nothing reclaims it" is a ' +
+      'finding; a candidate you clear must name the RESTING container and ' +
+      'its bound or reclaimer. Do not skip any: an unadjudicated candidate ' +
+      'is an unreviewed leak site.',
+    '',
+    ...items,
+  ];
+}
+
 function invariantFileBlock(
   report: PlanReport,
   diffPath: string,
@@ -749,6 +865,17 @@ export function buildRoleBrief(
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
       );
+    }
+  }
+
+  // The performance agent owns the recurring-write lens. The candidate list is
+  // welded in mechanically — present exactly when the plan carries it — because
+  // an enumeration the orchestrator would have to remember to mention is an
+  // enumeration that does not arrive.
+  if (role === '4') {
+    const candidates = recurrenceCandidatesFrom(report);
+    if (candidates.length > 0) {
+      parts.push('', ...recurrenceSection(candidates));
     }
   }
 

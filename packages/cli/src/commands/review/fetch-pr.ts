@@ -43,6 +43,10 @@ import {
 } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import {
+  planRecurrenceField,
+  type AccumulationCandidate,
+} from './lib/recurrence.js';
+import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
@@ -81,6 +85,8 @@ interface FetchPrArgs {
 type FetchPrResult = PlanReport & {
   /** The review's effort, recorded so the roster reads one value everywhere. */
   effort?: ReviewEffort;
+  /** Accumulation sites the performance agent must adjudicate; only when any. */
+  recurrenceCandidates?: AccumulationCandidate[];
   prNumber: string;
   ownerRepo: string;
   remote: string;
@@ -294,6 +300,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     );
     diffPath = null;
     diffPathAbsolute = null;
+    // The report must disown the whole capture, recurrence scan included — a
+    // candidate list pointing into a diff the plan just discarded would ask an
+    // agent to adjudicate sites the review cannot otherwise see.
+    diffText = '';
     plan = buildDiffPlan('', args.maxChunkLines);
   }
 
@@ -380,6 +390,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
     ...planEffortField(args.effort),
+    // The PR's post-diff files live in the review worktree, not the CWD — the
+    // downstream trace must read them from there.
+    ...planRecurrenceField(diffText, wt),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
