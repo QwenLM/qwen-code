@@ -2140,6 +2140,46 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
   });
 
+  // Three values encode one budget and drift silently when edited apart:
+  // the agent's graceful kill, the watchdog threshold that distinguishes
+  // that kill from an OOM, and the job limit that must not fire first.
+  // Each mismatch has its own quiet failure, so pin the relationships
+  // rather than the numbers.
+  it('keeps the verify budget, watchdog and job limit consistent', () => {
+    const verifyJob = job('verify');
+    const runStep = stepIn('verify', 'Run verification agent');
+
+    const agentMinutes = Number(
+      runStep.match(/timeout --kill-after=10s (\d+)m /)?.[1],
+    );
+    const watchdogSeconds = Number(
+      runStep.match(/"\$AGENT_ELAPSED" -ge (\d+)/)?.[1],
+    );
+    const jobMinutes = Number(verifyJob.match(/timeout-minutes: (\d+)/)?.[1]);
+    expect(agentMinutes).toBeGreaterThan(0);
+    expect(watchdogSeconds).toBeGreaterThan(0);
+    expect(jobMinutes).toBeGreaterThan(0);
+
+    // The watchdog threshold IS the agent budget. Set it lower and a
+    // late OOM (137) reads as `timeout`, publishing "partial evidence"
+    // for a crash; set it higher and a real timeout reads as a crash.
+    expect(watchdogSeconds).toBe(agentMinutes * 60);
+
+    // The job limit only guards infra hangs, so it must clear the agent
+    // budget plus install/build plus fixed overhead — otherwise the job
+    // is killed mid-run and the agent never ships its partial report.
+    // 20 minutes is the documented allowance (≈15m install/build + ≈5m
+    // tools, checkout, pin, upload, cleanup).
+    expect(jobMinutes).toBeGreaterThanOrEqual(agentMinutes + 20);
+
+    // And the skill has to advertise the same budget, or the agent
+    // self-limits to the old number and the raise does nothing.
+    const advertised = Number(verifySkill.match(/hard (\d+)-minute kill/)?.[1]);
+    expect(advertised).toBe(agentMinutes);
+    const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
+    expect(soft).toBeLessThan(agentMinutes);
+  });
+
   // Cleanups must never descend through a PR-writable parent, and an
   // outward-resolving hooks entry must be removed rather than reported.
   it('survives symlink escapes in the workspace cleanup', () => {
