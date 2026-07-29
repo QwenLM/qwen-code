@@ -3008,29 +3008,39 @@ jobs:
               echo
               printf '%s\n' "${LAST_REJECTION}"
             fi
-            # Repeat time-budget exhaustions mean the standard
-            # address-everything prompt is not converging at this budget:
-            # re-running it unchanged just walks into the same wall (#7929
-            # burned three 50-minute timeouts that way, #7846 two — each a
-            # full agent run with nothing pushed). From the second attempt
-            # on, tell the agent to narrow. Window-scoped like every other
-            # census (LIVE_REARM_KEY is the live window), so a re-arm
-            # clears it.
+            # Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean
+            # the standard address-everything prompt is not converging at
+            # this budget: re-running it unchanged just walks into the same
+            # wall (#7929 burned three 50-minute timeouts that way, #7846
+            # two — each a full agent run with nothing pushed). From the
+            # second attempt on, tell the agent to narrow. Counted since
+            # the last pushed/no-change round, NOT cumulatively: a push
+            # falsifies "not converging", and a single old timeout must not
+            # degrade every later round in a 100-round window. (The
+            # BREAKER in the report step stays cumulative — a push does not
+            # make the next timeout cheaper in budget terms.) Window-scoped
+            # like every other census (LIVE_REARM_KEY is the live window),
+            # so a re-arm clears it. The needle matches the emitted
+            # headline verbatim: first lines can embed provider error text
+            # (API_ERROR_DETAIL), so a loose phrase could count a model
+            # error message as a timeout.
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
                 | select(((.body // "") | contains("win=" + $key + " -->"))
                     or ($key == "none" and (((.body // "") | contains("win=")) | not)))
-                | select(((.body // "") | gsub("\r"; "") | split("\n")[0]) | contains("ran out of time"))
-              ] | length' "${WORKDIR}/ic.json")"
+              ] | sort_by(.created_at)
+              | map((.body | gsub("\r"; "") | split("\n")[0]))
+              | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
+              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing")) ] | length' "${WORKDIR}/ic.json")"
             if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]; then
               echo
               echo '## Budget warning: previous round(s) ran out of time'
               echo
-              echo "${PRIOR_TIMEOUTS} earlier round(s) on this PR exhausted the agent time budget before finishing anything. Do NOT attempt everything at once this round:"
+              echo "${PRIOR_TIMEOUTS} round(s) since the last successful round exhausted the agent time budget before finishing anything. Do NOT attempt everything at once this round:"
               echo '- Address the smallest set of blocking (Critical) findings first, and commit as soon as that subset is done.'
-              echo '- Prefer minimal, focused diffs; skip refactors and nice-to-haves entirely.'
-              echo '- If the remaining feedback cannot fit the budget, explicitly defer it in your summary instead of running out of time with nothing committed.'
+              echo '- Prefer minimal, focused diffs; decline refactors and nice-to-haves with a one-line reason rather than implementing them.'
+              echo '- If the remaining feedback cannot fit the budget, defer it the normal way: leave those findings out of resolved-comments.txt and record each deferral in comment-replies.json so every open thread gets its reason — never let a deferral live only in the summary.'
             fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
@@ -3936,13 +3946,23 @@ jobs:
               # overrides a would-be RETRY: a round already terminal keeps
               # its own headline (the consecutive breaker included).
               if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]]; then
-                TIMEOUT_N="$(grep -c 'ran out of time' <<< "${PRIOR_HEADS}" || true)"
+                # Needle matches the emitted headline verbatim — first lines
+                # can embed provider error text (API_ERROR_DETAIL puts up to
+                # 200 bytes of it on the same line), so a loose phrase could
+                # count a model error message as a timeout.
+                TIMEOUT_N="$(grep -c 'AutoFix ran out of time before finishing' <<< "${PRIOR_HEADS}" || true)"
                 if [[ -n "${AGENT_TIMEOUT:-}" ]]; then
                   TIMEOUT_N=$(( TIMEOUT_N + 1 ))
                 fi
                 if [[ "${TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
                   MARK_ROUND="${MAX_ROUNDS}"
-                  HEADLINE="🤖 AutoFix stopped after ${TIMEOUT_N} time-budget exhaustions in this counting window (not consecutive — pushed rounds in between do not make the next timeout cheaper). Re-running the same per-round budget against this PR is not converging; each timeout burns a full agent run with nothing pushed. A human should split or reduce the PR (or raise the agent time budget), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  # The headline states what the census MEASURED — the
+                  # window's cumulative count — not "stopped after N
+                  # timeouts": the round that trips this can itself have
+                  # failed differently (a gate rejection landing on a window
+                  # that already carries the cap — the exact rollout state
+                  # of #7929/#7846).
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). Re-running the same per-round budget against this PR is not converging; each timeout burns a full agent run with nothing pushed. A human should split or reduce the PR (or raise the agent time budget), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
                 fi
               fi
             fi

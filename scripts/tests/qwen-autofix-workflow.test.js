@@ -3205,12 +3205,15 @@ describe('qwen-autofix workflow', () => {
     expect(broken.body).toBe('');
   });
 
-  it('narrows the agent prompt after a prior in-window timeout', () => {
+  it('narrows the agent prompt after a timeout since the last successful round', () => {
     // Re-running the identical address-everything prompt after a timeout
     // walks straight into the same wall (#7929 burned three 50-minute
     // timeouts that way, #7846 two). From the second attempt on, the
     // feedback file ends with an explicit narrowing instruction: smallest
-    // blocking subset first, commit early, defer the rest out loud.
+    // blocking subset first, commit early, and defer through the SKILL
+    // contract (out of resolved-comments.txt, into comment-replies.json)
+    // — never only into the summary, which is exactly the cheap path a
+    // budget-pressured agent would otherwise take.
     expect(prepareBranchAndFeedbackStep).toContain('PRIOR_TIMEOUTS=');
     expect(prepareBranchAndFeedbackStep).toContain(
       'Budget warning: previous round(s) ran out of time',
@@ -3218,19 +3221,122 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain(
       'commit as soon as that subset is done',
     );
-    // The census is window-scoped (live window key, legacy 'none'
-    // included) so a re-arm clears it like every other census.
-    expect(prepareBranchAndFeedbackStep).toContain('win=" + $key + " -->');
     expect(prepareBranchAndFeedbackStep).toContain(
-      '--arg key "${LIVE_REARM_KEY}"',
+      'record each deferral in comment-replies.json',
     );
-    // The census needle must match the timeout CAUSE the report step emits,
-    // or it silently counts zero.
     expect(prepareBranchAndFeedbackStep).toContain(
-      'contains("ran out of time")',
+      'decline refactors and nice-to-haves with a one-line reason',
+    );
+    // The trigger threshold itself is pinned — a `-ge 99` mutation would
+    // otherwise leave the feature inert with every string pin green.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]',
+    );
+
+    // Behavioral replay of the census (the string pins alone cannot catch
+    // a broken filter): extract the real jq and run it against fixture
+    // ic.json shapes.
+    const censusSrc = prepareBranchAndFeedbackStep.match(
+      /PRIOR_TIMEOUTS="\$\(jq -r[\s\S]*?ic\.json"\)"/,
+    )?.[0];
+    expect(censusSrc).toBeTruthy();
+    const TIMEOUT_HEADLINE =
+      '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
+    const PUSH_HEADLINE =
+      '🤖 Addressed the latest review feedback (round 2/100). What changed…';
+    const mk = (headline, win, at, login = 'qwen-code-dev-bot') => ({
+      user: { login },
+      created_at: at,
+      body: `${headline}\n<!-- autofix-eval ts=x acted=false round=1${win ? ` win=${win}` : ''} -->`,
+    });
+    const runCensus = (comments, key) => {
+      const dir = mkdtempSync(join(tmpdir(), 'timeout-census-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `WORKDIR='${dir}'`,
+              "AUTOFIX_BOT='qwen-code-dev-bot'",
+              `LIVE_REARM_KEY='${key}'`,
+              censusSrc,
+              'printf %s "${PRIOR_TIMEOUTS}"',
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const K = '2026-07-29T03:00:00Z';
+    // A push RESETS the narrowing (the breaker stays cumulative — this
+    // census feeds only the prompt): timeout, push, timeout → 1.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(PUSH_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('1');
+    // Two trailing timeouts count as two.
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('2');
+    // Legacy pre-takeover markers (no win= field) count under key 'none' —
+    // the common real case: a PR that timed out before any re-arm.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, null, '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, null, '2026-07-29T05:00:00Z'),
+        ],
+        'none',
+      ),
+    ).toBe('2');
+    // Old-window timeouts do not leak into a fresh window (re-arm clears).
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, 'old-window', '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, 'old-window', '2026-07-29T05:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    // Non-timeout rounds and a HUMAN quoting the timeout headline verbatim
+    // both count zero (author-filtered like every census).
+    expect(runCensus([mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z')], K)).toBe(
+      '0',
+    );
+    expect(
+      runCensus(
+        [mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z', 'some-human')],
+        K,
+      ),
+    ).toBe('0');
+
+    // The census needle matches the emitted headline VERBATIM — first
+    // lines can embed provider error text (API_ERROR_DETAIL), so a loose
+    // phrase could count a model error message as a timeout.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'contains("AutoFix ran out of time before finishing")',
     );
     expect(reviewAddressReportStep).toContain(
-      'ran out of time before finishing',
+      'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
     );
   });
 
@@ -5942,7 +6048,14 @@ describe('qwen-autofix workflow', () => {
       agentTimeout: 'timeout (3000000ms)',
     });
     expect(bothCapped.terminal).toBe(true);
-    expect(bothCapped.headline).toContain('consecutive');
+    // 'consecutive' alone is satisfied by EITHER branch; assert the
+    // consecutive breaker's own phrase AND the absence of the timeout one
+    // — an `if true` mutation on the timeout guard flips the headline and
+    // must fail here.
+    expect(bothCapped.headline).toContain(
+      'consecutive rounds that failed to push',
+    );
+    expect(bothCapped.headline).not.toContain('time-budget exhaustions');
     // Pin the census greps to the actual emit line: the timeout CAUSE text
     // and the breaker's grep needle must stay in lockstep, or the census
     // silently counts zero.
@@ -5950,7 +6063,7 @@ describe('qwen-autofix workflow', () => {
       'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
     );
     expect(reviewAddressReportStep).toContain(
-      'TIMEOUT_N="$(grep -c \'ran out of time\' <<< "${PRIOR_HEADS}" || true)"',
+      'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
