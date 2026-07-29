@@ -521,6 +521,8 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       // Plain user records — including UserPromptSubmit-augmented ones —
       // prefer the recorded display projection, then strip a trailing
       // whole-part tagged hook-context block. Matches resumeHistoryUtils.
+      // Always go through projectMessageParts so multimodal inlineData
+      // (images) survives even when displayText replaces the text parts.
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload
         : undefined;
@@ -528,18 +530,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload && typeof payload['displayText'] === 'string'
           ? payload['displayText']
           : undefined;
-      if (displayText) {
-        yield emit(
-          createTranscriptMessageUpdate({
-            role: 'user',
-            text: displayText,
-            ...meta,
-          }),
-        );
-        return;
-      }
       yield* this.projectMessageParts(
-        this.withoutTrailingUserPromptSubmitContext(record),
+        displayText
+          ? this.withUserPromptDisplayText(record, displayText)
+          : this.withoutTrailingUserPromptSubmitContext(record),
         'user',
         emit,
         meta,
@@ -574,6 +568,50 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       message: {
         ...record.message,
         parts: parts.slice(0, -1),
+      },
+    };
+  }
+
+  /**
+   * Rebuilds a plain user record for display: strip trailing tagged hook
+   * context, then replace every text part with a single `displayText` part at
+   * the first text position so images keep their relative order.
+   */
+  private withUserPromptDisplayText(
+    record: TranscriptRecordInput,
+    displayText: string,
+  ): TranscriptRecordInput {
+    const stripped = this.withoutTrailingUserPromptSubmitContext(record);
+    const parts = stripped.message?.parts;
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return {
+        ...stripped,
+        message: {
+          ...stripped.message,
+          parts: [{ text: displayText }],
+        },
+      };
+    }
+    let replaced = false;
+    const nextParts: unknown[] = [];
+    for (const part of parts) {
+      if (isObjectRecord(part) && typeof part['text'] === 'string') {
+        if (!replaced) {
+          nextParts.push({ text: displayText });
+          replaced = true;
+        }
+        continue;
+      }
+      nextParts.push(part);
+    }
+    if (!replaced) {
+      nextParts.push({ text: displayText });
+    }
+    return {
+      ...stripped,
+      message: {
+        ...stripped.message,
+        parts: nextParts,
       },
     };
   }

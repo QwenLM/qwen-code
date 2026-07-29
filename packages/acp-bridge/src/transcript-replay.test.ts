@@ -197,13 +197,26 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
-    it('prefers displayText for plain user records over tagged parts', () => {
+    it('prefers displayText over the tag-strip fallback and keeps image parts', () => {
+      // Without displayText the tag-strip path would also emit the middle
+      // "expanded extra" text part. displayText must win, and the image
+      // part must survive (the previous early-return path dropped it).
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-1', 'user', {
           message: {
             role: 'user',
-            parts: [{ text: 'my prompt' }, { text: tagged }],
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc123',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'my prompt' },
+              { text: 'expanded extra' },
+              { text: tagged },
+            ],
           },
           systemPayload: {
             displayText: 'my prompt',
@@ -215,10 +228,18 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toMatchObject([
         {
           sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc123',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text: 'my prompt' },
         },
       ]);
-      expect(projected).toHaveLength(1);
+      expect(projected).toHaveLength(2);
     });
 
     it('strips a trailing whole-part tagged block when displayText is absent', () => {
