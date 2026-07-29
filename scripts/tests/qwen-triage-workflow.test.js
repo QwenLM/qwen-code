@@ -1573,11 +1573,11 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
-  // Four techniques lifted from maintainer-written verification rounds that
+  // Verification techniques lifted from maintainer-written verification rounds that
   // the skill could not previously have produced. Each is pinned to the
   // failure it exists for, because a rule stated without its failure reads
   // as advice and gets skipped.
-  it('carries the four maintainer-round techniques', () => {
+  it('carries the maintainer-round verification techniques', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
 
     // #7914 §4: the PR added write_file as a second writer into the shared
