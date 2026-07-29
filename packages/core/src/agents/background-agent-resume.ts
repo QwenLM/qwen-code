@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Content, FunctionDeclaration, Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -126,8 +126,6 @@ interface TranscriptRecovery {
     history: Content[];
     taskPrompt: string;
     runtimeHistory: Content[];
-    systemInstruction?: string | Content;
-    tools?: Array<string | FunctionDeclaration>;
   };
 }
 
@@ -363,14 +361,6 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
             history: structuredClone(
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
                 .history,
-            ),
-            systemInstruction: structuredClone(
-              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
-                .systemInstruction,
-            ),
-            tools: structuredClone(
-              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
-                .tools,
             ),
             taskPrompt: (
               launchPromptRecord!.systemPayload as NotificationRecordPayload
@@ -976,7 +966,7 @@ export class BackgroundAgentResumeService {
       }
       const forkResumeCapabilityReminder = target.isFork
         ? await this.buildForkResumeCapabilityReminder(
-            bgConfig as Config,
+            this.config,
             currentForkRuntime!.toolNames,
           )
         : undefined;

@@ -5958,6 +5958,8 @@ describe('AgentTool', () => {
         bootstrapHistory: [{ role: 'model', parts: [{ text: 'Ready' }] }],
         launchTaskPrompt: expect.any(String),
       });
+      const createArgs = createSpy.mock.calls[0];
+      expect(createArgs?.[5]).toEqual({ tools: ['Bash', 'Read'] });
 
       attachSpy.mockRestore();
       createSpy.mockRestore();

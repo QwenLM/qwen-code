@@ -67,6 +67,7 @@ describe('BackgroundAgentResumeService', () => {
       // buildForkResumeCapabilityReminder (MCP instructions, skills, and
       // deferred tools). Defaults keep the reminder minimal for other tests.
       mcpServerInstructions?: Map<string, string>;
+      overrideMcpServerInstructions?: Map<string, string>;
       deferredToolSummary?: Array<{
         name: string;
         description: string;
@@ -129,6 +130,15 @@ describe('BackgroundAgentResumeService', () => {
         ),
       ),
     };
+    const overrideToolRegistry =
+      options.overrideMcpServerInstructions === undefined
+        ? stubToolRegistry
+        : {
+            ...stubToolRegistry,
+            getMcpServerInstructions: vi
+              .fn()
+              .mockReturnValue(options.overrideMcpServerInstructions),
+          };
     const permissionManager = {
       stripDangerousRulesForAutoMode: vi.fn(),
       restoreDangerousRules: vi.fn(),
@@ -181,7 +191,7 @@ describe('BackgroundAgentResumeService', () => {
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
       getToolRegistry: () => stubToolRegistry,
-      createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
+      createToolRegistry: vi.fn().mockResolvedValue(overrideToolRegistry),
       getPermissionManager: () => permissionManager,
     } as unknown as Config;
 
@@ -2486,6 +2496,10 @@ describe('BackgroundAgentResumeService', () => {
       mcpServerInstructions: new Map([
         ['docs-server', 'Use ISO-8601 dates when calling docs tools.'],
       ]),
+      // The resumed fork override owns a fresh registry whose MCP client
+      // manager has no connected clients. Capability reminders must still
+      // read instructions from the live parent registry above.
+      overrideMcpServerInstructions: new Map(),
       deferredToolSummary: [
         { name: 'web_search', description: 'Search the web.' },
       ],
