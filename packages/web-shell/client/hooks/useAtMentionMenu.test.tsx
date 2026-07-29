@@ -172,6 +172,23 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('reuses an unchanged category menu and limits rendered providers', () => {
+    const providers = Array.from({ length: 100 }, (_, index) => ({
+      id: `custom-${index}`,
+      label: `Custom ${index}`,
+      search: vi.fn().mockResolvedValue([]),
+    }));
+    mount({ builtinProviders: false, providers });
+    const view = makeView('@');
+
+    act(() => latest!.refreshForView(view));
+    const firstState = latest!.state;
+    act(() => latest!.refreshForView(view));
+
+    expect(latest!.state).toBe(firstState);
+    expect(latest!.state?.providers).toHaveLength(50);
+  });
+
   it('rejects custom providers that reuse built-in ids', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     mount({
