@@ -254,6 +254,10 @@ const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 /** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
 const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 
+// Default `tools.toolSearch.threshold` (percent of the context window):
+// mirrors the settings-schema default in packages/cli.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+
 import {
   ModelsConfig,
   type ModelProvidersConfig,
@@ -980,6 +984,16 @@ export interface ConfigParameters {
    * silently ignored (they don't cause config errors).
    */
   visibleTools?: string[];
+  /**
+   * Percentage of the model's context window used as the session-start
+   * budget for preloading deferred tools. When the combined estimated
+   * schema size of every deferred tool — bundled built-ins and MCP alike
+   * — fits within the budget, they are all revealed upfront instead of
+   * loaded on demand via `tool_search`, keeping the declaration list
+   * stable for the whole session (prefix-cache friendly). `0` disables
+   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   */
+  toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -1756,6 +1770,7 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
+  private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2060,6 +2075,8 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
+    this.toolSearchThreshold =
+      params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -4902,6 +4919,15 @@ export class Config {
    */
   getVisibleTools(): ReadonlySet<string> {
     return this.visibleTools;
+  }
+
+  /**
+   * Percentage of the context window used as the session-start budget for
+   * preloading deferred tools. See
+   * {@link ConfigParameters.toolSearchThreshold}.
+   */
+  getToolSearchThreshold(): number {
+    return this.toolSearchThreshold;
   }
 
   /**
