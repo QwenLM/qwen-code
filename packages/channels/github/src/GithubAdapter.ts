@@ -103,7 +103,12 @@ function normalizeReasonFilter(
   if (config.reasonFilter === undefined) return null;
   if (!Array.isArray(config.reasonFilter)) {
     throw new Error(
-      'reasonFilter must be an array of GitHub notification reasons.',
+      `reasonFilter for channel ${channelName} must be an array of GitHub notification reasons.`,
+    );
+  }
+  if (config.reasonFilter.some((reason) => typeof reason !== 'string')) {
+    throw new Error(
+      `reasonFilter entries for channel ${channelName} must be strings.`,
     );
   }
   const reasons = config.reasonFilter

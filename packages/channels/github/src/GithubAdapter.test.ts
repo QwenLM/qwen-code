@@ -883,7 +883,7 @@ describe('GithubChannel', () => {
 
     it('normalizes configured reasonFilter entries before matching', async () => {
       await initWithoutLoop({
-        reasonFilter: [' COMMENT ', 123, ''],
+        reasonFilter: [' COMMENT ', ''],
       });
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1104,6 +1104,12 @@ describe('GithubChannel', () => {
         expect(channel.inboundEnvelopes[0]!.metadata).toContain(
           'Trigger: mention.',
         );
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledWith({
+          last_read_at: '2026-07-02T10:00:00.000Z',
+          read: true,
+        });
         expect(stderrWrite).toHaveBeenCalledWith(
           expect.stringContaining(
             'skipping notification (reason=comment not in reasonFilter, subject=https://api.github.com/repos/owner/repo/issues/42)',
@@ -1136,7 +1142,20 @@ describe('GithubChannel', () => {
             makeBridge(),
           ),
       ).toThrow(
-        'reasonFilter must be an array of GitHub notification reasons.',
+        'reasonFilter for channel test-github must be an array of GitHub notification reasons.',
+      );
+    });
+
+    it('rejects non-string reasonFilter entries', () => {
+      expect(
+        () =>
+          new TestableGithubChannel(
+            'test-github',
+            makeConfig({ reasonFilter: [42] }),
+            makeBridge(),
+          ),
+      ).toThrow(
+        'reasonFilter entries for channel test-github must be strings.',
       );
     });
 
