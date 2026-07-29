@@ -125,6 +125,10 @@ beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
   git(repo, 'init', '-q', '-b', 'main', '.');
+  // Keep the fake vitest out of git: `commitAll` runs `git add -A`, and a
+  // committed bin would be checked out into the probe worktree — the stale
+  // passing copy, not the file `installFailingVitest` overwrites.
+  writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
 
   // A fake `vitest` on the up-tree bin path so `npx vitest` in the probe tree
   // resolves locally — fast, deterministic, no network. It echoes each test
