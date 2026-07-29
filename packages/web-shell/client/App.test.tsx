@@ -1722,6 +1722,62 @@ describe('environment agent tasks', () => {
       },
     ]);
   });
+
+  it('deduplicates a completed background agent with no toolUseId or prompt on the live task', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-agent-1',
+            toolName: 'agent',
+            title: 'Agent: Fix lint errors',
+            status: 'completed',
+            args: {
+              description: 'Fix lint errors',
+              prompt: 'Fix all lint errors in src/',
+              run_in_background: true,
+            },
+            rawOutput: {
+              type: 'task_execution',
+              status: 'completed',
+            },
+          },
+        ],
+      },
+      {
+        id: 'agent-notification',
+        role: 'system',
+        content: 'background agent completed',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          taskId: 'general-purpose-internal-2',
+          status: 'completed',
+        },
+      },
+    ] satisfies Message[];
+    const liveTask = {
+      kind: 'agent' as const,
+      id: 'general-purpose-internal-2',
+      label: 'general-purpose: Fix lint errors',
+      description: 'Fix lint errors',
+      status: 'completed' as const,
+      startTime: 1,
+      runtimeMs: 1,
+      isBackgrounded: true,
+    };
+
+    expect(getEnvironmentAgentTasks(messages, [liveTask])).toMatchObject([
+      {
+        id: 'general-purpose-internal-2',
+        label: 'Fix lint errors',
+        status: 'completed',
+      },
+    ]);
+  });
 });
 
 function renderApp(props: React.ComponentProps<typeof App> = {}): {

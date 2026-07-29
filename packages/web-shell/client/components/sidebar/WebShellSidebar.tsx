@@ -4196,6 +4196,7 @@ export function WebShellSidebar({
                             noSessionsLabel={t('sidebar.noSessions')}
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
+                            sourceMetadataEnabled={sourceMetadataEnabled}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
                             onRenameGroup={
                               canOrganizeWorkspace(ws.cwd)

@@ -1167,12 +1167,15 @@ export function getEnvironmentAgentTasks(
           task: DaemonSessionAgentTaskStatus,
         ): boolean => {
           if (prompt && task.prompt === prompt) return true;
-          return (
-            !!description &&
-            !!subagentType &&
+          if (
+            description &&
             task.description === description &&
+            subagentType &&
             task.subagentType === subagentType
-          );
+          ) {
+            return true;
+          }
+          return !!description && task.description === description;
         };
         const liveTask = liveAgents.find(
           (task) =>
@@ -1240,6 +1243,12 @@ export function getEnvironmentAgentTasks(
     ) {
       continue;
     }
+    const alreadyListed = agents.some(
+      (a) =>
+        (a.toolUseId != null && a.toolUseId === task.toolUseId) ||
+        (a.description !== '' && a.description === task.description),
+    );
+    if (alreadyListed) continue;
     agents.push(task);
   }
   return agents;
