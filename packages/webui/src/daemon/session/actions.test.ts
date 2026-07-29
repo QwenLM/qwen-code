@@ -589,6 +589,32 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('resets silent hard getTasks failure dedupe when clearing the session', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const addNotice = vi.fn((notice) => notice);
+    sessionA.tasks.mockRejectedValue(new Error('Malformed response'));
+    sessionB.tasks.mockRejectedValue(new Error('Malformed response'));
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: sessionA,
+    });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+    await actions.clearSession();
+    sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+
+    expect(addNotice).toHaveBeenCalledTimes(2);
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');

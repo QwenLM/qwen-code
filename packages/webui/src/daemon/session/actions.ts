@@ -23,11 +23,8 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import {
-  DaemonHttpError,
-  isDaemonTurnError,
-  type PromptResult,
-} from '@qwen-code/sdk/daemon';
+import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
+import { extractHttpStatus } from './httpErrors.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -151,6 +148,7 @@ export function createDaemonSessionActions({
   const silentHardFailureNoticeKeys = new Set<string>();
 
   function clearActiveSessionState() {
+    silentHardFailureNoticeKeys.clear();
     for (const [, active] of activePromptsRef.current) {
       active.controller.abort();
     }
@@ -1495,18 +1493,6 @@ function isTransientActionError(error: unknown): boolean {
     message.includes('network error') ||
     message.includes('networkerror')
   );
-}
-
-function extractHttpStatus(error: unknown): number | undefined {
-  if (error instanceof DaemonHttpError) return error.status;
-  if (isRecord(error) && typeof error['status'] === 'number') {
-    return error['status'];
-  }
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isAbortError(error: unknown): boolean {
