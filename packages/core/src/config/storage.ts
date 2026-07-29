@@ -156,7 +156,7 @@ export class Storage {
    * Returns the base directory for all runtime output (temp files, debug logs,
    * session data, todos, insights, etc.).
    *
-   * Priority: QWEN_RUNTIME_DIR env var > setRuntimeBaseDir() value > getGlobalQwenDir()
+   * Priority: pinned runtime context > QWEN_RUNTIME_DIR env var > configurable context > setRuntimeBaseDir() value > getGlobalQwenDir()
    * @returns Absolute path to the runtime output base directory
    */
   static getRuntimeBaseDir(): string {

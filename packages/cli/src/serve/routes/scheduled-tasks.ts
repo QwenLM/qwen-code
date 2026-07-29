@@ -174,6 +174,22 @@ async function rollbackCronMutation(
   });
 }
 
+async function teardownBoundSession(
+  target: ScheduledTaskTarget,
+  sessionId: string,
+): Promise<void> {
+  if (target.cleanupSession) {
+    await target.cleanupSession(sessionId).catch(() => {});
+  } else if (target.bridge) {
+    await target.bridge.closeSession(sessionId).catch(() => {});
+    await new SessionService(target.workspaceCwd, {
+      runtimeBaseDir: target.runtimeBaseDir,
+    })
+      .removeSession(sessionId)
+      .catch(() => {});
+  }
+}
+
 /**
  * Resolves the target workspace for one request. Returns null when it can't be
  * resolved (unknown or untrusted `:workspace`), in which case the resolver has
@@ -516,16 +532,7 @@ function registerScheduledTaskCrudRoutes(
         });
         boundSessionId = session.sessionId;
         if (!requireOpenGeneration(target, res)) {
-          if (target.cleanupSession) {
-            await target.cleanupSession(boundSessionId).catch(() => {});
-          } else {
-            await bridge.closeSession(boundSessionId).catch(() => {});
-            await new SessionService(workspaceCwd, {
-              runtimeBaseDir: target.runtimeBaseDir,
-            })
-              .removeSession(boundSessionId)
-              .catch(() => {});
-          }
+          await teardownBoundSession(target, boundSessionId);
           return;
         }
         // Name the session after the task so it's recognizable in the session
@@ -573,17 +580,8 @@ function registerScheduledTaskCrudRoutes(
     // which passes the pre-check but loses the authoritative write) would leave
     // a named "⏰ …" session in the list with no owning task.
     const rollbackSession = async () => {
-      if (boundSessionId !== undefined && bridge) {
-        if (target.cleanupSession) {
-          await target.cleanupSession(boundSessionId).catch(() => {});
-        } else {
-          await bridge.closeSession(boundSessionId).catch(() => {});
-          await new SessionService(workspaceCwd, {
-            runtimeBaseDir: target.runtimeBaseDir,
-          })
-            .removeSession(boundSessionId)
-            .catch(() => {});
-        }
+      if (boundSessionId !== undefined) {
+        await teardownBoundSession(target, boundSessionId);
       }
     };
 

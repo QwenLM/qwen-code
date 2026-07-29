@@ -386,7 +386,18 @@ export async function deleteDaemonSessions(params: {
             await bridge.closeSession(sessionId);
           } catch (error) {
             if (isSessionNotFoundError(error)) {
-              return deletePersistedSessionWithLease(service, sessionId);
+              const result = await deletePersistedSessionWithLease(
+                service,
+                sessionId,
+              );
+              if (result.kind === 'error') {
+                onError?.({
+                  phase: 'remove',
+                  sessionId,
+                  error: errorMessage(result.error),
+                });
+              }
+              return result;
             }
             onError?.({
               phase: 'close',

@@ -949,6 +949,16 @@ export function createServeApp(
     }
   ).sessionArchiveCoordinator = archiveCoordinator;
 
+  const cleanupSession = (runtime: WorkspaceRuntime, sessionId: string) =>
+    runWithWorkspaceRuntimeStorage(runtime, () =>
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service: createWorkspaceRuntimeSessionService(runtime),
+        bridge: runtime.bridge,
+        coordinator: archiveCoordinator,
+      }),
+    );
+
   installSelfOriginStripMiddleware(app, getPort);
 
   // Park the factory on `app.locals` so route handlers can pick it up
@@ -1866,15 +1876,7 @@ export function createServeApp(
       workspaceRegistry.primaryEntry.state === 'active'
         ? workspaceRegistry.primaryEntry.current?.runtime
         : undefined,
-    cleanupSession: (runtime, sessionId) =>
-      runWithWorkspaceRuntimeStorage(runtime, () =>
-        deleteDaemonSessionIfOrphan({
-          sessionId,
-          service: createWorkspaceRuntimeSessionService(runtime),
-          bridge: runtime.bridge,
-          coordinator: archiveCoordinator,
-        }),
-      ),
+    cleanupSession,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
@@ -1898,15 +1900,7 @@ export function createServeApp(
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
-    cleanupSession: (runtime, sessionId) =>
-      runWithWorkspaceRuntimeStorage(runtime, () =>
-        deleteDaemonSessionIfOrphan({
-          sessionId,
-          service: createWorkspaceRuntimeSessionService(runtime),
-          bridge: runtime.bridge,
-          coordinator: archiveCoordinator,
-        }),
-      ),
+    cleanupSession,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -1993,15 +1987,7 @@ export function createServeApp(
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
-        cleanupSession: (sessionId) =>
-          runWithWorkspaceRuntimeStorage(runtime, () =>
-            deleteDaemonSessionIfOrphan({
-              sessionId,
-              service: createWorkspaceRuntimeSessionService(runtime),
-              bridge: runtime.bridge,
-              coordinator: archiveCoordinator,
-            }),
-          ),
+        cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
