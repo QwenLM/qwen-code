@@ -500,6 +500,53 @@ describe('QuestionCardController', () => {
     expect(second.respond).toHaveBeenCalledOnce();
   });
 
+  it('expires the prior card when a newer run is presented in the same scope', async () => {
+    const { client, controller } = createHarness();
+    const first = createContext('request-1');
+    const second = createContext('request-2');
+    second.context.runId = 'run-2';
+
+    await controller.present(first.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    const [firstOutTrackId, secondOutTrackId] = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.map(([request]) => request.outTrackId);
+
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outTrackId: firstOutTrackId,
+        cardParamMap: expect.objectContaining({ card_status: 'expired' }),
+      }),
+    );
+    expect(first.respond).not.toHaveBeenCalled();
+    expect(
+      callbackResult(
+        controller.claim({
+          outTrackId: firstOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Beijing', '1': ['Logs'] },
+        }),
+      ),
+    ).toEqual({ kind: 'ignored', actorId: 'owner-1' });
+    expect(
+      callbackResult(
+        controller.claim({
+          outTrackId: secondOutTrackId,
+          actionId: 'submit',
+          actorId: 'owner-1',
+          formData: { '0': 'Shanghai', '1': ['Metrics'] },
+        }),
+      ).kind,
+    ).toBe('accepted');
+  });
+
   it('keeps a newer run claimable after old settlement and callback events', async () => {
     const { client, controller } = createHarness();
     const first = createContext('request-1');

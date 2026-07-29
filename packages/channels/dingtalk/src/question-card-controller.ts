@@ -62,11 +62,16 @@ export class QuestionCardController {
   ): Promise<UserInputPresentationResult> {
     const scopeKey = this.scopeKey(context);
     const active = this.activeByScope.get(scopeKey);
-    if (
-      (active?.state === 'reserved' || active?.state === 'pending') &&
-      active.context.runId === context.runId
-    ) {
-      return { kind: 'unsupported' };
+    if (active?.state === 'reserved' || active?.state === 'pending') {
+      if (active.context.runId === context.runId) {
+        return { kind: 'unsupported' };
+      }
+      if (active.state === 'pending') this.reserveTerminalProjection(active);
+      void this.finalize(
+        active,
+        'expired',
+        'A newer question is available. Answer the latest card.',
+      );
     }
     const record: QuestionRecord = {
       context,
@@ -124,22 +129,14 @@ export class QuestionCardController {
       await this.projectTerminal(record);
       return { kind: 'presented' };
     }
-    const previous = this.activeByScope.get(record.scopeKey);
-    if (previous && previous.sequence > record.sequence) {
+    const latest = this.activeByScope.get(record.scopeKey);
+    if (latest && latest.sequence > record.sequence) {
       await this.finalize(
         record,
         'expired',
         'A newer question is available. Answer the latest card.',
       );
       return { kind: 'presented' };
-    }
-    if (previous?.state === 'pending') {
-      this.reserveTerminalProjection(previous);
-      void this.finalize(
-        previous,
-        'expired',
-        'A newer question is available. Answer the latest card.',
-      );
     }
     record.state = 'pending';
     this.activeByScope.set(record.scopeKey, record);
