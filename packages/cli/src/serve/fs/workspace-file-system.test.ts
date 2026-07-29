@@ -167,6 +167,38 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(out.content.length).toBeLessThanOrEqual(1024);
   });
 
+  it('caps decoded UTF-8 bytes when a smaller source encoding expands', async () => {
+    const smallTarget = path.join(h.workspace, 'expanded-small.txt');
+    const smallRaw = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中'.repeat(40), 'utf16le'),
+    ]);
+    expect(smallRaw.length).toBe(82);
+    await fsp.writeFile(smallTarget, smallRaw);
+    const smallResolved = await h.fs.resolve('expanded-small.txt', 'read');
+    const small = await h.fs.readText(smallResolved, { maxBytes: 100 });
+    expect(Buffer.byteLength(small.content)).toBeLessThanOrEqual(100);
+    expect(small.content).not.toContain('\uFFFD');
+    expect(small.meta.encoding).toBe('utf-16le');
+    expect(small.meta.truncated).toBe(true);
+
+    const defaultTarget = path.join(h.workspace, 'expanded-default.txt');
+    const defaultRaw = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中'.repeat(100_000), 'utf16le'),
+    ]);
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(defaultRaw.length).toBeLessThan(maxReadBytes);
+    await fsp.writeFile(defaultTarget, defaultRaw);
+    const defaultResolved = await h.fs.resolve('expanded-default.txt', 'read');
+    const expanded = await h.fs.readText(defaultResolved);
+    expect(Buffer.byteLength(expanded.content)).toBeLessThanOrEqual(
+      maxReadBytes,
+    );
+    expect(expanded.content).not.toContain('\uFFFD');
+    expect(expanded.meta.truncated).toBe(true);
+  });
+
   it('throws file_too_large for an oversized read with no window argument', async () => {
     const big = path.join(h.workspace, 'huge.txt');
     const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
@@ -329,6 +361,24 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(out.meta.encoding).toBe('utf-8');
     expect(out.meta.lineEnding).toBe('crlf');
     expect(out.meta.hash).toBeUndefined();
+  });
+
+  it('reports line endings from the selected large-file window', async () => {
+    const target = path.join(h.workspace, 'large-mixed-endings.txt');
+    const lines = Array.from(
+      { length: 8_000 },
+      (_, index) => `row-${index + 1} ${'x'.repeat(30)}`,
+    );
+    const content = `header\r\n${lines.join('\n')}`;
+    const maxReadBytes = (await import('./policy.js')).MAX_READ_BYTES;
+    expect(Buffer.byteLength(content)).toBeGreaterThan(maxReadBytes);
+    await fsp.writeFile(target, content);
+    const resolved = await h.fs.resolve('large-mixed-endings.txt', 'read');
+
+    const out = await h.fs.readText(resolved, { line: 2, limit: 2 });
+    expect(out.content).toBe(lines.slice(0, 2).join('\n'));
+    expect(out.content).not.toContain('\r\n');
+    expect(out.meta.lineEnding).toBe('lf');
   });
 
   it('rejects a symlink swap while a large range is being read', async () => {

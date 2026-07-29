@@ -1459,14 +1459,13 @@ async function readTextSnapshotFromResolvedFile(
     hash: hashBuffer(raw),
   };
 
-  if (sizeOutcome.truncated) {
-    const buf = Buffer.from(content, 'utf-8');
-    if (buf.length > sizeOutcome.bytesToRead) {
-      content = safeUtf8Truncate(buf, sizeOutcome.bytesToRead).toString(
-        'utf-8',
-      );
-      meta.lineEnding = detectLineEnding(content);
-    }
+  const outputCap = opts.maxBytes ?? MAX_READ_BYTES;
+  const decodedBuf = Buffer.from(content, 'utf-8');
+  if (decodedBuf.length > outputCap) {
+    content = safeUtf8Truncate(decodedBuf, outputCap).toString('utf-8');
+    meta.lineEnding = detectLineEnding(content);
+    meta.truncated = true;
+  } else if (sizeOutcome.truncated) {
     meta.truncated = true;
   }
 
@@ -1604,7 +1603,7 @@ async function readLargeTextWindowFromResolvedFile(
   const meta: TextReadOutcome['meta'] = {
     encoding: readMeta?.encoding,
     bom: readMeta?.bom,
-    lineEnding: readMeta?.lineEnding ?? detectLineEnding(content),
+    lineEnding: detectLineEnding(content),
     // Size as of `open`, not as of now: it describes the snapshot the
     // returned window was cut from. A file that grew during the read
     // reports the smaller, consistent number.

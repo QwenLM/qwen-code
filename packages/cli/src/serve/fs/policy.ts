@@ -25,10 +25,9 @@ import type { Intent, ResolvedPath } from './paths.js';
  * via post-decode truncation (`enforceReadSize`); that's where the
  * `meta.truncated = true` flag fires.
  *
- * `enforceReadBytesSize` (the `readBytes` gate) and `edit()` use the
- * same constant as a hard upper bound — multi-GB files in the
- * workspace can no longer reach `fsp.readFile` through any
- * boundary path.
+ * `enforceReadBytesSize` and `edit()` use the same constant as a
+ * hard upper bound — multi-GB files in the workspace can no longer
+ * reach `fsp.readFile` through any boundary path.
  */
 export const MAX_READ_BYTES = 256 * 1024;
 
@@ -225,9 +224,10 @@ export function enforceWriteSize(
 
 /**
  * Throw `file_too_large` when `fileBytes` exceeds the hard
- * `MAX_READ_BYTES` cap. This is the OOM-defense gate `readBytes`
- * runs at stat time — a 5 GB file is rejected before
- * `fsp.readFile` allocates the buffer.
+ * `MAX_READ_BYTES` cap. The production `readBytesWindow` path
+ * does not call this helper — it reads an explicit bounded window
+ * from an opened handle — but strict callers and tests can use it
+ * as a stat-time reject.
  *
  * Soft window-read (`opts.maxBytes` truncation) is NOT this
  * function's job: `readBytes` truncates the returned buffer

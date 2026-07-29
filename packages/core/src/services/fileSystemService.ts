@@ -353,6 +353,15 @@ export class StandardFileSystemService implements FileSystemService {
         `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
       );
     }
+    if (
+      params.line !== undefined &&
+      params.line !== null &&
+      (!Number.isSafeInteger(params.line) || params.line < 0)
+    ) {
+      throw new RangeError(
+        `handle-bound text reads require a non-negative integer line, got ${params.line}`,
+      );
+    }
     const range = await readTextRangeFromHandle(params.fileHandle, {
       offset: params.line ?? 0,
       limit: params.limit ?? Number.POSITIVE_INFINITY,

@@ -25,8 +25,10 @@ export interface ReadTextRangeRequest {
    * Upper bound on bytes read off disk while locating the requested window.
    * Line offsets address a byte stream, so a deep `offset` costs a scan from
    * byte 0 — this is what keeps that scan from being unbounded. Defaults to
-   * `Infinity` so non-boundary callers (the `read_file` tool) are unchanged;
-   * security boundaries must pass a finite value.
+   * `Infinity` so non-boundary callers (the `read_file` tool) are unchanged.
+   * The real security boundary is the handle variant
+   * ({@link ReadTextRangeFromHandleRequest}), where this field is required;
+   * no production caller of the path variant sets a finite value.
    */
   maxScanBytes?: number;
 }

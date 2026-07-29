@@ -224,6 +224,23 @@ describe('StandardFileSystemService', () => {
       ).rejects.toThrow(/positive integer limit or Infinity/);
     });
 
+    it.each([
+      ['a negative line', -1],
+      ['a fractional line', 1.5],
+    ])('should reject %s on a handle read', async (_label, line) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          fileHandle,
+          line,
+          limit: 20,
+          maxOutputBytes: 262_144,
+          maxScanBytes: 8 * 1024 * 1024,
+        }),
+      ).rejects.toThrow(/non-negative integer line/);
+    });
+
     it('should return encoding info for GBK file', async () => {
       vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
         content: '你好世界',
