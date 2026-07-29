@@ -12285,6 +12285,35 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('does not fire SessionDelete when offline session removal fails', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(null);
+    const sessionDeleteHook = vi.fn().mockResolvedValue(undefined);
+    mockConfig.getHookSystem = vi.fn().mockReturnValue({
+      fireSessionDeleteEvent: sessionDeleteHook,
+    });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    const removeSession = vi.fn().mockResolvedValue(false);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({ removeSession }) as unknown as InstanceType<typeof SessionService>,
+    );
+
+    const deletedSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    await expect(
+      agent.extMethod('deleteSession', {
+        cwd: '/tmp',
+        sessionId: deletedSessionId,
+      }),
+    ).resolves.toEqual({ success: false });
+
+    expect(removeSession).toHaveBeenCalledWith(deletedSessionId);
+    expect(sessionDeleteHook).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('returns success=false when the live ChatRecordingService rejects the title (I/O error)', async () => {
     const recording = makeRecordingService();
     recording.recordCustomTitle.mockResolvedValue(false);

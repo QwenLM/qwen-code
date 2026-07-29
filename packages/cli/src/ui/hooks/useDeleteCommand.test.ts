@@ -25,15 +25,17 @@ function createConfig(opts: {
     fireSessionDeleteEvent:
       opts.fireSessionDeleteEvent ?? vi.fn().mockResolvedValue(undefined),
   };
+  const debugLogger = { warn: vi.fn() };
   return {
     config: {
       getSessionId: () => opts.currentSessionId,
       getSessionService: () => sessionService,
       getHookSystem: () => hookSystem,
-      getDebugLogger: () => ({ warn: vi.fn() }),
+      getDebugLogger: () => debugLogger,
     } as unknown as Config,
     sessionService,
     hookSystem,
+    debugLogger,
   };
 }
 
@@ -584,6 +586,36 @@ describe('useDeleteCommand', () => {
       });
 
       expect(hookSystem.fireSessionDeleteEvent).not.toHaveBeenCalled();
+    });
+
+    it('reports deletion success when the SessionDelete hook rejects', async () => {
+      const { config, hookSystem, debugLogger } = createConfig({
+        currentSessionId: 'current',
+        fireSessionDeleteEvent: vi.fn().mockRejectedValue(new Error('failed')),
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('deleted-id');
+        await flushAsync();
+      });
+
+      expect(hookSystem.fireSessionDeleteEvent).toHaveBeenCalledWith(
+        'deleted-id',
+      );
+      expect(debugLogger.warn).toHaveBeenCalledWith(
+        'SessionDelete hook failed: Error: failed',
+      );
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Session deleted successfully.',
+        }),
+        expect.any(Number),
+      );
     });
   });
 });
