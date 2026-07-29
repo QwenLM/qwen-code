@@ -168,11 +168,58 @@ differs only by the change under test; the verdict is the pair of counts.
   change — and every residual delta gets accounted for ("the closure is
   1.3 KB larger: that is the new guards themselves"). An unexplained
   residue is a finding, not noise.
+- **Isolate the slice the mechanism can actually affect, then show what
+  fraction of the total it is.** A speedup claim is really two claims: the
+  mechanism works, and the thing it speeds up matters. Add an arm that
+  strips everything the mechanism cannot touch — measured example: an npm
+  download cache was claimed to cut `npm ci` by ~75%; running with
+  `--ignore-scripts` isolated pure download+extract at 36 s cold of a 226 s
+  total, so the cache's ceiling was 20 s and the real saving 15%, the rest
+  being the repo's own `postinstall`/`tsc`/bundler work. Then check the
+  saving against the **whole job budget**: 33 s off a 14 m 37 s job is not
+  the headline the description claimed. A perf PR whose mechanism works but
+  targets 15% of the cost is a finding about the premise, not the code.
+- **A mechanism that persists something has a cost, not only a benefit —
+  price it.** Caches, artifacts and generated entries consume a shared,
+  bounded resource. Measure what it adds (219 MB per lockfile hash), what
+  the pool holds (9.98 GB of a 10 GB cap), and the churn rate (39 distinct
+  lockfile states in 30 days) — because at the cap every new entry evicts
+  by LRU, including entries other jobs depend on, and possibly its own,
+  degrading the very hit rate the saving assumes.
+- **Test the scarier consequences and report which ones do NOT hold.** Having
+  found a real problem, the temptation is to report the worst reading of it.
+  Bound it instead: in the cache case the write-path finding was real
+  (a post-step uploads the directory that untrusted code can write), but
+  code injection was **disproved** — tampering with every cached tarball
+  made npm integrity-check, refetch and exit 0 — and privilege escalation
+  was **disproved** — `chown -R` does not follow symlinks. What survived was
+  content and quota abuse. A finding that names what it is _not_ is far
+  harder to wave away than one that implies everything.
 - When the PR adds a defensive guard or shape check, its unit tests usually
   mock the reject path — so verify the **accept path against the real
   artifacts it will see in production** (the shipped chunks, the real
   module namespaces, the actual wire payloads). A guard that is too strict
   fails in production on a path no mocked test covers.
+- **When the same predicate is checked in two places, verify they see the
+  same state.** A guard duplicated across a process boundary — a route and
+  the child it spawns, a parent and a worker, a cache and its source — is
+  two implementations of one question, and they diverge whenever their
+  _inputs_ differ rather than their logic. Find the configuration that makes
+  them disagree and drive it: one measured case had the route ask
+  `sessionExistsInAnyState()` with an unpinned runtime dir while the child
+  asked it with a pinned one, so a single settings key flipped a clean 409
+  into a 500 plus a `process.exit(1)` that killed every session on the
+  channel. Two related questions expose most of this class: does one side
+  observe state the other cannot, and **is the state observable yet at all**
+  — lazily-created backing files (`ensureConversationFile()` writes nothing
+  until the first prompt) leave a window in which a just-created entity is
+  invisible to any existence check that looks on disk.
+- **Measure the blast radius on bystanders, not just on the caller.** When a
+  failure path can take down shared infrastructure, the interesting number
+  is what happened to everything else: an unrelated session going
+  `200 → 404`, a workspace list going `2 → 0`. Assert on a third party you
+  set up beforehand — the caller's own error code understates a shared-state
+  failure every time.
 - **Run every control on BOTH arms, not just the arm that needs it.** A
   control usually exists to validate the probe on one side — "the empty list
   on base is a real absence, so let the model call the API explicitly and
@@ -250,6 +297,18 @@ Note the CI verify job runs on a **shared, loaded** runner, which is the
 regime where such a test passes. You cannot reproduce a fast-machine failure
 here by repetition; you can only compute the margin and say what it implies.
 
+**Before calling a survivor vacuous, escalate to a finer mutation.** A
+whole-file revert is a blunt instrument: it can remove the _precondition_ a
+test depends on, so a perfectly good test goes green because its scenario no
+longer occurs — indistinguishable, from the outside, from a test that asserts
+nothing. Worked example: a `finally`-cleanup test survived reverting all four
+production files, which read as vacuity; deleting the single line
+(`inFlightSessionIds.delete(...)`) killed it cleanly. It was doing exactly the
+job it was added for. Coarse mutation survived, fine mutation killed ⇒ the
+test is fine and the mutation was wrong. Report the finer result, not the
+coarse one — a false "your test is vacuous" costs the author more than a
+missed survivor.
+
 And do not generalize from one dead guard to its siblings. A clause that is
 unreachable in one call path may be the only thing protecting another —
 check each on its own evidence and report the contrast, so "this guard is
@@ -299,6 +358,14 @@ inconclusive.
   marker — anything printed after exit lands wherever the cursor actually
   was, so the marker's row corroborates the query without trusting it.
   Two agreeing instruments turn a measurement into evidence.
+- **To exercise real production data safely, interpose a refusing proxy on
+  the write path.** Read-only claims about a live system are best tested
+  against that system, and the objection is always side effects. Remove it
+  mechanically: wrap the client so every mutating call hard-fails, then run
+  the shipped script verbatim. A workflow verified this way returned real
+  counts (1085 unminimized comments, `rateLimit.cost = 2`) with a guarantee
+  no write could occur — stronger evidence than a fixture and safer than a
+  careful hand. Say in the report which wrapper enforced it.
 - Every assertion is a scripted comparison that can fail. Keep harnesses as
   `.mjs` files inside the artifact dir so a maintainer can rerun them.
 
@@ -342,6 +409,13 @@ since the merge-base, say so and re-measure there.
   whether it is a coverage gap or a real defect, and prove which
   independently rather than by reading the code. Confirm the unmutated
   control is green, or the kills mean nothing.
+- **Third-party actions and dependencies**: verify what they do from **their
+  own manifest**, never from the PR's description of them. A change asserted
+  that a cache directory was "ephemeral, discarded after the job"; reading
+  `action.yml` showed `post: 'dist/save/index.js'` with `post-if: success()`
+  — a post-step uploads that directory as root with the Actions credentials
+  intact, which is the opposite of the claim and the whole finding. Also
+  confirm a pinned SHA dereferences to the tag the PR says it does.
 - **Committed generated artifacts** (a `patch-package` patch, a lockfile, a
   generated schema or `.d.ts`, a checked-in snapshot): the description
   usually says it was regenerated with the tool. **Re-run the generator and

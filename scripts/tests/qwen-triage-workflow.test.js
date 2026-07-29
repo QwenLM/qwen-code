@@ -1582,6 +1582,37 @@ describe('qwen-triage verify hardening round 2', () => {
     // streamed, and every assertion passed.
     expect(flat).toContain('the scenario never reached the code under test');
     expect(flat).toContain('assert that count is non-zero');
+
+    // #7836: both blockers had one root cause — a route and the child it
+    // spawns asked the same question against different state (pinned vs
+    // unpinned runtime dir), and a lazily-created backing file left a
+    // window where a just-created session was invisible to any on-disk
+    // existence check.
+    expect(flat).toContain('the same predicate is checked in two places');
+    expect(flat).toContain('is the state observable yet at all');
+    expect(flat).toContain('blast radius on bystanders');
+
+    // #7836: a whole-file revert removed a test's precondition, so a good
+    // test looked vacuous. A false "your test is vacuous" is worse than a
+    // missed survivor, so the rule must demand the finer mutation first.
+    expect(flat).toContain('escalate to a finer mutation');
+
+    // #7885: an npm cache claimed ~75% off npm ci; isolating the slice a
+    // download cache can touch (--ignore-scripts) showed 36s of 226s, so
+    // the real saving was 15% — and 33s off a 14m37s job at that.
+    expect(flat).toContain('Isolate the slice the mechanism can actually');
+    expect(flat).toContain('has a cost, not only a benefit');
+    // ...and the severity of the finding it did have was bounded by
+    // disproving the scarier readings.
+    expect(flat).toContain('report which ones do NOT hold');
+
+    // #7885: the PR said the cache dir was discarded after the job; the
+    // action's own manifest declares a post-step that uploads it as root.
+    expect(flat).toContain('their own manifest');
+
+    // #7899: the shipped script was run verbatim against the live repo with
+    // every mutating call hard-failing — real data, no possible side effect.
+    expect(flat).toContain('interpose a refusing proxy on the write path');
   });
 
   // The whole report is already inside a <details> on the PR. With the
