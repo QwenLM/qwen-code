@@ -45,6 +45,17 @@ describe('adaptJSONLMessages user display projection', () => {
     expect(message?.content).toBe('raw @file prompt');
   });
 
+  it('does not fall back to model-facing parts for empty display metadata', () => {
+    const [message] = adaptJSONLMessages([
+      userMessage([{ text: 'expanded model prompt' }], {
+        displayText: '',
+        hookContext: 'hook-only context',
+      }),
+    ]);
+
+    expect(message?.content).toBe('');
+  });
+
   it('strips a complete final tag-only context part', () => {
     const [message] = adaptJSONLMessages([
       userMessage([

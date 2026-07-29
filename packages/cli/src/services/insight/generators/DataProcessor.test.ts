@@ -151,6 +151,41 @@ describe('DataProcessor', () => {
       expect(result).not.toContain('hook-only context');
     });
 
+    it('should strip a complete final tag-only context part without metadata', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'user prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: user prompt');
+      expect(result).not.toContain('hook-only context');
+    });
+
     it('should format assistant text messages correctly', () => {
       const records: ChatRecord[] = [
         {
