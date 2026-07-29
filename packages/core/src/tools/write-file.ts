@@ -53,7 +53,10 @@ import {
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { hasUnsafeDisplayPayload } from './record-artifact.js';
+import {
+  hasControlCharacter,
+  hasUnsafeDisplayPayload,
+} from './record-artifact.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
 const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
@@ -658,25 +661,16 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * Builds the artifact-recording note appended to a successful write.
- *
- * Exported because the workspacePath it produces is a CONTRACT with the daemon's
- * `GET /file` route: the `workspacePath` computed here is later resolved by
- * `resolveWithinWorkspace` against the bound workspace root. The two sides live
- * in different packages and drifted apart once already (a worktree session
- * emitted a session-cwd-relative path that the route resolved against the
- * workspace root, so every artifact preview 404'd). `workspace-file-read.test.ts`
- * pins the round-trip; keep this exported so it can keep doing so.
+ * Kept for the cross-package contract test in `workspace-file-read.test.ts`:
+ * the daemon's `GET /file` route resolves the `workspacePath` this produces.
+ * Delegates to `buildWorkspaceArtifactMetadata` so the two agree by construction.
  */
 export function buildRecordArtifactReminder(
   config: Config,
   filePath: string,
 ): string | null {
-  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
-  if (!workspacePath) {
-    return null;
-  }
-  return formatRecordArtifactReminder(workspacePath);
+  const artifact = buildWorkspaceArtifactMetadata(config, filePath);
+  return artifact ? formatRecordArtifactReminder(artifact.workspacePath) : null;
 }
 
 function formatRecordArtifactReminder(workspacePath: string): string {
@@ -697,9 +691,17 @@ export function buildWorkspaceArtifactMetadata(
     return null;
   }
   const title = path.basename(filePath);
-  // The daemon store rejects titles with unsafe markup; skip the artifact
-  // rather than tell the model it was recorded when it will be dropped.
-  if (hasUnsafeDisplayPayload(title)) {
+  // The daemon store rejects titles and paths that are too long, carry control
+  // characters, or contain markup; skip the artifact rather than tell the model
+  // it was recorded when it will be dropped.
+  if (
+    title.length > 200 ||
+    hasControlCharacter(title) ||
+    hasUnsafeDisplayPayload(title) ||
+    workspacePath.length > 500 ||
+    hasControlCharacter(workspacePath) ||
+    hasUnsafeDisplayPayload(workspacePath)
+  ) {
     return null;
   }
   return {

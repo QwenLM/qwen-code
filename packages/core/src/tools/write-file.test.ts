@@ -559,11 +559,44 @@ describe('WriteFileTool', () => {
       const filePath = path.join(
         rootDir,
         'reports',
-        '<img src=x onerror=alert(1)>.html',
+        'chart onerror=alert(1).html',
       );
       const params = {
         file_path: filePath,
         content: '<!doctype html><html><body>XSS</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifacts whose title exceeds 200 characters', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const longName = 'a'.repeat(196) + '.html';
+      const filePath = path.join(rootDir, 'reports', longName);
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Long</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record artifacts whose workspace path contains unsafe markup', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const dir = path.join(rootDir, 'Q&amp;A');
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, 'summary.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Summary</body></html>',
       };
 
       const result = await tool.build(params).execute(abortSignal);
