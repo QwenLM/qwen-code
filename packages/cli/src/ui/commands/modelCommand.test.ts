@@ -89,6 +89,11 @@ describe('modelCommand', () => {
           authType: AuthType.USE_OPENAI,
           imageOnly: true,
         },
+        {
+          id: 'vision-model',
+          authType: AuthType.USE_OPENAI,
+          visionOnly: true,
+        },
       ]),
     } as unknown as Config;
 

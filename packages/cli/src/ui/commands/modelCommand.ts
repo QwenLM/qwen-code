@@ -779,9 +779,7 @@ export const modelCommand: SlashCommand = {
     }
 
     const isCompactionModelCommand =
-      args === '--compaction' ||
-      args.startsWith('--compaction ') ||
-      args === '--compaction clear';
+      args === '--compaction' || args.startsWith('--compaction ');
     if (isCompactionModelCommand) {
       const modelName = args.replace('--compaction', '').trim();
       if (!modelName || modelName === 'clear') {
