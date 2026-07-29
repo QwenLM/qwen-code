@@ -32,6 +32,9 @@ const DESCRIPTION = `Registers a session artifact so clients can show it in an a
 
 This tool only records metadata. It does not publish, upload, read, write, or verify the referenced resource. Provide exactly one locator: workspacePath, managedId, or url. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.`;
 
+export const ARTIFACT_TITLE_MAX_LENGTH = 200;
+export const ARTIFACT_WORKSPACE_PATH_MAX_LENGTH = 500;
+
 class RecordArtifactInvocation extends BaseToolInvocation<
   RecordArtifactParams,
   ToolResult
@@ -158,7 +161,12 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
     params: RecordArtifactParams,
   ): string | null {
     params.title = (params.title ?? '').trim();
-    const titleError = validateString(params.title, 'title', 200, true);
+    const titleError = validateString(
+      params.title,
+      'title',
+      ARTIFACT_TITLE_MAX_LENGTH,
+      true,
+    );
     if (titleError) {
       return titleError;
     }
@@ -356,7 +364,12 @@ export function hasUnsafeDisplayPayload(value: string): boolean {
 
 function validateWorkspacePath(value: string): string | null {
   const trimmed = value.trim();
-  const stringError = validateString(trimmed, 'workspacePath', 500, true);
+  const stringError = validateString(
+    trimmed,
+    'workspacePath',
+    ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+    true,
+  );
   if (stringError) {
     return stringError;
   }

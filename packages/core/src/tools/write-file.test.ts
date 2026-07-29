@@ -14,7 +14,11 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
-import { WriteFileTool } from './write-file.js';
+import {
+  WriteFileTool,
+  buildRecordArtifactReminder,
+  buildWorkspaceArtifactMetadata,
+} from './write-file.js';
 import { ToolErrorType } from './tool-error.js';
 import type { FileDiff, ToolEditConfirmationDetails } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -1622,5 +1626,44 @@ describe('WriteFileTool', () => {
         fs.unlinkSync(filePath);
       }
     });
+  });
+});
+
+describe('workspace artifact metadata guard', () => {
+  beforeEach(() => {
+    mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+  });
+
+  // Pins the delegation: buildRecordArtifactReminder must agree with
+  // buildWorkspaceArtifactMetadata. If the reminder is reverted to compute the
+  // path independently (without the safety guard), it would still emit a hint
+  // for this markup-bearing filename while the artifact is correctly skipped,
+  // reintroducing the false "automatically recorded" claim.
+  it('keeps the reminder and the artifact in lockstep when the guard rejects', () => {
+    const rejected = path.resolve(
+      rootDir,
+      'reports',
+      'chart onerror=alert(1).html',
+    );
+    expect(buildWorkspaceArtifactMetadata(mockConfig, rejected)).toBeNull();
+    expect(buildRecordArtifactReminder(mockConfig, rejected)).toBeNull();
+  });
+
+  it('skips artifacts whose workspace path exceeds the store limit', () => {
+    // A short filename buried in a deep directory: the workspace path blows
+    // past the 500-char store limit while the title stays well under its own,
+    // so this exercises the path-length clause on its own.
+    const deepDir = 'a'.repeat(510);
+    const filePath = path.resolve(rootDir, deepDir, 'x.html');
+    expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+  });
+
+  it('skips artifacts whose workspace path contains a control character', () => {
+    // The control character sits in a directory segment, not the basename: the
+    // title is path.basename(filePath), so a control character in the title
+    // would also appear in the path and could not prove the path-side check on
+    // its own.
+    const filePath = path.resolve(rootDir, 'reports\u000b', 'chart.html');
+    expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
   });
 });

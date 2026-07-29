@@ -54,6 +54,8 @@ import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  ARTIFACT_TITLE_MAX_LENGTH,
+  ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from './record-artifact.js';
@@ -695,13 +697,16 @@ export function buildWorkspaceArtifactMetadata(
   // characters, or contain markup; skip the artifact rather than tell the model
   // it was recorded when it will be dropped.
   if (
-    title.length > 200 ||
+    title.length > ARTIFACT_TITLE_MAX_LENGTH ||
     hasControlCharacter(title) ||
     hasUnsafeDisplayPayload(title) ||
-    workspacePath.length > 500 ||
+    workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
     hasControlCharacter(workspacePath) ||
     hasUnsafeDisplayPayload(workspacePath)
   ) {
+    debugLogger.debug('workspace artifact skipped (safety checks)', {
+      path: filePath,
+    });
     return null;
   }
   return {
