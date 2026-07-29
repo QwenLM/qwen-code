@@ -1520,6 +1520,9 @@ describe('InputPrompt', () => {
 
     it('promotes copied image files to attachments on the clipboard shortcut', async () => {
       const imagePath = 'C:\\Users\\mochi\\image.png';
+      const expectedSource = path.isAbsolute(imagePath)
+        ? imagePath
+        : path.resolve(props.config.getTargetDir(), imagePath);
       vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
         imagePath,
       ]);
@@ -1535,9 +1538,9 @@ describe('InputPrompt', () => {
       stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
-      expect(mockFsStat).toHaveBeenCalledWith(imagePath);
+      expect(mockFsStat).toHaveBeenCalledWith(expectedSource);
       expect(mockFsCopyFile).toHaveBeenCalledWith(
-        imagePath,
+        expectedSource,
         expect.stringMatching(/clipboard-\d+-0\.png$/),
       );
       expect(mockBuffer.insert).not.toHaveBeenCalled();

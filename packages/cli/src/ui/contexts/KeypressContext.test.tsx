@@ -912,6 +912,7 @@ describe('KeypressContext - Kitty Protocol', () => {
           expect(keyHandler).toHaveBeenCalledWith(
             expect.objectContaining({
               paste: true,
+              pasteImage: false,
               sequence:
                 'C:\\Users\\mochi\\image.png\nC:\\Users\\mochi\\notes.txt',
             }),
