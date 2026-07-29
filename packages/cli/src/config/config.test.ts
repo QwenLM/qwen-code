@@ -3154,6 +3154,53 @@ describe('loadCliConfig folderTrust', () => {
   });
 });
 
+describe('loadCliConfig allowPrivateNetworkHooks', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should be false by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(false);
+  });
+
+  it('should pass through security.allowPrivateNetworkHooks from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const settings: Settings = {
+      security: {
+        allowPrivateNetworkHooks: true,
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(true);
+  });
+
+  it('should be false in bare mode even when enabled in settings', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const settings: Settings = {
+      security: {
+        allowPrivateNetworkHooks: true,
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(false);
+  });
+});
+
 describe('loadCliConfig with includeDirectories', () => {
   const originalArgv = process.argv;
 
