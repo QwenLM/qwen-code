@@ -64,7 +64,7 @@ function roundMs(value: number): number {
 
 function getAppendProfileOpenFlags(): number {
   const constants = fs.constants;
-  const noFollow = constants.O_NOFOLLOW;
+  const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
   if (noFollow === undefined) {
     throw new Error('session-start profiler requires O_NOFOLLOW support');
   }

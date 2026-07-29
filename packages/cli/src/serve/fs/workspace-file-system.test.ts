@@ -1862,33 +1862,39 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toHaveLength(3);
   });
 
-  it('returns healthy root glob results when one workspace root fails', async () => {
-    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      await expect(h.fs.glob('*.ts')).resolves.toEqual([
-        path.join(h.workspace, 'primary.ts'),
-      ]);
-    } finally {
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    'returns healthy root glob results when one workspace root fails',
+    async () => {
+      await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        await expect(h.fs.glob('*.ts')).resolves.toEqual([
+          path.join(h.workspace, 'primary.ts'),
+        ]);
+      } finally {
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
-  it('throws AggregateError when every workspace root glob fails', async () => {
-    await fsp.chmod(h.workspace, 0o000);
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
-      const cause = (err as Error & { cause?: unknown }).cause;
+  it.skipIf(process.platform === 'win32')(
+    'throws AggregateError when every workspace root glob fails',
+    async () => {
+      await fsp.chmod(h.workspace, 0o000);
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
+        const cause = (err as Error & { cause?: unknown }).cause;
 
-      expect(isFsError(err)).toBe(true);
-      expect(cause).toBeInstanceOf(AggregateError);
-      expect((cause as AggregateError).errors).toHaveLength(2);
-    } finally {
-      await fsp.chmod(h.workspace, 0o700);
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+        expect(isFsError(err)).toBe(true);
+        expect(cause).toBeInstanceOf(AggregateError);
+        expect((cause as AggregateError).errors).toHaveLength(2);
+      } finally {
+        await fsp.chmod(h.workspace, 0o700);
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
   it('glob with cwd searches only that resolved root', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');

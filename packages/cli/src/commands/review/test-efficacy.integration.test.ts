@@ -108,9 +108,10 @@ beforeEach(() => {
   // `inert` without a real runner. `npx` walks node_modules upward, and the
   // probe tree is a direct child of `repo`, so this bin is what it finds.
   mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
-  const bin = join(repo, 'node_modules', '.bin', 'vitest');
+  const binDir = join(repo, 'node_modules', '.bin');
+  const script = join(binDir, 'vitest.js');
   writeFileSync(
-    bin,
+    script,
     `#!/usr/bin/env node
 const path = require('path');
 const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
@@ -124,7 +125,16 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(bin, 0o755);
+  if (process.platform === 'win32') {
+    writeFileSync(
+      join(binDir, 'vitest.cmd'),
+      '@node "%~dp0\\vitest.js" %*\r\n',
+    );
+  } else {
+    const bin = join(binDir, 'vitest');
+    writeFileSync(bin, readFileSync(script));
+    chmodSync(bin, 0o755);
+  }
 });
 
 afterEach(() => {

@@ -115,9 +115,11 @@ describe('persistBinaryContent', () => {
       bytes,
     );
     // Owner-only: fetched content can be sensitive.
-    expect(
-      fs.statSync(path.join(dir, 'webfetch-test-1.pdf')).mode & 0o777,
-    ).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(
+        fs.statSync(path.join(dir, 'webfetch-test-1.pdf')).mode & 0o777,
+      ).toBe(0o600);
+    }
   });
 
   it('creates the target directory when missing', async () => {

@@ -20,7 +20,10 @@ export function isSessionId(value: string): boolean {
 
 export function parseSessionRef(pathName: string): SessionRef | null {
   if (!pathName.startsWith(SESSION_MENTION_PREFIX)) return null;
-  const remainder = pathName.slice(SESSION_MENTION_PREFIX.length).trim();
+  const remainder = pathName
+    .slice(SESSION_MENTION_PREFIX.length)
+    .trim()
+    .replace(/\\([,\s;!?()[\]{}])/g, '$1');
   if (remainder.length === 0) return null;
   return isSessionId(remainder) ? { id: remainder } : { title: remainder };
 }

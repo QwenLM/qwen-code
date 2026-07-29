@@ -114,6 +114,7 @@ describe('MemoryDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(os, 'homedir').mockReturnValue(path.resolve('/home/qwen'));
     vi.stubEnv('DISPLAY', ':99');
     vi.stubEnv('QWEN_HOME', path.join(os.homedir(), '.qwen'));
     vi.stubEnv(

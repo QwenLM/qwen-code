@@ -22,6 +22,10 @@ describe('ExtensionStore', () => {
   let extensionsDir: string;
   let storeDir: string;
   let enablementPath: string;
+  const workspacePath = (...segments: string[]) =>
+    path.resolve('/workspace', ...segments);
+  const legacyWorkspaceRule = (workspace: string) =>
+    `/${workspace.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/`;
 
   beforeEach(async () => {
     root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-extension-store-'));
@@ -84,7 +88,7 @@ describe('ExtensionStore', () => {
     await store.ensureInitialized([{ id, name: 'demo' }]);
     await store.setWorkspaceActivation(
       { id, name: 'demo' },
-      '/workspace/a',
+      workspacePath('a'),
       'enabled',
     );
 
@@ -95,10 +99,10 @@ describe('ExtensionStore', () => {
 
     expect(snapshot.generation).toBe(2);
     expect(snapshot.extensions[id]?.workspaceOverrides).toEqual({
-      '/workspace/a': 'enabled',
+      [workspacePath('a')]: 'enabled',
     });
     expect(
-      store.getActivation(snapshot, id, 'demo', '/workspace/a'),
+      store.getActivation(snapshot, id, 'demo', workspacePath('a')),
     ).toMatchObject({ effective: 'enabled', source: 'workspace_override' });
   });
 
@@ -110,7 +114,7 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivation({ id: oldId, name: 'dotnet' }, 'disabled');
     await store.setWorkspaceActivation(
       { id: oldId, name: 'dotnet' },
-      '/workspace/a',
+      workspacePath('a'),
       'enabled',
     );
 
@@ -122,7 +126,7 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[newId]).toMatchObject({
       name: 'dotnet',
       defaultActivation: 'disabled',
-      workspaceOverrides: { '/workspace/a': 'enabled' },
+      workspaceOverrides: { [workspacePath('a')]: 'enabled' },
     });
   });
 
@@ -187,13 +191,15 @@ describe('ExtensionStore', () => {
 
     const snapshot = await store.clearWorkspaceActivation(
       { id, name: 'demo' },
-      '/workspace/a',
+      workspacePath('a'),
     );
 
     expect(snapshot.extensions[id]?.workspaceOverrides).toEqual({
-      '/workspace/a': 'inherit',
+      [workspacePath('a')]: 'inherit',
     });
-    expect(store.getActivation(snapshot, id, 'demo', '/workspace/a')).toEqual({
+    expect(
+      store.getActivation(snapshot, id, 'demo', workspacePath('a')),
+    ).toEqual({
       default: 'enabled',
       workspace: 'inherit',
       effective: 'enabled',
@@ -210,12 +216,12 @@ describe('ExtensionStore', () => {
     await Promise.all([
       first.setWorkspaceActivation(
         { id, name: 'demo' },
-        '/workspace/a',
+        workspacePath('a'),
         'enabled',
       ),
       second.setWorkspaceActivation(
         { id, name: 'demo' },
-        '/workspace/b',
+        workspacePath('b'),
         'disabled',
       ),
     ]);
@@ -223,8 +229,8 @@ describe('ExtensionStore', () => {
     const snapshot = await first.readSnapshot();
     expect(snapshot.generation).toBe(2);
     expect(snapshot.extensions[id]?.workspaceOverrides).toEqual({
-      '/workspace/a': 'enabled',
-      '/workspace/b': 'disabled',
+      [workspacePath('a')]: 'enabled',
+      [workspacePath('b')]: 'disabled',
     });
   });
 
@@ -294,15 +300,15 @@ describe('ExtensionStore', () => {
     };
 
     await Promise.all([
-      runChild('/workspace/process-a', 'enabled'),
-      runChild('/workspace/process-b', 'disabled'),
+      runChild(workspacePath('process-a'), 'enabled'),
+      runChild(workspacePath('process-b'), 'disabled'),
     ]);
 
     const snapshot = await store.readSnapshot();
     expect(snapshot.generation).toBe(2);
     expect(snapshot.extensions[id]?.workspaceOverrides).toEqual({
-      '/workspace/process-a': 'enabled',
-      '/workspace/process-b': 'disabled',
+      [workspacePath('process-a')]: 'enabled',
+      [workspacePath('process-b')]: 'disabled',
     });
   });
 
@@ -445,14 +451,17 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivation({ id, name: 'demo' }, 'disabled');
     await store.setWorkspaceActivation(
       { id, name: 'demo' },
-      '/workspace/a',
+      workspacePath('a'),
       'enabled',
     );
 
     const projection = JSON.parse(
       await fsp.readFile(enablementPath, 'utf8'),
     ) as Record<string, { overrides: string[] }>;
-    expect(projection['demo']?.overrides).toEqual(['!/*', '/workspace/a/']);
+    expect(projection['demo']?.overrides).toEqual([
+      '!/*',
+      legacyWorkspaceRule(workspacePath('a')),
+    ]);
   });
 
   it('repairs an older V1 projection without changing generation', async () => {
@@ -627,7 +636,7 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivation(identity, 'disabled');
     await store.setWorkspaceActivation(
       identity,
-      '/workspace/enabled',
+      workspacePath('enabled'),
       'enabled',
     );
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -640,7 +649,7 @@ describe('ExtensionStore', () => {
 
     expect(imported.extensions[identity.id]).toMatchObject({
       defaultActivation: 'disabled',
-      workspaceOverrides: { '/workspace/enabled': 'enabled' },
+      workspaceOverrides: { [workspacePath('enabled')]: 'enabled' },
       legacyPathRules: ['!/workspace/legacy/*'],
     });
   });
@@ -652,7 +661,7 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivation(identity, 'disabled');
     await store.setWorkspaceActivation(
       identity,
-      '/workspace/enabled',
+      workspacePath('enabled'),
       'enabled',
     );
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -660,7 +669,11 @@ describe('ExtensionStore', () => {
       enablementPath,
       JSON.stringify({
         demo: {
-          overrides: ['!/*', '/workspace/enabled/', '!/workspace/legacy/*'],
+          overrides: [
+            '!/*',
+            legacyWorkspaceRule(workspacePath('enabled')),
+            '!/workspace/legacy/*',
+          ],
         },
       }),
     );
@@ -676,21 +689,23 @@ describe('ExtensionStore', () => {
     const store = makeStore();
     const identity = { id: 'ea'.repeat(32), name: 'demo' };
     await store.ensureInitialized([identity]);
-    await store.setWorkspaceActivation(identity, '/workspace', 'enabled');
+    await store.setWorkspaceActivation(identity, workspacePath(), 'enabled');
     await new Promise((resolve) => setTimeout(resolve, 10));
     await fsp.writeFile(
       enablementPath,
-      JSON.stringify({ demo: { overrides: ['!/workspace/'] } }),
+      JSON.stringify({
+        demo: { overrides: [`!${legacyWorkspaceRule(workspacePath())}`] },
+      }),
     );
 
     const imported = await store.ensureInitialized([identity]);
 
     expect(imported.extensions[identity.id]).toMatchObject({
-      workspaceOverrides: { '/workspace': 'disabled' },
+      workspaceOverrides: { [workspacePath()]: 'disabled' },
     });
     expect(imported.extensions[identity.id]?.legacyPathRules).toBeUndefined();
     expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
-      demo: { overrides: ['!/workspace/'] },
+      demo: { overrides: [`!${legacyWorkspaceRule(workspacePath())}`] },
     });
   });
 
@@ -742,7 +757,7 @@ describe('ExtensionStore', () => {
       destinationDirectory: path.join(extensionsDir, 'demo'),
       initialActivation: {
         scope: 'workspace',
-        workspacePath: '/workspace/a',
+        workspacePath: workspacePath('a'),
       },
     });
 
@@ -750,7 +765,7 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[identity.id]).toMatchObject({
       artifactGeneration: 1,
       defaultActivation: 'disabled',
-      workspaceOverrides: { '/workspace/a': 'enabled' },
+      workspaceOverrides: { [workspacePath('a')]: 'enabled' },
     });
     await expect(
       fsp.readFile(
@@ -991,7 +1006,7 @@ describe('ExtensionStore', () => {
       destinationDirectory: destination,
       initialActivation: {
         scope: 'workspace',
-        workspacePath: '/workspace/a',
+        workspacePath: workspacePath('a'),
       },
     });
     await fsp.rm(destination, { recursive: true });
@@ -1041,7 +1056,11 @@ describe('ExtensionStore', () => {
     await fsp.mkdir(destination);
     await fsp.writeFile(path.join(destination, 'version'), 'old');
     await store.ensureInitialized([identity]);
-    await store.setWorkspaceActivation(identity, '/workspace/a', 'disabled');
+    await store.setWorkspaceActivation(
+      identity,
+      workspacePath('a'),
+      'disabled',
+    );
     const staging = await store.createStagingDirectory();
     await fsp.writeFile(path.join(staging, 'version'), 'new');
 
@@ -1056,7 +1075,7 @@ describe('ExtensionStore', () => {
       'new',
     );
     expect(snapshot.extensions[identity.id]?.workspaceOverrides).toEqual({
-      '/workspace/a': 'disabled',
+      [workspacePath('a')]: 'disabled',
     });
   });
 

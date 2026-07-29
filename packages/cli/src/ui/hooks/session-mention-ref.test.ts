@@ -32,6 +32,10 @@ describe('sessionMentionRef', () => {
     });
   });
 
+  it('unescapes delimiters in a title', () => {
+    expect(parseSessionRef('session:My\\ Chat')).toEqual({ title: 'My Chat' });
+  });
+
   it('treats an empty remainder as null (lone prefix)', () => {
     expect(parseSessionRef('session:')).toBeNull();
   });

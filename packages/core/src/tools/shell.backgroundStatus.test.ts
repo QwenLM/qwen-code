@@ -104,8 +104,11 @@ describe('background shell status sidecar (integration, real spawn)', () => {
     shellTool = new ShellTool(mockConfig);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     registry.abortAll();
+    await waitFor(() =>
+      registry.getAll().every((task) => task.status !== 'running'),
+    );
     for (const dir of tmpDirs) {
       rmSync(dir, { recursive: true, force: true });
     }

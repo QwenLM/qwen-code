@@ -834,6 +834,7 @@ async function waitUntil(
 }
 
 describe('ACP Streamable HTTP transport (over the wire)', () => {
+  const boundWorkspace = path.resolve('/ws');
   let server: Server;
   let base: string;
   let bridge: FakeBridge;
@@ -884,7 +885,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
     acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
-      boundWorkspace: '/ws',
+      boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       workspaceRememberLane,
@@ -915,7 +916,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
     bridge = opts.nextBridge ?? new FakeBridge();
-    const boundWorkspace = opts.boundWorkspace ?? '/ws';
+    const boundWorkspace = opts.boundWorkspace ?? path.resolve('/ws');
     const app = express();
     app.use(express.json());
     const workspaceRegistry = opts.generationGuard

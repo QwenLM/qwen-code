@@ -497,7 +497,10 @@ describe('persistAndTruncateToolResult', () => {
       config,
     );
 
-    expect(result.outputFile).toMatch(/^\/fallback\/shell_[a-f0-9]+\.output$/);
+    expect(path.dirname(result.outputFile!)).toBe(path.resolve('/fallback'));
+    expect(path.basename(result.outputFile!)).toMatch(
+      /^shell_[a-f0-9]+\.output$/,
+    );
     expect(result.bytesWritten).toBe(Buffer.byteLength(content));
     expect(trackToolResultBytes).toHaveBeenCalledTimes(1);
     expect(trackToolResultBytes).toHaveBeenCalledWith(

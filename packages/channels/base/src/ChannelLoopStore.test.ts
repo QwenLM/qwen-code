@@ -181,11 +181,13 @@ describe('ChannelLoopStore', () => {
 
     const channelsDir = path.join(tmpDir, 'channels');
     const filePath = path.join(channelsDir, 'loops.json');
-    const dirMode = (await fs.stat(channelsDir)).mode & 0o777;
-    const fileMode = (await fs.stat(filePath)).mode & 0o777;
+    if (process.platform !== 'win32') {
+      const dirMode = (await fs.stat(channelsDir)).mode & 0o777;
+      const fileMode = (await fs.stat(filePath)).mode & 0o777;
 
-    expect(dirMode).toBe(0o700);
-    expect(fileMode).toBe(0o600);
+      expect(dirMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    }
   });
 
   it('disables a job without deleting its last status', async () => {

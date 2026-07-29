@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { markdownToPlainText } from './send.js';
 
 const {
@@ -310,18 +311,21 @@ describe('validateImagePath', () => {
     );
   });
 
-  it('does not treat POSIX backslashes as directory separators', () => {
-    const imagePath = '/home/user/project\\escape.png';
-    mockRealpathSync.mockImplementation((p: string) => {
-      if (p.includes('escape.png')) return imagePath;
-      if (p === '/home/user/project') return '/home/user/project';
-      return p;
-    });
+  it.skipIf(process.platform === 'win32')(
+    'does not treat POSIX backslashes as directory separators',
+    () => {
+      const imagePath = '/home/user/project\\escape.png';
+      mockRealpathSync.mockImplementation((p: string) => {
+        if (p.includes('escape.png')) return imagePath;
+        if (p === '/home/user/project') return '/home/user/project';
+        return p;
+      });
 
-    expect(() => validateImagePath(imagePath, workspaceDirs)).toThrow(
-      'Image path outside allowed directories',
-    );
-  });
+      expect(() => validateImagePath(imagePath, workspaceDirs)).toThrow(
+        'Image path outside allowed directories',
+      );
+    },
+  );
 
   it('rejects image with magic bytes that do not match extension', () => {
     // readSync returns JPEG magic, but file extension is .png
@@ -336,9 +340,10 @@ describe('validateImagePath', () => {
   });
 
   it('returns resolved realpath on success', () => {
-    mockRealpathSync.mockImplementation((p: string) => `/private${p}`);
-    const result = validateImagePath('/tmp/photo.png', workspaceDirs);
-    expect(result).toBe('/private/tmp/photo.png');
+    const imagePath = path.resolve('/tmp/photo.png');
+    mockRealpathSync.mockImplementation((p: string) => p);
+    const result = validateImagePath(imagePath, workspaceDirs);
+    expect(result).toBe(imagePath);
   });
 });
 
@@ -382,7 +387,9 @@ describe('sendImage', () => {
     // check (only 16 bytes), then sendImage calls readFileSync for
     // full file read.
     expect(mockReadFileSync).toHaveBeenCalledTimes(1);
-    expect(mockReadFileSync).toHaveBeenCalledWith('/tmp/test.png');
+    expect(mockReadFileSync).toHaveBeenCalledWith(
+      path.resolve('/tmp/test.png'),
+    );
 
     // Step 2: get upload URL called with correct params
     const encryptedSize = Math.ceil((fakeImageData.length + 1) / 16) * 16;

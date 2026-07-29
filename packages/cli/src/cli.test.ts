@@ -490,60 +490,63 @@ describe('bootstrap import boundaries', () => {
     }
   });
 
-  it('reloads the CLI through a stable shim after an update', () => {
-    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-update-'));
-    const wrongDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-wrong-'));
-    const oldDir = path.join(tempDir, 'old');
-    const newDir = path.join(tempDir, 'new');
-    const binPath = path.join(tempDir, 'qwen');
-    try {
-      mkdirSync(oldDir);
-      mkdirSync(newDir);
-      copyFileSync(
-        '../../scripts/cli-entry.js',
-        path.join(oldDir, 'entry.mjs'),
-      );
-      copyFileSync(
-        '../../scripts/cli-entry.js',
-        path.join(newDir, 'entry.mjs'),
-      );
-      writeFileSync(
-        path.join(oldDir, 'cli.js'),
-        `import { chmodSync, rmSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nrmSync(${JSON.stringify(oldDir)}, { recursive: true, force: true });\nprocess.exit(44);\n`,
-      );
-      writeFileSync(
-        path.join(newDir, 'cli.js'),
-        "process.stdout.write(`${JSON.stringify({ args: process.argv.slice(2), skip: process.env.QWEN_CODE_SKIP_UPDATE_CHECK_ONCE, hasLauncherPid: /^\\d+$/.test(process.env.QWEN_CODE_LAUNCHER_PID ?? ''), launcherPath: process.env.QWEN_CODE_LAUNCHER_PATH })}\\n`);\n",
-      );
-      writeFileSync(
-        binPath,
-        `#!/bin/sh\nexec "${process.execPath}" "${path.join(oldDir, 'entry.mjs')}" "$@"\n`,
-      );
-      chmodSync(binPath, 0o755);
-      writeFileSync(
-        path.join(wrongDir, 'qwen'),
-        '#!/bin/sh\necho wrong-launcher\n',
-      );
-      chmodSync(path.join(wrongDir, 'qwen'), 0o755);
+  it.skipIf(process.platform === 'win32')(
+    'reloads the CLI through a stable shim after an update',
+    () => {
+      const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-update-'));
+      const wrongDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-wrong-'));
+      const oldDir = path.join(tempDir, 'old');
+      const newDir = path.join(tempDir, 'new');
+      const binPath = path.join(tempDir, 'qwen');
+      try {
+        mkdirSync(oldDir);
+        mkdirSync(newDir);
+        copyFileSync(
+          '../../scripts/cli-entry.js',
+          path.join(oldDir, 'entry.mjs'),
+        );
+        copyFileSync(
+          '../../scripts/cli-entry.js',
+          path.join(newDir, 'entry.mjs'),
+        );
+        writeFileSync(
+          path.join(oldDir, 'cli.js'),
+          `import { chmodSync, rmSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(binPath)}, ${JSON.stringify(`#!/bin/sh\nexec "${process.execPath}" "${path.join(newDir, 'entry.mjs')}" "$@"\n`)});\nchmodSync(${JSON.stringify(binPath)}, 0o755);\nrmSync(${JSON.stringify(oldDir)}, { recursive: true, force: true });\nprocess.exit(44);\n`,
+        );
+        writeFileSync(
+          path.join(newDir, 'cli.js'),
+          "process.stdout.write(`${JSON.stringify({ args: process.argv.slice(2), skip: process.env.QWEN_CODE_SKIP_UPDATE_CHECK_ONCE, hasLauncherPid: /^\\d+$/.test(process.env.QWEN_CODE_LAUNCHER_PID ?? ''), launcherPath: process.env.QWEN_CODE_LAUNCHER_PATH })}\\n`);\n",
+        );
+        writeFileSync(
+          binPath,
+          `#!/bin/sh\nexec "${process.execPath}" "${path.join(oldDir, 'entry.mjs')}" "$@"\n`,
+        );
+        chmodSync(binPath, 0o755);
+        writeFileSync(
+          path.join(wrongDir, 'qwen'),
+          '#!/bin/sh\necho wrong-launcher\n',
+        );
+        chmodSync(path.join(wrongDir, 'qwen'), 0o755);
 
-      const output = execFileSync(binPath, ['--prompt', 'a&b'], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${wrongDir}${path.delimiter}${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
-        },
-      });
+        const output = execFileSync(binPath, ['--prompt', 'a&b'], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${wrongDir}${path.delimiter}${tempDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          },
+        });
 
-      expect(JSON.parse(output)).toEqual({
-        args: ['--prompt', 'a&b'],
-        skip: 'true',
-        hasLauncherPid: true,
-      });
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-      rmSync(wrongDir, { recursive: true, force: true });
-    }
-  });
+        expect(JSON.parse(output)).toEqual({
+          args: ['--prompt', 'a&b'],
+          skip: 'true',
+          hasLauncherPid: true,
+        });
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+        rmSync(wrongDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not pass the standalone launcher hint to child processes', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-launcher-env-'));

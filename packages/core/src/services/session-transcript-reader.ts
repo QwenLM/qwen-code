@@ -185,7 +185,7 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
 
 function cursorPayload(

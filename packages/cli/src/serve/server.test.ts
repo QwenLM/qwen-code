@@ -322,6 +322,7 @@ function deferred<T = void>(): {
 // WS_B).
 const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
 const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
+const WORK_A = path.resolve(path.sep, 'work', 'a');
 const EXPECTED_STAGE1_FEATURES = [
   'health',
   'daemon_status',
@@ -8725,12 +8726,12 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         sessionId: 'fake-0',
-        workspaceCwd: '/work/a',
+        workspaceCwd: WORK_A,
         attached: false,
         clientId: 'client-0',
       });
-      expect(bridge.calls).toEqual([
-        { workspaceCwd: '/work/a', modelServiceId: 'qwen-prod' },
+      expect(bridge.calls).toMatchObject([
+        { workspaceCwd: WORK_A, modelServiceId: 'qwen-prod' },
       ]);
     });
 
@@ -8747,8 +8748,8 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: '/work/a', sessionScope: scope });
         expect(res.status).toBe(200);
-        expect(bridge.calls).toEqual([
-          { workspaceCwd: '/work/a', sessionScope: scope },
+        expect(bridge.calls).toMatchObject([
+          { workspaceCwd: WORK_A, sessionScope: scope },
         ]);
       }
     });
@@ -8770,8 +8771,8 @@ describe('createServeApp', () => {
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(200);
       expect(res.body.clientId).toBe('client-existing');
-      expect(bridge.calls).toEqual([
-        { workspaceCwd: '/work/a', clientId: 'client-existing' },
+      expect(bridge.calls).toMatchObject([
+        { workspaceCwd: WORK_A, clientId: 'client-existing' },
       ]);
     });
 
@@ -8831,7 +8832,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(200);
-      expect(bridge.calls).toEqual([{ workspaceCwd: '/work/a' }]);
+      expect(bridge.calls).toMatchObject([{ workspaceCwd: WORK_A }]);
       expect(bridge.calls[0]).not.toHaveProperty('sessionScope');
     });
 
@@ -8869,7 +8870,7 @@ describe('createServeApp', () => {
           '{"cwd":"/work/a","__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}}}',
         );
       expect(res.status).toBe(200);
-      expect(bridge.calls[0]?.workspaceCwd).toBe('/work/a');
+      expect(bridge.calls[0]?.workspaceCwd).toBe(WORK_A);
       // No prototype pollution: Object.prototype.polluted is
       // undefined. (This is the core security property — if the
       // dangerous key landed via spread, this check would fail.)

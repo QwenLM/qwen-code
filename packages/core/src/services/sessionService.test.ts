@@ -282,7 +282,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts excludes sessions from other projects', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        path.basename(dir.toString()) === 'archive'
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
       );

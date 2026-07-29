@@ -438,9 +438,11 @@ describe('extension tests', () => {
       try {
         await manager.commitPreparedExtension(prepared);
         expect(
-          fs.readFileSync(
-            path.join(prepared.destinationDirectory, 'README.md'),
-            'utf8',
+          path.normalize(
+            fs.readFileSync(
+              path.join(prepared.destinationDirectory, 'README.md'),
+              'utf8',
+            ),
           ),
         ).toBe(path.join(prepared.destinationDirectory, 'scripts', 'setup.sh'));
       } finally {

@@ -903,9 +903,11 @@ export class SkillManager {
         );
       case 'user': {
         const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          v === QWEN_DIR
-            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
-            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          path.resolve(
+            v === QWEN_DIR
+              ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+              : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          ),
         );
         for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
           const homeExpanded = expandHomeDir(customDir);
