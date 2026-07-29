@@ -168,6 +168,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
             compactThinking: true,
+            markdownTableMode: 'advanced',
           }}
         />
       </DaemonWorkspaceProvider>
