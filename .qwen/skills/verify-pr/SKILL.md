@@ -215,6 +215,41 @@ If deleting the new guard leaves its own new test green, that test is pinned
 by something else (an earlier early-return, a different branch) and asserts
 nothing about the change. Name what actually pins it.
 
+**And the failure one level earlier: the scenario never reached the code
+under test.** A vacuity check asks whether the assertion can fail; this asks
+whether the code ever ran. Instrument the seam and count — requests the fake
+peer actually received, invocations of the function under test, frames
+rendered — then assert that count is non-zero. Worked example: four abort
+cases in an E2E suite fired their aborts during **CLI process startup**, so
+`modelRequestsSeenByFakeServer` was `0` and `messages` empty; a suite named
+for aborting mid-stream never streamed. Every assertion passed. Fixing the
+race also restored the coverage the tests were named for
+(`modelRequestsInFlightAtAbort=1`), which is the tell that the original
+green meant nothing.
+
+**Timing-triggered assertions have a threshold — measure it, do not sample
+it.** When an assertion's outcome depends on a wall-clock timer racing an
+operation whose duration you do not control (`setTimeout(() => abort(), 1000)`
+against a query bounded by process startup, not by the server), the test
+encodes a margin nobody has measured. Measure the operation's natural
+duration directly — run the scenario with the trigger disabled — and compare
+it to the timer. If the distribution crosses the threshold, the test fails on
+every machine on the fast side of it. A green run proves only that _this_ box
+was slow enough.
+
+This matters most because **a speed-correlated failure is not flake, and a
+retry budget does not absorb it.** Ordinary flake is random, so `retry: 2`
+converts it to a pass; a failure driven by machine speed is fully correlated
+across attempts — measured on a real PR as 5/5 runs failing all three
+attempts. Before writing off an intermittent failure as flake, establish
+which kind it is: repeat under load and idle, and report the natural
+durations alongside the outcomes. The two get opposite verdicts — flake is a
+note, a speed-correlated failure is blocking.
+
+Note the CI verify job runs on a **shared, loaded** runner, which is the
+regime where such a test passes. You cannot reproduce a fast-machine failure
+here by repetition; you can only compute the margin and say what it implies.
+
 And do not generalize from one dead guard to its siblings. A clause that is
 unreachable in one call path may be the only thing protecting another —
 check each on its own evidence and report the contrast, so "this guard is

@@ -1568,6 +1568,20 @@ describe('qwen-triage verify hardening round 2', () => {
     // #7998 "what I did not verify": a blank harness was proved
     // environmental by booting base and head identically.
     expect(flat).toContain('A/A control');
+
+    // #7934 R4 §1: a new guard turned a vacuous pass into a failure that is
+    // deterministic on a fast machine. Sampling cannot find it from a
+    // loaded CI box — only measuring the margin can, so the rule must say
+    // measure and must say why repetition is the wrong instrument here.
+    expect(flat).toContain('measure it, do not sample it');
+    expect(flat).toContain('speed-correlated failure is not flake');
+    expect(flat).toContain('You cannot reproduce a fast-machine failure');
+
+    // #7934 R4 §2: the abort cases fired during CLI startup, so the fake
+    // server saw zero requests — a suite named for mid-stream aborts never
+    // streamed, and every assertion passed.
+    expect(flat).toContain('the scenario never reached the code under test');
+    expect(flat).toContain('assert that count is non-zero');
   });
 
   // The whole report is already inside a <details> on the PR. With the
