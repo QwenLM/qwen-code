@@ -12,6 +12,7 @@ import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
+  reasonFilter?: unknown;
 }
 
 interface GithubCursor {
@@ -84,12 +85,22 @@ interface WorkingReaction {
   reactionId?: number;
 }
 
+function normalizeReasonFilter(config: GithubConfig): Set<string> | null {
+  if (!Array.isArray(config.reasonFilter)) return null;
+  const reasons = config.reasonFilter
+    .filter((reason): reason is string => typeof reason === 'string')
+    .map((reason) => reason.trim().toLowerCase())
+    .filter((reason) => reason.length > 0);
+  return new Set(reasons);
+}
+
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
   private readonly activeReactions = new Map<string, WorkingReaction>();
   private readonly reactionsPendingRemoval = new Set<string>();
+  private reasonFilter: Set<string> | null = null;
 
   constructor(
     name: string,
@@ -129,6 +140,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
+    this.reasonFilter = normalizeReasonFilter(cfg);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
@@ -155,6 +167,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    const botUsername = this.botUsername?.toLowerCase();
+    if (
+      this.config.senderPolicy === 'allowlist' &&
+      botUsername &&
+      allowed.includes(botUsername)
+    ) {
+      if (allowed.every((user) => user === botUsername)) {
+        throw new Error(
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+        );
+      }
+      process.stderr.write(
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+      );
+    }
     this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
   }
@@ -322,6 +349,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
+      const reason = String(notification.reason ?? '').toLowerCase();
+      if (this.reasonFilter && !this.reasonFilter.has(reason)) {
+        this.logDebugPayload('Github', {
+          event: 'reasonFilter.skip',
+          chatId,
+          threadId,
+          reason: notification.reason,
+        });
+        continue;
+      }
       const ctx: NotificationContext = {
         chatId,
         threadId,
@@ -331,11 +368,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metaFloor: this.cursor.metaFloor,
         maxUpdatedAt,
         subjectTitle: notification.subject.title || '',
-        reason: notification.reason,
+        reason,
       };
 
       try {
-        switch (notification.reason) {
+        switch (reason) {
           case 'mention':
             await this.processCommentLane(ctx, true);
             break;
