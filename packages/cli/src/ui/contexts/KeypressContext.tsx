@@ -1201,6 +1201,13 @@ export function KeypressProvider({
     });
 
     const shouldFlushRawDataAsPaste = (data: Buffer) => {
+      // ANSI escape sequences (SGR mouse events, cursor keys) must reach
+      // readline for proper parsing. Wrapping them in synthetic paste events
+      // causes handleKeypress's isPaste guard to discard SGR mouse data,
+      // breaking wheel scrolling on Windows where \r from Enter commonly
+      // shares a stdin chunk with a subsequent mouse event.
+      if (data.includes(0x1b)) return false;
+
       const hasReturn = data.includes(0x0d);
       const hasEmbeddedTab = data.length > 1 && data.includes(0x09);
       const isSingleReturn = data.length <= 2 && hasReturn;
