@@ -18,6 +18,7 @@ agent_cache_root="${QWEN_BENCHMARK_CACHE_ROOT:-/mnt/workspace/qwen-benchmark-cac
 agent_cache_prepare="${pool_root}/service/deploy/prepare-agent-cache.py"
 database_url="${BENCHMARK_POOL_DATABASE_URL:-postgresql://qwen_benchmark@127.0.0.1:55432/qwen_benchmark_dsw_release_v1}"
 model_name="${OPENAI_MODEL:-qwen3.7-max}"
+dataset_revision="2"
 max_attempts="${BENCHMARK_MAX_ATTEMPTS:-4}"
 retry_backoff_seconds="${BENCHMARK_RETRY_BACKOFF_SECONDS:-60}"
 output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
@@ -62,6 +63,7 @@ mkdir -p "${output_root}"
 manifest_path="${output_root}/manifest.json"
 manifest_args=(
   --dataset-root "${dataset_root}"
+  --dataset-revision "${dataset_revision}"
   --limit "${INSTANCE_LIMIT}"
   --output "${manifest_path}"
 )
@@ -89,7 +91,7 @@ submit_json="$(
     --idempotency-key "${BENCHMARK_IDEMPOTENCY_KEY}" \
     --suite "dsw_release_swe_verified_v1" \
     --dataset "swe-bench/swe-bench-verified" \
-    --dataset-revision "2" \
+    --dataset-revision "${dataset_revision}" \
     --task-prefix "swe-bench/" \
     --qwen-ref "${QWEN_REF}" \
     --qwen-commit "${QWEN_COMMIT}" \
@@ -103,7 +105,24 @@ submit_json="$(
     --release-tag "${RELEASE_TAG}" \
     --github-run-url "${GITHUB_RUN_URL:-}"
 )"
-run_id="$("${python_bin}" -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<< "${submit_json}")"
+run_id="$(
+  "${python_bin}" -c '
+import json
+import re
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except json.JSONDecodeError:
+    raise SystemExit("pool submit returned invalid JSON") from None
+run_id = payload.get("run_id") if isinstance(payload, dict) else None
+if not isinstance(run_id, str) or not run_id:
+    raise SystemExit("pool submit response is missing a non-empty run_id")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+    raise SystemExit("pool submit returned an invalid run_id")
+print(run_id)
+' <<< "${submit_json}"
+)"
 
 jq -n \
   --arg status "QUEUED" \

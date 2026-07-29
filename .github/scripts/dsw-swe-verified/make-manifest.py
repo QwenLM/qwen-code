@@ -9,6 +9,7 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--dataset-revision", required=True)
     parser.add_argument("--limit", type=int, required=True)
     parser.add_argument("--instance-id")
     parser.add_argument("--output", type=Path, required=True)
@@ -39,7 +40,7 @@ def main() -> None:
         json.dumps(
             {
                 "dataset": "swe-bench/swe-bench-verified",
-                "dataset_revision": "2",
+                "dataset_revision": args.dataset_revision,
                 "expected_instances": len(selected),
                 "instance_ids": selected,
             },

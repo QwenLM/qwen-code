@@ -73,8 +73,6 @@ jobs:
       QWEN_REF: '${{ github.event_name == ''release'' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}'
       INSTANCE_LIMIT: '${{ github.event_name == ''release'' && ''500'' || inputs.instance_limit }}'
       BENCHMARK_INSTANCE_ID: '${{ (github.event_name != ''release'' && inputs.instance_limit == ''1'') && inputs.instance_id || '''' }}'
-      RELEASE_ID: '${{ github.event_name == ''release'' && github.event.release.id || '''' }}'
-      BENCHMARK_TRIGGER: '${{ github.event_name }}'
       BENCHMARK_IDEMPOTENCY_KEY: 'dsw-release-v1-${{ github.run_id }}'
       GITHUB_RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
 
@@ -128,11 +126,13 @@ jobs:
           .github/scripts/dsw-swe-verified/dispatch-release-benchmark.sh
 
       - name: 'Record dispatch receipt'
+        env:
+          POOL_RUN_ID: '${{ steps.dispatch.outputs.run_id }}'
         run: |-
           {
             echo "### DSW SWE-bench Verified dispatch"
             echo
-            echo "- Pool run: \`${{ steps.dispatch.outputs.run_id }}\`"
+            echo "- Pool run: \`${POOL_RUN_ID}\`"
             echo "- State: queued"
             echo "- Cases: ${INSTANCE_LIMIT}"
             echo "- The persistent DSW publisher will update the Release after the run reaches a validated terminal state."
