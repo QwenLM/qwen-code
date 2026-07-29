@@ -335,8 +335,25 @@ function getPreviewVersion(args) {
     );
     releaseVersion = overrideVersion;
   } else if (tagResult) {
-    releaseVersion =
-      tagResult.latestVersion.replace(/-nightly.*/, '') + '-preview.0';
+    let baseVersion = tagResult.latestVersion.replace(/-nightly.*/, '');
+    // When the nightly base is already published as stable, the preview must
+    // target the next patch — otherwise the scheduled Tuesday release derives
+    // a version whose channel packages already exist on npm (E403).
+    const latestStable = getVersionFromNPM('latest');
+    if (
+      latestStable &&
+      semver.valid(latestStable) &&
+      semver.gte(latestStable, baseVersion)
+    ) {
+      const parts = baseVersion.split('.');
+      parts[2] = String(parseInt(parts[2] || '0', 10) + 1);
+      const bumped = parts.join('.');
+      console.error(
+        `Nightly base ${baseVersion} already released as stable (${latestStable}); bumping preview base to ${bumped}.`,
+      );
+      baseVersion = bumped;
+    }
+    releaseVersion = baseVersion + '-preview.0';
     validateVersion(
       releaseVersion,
       'X.Y.Z-preview.N',
