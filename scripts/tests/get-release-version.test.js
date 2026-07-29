@@ -86,22 +86,28 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
-    it.each([
-      ['matches', '0.8.0', '0.8.1-preview.0'],
-      ['is ahead of', '0.9.0', '0.9.1-preview.0'],
-    ])(
-      'should bump the preview base when the latest stable %s it',
-      (_, latestStable, expected) => {
-        vi.mocked(execSync).mockImplementation((command) => {
-          if (command.includes('npm view') && command.includes('--tag=latest'))
-            return latestStable;
-          return mockExecSync(command);
-        });
+    it('should bump the preview base when the latest stable matches it', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.8.0';
+        return mockExecSync(command);
+      });
 
-        const result = getVersion({ type: 'preview' });
-        expect(result.releaseVersion).toBe(expected);
-      },
-    );
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.1-preview.0');
+    });
+
+    it('should reject the preview when the latest stable is ahead', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.9.0';
+        return mockExecSync(command);
+      });
+
+      expect(() => getVersion({ type: 'preview' })).toThrow(
+        'Nightly base 0.8.0 is lower than published latest 0.9.0. Refusing divergent preview baseline.',
+      );
+    });
 
     it('should calculate the next nightly version from package.json', () => {
       vi.mocked(execSync).mockImplementation(mockExecSync);

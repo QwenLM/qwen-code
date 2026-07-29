@@ -343,14 +343,20 @@ function getPreviewVersion(args) {
     if (
       latestStable &&
       semver.valid(latestStable) &&
-      semver.valid(baseVersion) &&
-      semver.gte(latestStable, baseVersion)
+      semver.valid(baseVersion)
     ) {
-      const bumped = semver.inc(latestStable, 'patch');
-      console.error(
-        `Nightly base ${baseVersion} already released as stable (${latestStable}); bumping preview base to ${bumped}.`,
-      );
-      baseVersion = bumped;
+      if (semver.gt(latestStable, baseVersion)) {
+        throw new Error(
+          `Nightly base ${baseVersion} is lower than published latest ${latestStable}. Refusing divergent preview baseline.`,
+        );
+      }
+      if (semver.eq(latestStable, baseVersion)) {
+        const bumped = semver.inc(latestStable, 'patch');
+        console.error(
+          `Nightly base ${baseVersion} already released as stable (${latestStable}); bumping preview base to ${bumped}.`,
+        );
+        baseVersion = bumped;
+      }
     }
     releaseVersion = baseVersion + '-preview.0';
     validateVersion(
