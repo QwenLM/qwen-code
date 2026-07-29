@@ -73,6 +73,34 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).toContain('排队消息二');
   });
 
+  it('shows when an accepted prompt is queued on the server', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
+    });
+
+    expect(container.textContent).toContain('服务器排队中...');
+    expect(container.querySelector('[role="status"]')).toBeTruthy();
+    expect(
+      container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeNull();
+    expect(
+      [...container.querySelectorAll('button')].every(
+        (button) => !button.disabled,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the spinner while a prompt is still submitting', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '正在发送', serverState: 'submitting' }],
+    });
+
+    expect(container.textContent).toContain('提交中...');
+    expect(
+      container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeTruthy();
+  });
+
   it('renders queued reference annotations as tags', () => {
     const serialized = '<context id="orders">orders</context>';
     const text = `inspect ${serialized} now`;
