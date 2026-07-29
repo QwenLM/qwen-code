@@ -7265,6 +7265,10 @@ describe('DaemonClient', () => {
       await client.approveWorkspaceChannelPairing('bot/name', {
         code: 'ABCDEFGH',
       });
+      await client.workspaceChannelPairingApprovals('bot/name');
+      await client.revokeWorkspaceChannelPairingApproval('bot/name', {
+        senderId: 'sender/1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspace/channel-types'],
@@ -7280,9 +7284,18 @@ describe('DaemonClient', () => {
           'POST',
           'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
         ],
+        [
+          'GET',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[11]!.body!)).toEqual({ senderId: 'sender/1' });
     });
 
     it('uses the exact qualified workspace routes', async () => {
@@ -7300,6 +7313,10 @@ describe('DaemonClient', () => {
         config: { type: 'dingtalk' },
       });
       await workspace.workspaceChannelPairingRequests('bot');
+      await workspace.workspaceChannelPairingApprovals('bot');
+      await workspace.revokeWorkspaceChannelPairingApproval('bot', {
+        senderId: 'sender-1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
@@ -7313,9 +7330,20 @@ describe('DaemonClient', () => {
           'GET',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests',
         ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        senderId: 'sender-1',
+      });
     });
   });
 });
