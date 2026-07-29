@@ -477,7 +477,6 @@ const EN: Messages = {
     `${v?.label ?? 'Selection'} copied to the clipboard`,
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
-  'echartsChart.defaultTitle': 'Chart Loading',
   'echartsChart.noData': 'No data',
   'echartsChart.tableNotice': (v) => {
     const omittedRows = Number(v?.omittedRows ?? 0);
@@ -491,7 +490,6 @@ const EN: Messages = {
     return `Showing ${v?.visibleRows ?? 0} of ${v?.totalRows ?? 0} rows`;
   },
   'echartsChart.rendering': 'Rendering chart',
-  'echartsChart.runtimeUnavailable': 'Chart runtime is unavailable.',
   'echartsChart.renderFailed': 'Chart render failed.',
   'echartsChart.viewMode': 'View mode',
   'echartsChart.showChart': 'Show chart',
@@ -519,9 +517,20 @@ const EN: Messages = {
   'markdownTable.selection.min': 'Min',
   'markdownTable.selection.max': 'Max',
   'markdownTable.copyTsv': 'Copy TSV',
-  'markdownTable.copyVisible': 'Quick copy',
+  'markdownTable.copyTsvHint': 'Copy as TSV for pasting into spreadsheet apps',
+  'markdownTable.copyVisible': 'Copy table',
+  'markdownTable.customColumns': 'Custom columns',
+  'markdownTable.customColumns.tableSection': 'Columns shown in the table',
+  'markdownTable.customColumns.detailSection': 'Fields shown in expanded rows',
+  'markdownTable.customColumns.toggleAllTable': 'Toggle all table columns',
+  'markdownTable.customColumns.toggleAllDetails':
+    'Toggle all expanded-row fields',
+  'markdownTable.customColumns.reset': 'Reset',
+  'markdownTable.customColumns.noDetails': 'No expanded-row fields selected.',
   'markdownTable.freezeFirstColumn': 'Freeze first column',
   'markdownTable.unfreezeFirstColumn': 'Unfreeze first column',
+  'markdownTable.densityLabel': 'Table density',
+  'markdownTable.densityCurrent': (v) => `${v?.density ?? ''} density`.trim(),
   'markdownTable.density': (v) => `Density: ${v?.density ?? ''}`,
   'markdownTable.density.standard': 'Standard',
   'markdownTable.density.compact': 'Compact',
@@ -2392,12 +2401,16 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access.',
+    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
+  'channels.editor.pairing.approveFor': (v) =>
+    `Approve ${v?.sender ?? 'request'}, code ${v?.code ?? ''}`,
   'channels.editor.pairing.approved': (v) =>
     `${v?.sender ?? 'This person'} can now use this Channel.`,
   'channels.editor.pairing.error': 'Pairing requests were not updated',
+  'channels.editor.pairing.unavailable':
+    'Pairing requests are temporarily unavailable. Try again.',
   'channels.editor.pairing.retry': 'Try again',
   'channels.editor.pairing.empty.title': 'No pending requests',
   'channels.editor.pairing.empty.description':
@@ -2980,7 +2993,6 @@ const ZH: Messages = {
   'copy.toClipboard': (v) => `${v?.label ?? '内容'} 已复制到剪贴板`,
   'code.copy': '复制',
   'code.copied': '已复制！',
-  'echartsChart.defaultTitle': '图表加载中',
   'echartsChart.noData': '暂无数据',
   'echartsChart.tableNotice': (v) => {
     const omittedRows = Number(v?.omittedRows ?? 0);
@@ -2994,7 +3006,6 @@ const ZH: Messages = {
     return `显示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行`;
   },
   'echartsChart.rendering': '正在渲染图表',
-  'echartsChart.runtimeUnavailable': '图表运行时不可用。',
   'echartsChart.renderFailed': '图表渲染失败。',
   'echartsChart.viewMode': '视图模式',
   'echartsChart.showChart': '显示图表',
@@ -3003,7 +3014,7 @@ const ZH: Messages = {
   'echartsChart.data': '数据',
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
-  'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,
+  'markdownTable.rows': (v) => `共${v?.count ?? 0}行`,
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
   'markdownTable.hint': '点击表头排序，点击 ▾ 打开筛选。',
   'markdownTable.filtersActive': (v) => `${v?.count ?? 0} 个筛选`,
@@ -3015,9 +3026,19 @@ const ZH: Messages = {
   'markdownTable.selection.min': '最小',
   'markdownTable.selection.max': '最大',
   'markdownTable.copyTsv': '复制 TSV',
-  'markdownTable.copyVisible': '快捷复制',
+  'markdownTable.copyTsvHint': '复制为 TSV，可粘贴到 Excel 等表格应用',
+  'markdownTable.copyVisible': '复制表格',
+  'markdownTable.customColumns': '自定义列',
+  'markdownTable.customColumns.tableSection': '显示在表格列的信息',
+  'markdownTable.customColumns.detailSection': '显示在折叠面板的信息',
+  'markdownTable.customColumns.toggleAllTable': '切换全部表格列',
+  'markdownTable.customColumns.toggleAllDetails': '切换全部折叠面板字段',
+  'markdownTable.customColumns.reset': '重置',
+  'markdownTable.customColumns.noDetails': '未选择折叠面板字段',
   'markdownTable.freezeFirstColumn': '冻结首列',
   'markdownTable.unfreezeFirstColumn': '取消冻结首列',
+  'markdownTable.densityLabel': '表格密度',
+  'markdownTable.densityCurrent': (v) => `${v?.density ?? ''}密度`,
   'markdownTable.density': (v) => `密度：${v?.density ?? ''}`,
   'markdownTable.density.standard': '标准',
   'markdownTable.density.compact': '紧凑',
@@ -4759,12 +4780,15 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。',
+    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
   'channels.editor.pairing.refresh': '刷新配对请求',
-  'channels.editor.pairing.approve': '允许',
+  'channels.editor.pairing.approve': '批准',
+  'channels.editor.pairing.approveFor': (v) =>
+    `批准${v?.sender ?? '该请求'}，配对码 ${v?.code ?? ''}`,
   'channels.editor.pairing.approved': (v) =>
     `${v?.sender ?? '该用户'}现在可以使用此频道。`,
   'channels.editor.pairing.error': '未能更新配对请求',
+  'channels.editor.pairing.unavailable': '暂时无法获取配对请求，请重试。',
   'channels.editor.pairing.retry': '重试',
   'channels.editor.pairing.empty.title': '暂无待处理请求',
   'channels.editor.pairing.empty.description':

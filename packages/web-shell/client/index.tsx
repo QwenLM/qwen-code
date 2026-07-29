@@ -203,6 +203,7 @@ export type {
   WebShellAtProvider,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
+  WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
@@ -227,8 +228,9 @@ export type {
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,
+  createMarkdownChartRegistry,
   createEchartsFullDataRenderer,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';
 export type {
   DatasetCell,
   EchartsFullDataBlockProps,
@@ -240,4 +242,4 @@ export type {
   EchartsInstance,
   EchartsRuntime,
   EchartsRuntimeLoader,
-} from './components/messages/EchartsFullDataBlock';
+} from './components/messages/MarkdownChartRenderer';

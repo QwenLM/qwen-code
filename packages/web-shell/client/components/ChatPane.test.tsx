@@ -106,6 +106,11 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
 let messagesState: any[];
 vi.mock('../hooks/useMessages', () => ({
   useMessages: () => messagesState,
+  useMessagesFromBlocks: () => messagesState,
+}));
+
+vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptBlocks: () => [],
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
