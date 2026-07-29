@@ -339,6 +339,32 @@ function lineStartsInsideLiteral(content: string): boolean[] {
 }
 
 /**
+ * Does `lines[idx]` sit directly inside a `class` body? A modifier-less class
+ * field (`cache = new Map();`) reads exactly like a bare assignment statement
+ * from one line away, yet deleting it removes a DECLARATION, not a cleanup — a
+ * compile error (`inconclusive`) or, for an unused field, a false `survived`
+ * that labels a field an added safety statement. Walk backward to the brace
+ * that opens the immediately enclosing block and report whether it belongs to a
+ * `class`. A statement in a method body is enclosed by the method's brace, not
+ * the class's, so it is unaffected. Over-rejecting here is the cheap error.
+ */
+function insideClassBody(lines: string[], idx: number): boolean {
+  let depth = 0;
+  for (let j = idx - 1; j >= 0; j--) {
+    const code = codeOnly(lines[j]);
+    for (let i = code.length - 1; i >= 0; i--) {
+      const ch = code[i];
+      if (ch === '}') depth++;
+      else if (ch === '{') {
+        if (depth === 0) return /\bclass\b/.test(code.slice(0, i));
+        depth--;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Is `lines[idx]` deletable as one whole statement? Conservative on purpose: a
  * false negative costs one unprobed candidate, a false positive costs a full
  * suite run on a mutant that cannot compile — or worse, one whose deletion is
@@ -355,6 +381,7 @@ function isRemovableStatement(lines: string[], idx: number): boolean {
   if (!codeOnly(t).endsWith(';')) return false;
   if (!/^(?:await\s+)?[A-Za-z_$]/.test(t)) return false;
   if (NON_STATEMENT_START_RE.test(t)) return false;
+  if (insideClassBody(lines, idx)) return false;
   const depth = scanLineDelimiters(t);
   if (!depth || depth.paren !== 0 || depth.bracket !== 0 || depth.brace !== 0) {
     return false;
@@ -439,10 +466,17 @@ export function parseAddedLines(diffText: string): Map<string, number[]> {
   let inHunk = false;
   let newLine = 0;
   for (const line of diffText.split('\n')) {
-    if (line.startsWith('+++ ')) {
+    if (line.startsWith('diff --git ')) {
+      // A new file's header block follows; leave the previous file's hunk so
+      // its `+++ ` header is recognised rather than read as an added line.
+      inHunk = false;
+      continue;
+    }
+    // `!inHunk`: inside a hunk an added source line that begins with `++ `
+    // (spaced pre-increment) renders as `+++ x` and is not a file header.
+    if (!inHunk && line.startsWith('+++ ')) {
       const p = line.slice(4).split('\t')[0];
       file = p === '/dev/null' ? null : p.replace(/^b\//, '');
-      inHunk = false;
       continue;
     }
     const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);

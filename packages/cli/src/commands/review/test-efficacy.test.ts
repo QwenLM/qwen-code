@@ -461,6 +461,33 @@ describe('parseAddedLines', () => {
     ].join('\n');
     expect(parseAddedLines(diff).get('src/a.ts')).toEqual([5]);
   });
+
+  it('does not read an added `++ x` line as a file header', () => {
+    // `git diff --unified=0` prefixes each added line with `+`, so a spaced
+    // pre-increment (`++ count;`) renders as `+++ count;`. Matching `+++ `
+    // unconditionally misreads it as a header, drops the line, and attributes
+    // every later added line in the file to a phantom path. The next file's
+    // real header must still be recognised once its `diff --git` leaves the
+    // hunk.
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,0 +2,2 @@ ctx',
+      '+++ count;',
+      '+tail.clear();',
+      'diff --git a/src/b.ts b/src/b.ts',
+      '--- a/src/b.ts',
+      '+++ b/src/b.ts',
+      '@@ -0,0 +1 @@',
+      '+only line',
+      '',
+    ].join('\n');
+    const got = parseAddedLines(diff);
+    expect(got.get('src/a.ts')).toEqual([2, 3]);
+    expect(got.get('src/b.ts')).toEqual([1]);
+    expect(got.has('count;')).toBe(false);
+  });
 });
 
 describe('selectMutants', () => {
@@ -511,6 +538,29 @@ describe('selectMutants', () => {
       { file: 'src/s.ts', content, addedLines: all(8), hasNewTests: false },
     ]);
     expect(got.map((c) => c.line)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it('skips a modifier-less class field that only looks like an assignment', () => {
+    // `cache = new Map();` in a class body matches the safety-verb set and
+    // balances its delimiters, but it is a field DECLARATION: deleting it breaks
+    // the compile (a wasted run) or, if unused, survives and files a false
+    // finding. A statement inside a method body is enclosed by the method's
+    // brace, not the class's, and must still be selected.
+    const content = src([
+      'class Store {',
+      '  cache = new Map();',
+      '  reset() {',
+      '    this.cache.clear();',
+      '  }',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(6), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 4, statement: 'this.cache.clear();' },
+    ]);
   });
 
   it('skips what it cannot delete whole — declarations, headers, fragments', () => {
