@@ -452,10 +452,11 @@ describe('stampCliEntryEnv', () => {
   });
 
   it('default derivation never throws and never stamps outside a built layout', () => {
-    // Under vitest import.meta.url is not even a file: URL, and in dev runs
-    // the derived ../index.js is the unbuilt packages/cli/index.js. Both must
-    // keep the bare-`qwen` fallback — a failed derivation taking the CLI down
-    // would be worse than the version skew this stamp exists to fix.
+    // Under vitest Vite rewrites new URL(…, import.meta.url) to a non-file
+    // URL, and in dev runs the derived ../index.js is the unbuilt
+    // packages/cli/index.js. Both must keep the bare-`qwen` fallback — a
+    // failed derivation taking the CLI down would be worse than the version
+    // skew this stamp exists to fix.
     stampCliEntryEnv();
 
     expect(process.env['QWEN_CODE_CLI']).toBeUndefined();

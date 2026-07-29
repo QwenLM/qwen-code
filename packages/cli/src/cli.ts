@@ -469,8 +469,9 @@ function writeStderrLine(line: string): void {
  * an entry a shell cannot exec. Skipped when the derived path does not exist
  * (dev runs execute .ts sources with no built entry; the bare-`qwen` fallback
  * is the pre-existing behavior there) and when the module was not loaded from
- * the filesystem at all — test runners rewrite import.meta.url to non-file
- * schemes, and the stamp must never take the CLI down.
+ * the filesystem at all — under test runners, Vite statically rewrites the
+ * new URL(…, import.meta.url) expression to a non-file URL, and the stamp
+ * must never take the CLI down.
  *
  * The execute bit is granted here when missing, best-effort: the stamped file
  * must be shell-execable, but tsc emits dist/index.js as 0644 and only npm's
