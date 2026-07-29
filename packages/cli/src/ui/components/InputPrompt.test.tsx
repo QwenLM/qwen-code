@@ -60,12 +60,24 @@ const mockViewActions = vi.hoisted(() => ({
   enterBgDetailFromPanel: vi.fn(),
 }));
 
+const { mockFsStat, mockFsMkdir, mockFsCopyFile } = vi.hoisted(() => ({
+  mockFsStat: vi.fn(),
+  mockFsMkdir: vi.fn(),
+  mockFsCopyFile: vi.fn(),
+}));
+
 vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
 vi.mock('../utils/clipboardUtils.js');
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+  stat: mockFsStat,
+  mkdir: mockFsMkdir,
+  copyFile: mockFsCopyFile,
+}));
 vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
@@ -203,6 +215,9 @@ describe('InputPrompt', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockFsStat.mockRejectedValue(new Error('file not found'));
+    mockFsMkdir.mockResolvedValue(undefined);
+    mockFsCopyFile.mockResolvedValue(undefined);
     mockedSavePromptStash.mockReturnValue(true);
     mockedClearPromptStash.mockReturnValue(true);
     mockViewActions.setAgentTabBarFocused.mockReset();
@@ -1500,6 +1515,60 @@ describe('InputPrompt', () => {
         { paste: false },
       );
       expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('promotes copied image files to attachments on the clipboard shortcut', async () => {
+      const imagePath = 'C:\\Users\\mochi\\image.png';
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+        imagePath,
+      ]);
+      mockFsStat.mockResolvedValue({
+        isFile: () => true,
+      });
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(mockFsStat).toHaveBeenCalledWith(imagePath);
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        imagePath,
+        expect.stringMatching(/clipboard-\d+-0\.png$/),
+      );
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('collapses a large copied file list into a paste placeholder', async () => {
+      const clipboardFiles = Array.from(
+        { length: 11 },
+        (_, index) => `C:\\Users\\mochi\\notes-${index}.txt`,
+      );
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue(
+        clipboardFiles,
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[Pasted Content \d+ chars\]$/),
+        { paste: false },
+      );
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        clipboardFiles.join('\n'),
+        expect.anything(),
+      );
       unmount();
     });
 

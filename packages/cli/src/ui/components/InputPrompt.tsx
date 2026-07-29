@@ -583,6 +583,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     return id === 1 ? base : `${base} #${id}`;
   }, []);
 
+  const insertLargePastePlaceholder = useCallback(
+    (pasted: string): boolean => {
+      const charCount = [...pasted].length;
+      const lineCount = pasted.split('\n').length;
+      if (
+        charCount <= LARGE_PASTE_CHAR_THRESHOLD &&
+        lineCount <= LARGE_PASTE_LINE_THRESHOLD
+      ) {
+        return false;
+      }
+
+      const placeholder = nextLargePastePlaceholder(charCount);
+      setPendingPastes((prev) => {
+        const next = new Map(prev);
+        next.set(placeholder, pasted);
+        return next;
+      });
+      buffer.insert(placeholder, { paste: false });
+      return true;
+    },
+    [buffer, nextLargePastePlaceholder],
+  );
+
   // Clear escape prompt timer on unmount
   useEffect(
     () => () => {
@@ -833,12 +856,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     const pastedImagePaths = classifyPastedImagePaths(pasted);
     if (pastedImagePaths.allImages) {
       await promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
-    } else {
+    } else if (!insertLargePastePlaceholder(pasted)) {
       buffer.insert(pasted, { paste: false });
     }
   }, [
     buffer,
     handleClipboardImage,
+    insertLargePastePlaceholder,
     promotePastedImagePaths,
     reportClipboardUnavailable,
   ]);
@@ -1046,8 +1070,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         // Handle large pastes by showing a placeholder
         const pasted = key.sequence.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-        const charCount = [...pasted].length; // Proper Unicode char count
-        const lineCount = pasted.split('\n').length;
 
         // Ensure we never accidentally interpret paste as regular input.
         const pastedImagePaths = classifyPastedImagePaths(pasted);
@@ -1063,19 +1085,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Pasted text is purely image path(s) — promote to attachment chips
           // so Cmd+V (terminal-injected path) matches the Ctrl+V experience.
           void promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
-        } else if (
-          charCount > LARGE_PASTE_CHAR_THRESHOLD ||
-          lineCount > LARGE_PASTE_LINE_THRESHOLD
-        ) {
-          const placeholder = nextLargePastePlaceholder(charCount);
-          setPendingPastes((prev) => {
-            const next = new Map(prev);
-            next.set(placeholder, pasted);
-            return next;
-          });
-          // Insert the placeholder as regular text
-          buffer.insert(placeholder, { paste: false });
-        } else {
+        } else if (!insertLargePastePlaceholder(pasted)) {
           // Normal paste handling for small content
           buffer.handleInput(key);
         }
@@ -1870,7 +1880,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       handleAttachmentDelete,
       uiActions,
       pasteWorkaround,
-      nextLargePastePlaceholder,
+      insertLargePastePlaceholder,
       pendingPastes,
       parsePlaceholder,
       freePlaceholderId,

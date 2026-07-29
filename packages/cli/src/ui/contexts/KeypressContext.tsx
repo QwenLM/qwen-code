@@ -758,6 +758,28 @@ export function KeypressProvider({
       }
     };
 
+    const broadcastClipboardPaste = async () => {
+      let clipboardImageUnavailable = false;
+      const onUnavailable = () => {
+        clipboardImageUnavailable = true;
+      };
+      const clipboardFiles = await readClipboardFiles(onUnavailable);
+      const hasImage =
+        clipboardFiles.length === 0 && !clipboardImageUnavailable
+          ? await clipboardHasImage(onUnavailable)
+          : false;
+      broadcast({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: true,
+        pasteImage: hasImage,
+        clipboardImageUnavailable,
+        sequence: clipboardFiles.join('\n'),
+      });
+    };
+
     // Matches terminal query responses (DA1, DA2, Kitty protocol query)
     // that may arrive late from startup detection in kittyProtocolDetector.
     // These are never valid user input.
@@ -909,25 +931,7 @@ export function KeypressProvider({
             sequence: buffered,
           });
         } else {
-          let clipboardImageUnavailable = false;
-          const onUnavailable = () => {
-            clipboardImageUnavailable = true;
-          };
-          const clipboardFiles = await readClipboardFiles(onUnavailable);
-          const hasImage =
-            clipboardFiles.length === 0 && !clipboardImageUnavailable
-              ? await clipboardHasImage(onUnavailable)
-              : false;
-          broadcast({
-            name: '',
-            ctrl: false,
-            meta: false,
-            shift: false,
-            paste: true,
-            pasteImage: hasImage,
-            clipboardImageUnavailable,
-            sequence: clipboardFiles.join('\n'),
-          });
+          await broadcastClipboardPaste();
         }
         return;
       }
@@ -1390,29 +1394,8 @@ export function KeypressProvider({
           sequence: text,
         });
       } else {
-        // Empty paste — check for clipboard image (async, but fine here).
-        // Mirror the keypress-level paste-end path: surface whether the
-        // native clipboard module was unavailable.
-        let clipboardImageUnavailable = false;
-        const onUnavailable = () => {
-          clipboardImageUnavailable = true;
-        };
-        void readClipboardFiles(onUnavailable).then(async (clipboardFiles) => {
-          const hasImage =
-            clipboardFiles.length === 0 && !clipboardImageUnavailable
-              ? await clipboardHasImage(onUnavailable)
-              : false;
-          broadcast({
-            name: '',
-            ctrl: false,
-            meta: false,
-            shift: false,
-            paste: true,
-            pasteImage: hasImage,
-            clipboardImageUnavailable,
-            sequence: clipboardFiles.join('\n'),
-          });
-        });
+        // Empty paste — check copied files, then image data asynchronously.
+        void broadcastClipboardPaste();
       }
     };
 

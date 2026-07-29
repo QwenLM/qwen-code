@@ -890,28 +890,36 @@ describe('KeypressContext - Kitty Protocol', () => {
       });
     });
 
-    it('turns copied Windows files into pasted paths', async () => {
-      const keyHandler = vi.fn();
-      mockReadClipboardFiles.mockResolvedValue([
-        'C:\\Users\\mochi\\image.png',
-        'C:\\Users\\mochi\\notes.txt',
-      ]);
-      const { result } = renderHook(() => useKeypressContext(), { wrapper });
-      act(() => result.current.subscribe(keyHandler));
+    it.each([
+      ['raw paste path', false],
+      ['keypress paste path', true],
+    ])(
+      'turns copied Windows files into pasted paths through the %s',
+      async (_path, pasteWorkaround) => {
+        const keyHandler = vi.fn();
+        mockReadClipboardFiles.mockResolvedValue([
+          'C:\\Users\\mochi\\image.png',
+          'C:\\Users\\mochi\\notes.txt',
+        ]);
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) => wrapper({ children, pasteWorkaround }),
+        });
+        act(() => result.current.subscribe(keyHandler));
 
-      act(() => stdin.sendPaste(''));
+        act(() => stdin.sendPaste(''));
 
-      await waitFor(() => {
-        expect(keyHandler).toHaveBeenCalledWith(
-          expect.objectContaining({
-            paste: true,
-            sequence:
-              'C:\\Users\\mochi\\image.png\nC:\\Users\\mochi\\notes.txt',
-          }),
-        );
-      });
-      expect(mockClipboardHasImage).not.toHaveBeenCalled();
-    });
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledWith(
+            expect.objectContaining({
+              paste: true,
+              sequence:
+                'C:\\Users\\mochi\\image.png\nC:\\Users\\mochi\\notes.txt',
+            }),
+          );
+        });
+        expect(mockClipboardHasImage).not.toHaveBeenCalled();
+      },
+    );
 
     describe('paste mode markers', () => {
       // These tests use pasteWorkaround=true to force passthrough mode for raw keypress testing
