@@ -53,7 +53,14 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   // delete exactly what `git clean -fd` does. `--force` is the long spelling
   // of `-f`, so it blocks identically. The scan stops at a command separator
   // so a later segment cannot pull an unrelated `-f` into this match.
-  /\bgit\s+clean\b[^;&|\n]*?(?:\s-[a-zA-Z]*f|\s--force\b)/,
+  //
+  // A bare newline is one of those separators — bash ends the command there,
+  // so in `git clean\n -fd` the `-fd` is a second command and the clean that
+  // runs is the harmless one. A newline escaped by a backslash is the
+  // opposite: it is a line continuation, the two lines are one command, and
+  // `git clean \<newline> -fd` really does delete. So the scan crosses `\\\n`
+  // and stops at every other newline.
+  /\bgit\s+clean\b(?:[^;&|\n]|\\\n)*?(?:\s-[a-zA-Z]*f|\s--force\b)/,
   /\bgit\s+stash\s+drop\b/,
 ]);
 
@@ -204,15 +211,18 @@ export function isDestructiveCommand(
   // clean` is separator-bounded within one copy but not across the seam), and a
   // two-token pattern matches the tail of one copy against the head of the
   // next, so `destroy.sh --cdk` reads as `cdk destroy` and is blocked outright.
-  const matchesAny = (pattern: RegExp) =>
-    pattern.test(command) || pattern.test(stripped);
-  // The match may live in either spelling; report the one that actually hit.
-  const firstMatch = (pattern: RegExp) =>
+  //
+  // One traversal answers both questions: whether to block, and which text to
+  // quote back. Deciding with `.test()` and then re-deriving the quoted string
+  // with a separate `.match()` runs the pattern twice on every blocked command
+  // and lets the two drift — a later edit that taught one spelling to the test
+  // but not to the match would quote a string the block decision never saw.
+  const matchEither = (pattern: RegExp): string | undefined =>
     command.match(pattern)?.[0] ?? stripped.match(pattern)?.[0];
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {
-    if (matchesAny(pattern) && !userMentionsDiscard(userPrompt)) {
-      const matched = firstMatch(pattern) ?? command;
+    const matched = matchEither(pattern);
+    if (matched !== undefined && !userMentionsDiscard(userPrompt)) {
       return {
         blocked: true,
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,
@@ -220,7 +230,10 @@ export function isDestructiveCommand(
     }
   }
 
-  if (matchesAny(GIT_AMEND_PATTERN) && !isAmendOfSessionCommit(cwd)) {
+  if (
+    matchEither(GIT_AMEND_PATTERN) !== undefined &&
+    !isAmendOfSessionCommit(cwd)
+  ) {
     return {
       blocked: true,
       reason:
@@ -229,8 +242,9 @@ export function isDestructiveCommand(
   }
 
   for (const pattern of IAC_DESTROY_PATTERNS) {
-    if (matchesAny(pattern)) {
-      const toolName = firstMatch(pattern)?.split(/\s+/)[0] ?? 'unknown';
+    const matched = matchEither(pattern);
+    if (matched !== undefined) {
+      const toolName = matched.split(/\s+/)[0] ?? 'unknown';
       if (!userMentionsStack(userPrompt, toolName)) {
         return {
           blocked: true,

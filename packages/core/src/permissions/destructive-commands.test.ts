@@ -173,6 +173,36 @@ describe('isDestructiveCommand — git patterns', () => {
     }
   });
 
+  it('blocks git clean when a backslash continues the line before the flag', () => {
+    // A backslash before the newline is a line continuation, so bash joins the
+    // two lines into one command and the force flag does apply to this clean.
+    for (const cmd of [
+      'git clean \\\n -fd',
+      'git clean \\\n --force',
+      'git clean -d \\\n -f',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'remove files');
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    }
+  });
+
+  it('treats a bare newline as a command separator, like ; and &&', () => {
+    // Bash ends a command at an unescaped newline, so the flag on the next
+    // line belongs to a different command and the clean that runs is bare.
+    // Verified against bash: `git clean\n -fd` runs `git clean`, then fails
+    // with `-fd: command not found`.
+    for (const cmd of [
+      'git clean\n -fd',
+      'git clean\n --force',
+      'git clean\nrm -f stale.log',
+      'git clean\ntail -f log.txt',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'look at logs');
+      expect(result).toBeNull();
+    }
+  });
+
   it('blocks git checkout . (same discard as the -- . form)', () => {
     for (const cmd of [
       'git checkout .',
