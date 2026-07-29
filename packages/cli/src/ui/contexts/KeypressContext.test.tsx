@@ -391,6 +391,50 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('maps the Kitty Super bit to meta on the reverse-tab path', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Cmd+Shift+Tab: modifier 10 = base 1 + Shift 1 + Super 8
+      act(() => {
+        stdin.sendKittySequence(`\x1b[1;10Z`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'tab', shift: true, meta: true }),
+      );
+    });
+
+    it('maps the Kitty Super bit to meta on the functional-keys path', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Cmd+Up: modifier 9 = base 1 + Super 8
+      act(() => {
+        stdin.sendKittySequence(`\x1b[1;9A`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'up', meta: true }),
+      );
+    });
+
     it('decodes Shift+Enter modifyOtherKeys form without Kitty enabled', () => {
       // Ghostty (and other xterm modifyOtherKeys terminals) send Shift+Enter as
       // ESC [ 27 ; 2 ; 13 ~ when the Kitty protocol is not negotiated. readline
