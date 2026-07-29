@@ -30,6 +30,7 @@ Add the channel to `~/.qwen/settings.json`:
       "allowedUsers": ["your-github-username"],
       "sessionScope": "chat_thread",
       "cwd": "/path/to/your/project",
+      "blockStreaming": "off",
       "groupPolicy": "open",
       "groups": {
         "*": { "requireMention": true }
@@ -57,14 +58,15 @@ For GitHub Enterprise Server, set `baseUrl`:
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                      |
-| ------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
-| `token`                   | (required)               | Classic PAT with `notifications` scope                                           |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                              |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                           |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                       |
-| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                          |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run |
+| Option                    | Default                  | Description                                                                                   |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
+| `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
+| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
+| `blockStreaming`          | `"off"`                  | Keep GitHub final-only. Enable only when raw intermediate model text is acceptable to publish |
 
 ## ⚠️ Security
 
@@ -94,17 +96,19 @@ Non-comment activity (push, label changes) bumps the notification's `updated_at`
 
 ## Response Feedback
 
-For an accepted issue or pull-request comment, the channel first adds GitHub's `👀` reaction to that comment, then posts the agent response as a regular comment in the same thread. The reaction is best-effort: an unavailable reaction API or missing reaction permission is logged but does not prevent the agent response.
+For an accepted issue or pull-request comment, the channel adds GitHub's `👀` reaction while the agent is working, then removes it when the run completes, fails, or is cancelled. Both operations are best-effort: a reaction API or permission failure is logged and never prevents the final response.
 
-Set `blockStreaming` to `"on"` to publish long responses progressively as separate comments. Blocks flush at paragraph boundaries after 400 characters by default, force-split at 1000 characters, and flush after 1.5 seconds of model silence. This gives visible progress, but GitHub cannot edit one comment in place; a single final response is the default.
+### Final-only output (recommended)
+
+Keep `blockStreaming` set to `"off"` for GitHub bots. This is the default and publishes exactly one final agent response. It prevents transient model output — such as planning notes, tool narration, subagent progress, or unfinished review drafts — from becoming permanent issue or pull-request comments.
 
 ```json
 {
-  "blockStreaming": "on",
-  "blockStreamingChunk": { "minChars": 400, "maxChars": 1000 },
-  "blockStreamingCoalesce": { "idleMs": 1500 }
+  "blockStreaming": "off"
 }
 ```
+
+`blockStreaming: "on"` delivers raw model text chunks as multiple irreversible GitHub comments. Use it only when each intermediate chunk is deliberately suitable for public publication. GitHub cannot edit or retract the emitted comments.
 
 ## Known Limitations
 

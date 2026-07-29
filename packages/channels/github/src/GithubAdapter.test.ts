@@ -34,6 +34,7 @@ vi.mock('@octokit/rest', () => {
       },
       reactions: {
         createForIssueComment: vi.fn(),
+        deleteForIssueComment: vi.fn(),
       },
       pulls: {
         get: vi.fn(),
@@ -78,6 +79,7 @@ const mockOctokit = (
     };
     reactions: {
       createForIssueComment: Mock;
+      deleteForIssueComment: Mock;
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
@@ -188,6 +190,18 @@ class LiveGithubChannel extends GithubChannel {
   async pollForTest(): Promise<void> {
     await this.pollOnce();
   }
+
+  startPromptForTest(
+    chatId: string,
+    sessionId: string,
+    messageId: string,
+  ): void {
+    this.onPromptStart(chatId, sessionId, messageId);
+  }
+
+  endPromptForTest(chatId: string, sessionId: string, messageId: string): void {
+    this.onPromptEnd(chatId, sessionId, messageId);
+  }
 }
 
 describe('GithubChannel', () => {
@@ -208,7 +222,10 @@ describe('GithubChannel', () => {
     });
     mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
     mockOctokit.rest.issues.createComment.mockResolvedValue({});
-    mockOctokit.rest.reactions.createForIssueComment.mockResolvedValue({});
+    mockOctokit.rest.reactions.createForIssueComment.mockResolvedValue({
+      data: { id: 9000 },
+    });
+    mockOctokit.rest.reactions.deleteForIssueComment.mockResolvedValue({});
   });
 
   afterEach(() => {
@@ -1407,10 +1424,8 @@ describe('GithubChannel', () => {
     });
 
     it('does not wait for the acknowledgment before replying', async () => {
-      let resolveReaction: () => void = () => {};
-      const reactionPending = new Promise<void>((resolve) => {
-        resolveReaction = resolve;
-      });
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
       mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
         reactionPending,
       );
@@ -1432,7 +1447,42 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({ body: 'response' }),
       );
-      resolveReaction();
+      resolveReaction({ data: { id: 9000 } });
+      await reactionPending;
+    });
+
+    it('removes the working reaction when the prompt finishes', async () => {
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '1001');
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '1001');
+      expect(
+        mockOctokit.rest.reactions.deleteForIssueComment,
+      ).not.toHaveBeenCalled();
+
+      resolveReaction({ data: { id: 9001 } });
+      await reactionPending;
+      await Promise.resolve();
+
+      expect(
+        mockOctokit.rest.reactions.deleteForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        reaction_id: 9001,
+      });
     });
 
     it('does not react to a synthetic direct review-request trigger', async () => {
