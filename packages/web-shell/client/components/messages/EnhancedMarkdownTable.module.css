@@ -190,10 +190,6 @@
   background: linear-gradient(90deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
 }
 
-.scrollerWithDetail {
-  max-height: none;
-}
-
 .table {
   --action-column-width: 40px;
 

@@ -2007,6 +2007,25 @@ describe('EnhancedMarkdownTable', () => {
     expect(textButton(container, 'Collapse text')).toBeDefined();
   });
 
+  it('keeps the opened row anchored when the table scroller expands', () => {
+    const container = renderTable();
+    container.style.overflowY = 'auto';
+    container.scrollTop = 40;
+    const detailsButton = button(container, 'View details for row 3');
+    const row = detailsButton.closest('tr');
+    expect(row).not.toBeNull();
+    const rowRect = vi
+      .spyOn(row!, 'getBoundingClientRect')
+      .mockReturnValueOnce({ top: 120 } as DOMRect)
+      .mockReturnValueOnce({ top: 280 } as DOMRect);
+
+    click(detailsButton);
+
+    expect(rowRect).toHaveBeenCalledTimes(2);
+    expect(container.scrollTop).toBe(200);
+    expect(detailsButton.getAttribute('aria-expanded')).toBe('true');
+  });
+
   it('shows statistics for a numeric selection', () => {
     const container = renderTable();
 
