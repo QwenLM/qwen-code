@@ -2178,12 +2178,15 @@ function makeWorkspaceRuntimeForTest(input: {
   workspaceCwd: string;
   primary: boolean;
   bridge: AcpSessionBridge;
+  sessionRuntimeBaseDir?: string;
   trusted?: boolean;
   generationGuard?: WorkspaceGenerationGuard;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.workspaceId,
     workspaceCwd: input.workspaceCwd,
+    sessionRuntimeBaseDir:
+      input.sessionRuntimeBaseDir ?? Storage.getRuntimeBaseDir(),
     primary: input.primary,
     trusted: input.trusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -14141,12 +14144,34 @@ describe('createServeApp', () => {
     ])(
       '%s the persisted branch when generation cleanup kills=%s',
       async (_label, killed, expectedRemovals) => {
+        const runtimeDir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
+        );
+        const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
+        const chatsDir = path.join(
+          new Storage(WS_BOUND, runtimeDir).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(chatsDir, `${staleBranchId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${staleBranchId}-user-1`,
+            parentUuid: null,
+            sessionId: staleBranchId,
+            timestamp: '2026-07-29T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'hello' }] },
+            cwd: WS_BOUND,
+          })}\n`,
+          'utf8',
+        );
         const generationGuard = createWorkspaceGenerationGuard();
         const bridge = fakeBridge();
         bridge.branchSession = vi.fn(async (sessionId) => {
           generationGuard.close();
           return {
-            sessionId: 'stale-branch',
+            sessionId: staleBranchId,
             workspaceCwd: WS_BOUND,
             attached: false,
             clientId: 'stale-client',
@@ -14164,6 +14189,7 @@ describe('createServeApp', () => {
         const runtime = makeWorkspaceRuntimeForTest({
           workspaceId: 'branch-primary',
           workspaceCwd: WS_BOUND,
+          sessionRuntimeBaseDir: runtimeDir,
           primary: true,
           bridge,
           generationGuard,
@@ -14182,16 +14208,17 @@ describe('createServeApp', () => {
 
           expect(res.status).toBe(503);
           expect(res.body.code).toBe('workspace_runtime_unavailable');
-          expect(killSpy).toHaveBeenCalledWith('stale-branch', {
+          expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
             requireZeroAttaches: true,
           });
           expect(removeSpy).toHaveBeenCalledTimes(expectedRemovals);
           if (killed) {
-            expect(removeSpy).toHaveBeenCalledWith('stale-branch');
+            expect(removeSpy).toHaveBeenCalledWith(staleBranchId);
           }
         } finally {
           killSpy.mockRestore();
           removeSpy.mockRestore();
+          await fsp.rm(runtimeDir, { recursive: true, force: true });
         }
       },
     );
@@ -18768,6 +18795,8 @@ describe('createServeApp', () => {
     });
 
     it('returns per-id errors when removeSession throws unexpectedly', async () => {
+      const sessionId = 'aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sessionId);
       const spy = vi
         .spyOn(SessionService.prototype, 'removeSession')
         .mockRejectedValueOnce(new Error('disk on fire'));
@@ -18779,11 +18808,11 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/sessions/delete')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ sessionIds: ['aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee'] });
+        .send({ sessionIds: [sessionId] });
       expect(res.status).toBe(200);
       expect(res.body.errors).toEqual([
         {
-          sessionId: 'aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee',
+          sessionId,
           error: 'disk on fire',
         },
       ]);
@@ -18969,7 +18998,7 @@ describe('createServeApp', () => {
       ).rejects.toThrow();
     });
 
-    it('does not close a live session when no active JSONL exists', async () => {
+    it('returns notFound after closing a live session with no active JSONL', async () => {
       const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
       const bridge = fakeBridge();
       const app = createArchiveApp(bridge);
@@ -18986,7 +19015,13 @@ describe('createServeApp', () => {
         notFound: [sid],
         errors: [],
       });
-      expect(bridge.closeCalls).toHaveLength(0);
+      expect(bridge.closeCalls).toEqual([
+        {
+          sessionId: sid,
+          clientId: undefined,
+          closeOpts: { requireAgentClose: true },
+        },
+      ]);
     });
 
     it('unarchives by moving JSONL back into active chats', async () => {
