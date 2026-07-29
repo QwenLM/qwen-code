@@ -343,8 +343,9 @@ workflow globs). It must contain:
   not spend budget working around it.
 
   Route: `terminal-capture` skill (node-pty → xterm.js → Playwright PNG).
-  The publish job hosts what you produce on the `pr-assets` branch and
-  appends it below the report, capped at **8 images, 2 MB each**; anything
+  The publish job hosts what you produce on a per-PR branch
+  (`pr-assets/pr<N>-verify`) and appends it below the report, capped at
+  **8 images, 2 MB each**; anything
   beyond stays in the run artifacts. Name each file as a kebab-case caption
   that binds image to claim (`01-bundle-ab-base-vs-head.png`,
   `02-repaint-after-sigcont.png`) — the filename becomes the published

@@ -1004,7 +1004,7 @@ describe('qwen-triage verify hardening', () => {
     // qwen under `env -i`, which needs no per-variable stripping.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
-      verifyJob.indexOf('Run verification agent'),
+      verifyJob.indexOf("name: 'Install evidence browser'"),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
     expect(commands.length).toBe(2);
@@ -1353,7 +1353,7 @@ describe('qwen-triage verify hardening round 2', () => {
       // A bare remote with a pr-assets branch, plus a gh stub.
       sh(`git init -q --bare "${dir}/assets.git"`);
       sh(
-        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets`,
+        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/pr7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/pr7999-verify`,
       );
       writeFileSync(
         join(dir, 'gh'),
@@ -1415,7 +1415,7 @@ describe('qwen-triage verify hardening round 2', () => {
       });
       expect(res.status).toBe(0);
       const hosted = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets | grep verify/ || true`,
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/pr7999-verify | grep verify/ || true`,
       )
         .stdout.trim()
         .split('\n')
@@ -1431,8 +1431,8 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(comment).not.toContain('02-fake');
       expect(comment).toContain('did not pass the hosting checks');
 
-      // No reachable pr-assets branch -> text-only, never an aborted report.
-      sh(`git init -q --bare "${dir}/empty.git"`);
+      // Unreachable remote -> text-only, never an aborted report.
+      sh(`rm -rf "${dir}/empty.git" && mkdir -p "${dir}/empty.git"`);
       const out2 = join(dir, 'comment2.md');
       const res2 = sh(script, {
         cwd: work,
@@ -2140,31 +2140,51 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
   });
 
-  // Evidence images: the hosting machinery has been complete since the lane
-  // shipped, and across 14 real reports it produced ZERO images. Two
-  // independent causes, both fixed here — the agent physically could not
-  // install chromium (runs as `node`, `env -i`, fresh HOME, no apt), and the
-  // skill framed captures as optional and TUI-only.
+  // Evidence images: the agent cannot install chromium (runs as `node`,
+  // `env -i`, fresh HOME, no apt). The tools step installs system deps
+  // as root; a post-checkout step downloads the browser binary using the
+  // checkout's own Playwright so the version always matches the lockfile.
   it('pre-installs chromium and hands it to the agent', () => {
+    // System deps only — no browser binary, no version-sensitive download.
     const tools = stepIn('verify', 'Install verify runner tools');
-    // Installed as ROOT here, because the agent cannot.
-    expect(tools).toContain('playwright');
-    expect(tools).toContain('--with-deps chromium');
-    // Shared, world-readable, and outside the agent's throwaway HOME.
-    expect(tools).toContain('PLAYWRIGHT_BROWSERS_PATH');
-    expect(tools).toContain('chmod -R a+rX');
-    // Best-effort: a failed browser install must not fail a verification.
-    expect(tools).toContain('::warning::Chromium install failed');
-    expect(tools).not.toContain('exit 1');
+    expect(tools).toContain('install-deps chromium');
+    expect(tools).not.toContain('install --with-deps');
+    expect(tools).toContain('::warning::Chromium system deps install failed');
+
+    // Browser binary: downloaded after npm ci so npx resolves the
+    // checkout's lockfile version — never a hardcoded pin (M5).
+    const browser = stepIn('verify', 'Install evidence browser');
+    expect(browser).toContain('npx playwright install chromium');
+    expect(browser).not.toMatch(/playwright@[\d.]/);
+    expect(browser).toContain('PLAYWRIGHT_BROWSERS_PATH');
+    // Marker is written ONLY inside the success branch (M6): the if
+    // condition must precede the marker write, and the else branch must
+    // carry the warning instead.
+    const ifIdx = browser.indexOf('if runuser');
+    const markerIdx = browser.indexOf('verify-chromium-path');
+    const elseIdx = browser.indexOf(
+      '::warning::Chromium browser download failed',
+    );
+    expect(ifIdx).toBeGreaterThan(-1);
+    expect(markerIdx).toBeGreaterThan(ifIdx);
+    expect(elseIdx).toBeGreaterThan(markerIdx);
+    // Best-effort: a failed download must not fail a verification.
+    expect(browser).not.toContain('exit 1');
 
     // The agent is told ONLY when the install actually succeeded, so the
     // variable's absence is a real signal rather than a stale promise.
+    // The guard must be CONDITIONAL (M1b): QWEN_VERIFY_CHROMIUM=1 must
+    // appear inside the if-block that reads the marker, not unconditionally.
     const runStep = stepIn('verify', 'Run verification agent');
     expect(runStep).toContain('verify-chromium-path');
     expect(runStep).toContain('QWEN_VERIFY_CHROMIUM=1');
-    const marker = runStep.indexOf('QWEN_VERIFY_CHROMIUM=1');
     const guard = runStep.indexOf('verify-chromium-path');
+    const marker = runStep.indexOf('QWEN_VERIFY_CHROMIUM=1');
     expect(guard).toBeLessThan(marker);
+    // The if-fi block must wrap the QWEN_ENV+= assignment.
+    const ifBlock = runStep.slice(guard - 20, marker + 30);
+    expect(ifBlock).toContain('if');
+    expect(ifBlock).toContain('then');
 
     // The tmux lane is untouched: it has no evidence-image path.
     expect(stepIn('tmux-testing', 'Run tmux real-user testing')).not.toContain(
@@ -2178,6 +2198,19 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
     expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
+  });
+
+  // The publish job must host images on a per-PR branch that can coexist
+  // with the existing pr-assets/* namespace — a bare `pr-assets` leaf
+  // cannot be created while `pr-assets/…` children exist.
+  it('hosts evidence on a per-PR branch, not a bare pr-assets leaf', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain('pr-assets/pr${PR_NUMBER}-verify');
+    expect(publish).toContain('checkout -q --orphan');
+    expect(publish).not.toMatch(/--branch pr-assets["\s]/);
   });
 
   // Cleanups must never descend through a PR-writable parent, and an
