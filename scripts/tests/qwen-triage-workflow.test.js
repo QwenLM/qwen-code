@@ -2165,6 +2165,11 @@ describe('qwen-triage verify round-3 hardening', () => {
     // for a crash; set it higher and a real timeout reads as a crash.
     expect(watchdogSeconds).toBe(agentMinutes * 60);
 
+    // A step-level `timeout-minutes` on the run step would cap the agent
+    // below the budget while every relationship above stays green — the
+    // job limit must be the only cap.
+    expect(runStep).not.toMatch(/^\s+timeout-minutes:/m);
+
     // The job limit only guards infra hangs, so it must clear the agent
     // budget plus install/build plus fixed overhead — otherwise the job
     // is killed mid-run and the agent never ships its partial report.
@@ -2178,9 +2183,11 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(advertised).toBe(agentMinutes);
     const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
     expect(soft).toBeLessThan(agentMinutes);
-    // A lower bound catches the most common drift: the hard kill is
-    // raised but the soft budget is forgotten, silently wasting CI time.
-    expect(soft).toBeGreaterThanOrEqual(agentMinutes - 15);
+    // A proportional lower bound catches the most common drift — the hard
+    // kill is raised but the soft budget is forgotten, silently wasting CI
+    // time — without freezing the reserve at a fixed minute count for every
+    // future budget.
+    expect(soft).toBeGreaterThanOrEqual(Math.floor(agentMinutes * 0.8));
   });
 
   // Cleanups must never descend through a PR-writable parent, and an
