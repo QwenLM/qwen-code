@@ -173,9 +173,24 @@ notebook_edit(
   src/utils.ts:15:export function myFunction() {
   src/utils.ts:22:  myFunction.call();
   src/index.ts:5:import { myFunction } from './utils';
-  ---
+  ```
 
-  [0 lines truncated] ...
+  A notice is appended only when the output was actually cut short. When `limit`
+  or the character budget did the cutting, the notice names how many matching
+  lines were dropped:
+
+  ```
+  ---
+  [42 lines truncated] ...
+  ```
+
+  When ripgrep itself stopped early at its own output limit, how many matches
+  remain is not knowable — the total is short for the same reason the output is
+  — so the notice says that rather than printing a count:
+
+  ```
+  ---
+  [Truncated by ripgrep's output limit: an unknown number of further matches were not returned. Narrow the pattern or the search path.] ...
   ```
 
 - **Confirmation:** No.
