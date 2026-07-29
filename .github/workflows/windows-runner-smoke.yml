@@ -1,0 +1,48 @@
+name: 'Windows Self-Hosted Runner Smoke'
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-runner-smoke.yml'
+
+permissions:
+  contents: 'read'
+
+jobs:
+  smoke:
+    name: 'Smoke test'
+    runs-on: ['self-hosted', 'Windows', 'X64', 'ecs-win']
+    timeout-minutes: 10
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Verify tools'
+        shell: 'pwsh'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          whoami
+          git --version
+          node --version
+          npm --version
+          qwen --version
+          gh --version
+
+      - name: 'Verify symbolic links'
+        shell: 'pwsh'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'windows-runner-symlink-smoke'
+          $target = Join-Path $root 'target.txt'
+          $link = Join-Path $root 'link.txt'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Set-Content -Path $target -Value 'ok'
+          try {
+            New-Item -ItemType SymbolicLink -Path $link -Target $target | Out-Null
+            if ((Get-Content $link) -ne 'ok') {
+              throw 'Symbolic link target is unreadable.'
+            }
+          } finally {
+            Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
