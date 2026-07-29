@@ -22,6 +22,19 @@ interface GithubConfig extends ChannelConfig {
   reasonFilter?: string[];
 }
 
+const KNOWN_NOTIFICATION_REASONS = new Set([
+  'mention',
+  'review_requested',
+  'assign',
+  'author',
+  'comment',
+  'ci_activity',
+  'manual',
+  'state_change',
+  'subscribed',
+  'team_mention',
+]);
+
 interface GithubCursor {
   lastProcessedAt: string;
   metaFloor?: string;
@@ -101,6 +114,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     super(name, config, bridge, options);
     if (Array.isArray(config.reasonFilter) && config.reasonFilter.length > 0) {
       this.reasonFilterSet = new Set(config.reasonFilter);
+      const unknownReasons = config.reasonFilter.filter(
+        (reason) => !KNOWN_NOTIFICATION_REASONS.has(reason),
+      );
+      if (unknownReasons.length > 0) {
+        process.stderr.write(
+          `[Channel:${name}] warning: unrecognized reasonFilter values: ${unknownReasons.join(', ')}\n`,
+        );
+      }
     }
   }
 
@@ -240,6 +261,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.reasonFilterSet &&
         !this.reasonFilterSet.has(notification.reason)
       ) {
+        process.stderr.write(
+          `[Channel:${this.name}] skipping notification (reason=${notification.reason} not in reasonFilter)\n`,
+        );
         continue;
       }
       const extracted = this.extractFromSubjectUrl(notification.subject.url);

@@ -1001,28 +1001,59 @@ describe('GithubChannel', () => {
 
   describe('reasonFilter', () => {
     it('skips notifications whose reason is not in the allowlist', async () => {
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
       await initWithoutLoop({
         reasonFilter: ['mention'],
       });
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'comment',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-          makeNotification({
-            reason: 'mention',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({
+              reason: 'comment',
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+            makeNotification({
+              reason: 'mention',
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+          ])
+          .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
 
-      await pollOnce();
+        await pollOnce();
 
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        'Trigger: mention.',
-      );
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+          'Trigger: mention.',
+        );
+        expect(stderrWrite).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'skipping notification (reason=comment not in reasonFilter)',
+          ),
+        );
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
+    it('warns about unrecognized reasonFilter values', async () => {
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await initWithoutLoop({
+          reasonFilter: ['mentions'],
+        });
+
+        expect(stderrWrite).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'warning: unrecognized reasonFilter values: mentions',
+          ),
+        );
+      } finally {
+        stderrWrite.mockRestore();
+      }
     });
 
     it('processes all reasons when filter is empty or unset', async () => {
