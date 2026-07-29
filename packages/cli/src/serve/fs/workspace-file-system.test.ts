@@ -444,6 +444,34 @@ describe('WorkspaceFileSystem - readText', () => {
     expect((err as { kind: string }).kind).toBe('hash_mismatch');
   });
 
+  it('maps a cursor read of oversized non-UTF-8 text to binary_file', async () => {
+    const target = path.join(h.workspace, 'cursor-utf16-real.txt');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    await fsp.writeFile(target, body);
+    const stats = await fsp.stat(target);
+    const r = await h.fs.resolve('cursor-utf16-real.txt', 'read');
+
+    const err = await h.fs
+      .readText(r, {
+        cursor: encodeTextCursor({
+          off: 0,
+          size: stats.size,
+          dev: String(stats.dev),
+          ino: String(stats.ino),
+        }),
+      })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    // Real dev/ino clear the staleness gate, so decoding starts and the
+    // non-UTF-8 content is reclassified — not `file_too_large`, which a
+    // client would retry forever on.
+    expect((err as { kind: string }).kind).toBe('binary_file');
+    expect((err as { hint?: string }).hint).toMatch(/convert.*UTF-8/i);
+  });
+
   it('streams bounded line windows from text above MAX_READ_BYTES', async () => {
     const target = path.join(h.workspace, 'large-window.txt');
     const lines = Array.from(

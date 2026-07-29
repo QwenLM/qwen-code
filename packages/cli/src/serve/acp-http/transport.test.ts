@@ -53,6 +53,7 @@ import {
 } from '../../services/setup-github.js';
 import {
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
@@ -8145,6 +8146,40 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/file/read forwards a valid cursor and returns paged content', async () => {
+      const readText = vi.fn(async () => ({
+        content: 'page-two',
+        meta: { truncated: true, nextCursor: 'cursor-2' },
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readText }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 93,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt', cursor: 'cursor-1' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          path: 'test.txt',
+          content: 'page-two',
+          truncated: true,
+          nextCursor: 'cursor-2',
+        },
+      });
+      expect(readText).toHaveBeenCalledWith(resolvedPath('/ws/test.txt'), {
+        maxBytes: undefined,
+        line: undefined,
+        limit: undefined,
+        cursor: 'cursor-1',
+      });
+    });
+
     it.each([
       { maxBytes: 0 },
       { maxBytes: MAX_READ_BYTES + 1 },
@@ -8161,6 +8196,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       { limit: 1.5 },
       { limit: '1' },
       { limit: null },
+      { cursor: '' },
+      { cursor: 123 },
+      { cursor: 'x'.repeat(MAX_TEXT_CURSOR_CHARS + 1) },
     ])('_qwen/file/read rejects invalid window params (%j)', async (params) => {
       const readText = vi.fn(async () => ({
         content: 'hello',
