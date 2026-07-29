@@ -19,6 +19,7 @@ import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
+  reasonFilter?: unknown;
 }
 
 interface GithubCursor {
@@ -84,6 +85,15 @@ interface NotificationContext {
   reason: string;
 }
 
+function normalizeReasonFilter(config: GithubConfig): Set<string> | null {
+  if (!Array.isArray(config.reasonFilter)) return null;
+  const reasons = config.reasonFilter
+    .filter((reason): reason is string => typeof reason === 'string')
+    .map((reason) => reason.trim().toLowerCase())
+    .filter((reason) => reason.length > 0);
+  return new Set(reasons);
+}
+
 interface PostedGithubComment {
   id?: number;
   html_url?: string;
@@ -103,7 +113,10 @@ interface PublicationAuditRecord {
   bodyChars: number;
 }
 
+class FinalPublicationError extends Error {}
+
 const NO_REPLY_SENTINEL = '<no-reply/>';
+const NO_REPLY_SENTINEL_PATTERN = /^<no-reply\s*\/>$/i;
 const GITHUB_PUBLICATION_INSTRUCTIONS = [
   'GitHub publication policy:',
   '- Do not use gh, curl, or the GitHub API to create, edit, delete, or review GitHub content. The channel adapter publishes your final response exactly once.',
@@ -111,10 +124,26 @@ const GITHUB_PUBLICATION_INSTRUCTIONS = [
   '- Do not include reasoning, tool transcripts, or private operational details in the final response.',
 ].join('\n');
 
+function isNoReplySentinel(text: string): boolean {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
+  return NO_REPLY_SENTINEL_PATTERN.test((fenced?.[1] ?? trimmed).trim());
+}
+
+function isDefiniteNoWriteGithubError(err: unknown): boolean {
+  const e = err as {
+    status?: number;
+    response?: { headers?: Record<string, string | number> };
+  };
+  const remaining = Number(e.response?.headers?.['x-ratelimit-remaining']);
+  return (e.status === 403 || e.status === 429) && remaining === 0;
+}
+
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
+  private reasonFilter: Set<string> | null = null;
 
   constructor(
     name: string,
@@ -161,6 +190,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
+    this.reasonFilter = normalizeReasonFilter(cfg);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
@@ -187,6 +217,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    const botUsername = this.botUsername?.toLowerCase();
+    if (
+      this.config.senderPolicy === 'allowlist' &&
+      botUsername &&
+      allowed.includes(botUsername)
+    ) {
+      if (allowed.every((user) => user === botUsername)) {
+        throw new Error(
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+        );
+      }
+      process.stderr.write(
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+      );
+    }
     this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
   }
@@ -236,7 +281,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       bodySha256: createHash('sha256').update(fullText).digest('hex'),
       bodyChars: fullText.length,
     };
-    if (fullText.trim() === NO_REPLY_SENTINEL) {
+    if (isNoReplySentinel(fullText)) {
       this.recordPublicationAudit({
         ...auditBase,
         at: new Date().toISOString(),
@@ -251,7 +296,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         chatId,
         threadId,
         fullText,
-        1,
+        3,
+        isDefiniteNoWriteGithubError,
       );
       this.recordPublicationAudit({
         ...auditBase,
@@ -268,7 +314,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         type: 'github_publication',
         outcome: 'failed',
       });
-      throw err;
+      throw new FinalPublicationError(
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -277,6 +325,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string | undefined,
     text: string,
     retries = 3,
+    shouldRetry: (err: unknown) => boolean = () => true,
   ): Promise<PostedGithubComment> {
     if (!threadId) {
       throw new Error(
@@ -301,6 +350,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `createComment(${threadId})`,
       retries,
+      shouldRetry,
     );
     return response.data;
   }
@@ -348,6 +398,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
+      const reason = String(notification.reason ?? '').toLowerCase();
+      if (this.reasonFilter && !this.reasonFilter.has(reason)) {
+        this.logDebugPayload('Github', {
+          event: 'reasonFilter.skip',
+          chatId,
+          threadId,
+          reason: notification.reason,
+        });
+        continue;
+      }
       const ctx: NotificationContext = {
         chatId,
         threadId,
@@ -357,11 +417,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metaFloor: this.cursor.metaFloor,
         maxUpdatedAt,
         subjectTitle: notification.subject.title || '',
-        reason: notification.reason,
+        reason,
       };
 
       try {
-        switch (notification.reason) {
+        switch (reason) {
           case 'mention':
             await this.processCommentLane(ctx, true);
             break;
@@ -706,7 +766,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       process.stderr.write(
         `[Channel:${this.name}] handleInbound failed for ${envelope.messageId}: ${err}\n`,
       );
-      await this.postErrorComment(envelope.chatId, issueNumber);
+      if (!(err instanceof FinalPublicationError)) {
+        await this.postErrorComment(envelope.chatId, issueNumber);
+      }
       return false;
     }
   }
@@ -765,12 +827,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     fn: () => Promise<T>,
     label: string,
     retries = 3,
+    shouldRetry: (err: unknown) => boolean = () => true,
   ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         return await fn();
       } catch (err: unknown) {
-        if (attempt === retries) throw err;
+        if (attempt === retries || !shouldRetry(err)) throw err;
         // Octokit RequestError: { status, response?: { headers } }
         const e = err as {
           status?: number;

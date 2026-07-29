@@ -39,7 +39,13 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  statfsSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -121,6 +127,40 @@ function trimOutput(s: string): string {
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
+
+/**
+ * Free-disk floors for the preflights below, in bytes.
+ *
+ * Dogfooded on a live review: with ~2.7G free, `npm ci` on this monorepo ran 33
+ * seconds, died on `ENOSPC`, and the now-full disk went on to fail every agent
+ * scheduled after this command — a disk a command fills is not a failure that
+ * stays contained to that command. The installed `node_modules` here is ~1.4G,
+ * and npm stages cache and temp writes on the same filesystem while it
+ * materialises the tree, so 3 GiB is the least an install can be trusted with.
+ * The build phase writes far less (`dist/` and tsbuildinfo) and gets a lower
+ * floor — enough that a compile cannot be the thing that fills the disk. Like
+ * the deadline, a floor violation is skip-and-disclose, never a finding: an
+ * environment that cannot fit the command is not a defect in the diff.
+ */
+const INSTALL_MIN_FREE_BYTES = 3 * 1024 ** 3;
+const BUILD_MIN_FREE_BYTES = 1024 ** 3;
+
+/**
+ * Free bytes on the filesystem holding `dir`, or `null` where that cannot be
+ * measured (`statfsSync` is not available on every platform). An unmeasurable
+ * disk lets the run proceed: the preflight exists to prevent failures, not to
+ * invent them.
+ */
+function freeDiskBytes(dir: string): number | null {
+  try {
+    const s = statfsSync(dir);
+    return s.bavail * s.bsize;
+  } catch {
+    return null;
+  }
+}
+
+const gib = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);
 
 /**
  * The environment every build/test/install command runs under.
@@ -430,7 +470,24 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     );
   }
   if (args.install && npmLock && !installComplete()) {
-    const install = exec('npm ci --no-audit --no-fund', root, perCommandMs);
+    // Disk preflight. The deadline already treats "cannot finish in time" as an
+    // infrastructure result and skips ahead with a disclosure; "cannot fit on
+    // the disk" is the same class of result, discovered before the command runs
+    // instead of 33 seconds into it. An `npm ci` that dies on ENOSPC is
+    // strictly worse than one that never starts: it leaves a partial tree AND a
+    // full disk that fails every agent scheduled after this one.
+    const installCmd = 'npm ci --no-audit --no-fund';
+    const free = freeDiskBytes(root);
+    if (free !== null && free < INSTALL_MIN_FREE_BYTES) {
+      results.ok = false;
+      results.note =
+        `Insufficient disk space (${gib(free)}G free, need ~${gib(INSTALL_MIN_FREE_BYTES)}G): ` +
+        `skipped \`${installCmd}\`, so nothing could be built or tested. This ` +
+        'is an environment issue, not a code finding — report it as ' +
+        'informational.';
+      return results;
+    }
+    const install = exec(installCmd, root, perCommandMs);
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
     // A timeout leaves a partial tree — remove it, so this is not mistaken next time
@@ -462,6 +519,20 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           'report it as informational.';
       return results;
     }
+  }
+
+  // The same preflight before the build phase, at a lower floor. A warm tree
+  // skips the install (and its 3 GiB gate) entirely, but a compile that hits
+  // ENOSPC mid-write fails with errors that read as defects in the diff — and
+  // leaves the disk full for everything that runs after this command.
+  const freeForBuild = freeDiskBytes(root);
+  if (freeForBuild !== null && freeForBuild < BUILD_MIN_FREE_BYTES) {
+    results.ok = false;
+    results.note =
+      `Insufficient disk space (${gib(freeForBuild)}G free, need ~${gib(BUILD_MIN_FREE_BYTES)}G): ` +
+      'skipped the build and tests rather than fill the disk mid-compile. This ' +
+      'is an environment issue, not a code finding — report it as informational.';
+    return results;
   }
 
   const alsoBuild: string[] = [];

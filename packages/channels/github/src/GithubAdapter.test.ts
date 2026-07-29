@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -247,6 +247,44 @@ describe('GithubChannel', () => {
       // config is normalized too — ChannelBase reads it directly
       expect(config.allowedUsers).toEqual(['alice']);
       channel.disconnect();
+    });
+
+    it('rejects an allowlist containing only the authenticated GitHub account', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['TEST-BOT', 'test-bot'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'allowlist only contains the authenticated GitHub account "test-bot"',
+        );
+      } finally {
+        channel.disconnect();
+      }
+      expect(config.allowedUsers).toEqual(['test-bot', 'test-bot']);
+    });
+
+    it('warns when the authenticated GitHub account is part of a mixed allowlist', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['TEST-BOT', 'operator'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      try {
+        await channel.connect();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted but cannot trigger this channel; use a separate operator account.\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
     });
 
     it('connect() is idempotent across reconnects', async () => {
@@ -838,6 +876,45 @@ describe('GithubChannel', () => {
       },
     );
 
+    it('skips notifications whose reason is not in reasonFilter', async () => {
+      await initWithoutLoop({
+        reasonFilter: ['mention', 'review_requested', 'assign'],
+      });
+      mockOctokit.paginate.mockClear();
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'author',
+          last_read_at: '2026-07-01T12:00:00.000Z',
+        }),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('normalizes configured reasonFilter entries before matching', async () => {
+      await initWithoutLoop({
+        reasonFilter: [' COMMENT ', 123, ''],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'allowed comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('allowed comment');
+    });
+
     it('excludes comments from disallowed senders when aggregating', async () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
@@ -1054,6 +1131,32 @@ describe('GithubChannel', () => {
       expect(audit).not.toContain('<no-reply/>');
     });
 
+    it.each(['<NO-REPLY/>', '<no-reply />', '```text\n<no-reply/>\n```'])(
+      'suppresses no-reply sentinel variant %s',
+      async (response) => {
+        await connectForPublication();
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await publish(
+          'owner/repo',
+          'issue:42',
+          response,
+          'session-publication',
+        );
+
+        expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      },
+    );
+
     it('posts one final comment and audits only its digest and metadata', async () => {
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
@@ -1127,7 +1230,7 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('does not retry a failed final delivery', async () => {
+    it('does not retry an ambiguous failed final delivery', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockRejectedValue(
         new Error('ambiguous transport failure'),
@@ -1146,6 +1249,100 @@ describe('GithubChannel', () => {
       await expect(
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
       ).rejects.toThrow('ambiguous transport failure');
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries final delivery when GitHub definitely did not write', async () => {
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = sleep;
+      mockOctokit.rest.issues.createComment
+        .mockRejectedValueOnce(
+          Object.assign(new Error('rate limited'), {
+            status: 429,
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '0',
+                'x-ratelimit-reset': String(Math.floor(Date.now() / 1000)),
+              },
+            },
+          }),
+        )
+        .mockResolvedValueOnce({ data: {} });
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await publish(
+        'owner/repo',
+        'issue:42',
+        'Final reply',
+        'session-publication',
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalled();
+    });
+
+    it('does not post an error comment after final delivery fails', async () => {
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('ambiguous transport failure'),
+      );
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+      vi.spyOn(channel, 'handleInbound').mockImplementation(async () => {
+        await publish(
+          'owner/repo',
+          'issue:42',
+          'Final reply',
+          'session-publication',
+        );
+      });
+
+      const handled = await (
+        channel as unknown as {
+          dispatchEnvelope: (
+            envelope: Envelope,
+            issueNumber: number,
+          ) => Promise<boolean>;
+        }
+      ).dispatchEnvelope(
+        {
+          channelName: 'test-github',
+          senderId: 'alice',
+          senderName: 'alice',
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+          messageId: '1001',
+          text: '@test-bot help',
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+        },
+        42,
+      );
+
+      expect(handled).toBe(false);
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
     });
 
@@ -1187,7 +1384,6 @@ describe('GithubChannel', () => {
 
     it('keeps successful publication when its audit write fails', async () => {
       await connectForPublication();
-      vi.spyOn(channel, 'recordPublicationAudit').mockImplementation(() => {});
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -1199,20 +1395,19 @@ describe('GithubChannel', () => {
         }
       ).publishFinalResponse.bind(channel);
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
+      mkdirSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          'test-github-github-audit.jsonl',
+        ),
+        { recursive: true },
+      );
 
       await expect(
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
       ).resolves.toBeUndefined();
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      expect(
-        existsSync(
-          join(
-            process.env.QWEN_HOME!,
-            'channels',
-            'test-github-github-audit.jsonl',
-          ),
-        ),
-      ).toBe(false);
     });
   });
 

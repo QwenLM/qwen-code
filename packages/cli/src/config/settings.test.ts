@@ -3247,6 +3247,91 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('allowPrivateNetworkHooks scope handling', () => {
+    it('should honor security.allowPrivateNetworkHooks from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowPrivateNetworkHooks: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowPrivateNetworkHooks).toBe(true);
+    });
+
+    it('should strip security.allowPrivateNetworkHooks from workspace scope even when trusted', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const workspaceSettingsContent = {
+        security: {
+          allowPrivateNetworkHooks: true,
+          allowedHttpHookUrls: ['https://hooks.example.com/*'],
+        },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // The flag is ignored from workspace scope...
+      expect(
+        settings.merged.security?.allowPrivateNetworkHooks,
+      ).toBeUndefined();
+      // ...but other workspace security settings still merge.
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.example.com/*',
+      ]);
+    });
+
+    it('should warn when workspace settings define security.allowPrivateNetworkHooks', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowPrivateNetworkHooks: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowPrivateNetworkHooks')),
+      ).toBe(true);
+    });
+
+    it('should let user scope win over a stripped workspace value', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowPrivateNetworkHooks: true },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowPrivateNetworkHooks: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowPrivateNetworkHooks).toBe(true);
+    });
+  });
+
   describe('reloadScopeFromDisk', () => {
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
