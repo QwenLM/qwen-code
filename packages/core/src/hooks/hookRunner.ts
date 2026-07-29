@@ -62,7 +62,10 @@ export class HookRunner {
   private readonly asyncRegistry: AsyncHookRegistry;
 
   constructor(allowedHttpUrls?: string[], config?: Config) {
-    this.httpRunner = new HttpHookRunner(allowedHttpUrls);
+    this.httpRunner = new HttpHookRunner(
+      allowedHttpUrls,
+      config?.getAllowPrivateNetworkHooks(),
+    );
     this.functionRunner = new FunctionHookRunner();
     this.promptRunner = config ? new PromptHookRunner(config) : null;
     this.asyncRegistry = new AsyncHookRegistry();
