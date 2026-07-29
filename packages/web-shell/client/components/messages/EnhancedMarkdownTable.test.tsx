@@ -1448,6 +1448,30 @@ describe('EnhancedMarkdownTable', () => {
     );
   });
 
+  it('spans the detail row across the filler column', () => {
+    const container = renderTable();
+
+    for (const column of ['Team', 'Score']) {
+      act(() => {
+        button(container, `Resize ${column}`).dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            key: 'ArrowRight',
+          }),
+        );
+      });
+    }
+    expect(container.querySelector('[class*="fillerColumn"]')).not.toBeNull();
+
+    click(button(container, 'View details for row 1'));
+
+    const detailCell = container.querySelector<HTMLTableCellElement>(
+      '[class*="detailCell"]',
+    );
+    expect(detailCell).not.toBeNull();
+    expect(detailCell!.colSpan).toBe(4);
+  });
+
   it('resizes compact auto columns from their rendered width with keyboard arrows', () => {
     const container = renderTable();
     selectValue(button(container, 'Table density'), 'compact');
@@ -1643,6 +1667,68 @@ describe('EnhancedMarkdownTable', () => {
       container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
         ?.style.left,
     ).toBe('280px');
+  });
+
+  it('repositions the frozen shadow when the ResizeObserver fires', () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class CapturingResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver =
+      CapturingResizeObserver;
+
+    try {
+      const container = renderWideTable();
+      const shell = container.querySelector<HTMLElement>(
+        '[class*="tableShell"]',
+      );
+      const header = button(container, 'Sort by Team').closest('th');
+      expect(shell).not.toBeNull();
+      expect(header).not.toBeNull();
+      Object.defineProperty(shell, 'clientLeft', {
+        configurable: true,
+        value: 1,
+      });
+      Object.defineProperty(shell, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 20 }) as DOMRect,
+      });
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 301 }) as DOMRect,
+      });
+
+      freezeFirstColumn(container);
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('280px');
+
+      Object.defineProperty(header, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ right: 351 }) as DOMRect,
+      });
+      act(() => {
+        for (const cb of callbacks) {
+          cb([], {} as ResizeObserver);
+        }
+      });
+
+      expect(
+        container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+          ?.style.left,
+      ).toBe('330px');
+    } finally {
+      (globalThis as { ResizeObserver?: unknown }).ResizeObserver =
+        OriginalResizeObserver;
+    }
   });
 
   it('dismisses the first-column context menu without clearing the active column', () => {
@@ -2054,6 +2140,24 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(rowRect).toHaveBeenCalledTimes(2);
     expect(container.scrollTop).toBe(200);
+    expect(detailsButton.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('falls back to window.scrollBy when no scroll ancestor exists', () => {
+    const container = renderTable();
+    const scrollBySpy = vi
+      .spyOn(window, 'scrollBy')
+      .mockImplementation(() => {});
+    const detailsButton = button(container, 'View details for row 3');
+    const row = detailsButton.closest('tr');
+    expect(row).not.toBeNull();
+    vi.spyOn(row!, 'getBoundingClientRect')
+      .mockReturnValueOnce({ top: 120 } as DOMRect)
+      .mockReturnValueOnce({ top: 280 } as DOMRect);
+
+    click(detailsButton);
+
+    expect(scrollBySpy).toHaveBeenCalledWith(0, 160);
     expect(detailsButton.getAttribute('aria-expanded')).toBe('true');
   });
 

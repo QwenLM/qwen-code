@@ -182,6 +182,7 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
 
 export const MAX_ENHANCED_TABLE_ROWS = 500;
 export const MAX_ENHANCED_TABLE_COLUMNS = 50;
+// Must stay in sync with --action-column-width in EnhancedMarkdownTable.module.css
 const ACTION_COLUMN_WIDTH = 40;
 const DEFAULT_COLUMN_WIDTH = 160;
 const COMPACT_COLUMN_WIDTH = 72;
@@ -2175,9 +2176,8 @@ export function EnhancedTable({
     minWidth: number,
     fixedWidth: number,
     flexibleColumnCount: number,
-    containerWidth: '100cqw' | '100%',
   ): string =>
-    `max(${minWidth}px, calc((${containerWidth} - ${ACTION_COLUMN_WIDTH}px - ${fixedWidth}px) / ${flexibleColumnCount}))`;
+    `max(${minWidth}px, calc((100cqw - ${ACTION_COLUMN_WIDTH}px - ${fixedWidth}px) / ${flexibleColumnCount}))`;
 
   const columnGroupStyle = (columnIndex: number): CSSProperties => {
     const width = columnWidths[columnIndex];
@@ -2190,7 +2190,6 @@ export function EnhancedTable({
         minWidth,
         fixedVisibleColumnWidth,
         flexibleColumnCount,
-        '100cqw',
       ),
     };
   };

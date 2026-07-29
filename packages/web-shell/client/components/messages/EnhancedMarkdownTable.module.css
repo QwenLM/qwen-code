@@ -1,5 +1,6 @@
 .tableShell {
   position: relative;
+  --toolbar-height: 38px;
   max-width: 100%;
   margin: 8px 0;
   overflow: visible;
@@ -52,7 +53,7 @@
   gap: 8px;
   align-items: center;
   box-sizing: border-box;
-  height: 38px;
+  height: var(--toolbar-height);
   padding: 4px 10px;
   border-bottom: 1px solid var(--border);
   border-radius: 14px 14px 0 0;
@@ -128,8 +129,6 @@
   font-size: 12px;
 }
 
-.densityTrigger:focus,
-.densityTrigger:focus-visible,
 .densityTrigger[data-state='open'] {
   border-color: transparent;
   box-shadow: none;
@@ -179,9 +178,14 @@
   outline: none;
 }
 
+.scroller:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
+}
+
 .frozenColumnShadow {
   position: absolute;
-  top: 38px;
+  top: var(--toolbar-height);
   bottom: 0;
   z-index: 9;
   width: 14px;
