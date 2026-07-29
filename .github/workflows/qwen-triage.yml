@@ -2373,6 +2373,7 @@ jobs:
           # chromium is ready when every launch still dies on a missing .so.
           if [ -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok" ] &&
             runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_RUNTIME_URL -u ACTIONS_CACHE_URL \
               PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
               node "$PW_CLI" install chromium; then
             printf '%s' "$PW_PATH" > "${RUNNER_TEMP:?}/verify-chromium-path"

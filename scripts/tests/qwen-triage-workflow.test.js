@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -2244,6 +2245,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(browser).not.toContain('npx playwright install chromium');
     expect(browser).not.toMatch(/playwright@[\d.]/);
     expect(browser).toContain('PLAYWRIGHT_BROWSERS_PATH');
+    // The CLI runs PR-controlled code ($PW_CLI resolves from the PR's
+    // node_modules), so it must drop the same runner-injected cache
+    // credentials the prepare and agent steps unset — a doctored
+    // playwright package could otherwise write to the Actions cache.
+    expect(browser).toContain('-u ACTIONS_RUNTIME_TOKEN');
+    expect(browser).toContain('-u ACTIONS_RUNTIME_URL');
+    expect(browser).toContain('-u ACTIONS_CACHE_URL');
     // Marker is written ONLY inside the success branch (M6): the if
     // condition must precede the marker write, and the else branch must
     // carry the warning instead. The condition must ALSO require the deps
@@ -2308,6 +2316,29 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
   });
+
+  // The browser step's require.resolve + cli.js join is otherwise guarded
+  // only by a literal string match, so a Playwright bump that relocates
+  // cli.js would break the download at runtime while that assertion still
+  // passes. Execute the workflow's exact resolution against the installed
+  // tree and require it to land on a real cli.js. Skipped only when
+  // playwright is absent entirely (the require.resolve itself fails),
+  // mirroring the jq tool-availability guard above.
+  const resolveHarnessCli =
+    "process.stdout.write(require('path').join(require('path').dirname(" +
+    "require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })" +
+    "), 'cli.js'))";
+  it.skipIf(spawnSync('node', ['-e', resolveHarnessCli]).status !== 0)(
+    'resolves the harness Playwright cli.js to a real file',
+    () => {
+      const cli = spawnSync('node', ['-e', resolveHarnessCli], {
+        encoding: 'utf8',
+      });
+      expect(cli.status).toBe(0);
+      expect(cli.stdout).toMatch(/cli\.js$/);
+      expect(existsSync(cli.stdout)).toBe(true);
+    },
+  );
 
   // The publish job must host images on a per-PR branch that can coexist
   // with the existing pr-assets/* namespace — a bare `pr-assets` leaf
