@@ -536,7 +536,7 @@ jobs:
           fi
 
       - name: 'Push and open PR'
-        if: '${{ steps.gate.outputs.result == ''fixes'' && steps.verify.outputs.result != ''no-fixes'' && env.DRY_RUN != ''true'' }}'
+        if: '${{ success() && steps.gate.outputs.result == ''fixes'' && steps.verify.outputs.result != ''no-fixes'' && env.DRY_RUN != ''true'' }}'
         id: 'publish'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
