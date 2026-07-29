@@ -961,6 +961,7 @@ export interface EditorHandle extends WebShellComposerApi {
   clearText(): void;
   focus(): void;
   getText(): string;
+  hasAttachments(): boolean;
   hasInput(): boolean;
   retryLast(): void;
   restoreImages(images: readonly PromptImage[]): void;
@@ -1268,6 +1269,7 @@ export interface UseComposerCoreReturn {
   clearText: () => void;
   getText: () => string;
   hasInput: () => boolean;
+  hasAttachments: boolean;
   hasContent: boolean;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1607,6 +1609,7 @@ export function useComposerCore(
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
+  const [hasInlineTags, setHasInlineTags] = useState(false);
   const historyDraftComposerTagsRef = useRef<WebShellComposerTag[] | null>(
     null,
   );
@@ -2825,6 +2828,7 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
+          setHasInlineTags(getInlineComposerTags(update.view).length > 0);
           if (update.docChanged) {
             const text = getDocText(update.state);
             if (draftIdentityRef.current.storageKey === undefined) {
@@ -3553,6 +3557,17 @@ export function useComposerCore(
     );
   }, [isTouchComposer]);
 
+  const hasAttachments = useCallback(() => {
+    const inlineTags = viewRef.current
+      ? getInlineComposerTags(viewRef.current)
+      : [];
+    return (
+      inlineTags.length > 0 ||
+      composerTagsRef.current.length > 0 ||
+      pastedImagesRef.current.length > 0
+    );
+  }, []);
+
   const submit = useCallback(
     (input?: WebShellComposerInput) => {
       const view = viewRef.current;
@@ -3856,6 +3871,7 @@ export function useComposerCore(
       clear,
       focus,
       getText,
+      hasAttachments,
       hasInput,
       setText,
       addTags,
@@ -3871,6 +3887,7 @@ export function useComposerCore(
     clearText,
     focus,
     getText,
+    hasAttachments,
     hasInput,
     insertText,
     removeTopTag,
@@ -3902,6 +3919,8 @@ export function useComposerCore(
     clearText,
     getText,
     hasInput,
+    hasAttachments:
+      hasInlineTags || composerTags.length > 0 || pastedImages.length > 0,
     hasContent,
     handle,
     pastedImages,
