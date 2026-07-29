@@ -72,7 +72,7 @@ describe('translateAndCheckAbsoluteWorkspacePath', () => {
     vi.stubEnv('SANDBOX', '');
     try {
       expect(translateAndCheckAbsoluteWorkspacePath('C:\\qwen-repro')).toBe(
-        null,
+        process.platform === 'win32' ? 'C:\\qwen-repro' : null,
       );
       expect(translateAndCheckAbsoluteWorkspacePath('relative/dir')).toBe(null);
     } finally {
