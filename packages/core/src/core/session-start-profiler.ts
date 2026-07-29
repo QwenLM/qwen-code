@@ -64,8 +64,11 @@ function roundMs(value: number): number {
 
 function getAppendProfileOpenFlags(): number {
   const constants = fs.constants;
-  // Windows does not expose O_NOFOLLOW. The profiler writes append-only
-  // diagnostics, so keep symlink hardening where the platform supports it.
+  // Windows does not expose O_NOFOLLOW, so there the JSONL profile is opened
+  // WITHOUT symlink protection. That is a deliberate trade, not a no-loss
+  // fallback: the previous behaviour threw here, refusing to profile on Windows
+  // at all, and append-only startup diagnostics are not worth that. Where the
+  // platform supports O_NOFOLLOW, keep the hardening.
   const noFollow = constants.O_NOFOLLOW ?? 0;
   return (
     (constants.O_APPEND ?? 0) |

@@ -37,8 +37,9 @@ describe('sessionMentionRef', () => {
   });
 
   it('unescapes the full shared shell-special set, not a subset', () => {
-    // `&` is in SHELL_SPECIAL_CHARS but was missing from the old inline regex,
-    // so `@session:a\&b` resolved on POSIX yet not on Windows. Keep them aligned.
+    // `&` is in SHELL_SPECIAL_CHARS but is the kind of char a hand-rolled subset
+    // would drop, leaving `@session:a\&b` as the literal title `a\&b`. Assert the
+    // shared unescaper keeps the full set so every shell special is released.
     expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a&b' });
   });
 

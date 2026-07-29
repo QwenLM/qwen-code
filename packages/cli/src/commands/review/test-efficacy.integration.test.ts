@@ -22,6 +22,7 @@ import {
   existsSync,
   symlinkSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { testEfficacyCommand } from './test-efficacy.js';
@@ -109,6 +110,18 @@ beforeEach(() => {
   // npm's platform-specific bin wrappers. It reports every test file as passed.
   const vitestDir = join(repo, 'node_modules', 'vitest');
   mkdirSync(vitestDir, { recursive: true });
+  // A package.json with a `bin` entry so the probe resolves the fake through the
+  // same `vitest/package.json` + `bin.vitest` path it uses for the real package,
+  // not a hard-coded entry the finder and the fake merely agree on by
+  // construction.
+  writeFileSync(
+    join(vitestDir, 'package.json'),
+    JSON.stringify({
+      name: 'vitest',
+      version: '0.0.0',
+      bin: { vitest: './vitest.mjs' },
+    }),
+  );
   const script = join(vitestDir, 'vitest.mjs');
   writeFileSync(
     script,
@@ -141,6 +154,18 @@ afterEach(() => {
   }
   rmSync(repo, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
+});
+
+describe('vitest entry resolution', () => {
+  it('anchors the fake to the real vitest bin target', () => {
+    // The probe resolves vitest through its package.json `bin` field rather than
+    // a hard-coded path. If a vitest bump moves that entry, this trips — the
+    // canary the finder no longer is, but that the fake-and-finder agreement in
+    // the probe tests would otherwise hide.
+    expect(
+      existsSync(createRequire(import.meta.url).resolve('vitest/vitest.mjs')),
+    ).toBe(true);
+  });
 });
 
 describe('test-efficacy probe isolation (#6832)', () => {

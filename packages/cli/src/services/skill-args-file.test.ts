@@ -111,6 +111,10 @@ describe('writeSkillArgs', () => {
   });
 
   it('refuses a dangling symlink planted at its path', () => {
+    // On POSIX this is caught by O_NOFOLLOW (ELOOP) even without the lstat
+    // pre-check — deleting that block leaves the test green here. The pre-check
+    // is the best-effort guard for Windows, where O_NOFOLLOW does not exist; CI
+    // runs on POSIX, so this case does not isolate that guard on its own.
     const linkPath = skillArgsPath('review');
     mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
     symlinkSync(join(dir, 'missing.txt'), linkPath);

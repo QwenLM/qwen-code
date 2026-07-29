@@ -44,7 +44,8 @@ import {
   lstatSync,
   existsSync,
 } from 'node:fs';
-import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
+import { createRequire } from 'node:module';
+import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
@@ -189,9 +190,14 @@ export function classifyProbeRun(
     // `testResults[].name` is absolute; the probe path is repo-relative. Match
     // on a path-separator boundary, so `src/a.test.ts` cannot be satisfied by
     // `/w/vendor/other-src/a.test.ts` — a bare `endsWith` would take the wrong
-    // file's verdict and never say so.
+    // file's verdict and never say so. Normalise `\` to `/` only on Windows:
+    // there backslash IS a separator, but on POSIX it is a legal filename
+    // character, so normalising it unconditionally would let
+    // `/w/vendor/other\src/a.test.ts` satisfy `src/a.test.ts` — the very false
+    // match the boundary exists to prevent.
     const result = byFile.find((r) => {
-      const name = (r.name ?? '').replace(/\\/g, '/');
+      const raw = r.name ?? '';
+      const name = process.platform === 'win32' ? raw.replace(/\\/g, '/') : raw;
       return name.endsWith(`/${file}`) || name === file;
     });
     const assertions = result?.assertionResults ?? [];
@@ -259,15 +265,35 @@ function gitOut(cwd: string, ...args: string[]): string {
   return (r.stdout ?? '').trim();
 }
 
-function findVitestBin(start: string): string | null {
-  let dir = resolve(start);
-  while (true) {
-    const candidate = join(dir, 'node_modules', 'vitest', 'vitest.mjs');
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
+/**
+ * Resolve the vitest CLI entry the probe runs with.
+ *
+ * Spawning `process.execPath` against vitest's own entry — not `npx` — sidesteps
+ * `npx.cmd` and shell quoting on Windows entirely. The entry is read from
+ * vitest's `bin` field rather than a hard-coded `vitest.mjs`: `package.json`
+ * pins a caret range, so a minor bump can move the bin target. A miss must also
+ * explain itself — name the search root and what was sought — because the throw
+ * lands in the probe's catch and an unexplained `inconclusive` is the one failure
+ * shape a review must not have. `createRequire` anchored at the worktree does the
+ * same up-tree walk Node uses for the probe's own imports, so it also survives
+ * non-hoisted layouts.
+ */
+function findVitestBin(worktree: string): string {
+  const req = createRequire(join(worktree, 'noop.js'));
+  let pkgPath: string;
+  try {
+    pkgPath = req.resolve('vitest/package.json');
+  } catch {
+    throw new Error(`vitest not found searching up from ${worktree}`);
   }
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+    bin?: { vitest?: string };
+  };
+  const bin = pkg.bin?.vitest;
+  if (!bin) {
+    throw new Error(`vitest package at ${pkgPath} declares no "vitest" bin`);
+  }
+  return join(dirname(pkgPath), bin);
 }
 
 /**
@@ -497,7 +523,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         for (const p of added) safeRmWithin(probeTree, p);
 
         const vitestBin = findVitestBin(worktree);
-        if (!vitestBin) throw new Error('vitest binary not found');
         const r = spawnSync(
           process.execPath,
           [vitestBin, 'run', '--reporter=json', ...probes],

@@ -22,6 +22,7 @@ jobs:
         # turns into NUL-interleaved bytes — silently leaving TEMP/TMP unset.
         shell: 'pwsh'
         run: |-
+          $ErrorActionPreference = 'Stop'
           git config --global core.autocrlf false
           "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -35,6 +36,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           whoami
           "TEMP=$env:TEMP"
+          if ($env:TEMP -ne $env:RUNNER_TEMP) {
+            throw "TEMP not redirected to RUNNER_TEMP: $env:TEMP"
+          }
           git --version
           $nodeVersion = node --version
           $nodeVersion

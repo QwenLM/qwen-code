@@ -468,6 +468,31 @@ describe('ExtensionStore', () => {
     ]);
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'writes the V1 projection in the exact legacy literal format',
+    async () => {
+      // The derived `legacyWorkspaceRule` helper builds both the fixture and the
+      // expectation in the cross-platform tests, so a change to the real V1
+      // format could move both sides together and still pass. Pin the exact
+      // literals here, where the workspace path is a stable POSIX string.
+      const store = makeStore();
+      const id = 'f'.repeat(64);
+      await store.ensureInitialized([{ id, name: 'demo' }]);
+
+      await store.setDefaultActivation({ id, name: 'demo' }, 'disabled');
+      await store.setWorkspaceActivation(
+        { id, name: 'demo' },
+        workspacePath('a'),
+        'enabled',
+      );
+
+      const projection = JSON.parse(
+        await fsp.readFile(enablementPath, 'utf8'),
+      ) as Record<string, { overrides: string[] }>;
+      expect(projection['demo']?.overrides).toEqual(['!/*', '/workspace/a/']);
+    },
+  );
+
   it('repairs an older V1 projection without changing generation', async () => {
     const store = makeStore();
     const id = 'e1'.repeat(32);

@@ -307,21 +307,53 @@ describe('classifyProbeRun', () => {
     expect(only(got).verdict).toBe('gated');
   });
 
-  it('matches Windows result paths to repository-relative probes', () => {
-    const got = classifyProbeRun(
-      0,
-      json({
-        testResults: [
-          {
-            name: 'C:\\w\\packages\\lib\\src\\inert.test.ts',
-            assertionResults: [{ status: 'passed' }],
-          },
-        ],
-      }),
-      ['packages/lib/src/inert.test.ts'],
-    );
-    expect(only(got).verdict).toBe('inert');
-  });
+  // The backslash normalisation this exercises runs only on win32 (see
+  // classifyProbeRun): there backslash is a separator. On POSIX the same input
+  // is a legal filename and must NOT match — the next test pins that.
+  it.skipIf(process.platform !== 'win32')(
+    'matches Windows result paths to repository-relative probes',
+    () => {
+      const got = classifyProbeRun(
+        0,
+        json({
+          testResults: [
+            {
+              name: 'C:\\w\\packages\\lib\\src\\inert.test.ts',
+              assertionResults: [{ status: 'passed' }],
+            },
+          ],
+        }),
+        ['packages/lib/src/inert.test.ts'],
+      );
+      expect(only(got).verdict).toBe('inert');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not treat a POSIX backslash filename as a path separator',
+    () => {
+      // On POSIX a backslash is a legal filename character. The win32-only
+      // normalisation must not run here, or `/w/vendor/other\src/a.test.ts`
+      // would collapse into `/w/vendor/other/src/a.test.ts` and satisfy the
+      // probe `src/a.test.ts` — taking a neighbour's verdict, exactly what the
+      // path-separator boundary exists to prevent.
+      const got = only(
+        classifyProbeRun(
+          1,
+          json({
+            testResults: [
+              {
+                name: '/w/vendor/other\\src/a.test.ts',
+                assertionResults: [{ status: 'failed' }],
+              },
+            ],
+          }),
+          ['src/a.test.ts'],
+        ),
+      );
+      expect(got.verdict).toBe('inconclusive');
+    },
+  );
 
   it('does not let a gating test cover for an inert one in the same run', () => {
     // The bug the LIVE run found and the unit tests did not. One `vitest run`

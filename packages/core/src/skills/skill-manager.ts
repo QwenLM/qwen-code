@@ -902,6 +902,9 @@ export class SkillManager {
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
       case 'user': {
+        // Resolve the defaults so they compare byte-equal to the path.resolve'd
+        // custom dirs in the dedup below. `project` has no such comparison and
+        // joins onto an already-absolute root, so it deliberately does not.
         const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.resolve(
             v === QWEN_DIR
