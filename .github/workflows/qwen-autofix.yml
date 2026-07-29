@@ -3522,7 +3522,16 @@ jobs:
                 exit 1
               fi
               echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
-              git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"
+              if ! git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+                echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
+                exit 1
+              fi
+              # The disclosure flag keys on HEAD actually advancing: a push
+              # can fail transiently (upload timeout, 503) with the branch
+              # unmoved, and the merge then no-ops "Already up to date" —
+              # flagging that would tell the reviewer to re-check mid-run
+              # commits that never existed.
+              PRE_MERGE_HEAD="$(git rev-parse HEAD)"
               if ! git -c user.name="${AUTOFIX_BOT}" \
                 -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
                 merge --no-edit FETCH_HEAD; then
@@ -3530,7 +3539,9 @@ jobs:
                 echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
                 exit 1
               fi
-              PUSH_RACE_MERGED='true'
+              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
+                PUSH_RACE_MERGED='true'
+              fi
             done
             # Resolve the review threads whose findings the agent actually
             # IMPLEMENTED, so a human re-reviewing sees only what is still open

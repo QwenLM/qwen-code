@@ -5235,8 +5235,32 @@ describe('qwen-autofix workflow', () => {
     // the local line, and retries a bounded number of times; the merge
     // result descends from the remote head so the retry is a fast-forward.
     expect(pushAndReportStep).toContain('for push_attempt in 1 2 3; do');
+    // BOTH push-URL constructions stay pinned — the fork one is pinned by
+    // the fork-plumbing test, and the same-repo one lost its old
+    // `origin "${BRANCH}"` pin in this rework: a mutation swapping ${REPO}
+    // for ${HEAD_REPO} (empty in the same-repo case → a malformed
+    // `github.com/.git` remote) must not survive.
+    expect(pushAndReportStep).toContain(
+      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+    );
     expect(pushAndReportStep).toContain(
       'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
+    );
+    // Every failure path in the salvage loop is ::error::-annotated — a
+    // deleted fork branch (or transient network error) must not kill the
+    // step with an unannotated exit 128 under bash -e.
+    expect(pushAndReportStep).toContain(
+      'could not fetch the moved head (attempt ${push_attempt})',
+    );
+    // The disclosure flag keys on HEAD actually advancing: a transient
+    // push failure on an unmoved branch no-ops the merge ("Already up to
+    // date") and must NOT tell the reviewer to re-check commits that
+    // never existed.
+    expect(pushAndReportStep).toContain(
+      'PRE_MERGE_HEAD="$(git rev-parse HEAD)"',
+    );
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
     );
     // Merge, never rebase: the agent's own conflict-resolution rounds create
     // merge commits, and a rebase would flatten them and can silently
