@@ -37,7 +37,9 @@ projection.
    `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>`.
    `getAdditionalContext()` escapes `<`/`>` in hook output, so the wrapper
    cannot be closed or forged from inside. User-authored text is never
-   rewritten or escaped.
+   rewritten or escaped. `promptText` must be declared before the injection
+   assignment that captures it into `preInjectionPromptText` (avoids a TDZ
+   if the surrounding Goal try/catch is later reshuffled).
 2. **Display provenance** (`chatRecordingService.ts`): `recordUserMessage`
    accepts an optional `UserPromptRecordPayload { displayText?, hookContext? }`
    stored as `systemPayload`. `message` keeps the exact model-bound Content —
@@ -56,7 +58,9 @@ fallback:
 - (a) new records: prefer `systemPayload.displayText`;
 - (b) tag-only records (no payload): drop a trailing part that is, in its
   entirety, a tagged block — whole-part strict match only, so user prose that
-  merely contains the tag is never stripped;
+  merely contains the tag is never stripped. A sole part matching the tag
+  shape is also kept (injection always appends after the user's own part(s),
+  so a single-part record can only be user-authored);
 - (c) legacy bare-injected records: unchanged concatenation.
 
 ## Scope notes
