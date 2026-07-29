@@ -70,7 +70,10 @@ const rootDir = join(__dirname, '..');
 // lifecycle, startup, and pairing helpers on both daemon client classes.
 // Bumped from 173KB to 174KB for worktree gitCwd query parameters on the
 // workspace-qualified diff/log/commit-detail client methods.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 174 * 1024;
+// Bumped from 174KB to 175KB for git branch listing/checkout/push/pull/commit
+// client methods on both daemon client classes.
+// Bumped from 175KB to 176KB for GitHub PR create + default-branch methods.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 176 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
