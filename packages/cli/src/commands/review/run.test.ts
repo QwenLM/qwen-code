@@ -53,6 +53,17 @@ describe('buildReviewPrompt', () => {
       '/review --effort medium',
     );
   });
+
+  it('rejects a target that would re-tokenize into extra args', () => {
+    // `123 --comment` would split into a target plus a flag the child
+    // honours, silently authorising a post the run never asked for.
+    expect(() => buildReviewPrompt({ target: '123 --comment' })).toThrow(
+      /Invalid review target/,
+    );
+    expect(() => buildReviewPrompt({ target: '--comment' })).toThrow(
+      /Invalid review target/,
+    );
+  });
 });
 
 describe('newestArtifactSince', () => {
@@ -143,6 +154,7 @@ describe('review run (handler)', () => {
   afterEach(() => {
     process.exitCode = exitCode;
     vi.restoreAllMocks();
+    vi.useRealTimers();
     process.chdir(cwd);
     rmSync(dir, { recursive: true, force: true });
   });
@@ -244,5 +256,36 @@ describe('review run (handler)', () => {
     const i = argvUsed.indexOf('--approval-mode');
     expect(i).toBeGreaterThan(-1);
     expect(argvUsed[i + 1]).toBe('default');
+  });
+
+  it('treats a composed verdict without a string event as no verdict', async () => {
+    // readComposed must refuse a file whose `event` is not a string, or a
+    // corrupt verdict would read as completed with event null and exit 0.
+    armChild(0, { event: 123, verdictLine: 'Verdict: Approve' });
+    await runHandler();
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('reports a timed-out run as incomplete and kills the child', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => child);
+
+    const done = runHandler({ 'timeout-minutes': 1 });
+    await vi.advanceTimersByTimeAsync(60_000); // fire the timeout
+    child.emit('close', null, 'SIGTERM'); // the kill takes effect
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.childExitCode).toBeNull();
+    expect(result.childSignal).toBe('SIGTERM');
+    expect(process.exitCode).toBe(1);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 });

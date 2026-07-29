@@ -25,7 +25,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['mcp', 'Manage MCP servers'],
   [
     'review <command>',
-    'Internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
+    'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
   ],
   [
     'serve',

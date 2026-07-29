@@ -29,7 +29,10 @@ import type { CommandModule } from 'yargs';
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR } from './lib/paths.js';
 import { EFFORT_LEVELS } from './parse-args.js';
 
@@ -67,6 +70,7 @@ export interface RunReviewResult {
   composedPath: string | null;
   reportPath: string | null;
   childExitCode: number | null;
+  childSignal: string | null;
   timedOut: boolean;
   durationMs: number;
 }
@@ -78,7 +82,17 @@ export function buildReviewPrompt(args: {
   comment?: boolean;
 }): string {
   const parts = ['/review'];
-  if (args.target) parts.push(args.target);
+  if (args.target) {
+    // The child re-tokenizes this string; a target carrying whitespace or a
+    // leading dash would split into extra tokens (`123 --comment` would
+    // silently authorise posting) — refuse anything but a single clean token.
+    if (/\s/.test(args.target) || args.target.startsWith('-')) {
+      throw new Error(
+        `Invalid review target ${JSON.stringify(args.target)}: expected a single PR number, PR URL, or file path`,
+      );
+    }
+    parts.push(args.target);
+  }
   if (args.effort) parts.push(`--effort ${args.effort}`);
   if (args.comment) parts.push('--comment');
   return parts.join(' ');
@@ -166,9 +180,18 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   );
 
   if (!args.quiet) {
-    // Progress belongs on stderr; stdout is reserved for the result.
-    child.stdout?.on('data', (chunk: Buffer) => process.stderr.write(chunk));
-    child.stderr?.on('data', (chunk: Buffer) => process.stderr.write(chunk));
+    // Progress belongs on stderr; stdout is reserved for the result. A throw
+    // here (EPIPE once the pipe reader exits) would crash the parent and orphan
+    // the child review, so the write stays incidental.
+    const writeProgress = (chunk: Buffer): void => {
+      try {
+        process.stderr.write(chunk);
+      } catch {
+        // stderr is gone; the verdict, not the progress, is what matters.
+      }
+    };
+    child.stdout?.on('data', writeProgress);
+    child.stderr?.on('data', writeProgress);
   } else {
     child.stdout?.resume();
     child.stderr?.resume();
@@ -178,7 +201,9 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   const timeoutMs = args.timeoutMinutes * 60_000;
   const timer = setTimeout(() => {
     timedOut = true;
-    writeStderrLine(
+    // Safe write: a throw on EPIPE would skip the kill below and leave the
+    // child review running on, burning compute and model API calls.
+    writeStderrLineSafe(
       `review run: timeout after ${args.timeoutMinutes} minutes — terminating the review`,
     );
     child.kill('SIGTERM');
@@ -186,13 +211,20 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     setTimeout(() => child.kill('SIGKILL'), 10_000).unref();
   }, timeoutMs);
 
-  const childExitCode: number | null = await new Promise((resolvePromise) => {
-    child.on('close', (code) => resolvePromise(code));
+  const childOutcome = await new Promise<{
+    code: number | null;
+    signal: string | null;
+  }>((resolvePromise) => {
+    child.on('close', (code, signal) => resolvePromise({ code, signal }));
     child.on('error', (err) => {
-      writeStderrLine(`review run: failed to launch the CLI: ${err.message}`);
-      resolvePromise(null);
+      writeStderrLineSafe(
+        `review run: failed to launch the CLI: ${err.message}`,
+      );
+      resolvePromise({ code: null, signal: null });
     });
   });
+  const childExitCode = childOutcome.code;
+  const childSignal = childOutcome.signal;
   clearTimeout(timer);
 
   // The verdict is what compose-review wrote, not what the child printed. A
@@ -225,6 +257,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     composedPath: composedPath ? resolve(composedPath) : null,
     reportPath: reportPath ? resolve(reportPath) : null,
     childExitCode,
+    childSignal,
     timedOut,
     durationMs: Date.now() - startMs,
   };
@@ -239,7 +272,8 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       timedOut
         ? 'Review did not complete: timed out.'
         : `Review did not complete: no composed verdict was produced` +
-            `${childExitCode !== null ? ` (CLI exit ${childExitCode})` : ''}.`,
+            `${childExitCode !== null ? ` (CLI exit ${childExitCode})` : ''}` +
+            `${childSignal !== null ? ` (killed by ${childSignal})` : ''}.`,
     );
   }
 
@@ -290,6 +324,7 @@ export const runCommand: CommandModule = {
       .option('approval-mode', {
         type: 'string',
         default: 'yolo',
+        choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
         describe:
           'Approval mode for the child CLI. The default is yolo: headless runs cannot answer ' +
           'confirmation prompts, and anything still unapproved would be auto-denied mid-review.',
