@@ -518,6 +518,8 @@ jobs:
           NOTES_START_TAG_FLAG=()
           if [[ -n "${PREVIOUS_RELEASE_TAG}" ]] && git merge-base --is-ancestor "${PREVIOUS_RELEASE_TAG}" HEAD; then
             NOTES_START_TAG_FLAG+=(--notes-start-tag "${PREVIOUS_RELEASE_TAG}")
+          elif [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
+            echo "::warning::PREVIOUS_RELEASE_TAG (${PREVIOUS_RELEASE_TAG}) is not an ancestor of HEAD; omitting --notes-start-tag"
           fi
 
           gh release create "${RELEASE_TAG}" \

@@ -33,6 +33,9 @@ describe('stable release notes workflow', () => {
       'git merge-base --is-ancestor "${PREVIOUS_RELEASE_TAG}" HEAD',
     );
     expect(step).toContain('NOTES_START_TAG_FLAG=()');
+    expect(step).toContain(
+      'echo "::warning::PREVIOUS_RELEASE_TAG (${PREVIOUS_RELEASE_TAG}) is not an ancestor of HEAD; omitting --notes-start-tag"',
+    );
     expect(step).toContain('"${NOTES_START_TAG_FLAG[@]}"');
     expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(releaseWorkflow).not.toContain(
