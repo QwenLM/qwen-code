@@ -1077,6 +1077,15 @@ describe('GithubChannel', () => {
   });
 
   describe('reasonFilter', () => {
+    function connectWithReasonFilter(reasonFilter: unknown): Promise<void> {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ reasonFilter }),
+        makeBridge(),
+      );
+      return channel.connect();
+    }
+
     it('skips notifications whose reason is not in the allowlist', async () => {
       const stderrWrite = vi
         .spyOn(process.stderr, 'write')
@@ -1120,54 +1129,29 @@ describe('GithubChannel', () => {
       }
     });
 
-    it('rejects unrecognized reasonFilter values', () => {
-      expect(
-        () =>
-          new TestableGithubChannel(
-            'test-github',
-            makeConfig({ reasonFilter: ['mentions'] }),
-            makeBridge(),
-          ),
-      ).toThrow(
+    it('rejects unrecognized reasonFilter values', async () => {
+      await expect(connectWithReasonFilter(['mentions'])).rejects.toThrow(
         'Unrecognized reasonFilter values for channel test-github: mentions',
       );
     });
 
-    it('rejects non-array reasonFilter values', () => {
-      expect(
-        () =>
-          new TestableGithubChannel(
-            'test-github',
-            makeConfig({ reasonFilter: 'mention' }),
-            makeBridge(),
-          ),
-      ).toThrow(
+    it('rejects non-array reasonFilter values', async () => {
+      await expect(connectWithReasonFilter('mention')).rejects.toThrow(
         'reasonFilter for channel test-github must be an array of GitHub notification reasons.',
       );
     });
 
-    it('rejects non-string reasonFilter entries', () => {
-      expect(
-        () =>
-          new TestableGithubChannel(
-            'test-github',
-            makeConfig({ reasonFilter: [42] }),
-            makeBridge(),
-          ),
-      ).toThrow(
+    it('rejects non-string reasonFilter entries', async () => {
+      await expect(connectWithReasonFilter([42])).rejects.toThrow(
         'reasonFilter entries for channel test-github must be strings.',
       );
     });
 
-    it('accepts documented security notification reasons', () => {
-      expect(
-        () =>
-          new TestableGithubChannel(
-            'test-github',
-            makeConfig({ reasonFilter: ['security_alert'] }),
-            makeBridge(),
-          ),
-      ).not.toThrow();
+    it('accepts documented security notification reasons', async () => {
+      await expect(
+        connectWithReasonFilter(['security_alert']),
+      ).resolves.toBeUndefined();
+      channel.disconnect();
     });
 
     it('processes all reasons when filter is empty or unset', async () => {

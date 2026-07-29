@@ -139,7 +139,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    this.reasonFilter = normalizeReasonFilter(config, name);
   }
 
   protected createInitialCursor(): GithubCursor {
@@ -171,6 +170,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
+    this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
