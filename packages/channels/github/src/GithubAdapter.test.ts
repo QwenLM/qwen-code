@@ -151,6 +151,21 @@ class TestableGithubChannel extends GithubChannel {
   inboundEnvelopes: Envelope[] = [];
   handleInboundError: Error | null = null;
   usePreflight = false;
+  sourceMessageId: string | undefined;
+  sourceSenderId: string | undefined;
+  sourceMetadata: string | undefined;
+
+  protected getResponseMessageId(_sessionId: string): string | undefined {
+    return this.sourceMessageId;
+  }
+
+  protected getResponseSenderId(_sessionId: string): string | undefined {
+    return this.sourceSenderId;
+  }
+
+  protected getResponseMetadata(_sessionId: string): string | undefined {
+    return this.sourceMetadata;
+  }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.handleInboundError) throw this.handleInboundError;
@@ -696,6 +711,12 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'Author: alice | State: open | Draft: false',
       );
+      expect(channel.inboundEnvelopes[0]!.text).toBe(
+        'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+      );
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'For review_requested, return a formal review summary',
+      );
     });
 
     it('dispatches late direct events once without muting newer events', async () => {
@@ -871,6 +892,9 @@ describe('GithubChannel', () => {
         expect(channel.inboundEnvelopes[0]).toMatchObject({
           isMentioned: true,
         });
+        expect(channel.inboundEnvelopes[0]!.text).toContain(
+          'output exactly <no-reply/> if no public reply is needed',
+        );
         expect(channel.inboundEnvelopes[0]!.text).toContain('@alice: first');
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
       },
@@ -1168,7 +1192,7 @@ describe('GithubChannel', () => {
         },
       });
       await connectForPublication();
-      const response = 'Final public reply';
+      const response = 'Final public reply 🙂';
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -1202,6 +1226,12 @@ describe('GithubChannel', () => {
         createHash('sha256').update(response).digest('hex'),
       );
       expect(audit).not.toContain(response);
+      expect(JSON.parse(audit)).toMatchObject({
+        outcome: 'posted',
+        repository: 'owner/repo',
+        number: 42,
+        bodyChars: Array.from(response).length,
+      });
     });
 
     it('uses the active prompt thread for final delivery', async () => {
@@ -1253,6 +1283,19 @@ describe('GithubChannel', () => {
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
       ).rejects.toThrow('ambiguous transport failure');
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      const audit = readFileSync(
+        join(
+          process.env.QWEN_HOME!,
+          'channels',
+          'test-github-github-audit.jsonl',
+        ),
+        'utf-8',
+      );
+      expect(JSON.parse(audit)).toMatchObject({
+        outcome: 'failed',
+        failurePhase: 'delivery',
+        failureError: 'ambiguous transport failure',
+      });
     });
 
     it.each([
@@ -1360,14 +1403,9 @@ describe('GithubChannel', () => {
           ) => Promise<void>;
         }
       ).publishFinalResponse.bind(channel);
-      const sourceMessage = vi
-        .spyOn(
-          channel as unknown as {
-            getResponseMessageId: (sessionId: string) => string | undefined;
-          },
-          'getResponseMessageId',
-        )
-        .mockReturnValue('source-message');
+      channel.sourceMessageId = 'source-message';
+      channel.sourceSenderId = 'maintainer';
+      channel.sourceMetadata = 'Type: Pull Request\nTrigger: review_requested.';
 
       await publish('owner/repo', 'pr:99', '<no-reply/>', 'session-correlated');
 
@@ -1381,7 +1419,12 @@ describe('GithubChannel', () => {
       );
       expect(audit).toContain('"sourceMessageId":"source-message"');
       expect(audit).toContain('"threadId":"pr:99"');
-      sourceMessage.mockRestore();
+      expect(JSON.parse(audit)).toMatchObject({
+        triggerKind: 'review_requested',
+        actor: 'maintainer',
+        repository: 'owner/repo',
+        number: 99,
+      });
     });
 
     it('keeps successful publication when its audit write fails', async () => {

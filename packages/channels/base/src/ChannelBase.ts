@@ -290,6 +290,7 @@ type ActivePrompt = {
   messageId?: string;
   senderId?: string;
   senderName?: string;
+  metadata?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -2353,6 +2354,14 @@ export abstract class ChannelBase {
    */
   protected getResponseMessageId(sessionId: string): string | undefined {
     return this.activePrompts.get(sessionId)?.messageId;
+  }
+
+  protected getResponseSenderId(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.senderId;
+  }
+
+  protected getResponseMetadata(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.metadata;
   }
 
   /**
@@ -5396,6 +5405,7 @@ export abstract class ChannelBase {
         messageId: envelope.messageId,
         senderId: envelope.senderId,
         senderName: envelope.senderName,
+        metadata: envelope.metadata,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only

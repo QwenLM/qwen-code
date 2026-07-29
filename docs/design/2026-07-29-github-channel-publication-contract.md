@@ -10,7 +10,7 @@ Make GitHub-channel replies safe to publish automatically and traceable after th
 - Final delivery uses the active prompt's issue/PR thread rather than a potentially stale shared-session target.
 - Channel instructions tell the agent not to use `gh` or the GitHub API to create comments or reviews. The adapter owns public delivery.
 - A final response whose trimmed content is only the `<no-reply/>` sentinel is intentionally suppressed. Whitespace, case, a space before `/>`, and a single wrapping code fence are normalized; any other content is published unchanged.
-- Suppression and publication are recorded in a local append-only JSONL audit file at `~/.qwen/channels/<channel>-github-audit.jsonl`. Records contain time, channel, session, source message, thread, outcome, GitHub comment identity/URL when present, and a SHA-256 plus UTF-16 length of the reply. They never contain reply text, credentials, or a GitHub token.
+- Suppression and publication are recorded in a local append-only JSONL audit file at `~/.qwen/channels/<channel>-github-audit.jsonl`. Records contain time, channel, session, source message, thread, outcome, GitHub comment identity/URL when present, and a SHA-256 plus character count of the reply. They never contain reply text, credentials, or a GitHub token.
 - Audit writes are best effort. An audit failure is logged without changing the publication result. An ambiguous GitHub API failure remains a delivery failure and is not retried; definite rate-limit no-write responses may use the existing retry backoff.
 
 ## Flow
