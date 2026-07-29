@@ -2282,7 +2282,55 @@ describe('qwen-autofix workflow', () => {
     // to the next scheduled tick, and an ic.json snapshot taken between
     // the label write and the command's ack cannot double-post.
     expect(reviewScanJob).toContain('engage ack deferred for #${PR}');
-    expect(reviewScanJob).toContain('LAST_LABELED_BY=');
+    // Behaviorally pin the LAST_LABELED_BY jq extraction — the load-bearing
+    // input to the actor-keyed grace — mirroring the labeledTs treatment
+    // above: regex-extract the program, exec it against a multi-event
+    // fixture, and assert the returned actor. A presence check alone
+    // survives any mutation to the jq body (.actor.login → .user.login,
+    // wrong source file, sort_by on the wrong field).
+    const labeledByProgram = reviewScanJob
+      .match(
+        /LAST_LABELED_BY="\$\(jq -rs --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {18}/g, '\n');
+    expect(labeledByProgram).toBeTruthy();
+    const labeledBy = execFileSync(
+      'jq',
+      ['-rs', '--arg', 'lb', 'autofix/takeover', labeledByProgram],
+      {
+        encoding: 'utf8',
+        input:
+          JSON.stringify([
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'wenshao' },
+              created_at: '2026-07-02T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'other' },
+              actor: { login: 'mallory' },
+              created_at: '2026-07-09T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              event: 'unlabeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-08T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-06T00:00:00Z',
+            },
+          ]),
+      },
+    ).trim();
+    expect(labeledBy).toBe('qwen-code-dev-bot');
     expect(reviewScanJob).toContain('command-applied label <45s ago');
     expect(reviewScanJob).toContain(`date -u -d '45 seconds ago'`);
     // A fork fetch failure (force-push/rename race) discards gracefully
