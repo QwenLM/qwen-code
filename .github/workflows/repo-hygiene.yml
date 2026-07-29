@@ -549,6 +549,11 @@ jobs:
             --body-file "${WORKDIR}/pr-body.md")"
           echo "🚀 Opened ${PR_URL}"
 
+          # Label requested by issue #7383. Non-fatal: never create labels,
+          # and a repo without it should not fail the run.
+          gh pr edit "${PR_URL}" --add-label 'autofix/repo-hygiene' \
+            || echo '⚠️  Could not add label autofix/repo-hygiene (missing in this repo?)'
+
           if [[ -s "${WORKDIR}/report-only.md" ]]; then
             {
               echo
