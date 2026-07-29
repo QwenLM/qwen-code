@@ -11,7 +11,15 @@
 // assembly, artifact discovery (this run's verdict, not a stale one), the
 // completed/failed/blocking exit split, and the spawn wiring.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+  type MockInstance,
+} from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
   mkdtempSync,
@@ -130,7 +138,7 @@ describe('review run (handler)', () => {
   let cwd: string;
   let outs: string[];
   let exitCode: number | undefined;
-  let processKill: ReturnType<typeof vi.spyOn>;
+  let processKill: MockInstance<typeof process.kill>;
 
   class FakeChild extends EventEmitter {
     pid = 12345;
