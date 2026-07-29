@@ -5,9 +5,13 @@
  */
 
 import { createReadStream, type Stats } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { stat, type FileHandle } from 'node:fs/promises';
 import { TextDecoder } from 'node:util';
-import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
+import {
+  decodeBufferWithEncodingInfoAsync,
+  detectFileEncoding,
+  readFileWithEncodingInfo,
+} from './fileUtils.js';
 import { isUtf8CompatibleEncoding } from './encoding.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
@@ -21,6 +25,12 @@ export interface ReadTextRangeRequest {
   maxOutputBytes: number;
   signal?: AbortSignal;
   stats?: Stats;
+  /**
+   * Optional caller-owned handle. When present, every read is bound to this
+   * already-open inode and uses the streaming path; this function never closes
+   * the handle.
+   */
+  fileHandle?: FileHandle;
 }
 
 export interface ReadTextRangeResult {
@@ -51,10 +61,17 @@ export async function readTextRange(
   request: ReadTextRangeRequest,
 ): Promise<ReadTextRangeResult> {
   request.signal?.throwIfAborted();
-  const stats = request.stats ?? (await stat(request.path));
+  const stats =
+    request.stats ??
+    (request.fileHandle !== undefined
+      ? await request.fileHandle.stat()
+      : await stat(request.path));
   const maxOutputBytes = normalizeMaxBytes(request.maxOutputBytes);
 
-  if (stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE) {
+  if (
+    request.fileHandle === undefined &&
+    stats.size < TEXT_RANGE_FAST_PATH_MAX_SIZE
+  ) {
     const { content, encoding, bom } = await readFileWithEncodingInfo(
       request.path,
       request.signal,
@@ -74,7 +91,7 @@ export async function readTextRange(
     };
   }
 
-  return readLargeUtf8Range(request, maxOutputBytes);
+  return readLargeUtf8Range(request, maxOutputBytes, stats.size);
 }
 
 function normalizeMaxBytes(maxOutputBytes: number): number {
@@ -120,8 +137,16 @@ function sliceDecodedContent(
 async function readLargeUtf8Range(
   request: ReadTextRangeRequest,
   maxOutputBytes: number,
+  sourceSize: number,
 ): Promise<ReadTextRangeResult> {
-  const encoding = await detectFileEncoding(request.path);
+  const encoding =
+    request.fileHandle === undefined
+      ? await detectFileEncoding(request.path)
+      : await detectFileHandleEncoding(
+          request.fileHandle,
+          sourceSize,
+          request.signal,
+        );
   if (!isUtf8CompatibleEncoding(encoding)) {
     throw new LargeNonUtf8TextError(encoding);
   }
@@ -144,10 +169,16 @@ async function readLargeUtf8Range(
     ignoreBOM: true,
   });
 
-  const stream = createReadStream(request.path, {
-    highWaterMark: 512 * 1024,
-    signal: request.signal,
-  });
+  const pathStream =
+    request.fileHandle === undefined
+      ? createReadStream(request.path, {
+          highWaterMark: 512 * 1024,
+          signal: request.signal,
+        })
+      : undefined;
+  const chunks =
+    pathStream ??
+    readFileHandleChunks(request.fileHandle!, sourceSize, request.signal);
 
   function appendSelected(fragment: string): void {
     if (fragment.length === 0 || truncatedByBytes) {
@@ -184,7 +215,7 @@ async function readLargeUtf8Range(
   }
 
   try {
-    for await (const rawChunk of stream) {
+    for await (const rawChunk of chunks) {
       request.signal?.throwIfAborted();
       let chunk = decodeUtf8Chunk(rawChunk as Buffer, { stream: true });
       if (firstChunk) {
@@ -232,7 +263,9 @@ async function readLargeUtf8Range(
       }
     }
   } finally {
-    stream.destroy();
+    if (pathStream !== undefined && !pathStream.destroyed) {
+      pathStream.destroy();
+    }
   }
 
   if (!stoppedEarly) {
@@ -248,6 +281,51 @@ async function readLargeUtf8Range(
     originalLineCountExact,
     truncatedByBytes,
   };
+}
+
+async function* readFileHandleChunks(
+  fileHandle: FileHandle,
+  sourceSize: number,
+  signal?: AbortSignal,
+): AsyncGenerator<Buffer> {
+  const highWaterMark = 512 * 1024;
+  const buffer = Buffer.allocUnsafe(highWaterMark);
+  let position = 0;
+  while (position < sourceSize) {
+    signal?.throwIfAborted();
+    const bytesToRead = Math.min(highWaterMark, sourceSize - position);
+    const { bytesRead } = await fileHandle.read(
+      buffer,
+      0,
+      bytesToRead,
+      position,
+    );
+    signal?.throwIfAborted();
+    if (bytesRead === 0) return;
+    position += bytesRead;
+    // `buffer` is reused across iterations, so each yielded view is valid
+    // only until the next read; consumers must decode or copy it before
+    // advancing the generator.
+    yield buffer.subarray(0, bytesRead);
+  }
+}
+
+async function detectFileHandleEncoding(
+  fileHandle: FileHandle,
+  sourceSize: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
+  if (sourceSize === 0) return 'utf-8';
+
+  const sample = Buffer.alloc(Math.min(8192, sourceSize));
+  const { bytesRead } = await fileHandle.read(sample, 0, sample.length, 0);
+  signal?.throwIfAborted();
+  if (bytesRead === 0) return 'utf-8';
+  return (
+    (await decodeBufferWithEncodingInfoAsync(sample.subarray(0, bytesRead)))
+      .encoding ?? 'utf-8'
+  );
 }
 
 function truncateUtf8(

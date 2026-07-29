@@ -218,17 +218,19 @@ remediation.
 
 The daemon also exposes workspace file helpers:
 
-- `GET /file` reads text files and returns a raw-byte `sha256:<hex>` hash.
+- `GET /file` reads text files. Full-snapshot responses return a raw-byte
+  `sha256:<hex>` hash; finite-line windows from files above 256 KiB omit it.
 - `GET /file/bytes` reads bounded raw byte windows and returns base64 content.
 - `POST /file/write` creates or replaces text files.
 - `POST /file/edit` applies one exact text replacement.
 
 Write/edit are **strict mutation routes**: even on loopback they require a
 configured bearer token, otherwise they return `token_required`. Replacements
-and edits require the latest `expectedHash` from `GET /file` (or a full-window
-`GET /file/bytes`). `create` never overwrites. Explicit writes to ignored paths
-are allowed but audited. Binary writes, delete/move/mkdir, and recursive parent
-creation are not part of this surface.
+and edits require the latest `expectedHash` from a full-snapshot `GET /file`
+(or a full-window `GET /file/bytes`). A partial large-file window cannot be
+used as an optimistic-concurrency token. `create` never overwrites. Explicit
+writes to ignored paths are allowed but audited. Binary writes,
+delete/move/mkdir, and recursive parent creation are not part of this surface.
 
 ### 3. Open a session
 
