@@ -54,10 +54,10 @@ describe('getVersion', () => {
     // Git Hash Mock
     if (command.includes('git rev-parse --short HEAD')) return 'd3bf8a3d';
 
-    // For doesVersionExist checks - default to not found
+    // For doesVersionExist checks - default to not found on any package
     if (
       command.includes('npm view') &&
-      command.includes('@qwen-code/qwen-code@')
+      command.includes('version 2>/dev/null')
     ) {
       throw new Error('NPM version not found');
     }
@@ -84,39 +84,6 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.8.0-preview.0');
       expect(result.npmTag).toBe('preview');
       expect(result.previousReleaseTag).toBe('v0.6.1');
-    });
-
-    it('should keep the nightly base when no stable is published yet', () => {
-      vi.mocked(execSync).mockImplementation((command) => {
-        if (command.includes('npm view') && command.includes('--tag=latest'))
-          throw new Error('npm error code E404');
-        return mockExecSync(command);
-      });
-
-      const result = getVersion({ type: 'preview' });
-      expect(result.releaseVersion).toBe('0.8.0-preview.0');
-    });
-
-    it('should bump the preview base when the latest stable matches it', () => {
-      vi.mocked(execSync).mockImplementation((command) => {
-        if (command.includes('npm view') && command.includes('--tag=latest'))
-          return '0.8.0';
-        return mockExecSync(command);
-      });
-
-      const result = getVersion({ type: 'preview' });
-      expect(result.releaseVersion).toBe('0.8.1-preview.0');
-    });
-
-    it('should bump the preview base when the latest stable is ahead', () => {
-      vi.mocked(execSync).mockImplementation((command) => {
-        if (command.includes('npm view') && command.includes('--tag=latest'))
-          return '0.9.0';
-        return mockExecSync(command);
-      });
-
-      const result = getVersion({ type: 'preview' });
-      expect(result.releaseVersion).toBe('0.9.1-preview.0');
     });
 
     it('should calculate the next nightly version from package.json', () => {
@@ -214,6 +181,62 @@ describe('getVersion', () => {
       const result = getVersion({ type: 'preview' });
       // Should have skipped preview.0 and landed on preview.1
       expect(result.releaseVersion).toBe('0.8.0-preview.1');
+    });
+
+    it('should keep the nightly base when no stable is published yet (greenfield)', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        // No latest dist-tag
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          throw new Error('npm error code E404');
+        // No versions published at all
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([]);
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.0-preview.0');
+      expect(result.npmTag).toBe('preview');
+      expect(result.previousReleaseTag).toBe('');
+    });
+
+    it('should bump the preview base when the latest stable matches it', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.8.0';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.1-preview.0');
+      expect(result.npmTag).toBe('preview');
+      expect(result.previousReleaseTag).toBe('v0.8.0');
+    });
+
+    it('should bump the preview base when the latest stable is ahead', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.9.0';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.9.1-preview.0');
+      expect(result.npmTag).toBe('preview');
+      expect(result.previousReleaseTag).toBe('v0.9.0');
+    });
+
+    it('should not bump the preview base when the latest stable is below it', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.7.9';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.0-preview.0');
+      expect(result.npmTag).toBe('preview');
+      expect(result.previousReleaseTag).toBe('v0.7.9');
     });
 
     it('should fall back to package.json when no nightly dist-tag exists (preview)', () => {

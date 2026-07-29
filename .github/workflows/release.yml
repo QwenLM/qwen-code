@@ -493,6 +493,7 @@ jobs:
         working-directory: 'packages/channels'
         run: |-
           # Explicit allowlist: new channel workspaces require release approval.
+          PUBLISH_MARKER="$(mktemp)"
           for channel in dingtalk feishu github qqbot telegram wecom weixin; do
             echo "::group::Publishing @qwen-code/channel-${channel}"
             (
@@ -506,9 +507,13 @@ jobs:
                 exit 0
               fi
               npm publish "${PUBLISH_ARGS[@]}"
+              echo "${channel}" >> "${PUBLISH_MARKER}"
             )
             echo "::endgroup::"
           done
+          if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${PUBLISH_MARKER}" ]]; then
+            echo "::warning::Every channel package was already published; nothing shipped"
+          fi
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'

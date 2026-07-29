@@ -476,6 +476,19 @@ describe('package scripts', () => {
       expect(publishStep).toContain('exit 0');
       expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
     }
+
+    // The channel loop must wrap each iteration in a subshell so that
+    // `exit 0` skips only the current channel, not the entire step.
+    const channelStep = getWorkflowStep(
+      publishJob,
+      'Publish remaining channel packages',
+    );
+    expect(channelStep).toContain('(\n');
+    expect(channelStep).toContain(')');
+    // A fully-skipped publish must be visible, not silently green.
+    expect(channelStep).toContain(
+      'Every channel package was already published; nothing shipped',
+    );
   });
 
   it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
