@@ -1402,7 +1402,7 @@ describe('runQwenServe telemetry validation', () => {
           QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace',
         },
       },
-    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    } as unknown as ReturnType<typeof settingsRuntime.loadSettings>);
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
