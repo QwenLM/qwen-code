@@ -2338,6 +2338,8 @@ const EN: Messages = {
   'splitView.closePane': 'Close pane',
   'splitView.maximizePane': 'Maximize pane',
   'splitView.restorePane': 'Restore pane',
+  'splitView.morePaneActions': 'More pane actions',
+  'splitView.defaultActionLabel': 'Action',
   'splitView.paneError': 'This session pane hit an error',
   'splitView.paneConnectionError': 'Connection lost',
   'splitView.outerApprovalPending':
@@ -4744,6 +4746,8 @@ const ZH: Messages = {
   'splitView.closePane': '关闭窗格',
   'splitView.maximizePane': '最大化窗格',
   'splitView.restorePane': '还原窗格',
+  'splitView.morePaneActions': '更多窗格操作',
+  'splitView.defaultActionLabel': '操作',
   'splitView.paneError': '此会话窗格出错',
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',

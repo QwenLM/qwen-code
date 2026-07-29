@@ -835,6 +835,10 @@ vi.doMock('./components/SplitView', async () => {
         sessionId: string,
         sessionActions: typeof mockSessionActions,
       ) => void;
+      renderPaneHeaderActions?: (info: {
+        sessionId: string;
+        workspaceCwd?: string;
+      }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
       const paneActions = {
@@ -973,6 +977,11 @@ vi.doMock('./components/SplitView', async () => {
             onClick: props.onExit,
           },
           'back',
+        ),
+        React.createElement(
+          'span',
+          { 'data-testid': 'split-has-header-actions' },
+          props.renderPaneHeaderActions ? 'yes' : 'no',
         ),
       );
     },
@@ -8564,6 +8573,7 @@ describe('App session callbacks', () => {
     const { container, rerender } = renderApp({
       sidebar: false,
       splitSessionIds: ['s1'],
+      renderPaneHeaderActions: () => null,
     });
     await flush();
 
@@ -8574,6 +8584,10 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('s1');
+    expect(
+      container.querySelector('[data-testid="split-has-header-actions"]')
+        ?.textContent,
+    ).toBe('yes');
 
     rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
     await flush();
