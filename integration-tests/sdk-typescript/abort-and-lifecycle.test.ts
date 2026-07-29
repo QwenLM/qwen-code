@@ -42,6 +42,8 @@ function fakeModelOptions(baseUrl: string) {
     env: {
       NO_PROXY: LOCAL_OPENAI_NO_PROXY,
       no_proxy: LOCAL_OPENAI_NO_PROXY,
+      QWEN_HOME: process.env['E2E_TEST_FILE_DIR']!,
+      QWEN_RUNTIME_DIR: process.env['E2E_TEST_FILE_DIR']!,
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
@@ -69,6 +71,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const controller = new AbortController();
       const TARGET_CHARS = 50;
       let accumulatedText = '';
+      let messagesAfterAbort = 0;
 
       const fakeServer = await startFakeOpenAIServer(() => {
         return { contentChunks: LONG_CONTENT_CHUNKS };
@@ -88,6 +91,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
       try {
         for await (const message of q) {
+          if (controller.signal.aborted) {
+            messagesAfterAbort++;
+          }
           if (isSDKPartialAssistantMessage(message)) {
             // Handle partial messages from streaming
             if (
@@ -122,6 +128,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(isAbortError(error)).toBe(true);
         // Should have accumulated at least TARGET_CHARS before abort
         expect(accumulatedText.length).toBeGreaterThanOrEqual(TARGET_CHARS);
+        expect(messagesAfterAbort).toBeLessThan(10);
       } finally {
         await q.close();
         await fakeServer.close();

@@ -20,6 +20,8 @@ const ENV_KEYS = [
   'OPENAI_BASE_URL',
   'OPENAI_MODEL',
   'QWEN_MODEL',
+  'QWEN_HOME',
+  'QWEN_RUNTIME_DIR',
   'NO_PROXY',
   'no_proxy',
 ] as const;
@@ -65,7 +67,12 @@ describe('list_directory', () => {
       ? CONTAINER_SANDBOX_NO_PROXY
       : '127.0.0.1,localhost';
 
-    const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      const requestIndex = streamingRequestIndex++;
       if (requestIndex === 0) {
         return {
           toolCalls: [
@@ -80,6 +87,8 @@ describe('list_directory', () => {
     process.env['OPENAI_BASE_URL'] = fakeServer.baseUrl;
     process.env['OPENAI_MODEL'] = 'fake-model';
     process.env['QWEN_MODEL'] = 'fake-model';
+    process.env['QWEN_HOME'] = join(rig.testDir!, '.qwen-home');
+    process.env['QWEN_RUNTIME_DIR'] = join(rig.testDir!, '.qwen-home');
     process.env['NO_PROXY'] = noProxy;
     process.env['no_proxy'] = noProxy;
 
@@ -104,18 +113,31 @@ describe('list_directory', () => {
 
       expect(foundToolCall, 'Expected a list_directory tool call').toBe(true);
 
+      const toolResultRequest = fakeServer.requests.find(({ body }) => {
+        const messages = body['messages'];
+        return (
+          Array.isArray(messages) &&
+          messages.some(
+            (message) =>
+              typeof message === 'object' &&
+              message !== null &&
+              'role' in message &&
+              message.role === 'tool',
+          )
+        );
+      });
       expect(
-        fakeServer.requests.length,
-        'Fake server saw fewer than 2 requests — the CLI likely resolved a real model endpoint from user-level settings instead of the fake server',
-      ).toBeGreaterThanOrEqual(2);
-      const messages = fakeServer.requests[1]?.body['messages'] as
+        toolResultRequest,
+        'Expected a model request containing the list_directory result',
+      ).toBeDefined();
+      const messages = toolResultRequest?.body['messages'] as
         | Array<{ role?: string; content?: unknown }>
         | undefined;
-      const toolResultRequest = JSON.stringify(
+      const toolResultContent = JSON.stringify(
         messages?.find((message) => message.role === 'tool')?.content ?? '',
       );
-      expect(toolResultRequest).toContain('file1.txt');
-      expect(toolResultRequest).toContain('subdir');
+      expect(toolResultContent).toContain('file1.txt');
+      expect(toolResultContent).toContain('subdir');
     } finally {
       await fakeServer.close();
     }

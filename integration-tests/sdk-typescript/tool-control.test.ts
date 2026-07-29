@@ -54,6 +54,8 @@ function fakeModelOptions(baseUrl: string) {
     env: {
       NO_PROXY: LOCAL_OPENAI_NO_PROXY,
       no_proxy: LOCAL_OPENAI_NO_PROXY,
+      QWEN_HOME: process.env['E2E_TEST_FILE_DIR']!,
+      QWEN_RUNTIME_DIR: process.env['E2E_TEST_FILE_DIR']!,
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
@@ -63,7 +65,8 @@ function fakeModelOptions(baseUrl: string) {
 }
 
 function advertisedToolNames(fakeServer: FakeOpenAIServer): string[] {
-  const tools = fakeServer.requests[0]?.body['tools'];
+  const tools = fakeServer.requests.find(({ body }) => body['stream'] === true)
+    ?.body['tools'];
   if (!Array.isArray(tools)) return [];
   return tools.flatMap((tool): string[] => {
     if (typeof tool !== 'object' || tool === null) return [];
@@ -146,14 +149,21 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(toolNames).toContain('read_file');
           expect(toolNames).toContain('write_file');
 
-          // list_directory is not in coreTools: it must not be advertised to
-          // the model, and the scripted call must be declined at execution.
-          expect(advertisedToolNames(fakeServer)).not.toContain(
+          const advertisedTools = advertisedToolNames(fakeServer);
+          expect(advertisedTools).toEqual(
+            expect.arrayContaining(['read_file', 'write_file']),
+          );
+
+          const listDirectoryResults = findToolResults(
+            messages,
             'list_directory',
           );
-          const blocked = findToolResults(messages, 'list_directory');
-          expect(blocked.length).toBeGreaterThan(0);
-          expect(blocked[0].isError).toBe(true);
+          expect(listDirectoryResults).toHaveLength(1);
+          expect(listDirectoryResults[0]).toMatchObject({
+            isError: true,
+            content: expect.stringContaining('was declined'),
+          });
+          expect(advertisedTools).not.toContain('list_directory');
 
           // Verify the write_file call itself requested different content
           // than the original. Asserting on the tool-call arguments (rather
@@ -1221,6 +1231,11 @@ describe('Tool Control Parameters (E2E)', () => {
                   },
                   'write-test',
                 ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-test',
+                ),
               ],
             };
           }
@@ -1256,11 +1271,18 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(toolNames).toContain('read_file');
           expect(toolNames).toContain('write_file');
 
-          // Should NOT use tools outside coreTools
-          expect(toolNames).not.toContain('run_shell_command');
-          expect(advertisedToolNames(fakeServer)).not.toContain(
-            'run_shell_command',
+          const advertisedTools = advertisedToolNames(fakeServer);
+          expect(advertisedTools).toEqual(
+            expect.arrayContaining(['read_file', 'write_file']),
           );
+
+          const shellResults = findToolResults(messages, 'run_shell_command');
+          expect(shellResults).toHaveLength(1);
+          expect(shellResults[0]).toMatchObject({
+            isError: true,
+            content: expect.stringContaining('was declined'),
+          });
+          expect(advertisedTools).not.toContain('run_shell_command');
 
           // Verify file was actually modified (content changed from original).
           // Don't assert on specific wording — the model may paraphrase.
@@ -1289,6 +1311,15 @@ describe('Tool Control Parameters (E2E)', () => {
                   'read-test',
                 ),
                 fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    old_string: 'test',
+                    new_string: 'modified',
+                  },
+                  'edit-test',
+                ),
               ],
             };
           }
@@ -1324,9 +1355,18 @@ describe('Tool Control Parameters (E2E)', () => {
           // Should use non-excluded tools from coreTools
           expect(toolNames).toContain('read_file');
 
-          // Should NOT use excluded tool
-          expect(toolNames).not.toContain('edit');
-          expect(advertisedToolNames(fakeServer)).not.toContain('edit');
+          const advertisedTools = advertisedToolNames(fakeServer);
+          expect(advertisedTools).toEqual(
+            expect.arrayContaining(['read_file', 'list_directory']),
+          );
+
+          const editResults = findToolResults(messages, 'edit');
+          expect(editResults).toHaveLength(1);
+          expect(editResults[0]).toMatchObject({
+            isError: true,
+            content: expect.stringContaining('was declined'),
+          });
+          expect(advertisedTools).not.toContain('edit');
 
           // File should still exist
           expect(helper.fileExists('test.txt')).toBe(true);
@@ -1361,6 +1401,15 @@ describe('Tool Control Parameters (E2E)', () => {
                     content: 'modified',
                   },
                   'write-test',
+                ),
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('test.txt'),
+                    old_string: 'test',
+                    new_string: 'modified',
+                  },
+                  'edit-test',
                 ),
               ],
             };
@@ -1403,9 +1452,22 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(toolNames).toContain('read_file');
           expect(toolNames).toContain('write_file');
 
-          // Should NOT use excluded tool
-          expect(toolNames).not.toContain('edit');
-          expect(advertisedToolNames(fakeServer)).not.toContain('edit');
+          const advertisedTools = advertisedToolNames(fakeServer);
+          expect(advertisedTools).toEqual(
+            expect.arrayContaining([
+              'read_file',
+              'write_file',
+              'list_directory',
+            ]),
+          );
+
+          const editResults = findToolResults(messages, 'edit');
+          expect(editResults).toHaveLength(1);
+          expect(editResults[0]).toMatchObject({
+            isError: true,
+            content: expect.stringContaining('was declined'),
+          });
+          expect(advertisedTools).not.toContain('edit');
 
           // canUseTool should be called for core write tools
           expect(canUseToolCalls).toContain('write_file');
@@ -2017,7 +2079,12 @@ describe('Tool Control Parameters (E2E)', () => {
           input: Record<string, unknown>;
         }> = [];
 
-        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        let streamingRequestIndex = 0;
+        const fakeServer = await startFakeOpenAIServer(({ body }) => {
+          if (body['stream'] !== true) {
+            return { content: '{"selected_memories":[]}' };
+          }
+          const requestIndex = streamingRequestIndex++;
           if (requestIndex === 0) {
             return {
               toolCalls: [
@@ -2124,7 +2191,12 @@ describe('Tool Control Parameters (E2E)', () => {
 
         const resultWaiter = createResultWaiter(1);
 
-        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        let streamingRequestIndex = 0;
+        const fakeServer = await startFakeOpenAIServer(({ body }) => {
+          if (body['stream'] !== true) {
+            return { content: '{"selected_memories":[]}' };
+          }
+          const requestIndex = streamingRequestIndex++;
           if (requestIndex === 0) {
             return {
               toolCalls: [
@@ -2240,19 +2312,15 @@ describe('Tool Control Parameters (E2E)', () => {
         const resultWaiter = createResultWaiter(2);
         const canUseToolCalls: string[] = [];
 
-        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-          if (requestIndex === 0) {
-            return {
-              toolCalls: [
-                fakeToolCall(
-                  'read_file',
-                  { file_path: helper.getPath('data.txt') },
-                  'read-data',
-                ),
-              ],
-            };
+        const fakeServer = await startFakeOpenAIServer(({ body }) => {
+          if (body['stream'] !== true) {
+            return { content: '{"selected_memories":[]}' };
           }
-          if (requestIndex === 1) {
+          const transcript = JSON.stringify(body['messages'] ?? []);
+          if (transcript.includes('write-data')) {
+            return { content: 'Done.' };
+          }
+          if (transcript.includes('Now append')) {
             return {
               toolCalls: [
                 fakeToolCall(
@@ -2266,7 +2334,18 @@ describe('Tool Control Parameters (E2E)', () => {
               ],
             };
           }
-          return { content: 'Done.' };
+          if (transcript.includes('read-data')) {
+            return { content: 'Done.' };
+          }
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'read_file',
+                { file_path: helper.getPath('data.txt') },
+                'read-data',
+              ),
+            ],
+          };
         }, FAKE_SERVER_OPTIONS);
 
         // Create an async generator that yields multiple messages
