@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { up, down, status } from './orchestrator.js';
+import { up, down, status, upJson } from './orchestrator.js';
 import { readState } from './state.js';
 import type { RunCommand, CommandResult } from './exec.js';
 
@@ -191,6 +191,38 @@ describe('up', () => {
     const res = await up(DEPS(d, run));
     expect(res.ok).toBe(false);
     expect(res.hint).toMatch(/XDG_RUNTIME_DIR|enable-linger/);
+  });
+});
+
+describe('upJson', () => {
+  it('never includes bootstrapCode — the --json payload must not leak the one-time OWNER credential', () => {
+    const r = {
+      ok: true,
+      url: 'https://laptop-wsl.tn.ts.net:8443/ui/',
+      host: 'laptop-wsl.tn.ts.net',
+      port: 8443,
+      unit: 'qwen-rc-gateway',
+      bootstrapCode: 'SECRET-1',
+      certExpiry: '2030-01-01T00:00:00.000Z',
+    };
+    const json = upJson(r);
+    expect(json).not.toHaveProperty('bootstrapCode');
+    expect(json).toEqual({
+      status: 'running',
+      url: r.url,
+      host: r.host,
+      port: r.port,
+      unit: r.unit,
+      certExpiry: r.certExpiry,
+      hint: undefined,
+    });
+    expect(JSON.stringify(json)).not.toContain('SECRET-1');
+  });
+
+  it('reports status "error" when ok is false', () => {
+    const json = upJson({ ok: false, hint: 'something failed' });
+    expect(json['status']).toBe('error');
+    expect(json).not.toHaveProperty('bootstrapCode');
   });
 });
 

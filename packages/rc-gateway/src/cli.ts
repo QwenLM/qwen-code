@@ -1893,17 +1893,22 @@ if (process.argv[2] === 'serve') {
   // result as text or `--json`. Printed/JSON output carries connect metadata
   // + the pairing code only, never session/tool content.
   void (async () => {
-    const { up, down, status } = await import('./launcher/orchestrator.js');
+    const { up, down, status, upJson } = await import(
+      './launcher/orchestrator.js'
+    );
     const { realRunCommand } = await import('./launcher/exec.js');
     const wantJson = process.argv.includes('--json');
     const portFlag = (() => {
       const i = process.argv.indexOf('--port');
       return i >= 0 ? Number(process.argv[i + 1]) : undefined;
     })();
+    // A missing/non-numeric --port (NaN) must fall back to the default, not
+    // propagate into the URL / persisted state / serve argv as "NaN".
+    const port = Number.isFinite(portFlag) ? (portFlag as number) : 8443;
     const deps = {
       run: realRunCommand,
       dir: join(homedir(), '.qwen', 'rc'),
-      port: portFlag ?? 8443,
+      port,
       unit: 'qwen-rc-gateway',
       // PATH-independent self-invocation: [node, this cli.js] so the systemd
       // --user unit can exec qwen-rc even when it isn't on PATH.
@@ -1913,19 +1918,11 @@ if (process.argv[2] === 'serve') {
     if (cmd === 'up') {
       const r = await up(deps);
       if (wantJson) {
+        // Deliberately NOT the raw UpResult: upJson() strips bootstrapCode —
+        // a one-time OWNER credential — before it reaches this
+        // machine-captured stream (e.g. the Electron/wsl.exe launcher path).
         // eslint-disable-next-line no-console
-        console.log(
-          JSON.stringify({
-            status: r.ok ? 'running' : 'error',
-            url: r.url,
-            host: r.host,
-            port: r.port,
-            unit: r.unit,
-            bootstrapCode: r.bootstrapCode,
-            certExpiry: r.certExpiry,
-            hint: r.hint,
-          }),
-        );
+        console.log(JSON.stringify(upJson(r)));
       } else if (r.ok) {
         // eslint-disable-next-line no-console
         console.log(

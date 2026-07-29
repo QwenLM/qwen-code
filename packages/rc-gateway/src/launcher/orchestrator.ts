@@ -149,6 +149,26 @@ export async function up(deps: Deps): Promise<UpResult> {
   };
 }
 
+/**
+ * Shape the `--json` payload for `qwen-rc up`. Deliberately OMITS
+ * `bootstrapCode`: `--json` targets a machine-captured stream (e.g. the
+ * Electron/wsl.exe launcher path), and the bootstrap code is a one-time OWNER
+ * credential that must not be echoed onto a surface that may be logged or
+ * relayed. The human-readable path (cli.ts, non-`--json`) still prints it to
+ * the terminal.
+ */
+export function upJson(r: UpResult): Record<string, unknown> {
+  return {
+    status: r.ok ? 'running' : 'error',
+    url: r.url,
+    host: r.host,
+    port: r.port,
+    unit: r.unit,
+    certExpiry: r.certExpiry,
+    hint: r.hint,
+  };
+}
+
 export async function down(deps: Deps): Promise<{ ok: boolean }> {
   const { run, dir, unit } = deps;
   const st = readState(dir);
