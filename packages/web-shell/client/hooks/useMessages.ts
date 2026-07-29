@@ -142,8 +142,10 @@ export function reconcileBackgroundAgentResolutions(
   return changed ? reconciled : messages;
 }
 
-export function useMessages(t: Translator): Message[] {
-  const blocks = useTranscriptBlocks();
+export function useMessagesFromBlocks(
+  t: Translator,
+  blocks: readonly DaemonTranscriptBlock[],
+): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
   const messages = useMemo(
@@ -259,4 +261,9 @@ export function useMessages(t: Translator): Message[] {
       resolutionSnapshot.resolutions,
     );
   }, [connection.sessionId, messages, resolutionSnapshot]);
+}
+
+export function useMessages(t: Translator): Message[] {
+  const blocks = useTranscriptBlocks();
+  return useMessagesFromBlocks(t, blocks);
 }

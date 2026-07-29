@@ -820,9 +820,7 @@ export async function resolveAtCommandQuery({
       fileDisplays = result.files.map((file, index) => ({
         callId: `client-read-${userMessageTimestamp}-${index}`,
         name: file.isDirectory ? 'Read Directory' : 'Read File',
-        description: file.isDirectory
-          ? `Read directory ${path.basename(file.filePath)}`
-          : `Read file ${path.basename(file.filePath)}`,
+        description: `@${path.basename(file.filePath)}`,
         status: file.error ? ToolCallStatus.Error : ToolCallStatus.Success,
         resultDisplay: file.error
           ? `Failed to read ${path.basename(file.filePath)}: ${file.error}`

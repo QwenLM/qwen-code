@@ -609,6 +609,8 @@ export class ChatRecordingService {
     | undefined;
   /** Serializes appends and authoritative read barriers. Always settles. */
   private operationTail: Promise<void> = Promise.resolve();
+  private acceptingWrites = false;
+  private closePromise: Promise<void> | undefined;
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -698,6 +700,7 @@ export class ChatRecordingService {
       this.lastPersistedRecordUuid = this.lastRecordUuid;
     } else {
       this.state = 'active';
+      this.acceptingWrites = true;
       this.restoreSessionState(
         resumed
           ? {
@@ -842,6 +845,7 @@ export class ChatRecordingService {
     this.binding = { sessionId: lease.sessionId, lease };
     this.restoreSessionState(sessionData, persistedTitleInfo);
     this.state = 'active';
+    this.acceptingWrites = true;
   }
 
   /**
@@ -884,6 +888,7 @@ export class ChatRecordingService {
     operation = 'append',
   ): Error {
     const failure = cause instanceof Error ? cause : new Error(String(cause));
+    this.acceptingWrites = false;
     if (
       !this.integrityFailure &&
       (failure instanceof SessionWriterLostError ||
@@ -959,7 +964,9 @@ export class ChatRecordingService {
     record: ChatRecord,
     options?: { updateActiveTail?: boolean },
   ): void {
-    if (this.writeFailure || this.state !== 'active') return;
+    if (this.writeFailure || !this.acceptingWrites || this.state !== 'active') {
+      return;
+    }
     const legacyConversationFile = this.writerLeaseRequired
       ? undefined
       : this.ensureConversationFile();
@@ -976,7 +983,9 @@ export class ChatRecordingService {
     options?: { updateActiveTail?: boolean },
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
-    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+    if (!this.acceptingWrites || this.state !== 'active') {
+      throw new SessionWriterUnavailableError();
+    }
 
     const updateActiveTail = options?.updateActiveTail !== false;
     const legacyConversationFile = this.writerLeaseRequired
@@ -1094,10 +1103,11 @@ export class ChatRecordingService {
 
   async runWithWriteBarrier<T>(operation: () => Promise<T>): Promise<T> {
     if (this.writeFailure) throw this.writeFailure;
-    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+    if (!this.acceptingWrites || this.state !== 'active') {
+      throw new SessionWriterUnavailableError();
+    }
     const pending = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
-      if (this.state !== 'active') throw new SessionWriterUnavailableError();
       const lease = this.binding?.lease;
       try {
         if (lease) {
@@ -1142,22 +1152,36 @@ export class ChatRecordingService {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.state === 'closed') return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    if (this.state === 'closed') return Promise.resolve();
+    this.beginClose();
+    this.closePromise = this.closeOnce();
+    return this.closePromise;
+  }
+
+  beginClose(): void {
     this.autoTitleController?.abort();
-    if (this.state === 'active') this.state = 'closing';
+    this.acceptingWrites = false;
+    if (this.state === 'active') {
+      this.state = 'closing';
+    }
+  }
+
+  private async closeOnce(): Promise<void> {
     let flushFailure: unknown;
     try {
       await this.flush();
     } catch (error) {
       flushFailure = error;
     }
+    const lease = this.binding?.lease;
     try {
-      await this.binding?.lease.release();
+      await lease?.release();
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {
-      if (error instanceof SessionWriterLostError) {
+      if (lease?.isReleased || error instanceof SessionWriterLostError) {
         this.binding = undefined;
         this.state = 'closed';
       } else {

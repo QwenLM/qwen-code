@@ -17,7 +17,12 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import type { CallableTool, FunctionCall, Part } from '@google/genai';
+import type {
+  CallableTool,
+  FunctionCall,
+  Part,
+  PartListUnion,
+} from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
@@ -32,6 +37,7 @@ import {
   generateLegacyMcpToolName,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
+import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
 
@@ -406,20 +412,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        const errorMessage = `MCP tool '${
-          this.serverToolName
-        }' reported tool error for function call: ${safeJsonStringify({
+        return await this.buildMcpToolError(rawResponseParts, {
           name: this.serverToolName,
           args: this.params,
-        })} with response: ${safeJsonStringify(rawResponseParts)}`;
-        return {
-          llmContent: errorMessage,
-          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-          error: {
-            message: errorMessage,
-            type: ToolErrorType.MCP_TOOL_ERROR,
-          },
-        };
+        });
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
@@ -490,19 +486,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       });
 
       if (this.isMCPToolError(rawResponseParts)) {
-        const errorMessage = `MCP tool '${
-          this.serverToolName
-        }' reported tool error for function call: ${safeJsonStringify(
-          functionCalls[0],
-        )} with response: ${safeJsonStringify(rawResponseParts)}`;
-        return {
-          llmContent: errorMessage,
-          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-          error: {
-            message: errorMessage,
-            type: ToolErrorType.MCP_TOOL_ERROR,
-          },
-        };
+        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
@@ -519,6 +503,43 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       return this.handleReconnectOnError(error, signal);
     }
+  }
+
+  private async buildMcpToolError(
+    rawResponseParts: Part[],
+    functionCall: FunctionCall,
+  ): Promise<ToolResult> {
+    const imageContent = getMcpErrorImageContent(rawResponseParts);
+    let llmContent: PartListUnion;
+    let errorMessage: string;
+    let persistedOutputFiles: string[] | undefined;
+    if (imageContent) {
+      const truncatedContent = await this.truncateTextParts(imageContent);
+      llmContent = truncatedContent.parts;
+      persistedOutputFiles = truncatedContent.persistedOutputFiles;
+      errorMessage = `MCP tool '${
+        this.serverToolName
+      }' reported tool error for function call: ${safeJsonStringify(
+        functionCall,
+      )} with response: ${getDisplayFromParts(truncatedContent.parts)}`;
+    } else {
+      errorMessage = `MCP tool '${
+        this.serverToolName
+      }' reported tool error for function call: ${safeJsonStringify(
+        functionCall,
+      )} with response: ${safeJsonStringify(rawResponseParts)}`;
+      llmContent = errorMessage;
+    }
+
+    return {
+      llmContent,
+      returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+      error: {
+        message: errorMessage,
+        type: ToolErrorType.MCP_TOOL_ERROR,
+      },
+      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+    };
   }
 
   /**
@@ -819,6 +840,11 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
   );
 
   return transformed.filter((part): part is Part => part !== null);
+}
+
+function getMcpErrorImageContent(rawResponseParts: Part[]): Part[] | undefined {
+  const transformedParts = transformMcpContentToParts(rawResponseParts);
+  return transformedParts.some(isImagePart) ? transformedParts : undefined;
 }
 
 /**

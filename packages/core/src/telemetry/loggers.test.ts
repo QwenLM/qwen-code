@@ -33,6 +33,7 @@ import {
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_RIPGREP_RUNTIME_RECOVERY,
   EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
@@ -53,6 +54,7 @@ import {
   logMalformedJsonResponse,
   logFileOperation,
   logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
   logSkillLaunch,
   logToolOutputTruncated,
   logExtensionEnable,
@@ -79,6 +81,7 @@ import {
   ToolCallEvent,
   UserPromptEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   SkillLaunchEvent,
   MalformedJsonResponseEvent,
   makeChatCompressionEvent,
@@ -844,6 +847,47 @@ describe('loggers', () => {
           'event.name': EVENT_RIPGREP_FALLBACK,
           error: 'rg not found',
         }),
+      );
+    });
+  });
+
+  describe('logRipgrepRuntimeRecovery', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logRipgrepRuntimeRecoveryEvent');
+    });
+
+    it('logs privacy-safe runtime recovery fields', () => {
+      const event = new RipgrepRuntimeRecoveryEvent({
+        selection_mode: 'builtin',
+        retry_triggered: true,
+        retry_succeeded: true,
+        failure_kind: 'eagain',
+      });
+
+      logRipgrepRuntimeRecovery(mockConfig, event);
+
+      expect(
+        QwenLogger.prototype.logRipgrepRuntimeRecoveryEvent,
+      ).toHaveBeenCalledWith(event);
+      const emittedEvent = mockLogger.emit.mock.calls[0][0];
+      expect(emittedEvent.body).toBe('Ripgrep runtime recovery: eagain.');
+      expect(emittedEvent.attributes).toEqual(
+        expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_RIPGREP_RUNTIME_RECOVERY,
+          selection_mode: 'builtin',
+          retry_triggered: true,
+          retry_succeeded: true,
+          failure_kind: 'eagain',
+        }),
+      );
+      expect(JSON.stringify(emittedEvent.attributes)).not.toMatch(
+        /pattern|path|stdout|stderr|needle|repo/,
       );
     });
   });

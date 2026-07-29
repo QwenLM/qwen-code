@@ -86,7 +86,15 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
-import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  ChatRecordingFailureEvent,
+} from '../services/chatRecordingService.js';
+import type { ResumedSessionData } from '../services/sessionService.js';
+import {
+  GoalPersistenceUnavailableError,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
 import {
   SessionTranscriptChangedError,
   SessionWriterLease,
@@ -2185,6 +2193,146 @@ describe('Server Config (config.ts)', () => {
       expect(flush).not.toHaveBeenCalled();
     });
 
+    const resumedGoalSession = (
+      status: 'active' | 'paused',
+    ): ResumedSessionData => {
+      const record: ChatRecord = {
+        uuid: `goal-${status}`,
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          v: 2,
+          cause: status === 'active' ? 'create' : 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'g-resumed',
+              revision: 1,
+              objective: 'resume me',
+              status,
+              evidenceCursor: { recordId: 'goal-active' },
+              turnCount: 1,
+              activeTimeMs: 10,
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          },
+        },
+      };
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    it('restores the complete resumed-session Goal before exposing readiness', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+
+      const initial = await config.getGoalRuntimeReady();
+      expect(initial.getSnapshot().goal).toMatchObject({
+        objective: 'resume me',
+        status: 'paused',
+      });
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      const replacement = await config.getGoalRuntimeReady();
+      expect(replacement).not.toBe(initial);
+      expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('owns one durable Goal runtime per canonical session', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const first = config.getGoalRuntime();
+
+      expect(config.getGoalRuntime()).toBe(first);
+      config.startNewSession('replacement-session');
+      const replacement = config.getGoalRuntime();
+
+      expect(replacement).not.toBe(first);
+      await expect(
+        first.dispatch({ action: 'create', objective: 'stale' }),
+      ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('rebinds the current Goal host to every replacement runtime', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('active'),
+      });
+      const started: string[] = [];
+      const host: GoalTurnHost = {
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      };
+
+      config.bindGoalTurnHost(host);
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() =>
+        expect(started).toEqual(['g-resumed', 'g-resumed']),
+      );
+    });
+
+    it('does not expose volatile Goal state when chat recording is disabled', () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      expect(() => config.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
+    it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const canonical = config.getGoalRuntime();
+      const child = Object.create(config) as Config;
+
+      expect(() => child.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+      expect(() =>
+        child.bindGoalTurnHost({
+          startGoalTurn: vi.fn(),
+          preemptGoalTurn: vi.fn(),
+        }),
+      ).toThrow(GoalPersistenceUnavailableError);
+      await expect(
+        child.rebaseGoalRuntimeFromActiveTranscript(),
+      ).rejects.toThrow(GoalPersistenceUnavailableError);
+      await child.shutdown();
+      expect(() => canonical.getSnapshot()).not.toThrow();
+      expect(config.getGoalRuntime()).toBe(canonical);
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -2334,6 +2482,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            beginClose: () => void;
             close: () => Promise<void>;
           };
         }
@@ -2343,6 +2492,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            beginClose: () => void;
             close: () => Promise<void>;
           };
         }
@@ -2351,6 +2501,7 @@ describe('Server Config (config.ts)', () => {
         flush: async () => {
           notify(config, event);
         },
+        beginClose: vi.fn(),
         close: async () => {},
       };
 
@@ -2663,6 +2814,46 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('treats managed shutdown during writer acquisition as a clean terminal', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      let resolveAcquire!: (lease: SessionWriterLease) => void;
+      const acquireGate = new Promise<SessionWriterLease>((resolve) => {
+        resolveAcquire = resolve;
+      });
+      let released = false;
+      const release = vi.fn().mockImplementation(async () => {
+        released = true;
+      });
+      const lease = {
+        transcriptExistedAtAcquire: false,
+        release,
+        get isReleased() {
+          return released;
+        },
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockReturnValue(acquireGate);
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+      const close = config.closeSessionWriter();
+      resolveAcquire(lease);
+
+      await expect(close).resolves.toBeUndefined();
+      await expect(initialize).rejects.toMatchObject({
+        name: 'SessionWriterUnavailableError',
+      });
+      expect(release).toHaveBeenCalledOnce();
+      expect(config.hasSessionWriteOwnership()).toBe(false);
+      acquire.mockRestore();
+    });
+
     it('preserves activation and lease release failures', async () => {
       const config = new Config({
         ...baseParams,
@@ -2717,9 +2908,13 @@ describe('Server Config (config.ts)', () => {
       ).mockRejectedValue(initializationError);
       (
         config as unknown as {
-          chatRecordingService: { close: () => Promise<void> };
+          chatRecordingService: {
+            beginClose: () => void;
+            close: () => Promise<void>;
+          };
         }
       ).chatRecordingService = {
+        beginClose: vi.fn(),
         close: vi.fn().mockRejectedValue(closeError),
       };
 
@@ -2732,6 +2927,332 @@ describe('Server Config (config.ts)', () => {
       expect(
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([initializationError, closeError]);
+    });
+
+    it('waits for in-flight initialization before cleaning late resources', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      const initializeInternal = vi
+        .spyOn(internal, 'initializeInternal')
+        .mockImplementation(async () => {
+          await initializationGate;
+          internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        });
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+      let shutdownSettled = false;
+      const shutdown = config
+        .shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        })
+        .then(() => {
+          shutdownSettled = true;
+        });
+
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(shutdownSettled).toBe(false);
+      expect(stop).not.toHaveBeenCalled();
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await expect(shutdown).resolves.toBeUndefined();
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('does not let incomplete initialization block best-effort shutdown', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      const initializeInternal = vi
+        .spyOn(internal, 'initializeInternal')
+        .mockImplementation(async () => {
+          await initializationGate;
+          internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        });
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(stop).not.toHaveBeenCalled();
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    });
+
+    it('keeps strict shutdown waiting when best-effort shutdown starts first', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        await initializationGate;
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+
+      const initialize = config.initialize();
+      const bestEffortShutdown = config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+      let strictShutdownSettled = false;
+      const strictShutdown = config
+        .shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        })
+        .then(() => {
+          strictShutdownSettled = true;
+        });
+
+      await bestEffortShutdown;
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(strictShutdownSettled).toBe(false);
+
+      releaseInitialization();
+      await initialize;
+      await strictShutdown;
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('runs resource cleanup once across concurrent shutdown calls', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await Promise.all([
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+      ]);
+
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('allows a later shutdown to retry incomplete resource cleanup', async () => {
+      const config = new Config(baseParams);
+      const stop = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('stop failed'))
+        .mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+
+      expect(stop).toHaveBeenCalledTimes(2);
+    });
+
+    it('propagates resource cleanup failures in strict mode and allows retry', async () => {
+      const config = new Config(baseParams);
+      const stop = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('stop failed'))
+        .mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        }),
+      ).rejects.toThrow('stop failed');
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).toHaveBeenCalledTimes(2);
+    });
+
+    it('cleans partial resources after initialization fails', async () => {
+      const config = new Config(baseParams);
+      const initializationError = new Error('late initialization failure');
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+        throw initializationError;
+      });
+
+      const result = await config.initialize().catch((error: unknown) => error);
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+
+      expect(result).toBe(initializationError);
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('closes the writer before waiting for incomplete initialization', async () => {
+      const config = new Config(baseParams);
+      let releaseInitialization!: () => void;
+      const initializationGate = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      const initializeInternal = vi
+        .spyOn(
+          config as unknown as {
+            initializeInternal: () => Promise<void>;
+          },
+          'initializeInternal',
+        )
+        .mockImplementation(() => initializationGate);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          chatRecordingService: {
+            beginClose: () => void;
+            close: () => Promise<void>;
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        beginClose,
+        close,
+        finalize,
+        flush,
+      };
+
+      const initialize = config.initialize();
+      await vi.waitFor(() => expect(initializeInternal).toHaveBeenCalledOnce());
+      const shutdown = config.shutdown({ shutdownTelemetry: false });
+
+      expect(beginClose).toHaveBeenCalledOnce();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+      releaseInitialization();
+      await expect(initialize).resolves.toBeUndefined();
+      await expect(shutdown).resolves.toBeUndefined();
+    });
+
+    it('rejects initialization after shutdown has started', async () => {
+      const config = new Config(baseParams);
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+      });
+
+      await expect(config.initialize()).rejects.toThrow(
+        'Config is shutting down',
+      );
+    });
+
+    it('preserves graceful writer finalization after successful initialization', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockResolvedValue(undefined);
+      await config.initialize();
+      const order: string[] = [];
+      (
+        config as unknown as {
+          chatRecordingService: {
+            beginClose: () => void;
+            close: () => Promise<void>;
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        beginClose: vi.fn(() => order.push('beginClose')),
+        close: vi.fn(async () => {
+          order.push('close');
+        }),
+        finalize: vi.fn(() => order.push('finalize')),
+        flush: vi.fn(async () => {
+          order.push('flush');
+        }),
+      };
+
+      await config.shutdown({ shutdownTelemetry: false });
+
+      expect(order).toEqual(['finalize', 'flush', 'beginClose', 'close']);
     });
 
     it('should throw an error if initialized more than once', async () => {
@@ -2771,6 +3292,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -5248,6 +5771,24 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
   });
 
+  it('Config exposes the telemetry user ID', () => {
+    const config = new Config({
+      ...baseParams,
+      telemetry: { enabled: true, userId: '  user-079458  ' },
+    });
+
+    expect(config.getTelemetryUserId()).toBe('user-079458');
+  });
+
+  it('Config omits the telemetry user ID by default', () => {
+    const config = new Config({
+      ...baseParams,
+      telemetry: { enabled: true },
+    });
+
+    expect(config.getTelemetryUserId()).toBeUndefined();
+  });
+
   it('should have a getFileService method that returns FileDiscoveryService', () => {
     const config = new Config(baseParams);
     const fileService = config.getFileService();
@@ -5747,6 +6288,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -5777,6 +6320,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
     });

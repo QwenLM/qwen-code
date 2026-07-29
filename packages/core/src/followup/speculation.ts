@@ -23,6 +23,7 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
+import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
@@ -345,9 +346,12 @@ async function runSpeculativeLoop(
                 result.error.message,
               )
             : convertToFunctionResponse(name, id ?? '', result.llmContent);
+          const bridgedResponseParts = stripToolResultImages(
+            convertedResponseParts,
+          );
           const responseParts = id
-            ? convertedResponseParts
-            : convertedResponseParts.map((responsePart) => {
+            ? bridgedResponseParts
+            : bridgedResponseParts.map((responsePart) => {
                 if (!responsePart.functionResponse) {
                   return responsePart;
                 }

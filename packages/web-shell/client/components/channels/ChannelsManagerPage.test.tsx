@@ -60,6 +60,10 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
       start: vi.fn(),
       stop: vi.fn(),
       restart: vi.fn(),
+      pairing: {
+        list: vi.fn(),
+        approve: vi.fn(),
+      },
     },
   },
   useChannelsMock: vi.fn(),
@@ -171,6 +175,10 @@ beforeEach(() => {
   channelState.current.start.mockReset().mockResolvedValue(undefined);
   channelState.current.stop.mockReset().mockResolvedValue(undefined);
   channelState.current.restart.mockReset().mockResolvedValue(undefined);
+  channelState.current.pairing.list
+    .mockReset()
+    .mockResolvedValue({ requests: [] });
+  channelState.current.pairing.approve.mockReset();
   workspaceState.current = {
     workspaceCwd: '/workspace/demo',
     token: 'secret',
@@ -259,6 +267,16 @@ describe('ChannelsManagerPage', () => {
         clientSecret: { present: true, source: 'literal' },
       },
     };
+    channelState.current.pairing.list.mockResolvedValue({
+      requests: [
+        {
+          senderId: 'user-42',
+          senderName: 'Ada',
+          code: 'ABCD1234',
+          createdAt: Date.now(),
+        },
+      ],
+    });
     await renderPage();
 
     const edit = Array.from(container.querySelectorAll('button')).find(
@@ -273,6 +291,10 @@ describe('ChannelsManagerPage', () => {
       (input) => input.value === 'DingTalk Bot',
     );
     expect(name?.disabled).toBe(true);
+    expect(channelState.current.pairing.list).toHaveBeenCalledWith(
+      'DingTalk Bot',
+    );
+    expect(document.body.textContent).toContain('ABCD1234');
   });
 
   it('deletes a Channel with the current revision', async () => {
