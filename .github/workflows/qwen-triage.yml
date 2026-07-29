@@ -2082,7 +2082,7 @@ jobs:
               [ -n "$hit" ] && add_reason 'a dependency resolves outside registry.npmjs.org'
               hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$' "$diff_file" | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff modifies package-manager configuration'
-              hit="$(grep -E '^\+' "$diff_file" | grep -Ev '"(integrity|resolved)"' | awk '{ for (i = 1; i <= NF; i++) if (length($i) >= 600) { print; exit } }' || true)"
+              hit="$(grep -E '^\+' "$diff_file" | grep -Ev '"(integrity|resolved)"' | grep -Ev '^\+[-|:+ ]+$' | awk '{ for (i = 1; i <= NF; i++) if (length($i) >= 600) { print; exit } }' || true)"
               [ -n "$hit" ] && add_reason 'the diff adds long opaque single-line content'
               # The model screen reads at most 200 KB; an oversized diff
               # would be screened on a prefix and the rest never shown to
@@ -3108,6 +3108,10 @@ jobs:
             /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
           esac
           find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+          remaining="$(find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$remaining" != '0' ]; then
+            echo "::warning::post-run wipe left ${remaining} entries in the workspace; the next pool job meets only the allowlist sweep for them."
+          fi
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted

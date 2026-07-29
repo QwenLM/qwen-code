@@ -1113,6 +1113,8 @@ describe('qwen-triage verify hardening', () => {
     );
     // Same path guard as the pre-run wipe.
     expect(postWipe).toContain('refusing to wipe suspicious workspace path');
+    // Warns (but does not fail) when residue survives the wipe.
+    expect(postWipe).toContain('::warning::post-run wipe left');
   });
 
   // The sponsored lane's pre-execution risk screen, driven for real: the
@@ -1370,6 +1372,15 @@ describe('qwen-triage verify hardening', () => {
         run({
           trust: 'external',
           diff: `+++ b/src/x.js\n+${'word '.repeat(200)}\n`,
+        }).decision,
+      ).toBe('run');
+
+      // A wide markdown table separator row is not an opaque payload:
+      // only |, -, +, : and spaces, so it must not be refused.
+      expect(
+        run({
+          trust: 'external',
+          diff: `+++ b/README.md\n+${'|---'.repeat(200)}|\n`,
         }).decision,
       ).toBe('run');
 
