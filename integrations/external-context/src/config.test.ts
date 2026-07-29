@@ -4,9 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ConfigurationError, loadConfig } from './config.js';
 
@@ -38,6 +45,7 @@ describe('loadConfig', () => {
     });
 
     expect(config.timeoutMs).toBe(5000);
+    expect(config.version).toBe(1);
     expect(config.provider).toMatchObject({
       type: 'mem0-platform-v3',
       apiKeyEnv: 'MEM0_API_KEY',
@@ -49,7 +57,7 @@ describe('loadConfig', () => {
   it('rejects unsupported config versions', async () => {
     const fixture = await createFixture();
     await writeConfig(fixture, {
-      version: 2,
+      version: 3,
       provider: {
         type: 'mem0-platform-v3',
         apiKeyEnv: 'MEM0_API_KEY',
@@ -63,6 +71,185 @@ describe('loadConfig', () => {
         MEM0_API_KEY: 'secret-value',
       }),
     ).rejects.toThrow(ConfigurationError);
+  });
+
+  it('loads a v2 auto-recall config and canonicalizes its root', async () => {
+    const fixture = await createFixture();
+    const repositoryRoot = join(fixture.root, 'repository');
+    await mkdir(repositoryRoot);
+    await writeConfig(fixture, {
+      version: 2,
+      timeoutMs: 4000,
+      autoRecall: { repositoryRoot },
+      provider: {
+        type: 'generic-http-search-v1',
+        baseUrl: 'https://context.example.com',
+        tokenEnv: 'CONTEXT_TOKEN',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        CONTEXT_TOKEN: 'secret-value',
+      }),
+    ).resolves.toMatchObject({
+      version: 2,
+      timeoutMs: 4000,
+      autoRecall: {
+        repositoryRoot: await realpath(repositoryRoot),
+        timeoutMs: 1500,
+      },
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves a symlinked v2 repository root',
+    async () => {
+      const fixture = await createFixture();
+      const repositoryRoot = join(fixture.root, 'repository');
+      const repositoryLink = join(fixture.root, 'repository-link');
+      await mkdir(repositoryRoot);
+      await symlink(repositoryRoot, repositoryLink, 'dir');
+      await writeConfig(fixture, {
+        version: 2,
+        autoRecall: { repositoryRoot: repositoryLink },
+        provider: {
+          type: 'mem0-platform-v3',
+          apiKeyEnv: 'MEM0_API_KEY',
+          appId: 'shared-repository',
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).resolves.toMatchObject({
+        autoRecall: { repositoryRoot: await realpath(repositoryRoot) },
+      });
+    },
+  );
+
+  it.each([
+    ['relative root', 'relative'],
+    ['filesystem root', parse(tmpdir()).root],
+    ['Windows drive root', 'C:\\'],
+  ])('rejects a v2 %s', async (_name, repositoryRoot) => {
+    const fixture = await createFixture();
+    await writeConfig(fixture, {
+      version: 2,
+      autoRecall: { repositoryRoot },
+      provider: {
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        appId: 'shared-repository',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        MEM0_API_KEY: 'secret-value',
+      }),
+    ).rejects.toThrow('External context repository root is invalid.');
+  });
+
+  it('rejects a missing or non-directory v2 repository root', async () => {
+    const fixture = await createFixture();
+    const file = join(fixture.root, 'not-a-directory');
+    await writeFile(file, 'content');
+
+    for (const repositoryRoot of [join(fixture.root, 'missing'), file]) {
+      await writeConfig(fixture, {
+        version: 2,
+        autoRecall: { repositoryRoot },
+        provider: {
+          type: 'mem0-platform-v3',
+          apiKeyEnv: 'MEM0_API_KEY',
+          appId: 'shared-repository',
+        },
+      });
+
+      await expect(
+        loadConfig({
+          QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+          MEM0_API_KEY: 'secret-value',
+        }),
+      ).rejects.toThrow('External context repository root is invalid.');
+    }
+  });
+
+  it.each([0, 5001])('rejects v2 auto-recall timeout %s', async (timeoutMs) => {
+    const fixture = await createFixture();
+    await writeConfig(fixture, {
+      version: 2,
+      autoRecall: {
+        repositoryRoot: fixture.root,
+        timeoutMs,
+      },
+      provider: {
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        appId: 'shared-repository',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        MEM0_API_KEY: 'secret-value',
+      }),
+    ).rejects.toThrow('External context config is invalid.');
+  });
+
+  it.each([1, 5000])('accepts v2 auto-recall timeout %s', async (timeoutMs) => {
+    const fixture = await createFixture();
+    await writeConfig(fixture, {
+      version: 2,
+      autoRecall: {
+        repositoryRoot: fixture.root,
+        timeoutMs,
+      },
+      provider: {
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        appId: 'shared-repository',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        MEM0_API_KEY: 'secret-value',
+      }),
+    ).resolves.toMatchObject({
+      autoRecall: { timeoutMs },
+    });
+  });
+
+  it('strictly validates v2 auto-recall fields', async () => {
+    const fixture = await createFixture();
+    await writeConfig(fixture, {
+      version: 2,
+      autoRecall: {
+        repositoryRoot: fixture.root,
+        extra: true,
+      },
+      provider: {
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        appId: 'shared-repository',
+      },
+    });
+
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        MEM0_API_KEY: 'secret-value',
+      }),
+    ).rejects.toThrow('External context config is invalid.');
   });
 
   it('rejects unknown config fields', async () => {
@@ -199,6 +386,7 @@ async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), 'external-context-config-'));
   temporaryDirectories.push(root);
   return {
+    root,
     config: join(root, 'config.json'),
   };
 }
