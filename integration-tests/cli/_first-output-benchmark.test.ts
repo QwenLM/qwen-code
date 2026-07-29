@@ -357,6 +357,7 @@ describe('FirstOutputTracker', () => {
     );
     tracker.push(updateLevelReplayedEcho, 9.6);
     tracker.push(userEcho('prompt-1', 3), 10);
+    tracker.push(userEcho('prompt-1', 7), 15);
     tracker.push(answer('prompt-1', 'answer', 4), 20);
     tracker.push(turnComplete('prompt-1', 5), 30);
     tracker.acceptPrompt('prompt-1');
