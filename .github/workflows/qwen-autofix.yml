@@ -404,8 +404,8 @@ jobs:
               # applies TAKEOVER_LABEL, 'TAKEOVER_COMMAND stop' removes it —
               # nothing else. The label stays the single source of truth:
               # engagement and release happen ONLY via the label events
-              # below, so the command's whole blast radius is one label
-              # toggle. Exact match on the trimmed body (constants, never
+              # below; the command also posts acks directly in both
+              # directions (#7999, #8002). Exact match on the trimmed body (constants, never
               # user-input parsing); allowed senders: the PR author (who may
               # lack label access) or a write+ collaborator. This immediately
               # narrows a previously fully-closed surface reopened under
@@ -2069,10 +2069,10 @@ jobs:
                 # the ack itself within seconds — fork or in-repo alike — so
                 # a SHORT grace covers the write's own latency and an
                 # ic.json snapshot taken between the label write and the ack
-                # landing; past it, the command's post failed and THIS scan
-                # heals it, including the immediate scan the label event
-                # routed (the heal must not slip to the next scheduled
-                # tick). A human-applied in-repo label is owned by the
+                # landing; past it, the command's post failed and the next
+                # scheduled scan heals it (≤10 min), instead of waiting on
+                # a label event that may never arrive. A human-applied
+                # in-repo label is owned by the
                 # DEDICATED ack job, which needs job-spin-up time — the
                 # longer grace stands. A human-labeled fork has no other
                 # owner, so no grace: the scan posts right here.

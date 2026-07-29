@@ -2277,9 +2277,9 @@ describe('qwen-autofix workflow', () => {
     // First-pickup grace is keyed by WHO owns the missing ack (the label
     // event's actor): a human in-repo label defers to the DEDICATED ack
     // job (3m of job spin-up), a bot-applied label defers only to the
-    // COMMAND's own in-flight write (45s — fork or in-repo alike), so the
-    // immediate scan still heals a failed command ack instead of slipping
-    // to the next scheduled tick, and an ic.json snapshot taken between
+    // COMMAND's own in-flight write (45s — fork or in-repo alike); past
+    // the grace the next scheduled scan heals a failed command ack
+    // (≤10 min), and an ic.json snapshot taken between
     // the label write and the command's ack cannot double-post.
     expect(reviewScanJob).toContain('engage ack deferred for #${PR}');
     // Behaviorally pin the LAST_LABELED_BY jq extraction — the load-bearing
