@@ -247,6 +247,44 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
+    it('rejects an allowlist containing only the authenticated GitHub account', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['TEST-BOT', 'test-bot'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'allowlist only contains the authenticated GitHub account "test-bot"',
+        );
+      } finally {
+        channel.disconnect();
+      }
+      expect(config.allowedUsers).toEqual(['test-bot', 'test-bot']);
+    });
+
+    it('warns when the authenticated GitHub account is part of a mixed allowlist', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['TEST-BOT', 'operator'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      try {
+        await channel.connect();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted but cannot trigger this channel; use a separate operator account.\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
     it('connect() is idempotent across reconnects', async () => {
       const config = makeConfig({
         senderPolicy: 'allowlist',
