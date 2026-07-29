@@ -37,6 +37,7 @@ async function renderRequests({
   channelName = 'release-bot',
   list = vi.fn().mockResolvedValue(PENDING),
   approve = vi.fn(),
+  language = 'en',
 }: {
   channelName?: string;
   list?: (name: string) => Promise<DaemonChannelPairingRequestsSnapshot>;
@@ -44,10 +45,11 @@ async function renderRequests({
     name: string,
     code: string,
   ) => Promise<DaemonChannelPairingApprovalResult>;
+  language?: 'en' | 'zh-CN';
 } = {}) {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChannelPairingRequests
           channelName={channelName}
           listRequests={list}
@@ -83,6 +85,15 @@ describe('ChannelPairingRequests', () => {
     expect(container.textContent).toContain('user-42');
     expect(container.textContent).toContain('ABCD1234');
     expect(container.textContent).toContain('5 min ago');
+    expect(container.textContent).toContain(
+      'Approvals take effect immediately; Save and Cancel do not undo them.',
+    );
+    const approve = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Approve',
+    );
+    expect(approve?.getAttribute('aria-label')).toBe(
+      'Approve Ada, code ABCD1234',
+    );
   });
 
   it('approves a request and replaces the list with the daemon response', async () => {
@@ -121,6 +132,62 @@ describe('ChannelPairingRequests', () => {
     expect(container.textContent).toContain('ABCD1234');
   });
 
+  it('uses an actionable message when approval cannot reach the daemon', async () => {
+    const approve = vi
+      .fn()
+      .mockRejectedValue(
+        new Error(
+          'POST /workspaces/:workspace/channels/:name/pairing-requests/approve: HTTP 500',
+        ),
+      );
+    await renderRequests({ approve });
+
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Approve',
+    );
+    await act(async () => {
+      button?.click();
+    });
+
+    expect(container.textContent).toContain(
+      'Pairing requests are temporarily unavailable. Try again.',
+    );
+    expect(container.textContent).toContain('ABCD1234');
+  });
+
+  it('refreshes the list when an approval request has expired', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(PENDING)
+      .mockResolvedValueOnce({ requests: [] });
+    const error = Object.assign(
+      new Error(
+        'POST /workspaces/:workspace/channels/:name/pairing-requests/approve: Pairing request was not found or has expired.',
+      ),
+      {
+        body: {
+          error: 'Pairing request was not found or has expired.',
+          code: 'channel_pairing_request_not_found',
+        },
+      },
+    );
+    const approve = vi.fn().mockRejectedValue(error);
+    await renderRequests({ list, approve });
+
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Approve',
+    );
+    await act(async () => {
+      button?.click();
+    });
+
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain(
+      'Pairing request was not found or has expired.',
+    );
+    expect(container.textContent).not.toContain('ABCD1234');
+  });
+
   it('retries after loading requests fails', async () => {
     const list = vi
       .fn()
@@ -138,6 +205,34 @@ describe('ChannelPairingRequests', () => {
 
     expect(list).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('ABCD1234');
+  });
+
+  it('uses an actionable message for transport failures', async () => {
+    const list = vi
+      .fn()
+      .mockRejectedValue(
+        new Error(
+          'GET /workspaces/:workspace/channels/:name/pairing-requests: HTTP 500',
+        ),
+      );
+    await renderRequests({ list });
+
+    expect(container.textContent).toContain(
+      'Pairing requests are temporarily unavailable. Try again.',
+    );
+    expect(container.textContent).not.toContain(
+      'GET /workspaces/:workspace/channels/:name/pairing-requests',
+    );
+  });
+
+  it('uses consistent approval wording in Chinese', async () => {
+    await renderRequests({ language: 'zh-CN' });
+
+    expect(container.textContent).toContain(
+      '批准会立即生效，保存或取消都不会撤销已批准的访问。',
+    );
+    expect(container.textContent).toContain('批准');
+    expect(container.textContent).not.toContain('允许');
   });
 
   it('ignores an approval response after the selected Channel changes', async () => {
