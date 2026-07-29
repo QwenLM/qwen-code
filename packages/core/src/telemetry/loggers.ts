@@ -34,6 +34,7 @@ import {
   EVENT_API_RETRY,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_RIPGREP_RUNTIME_RECOVERY,
   EVENT_EXTENSION_INSTALL,
   EVENT_MODEL_SLASH_COMMAND,
   EVENT_EXTENSION_DISABLE,
@@ -104,6 +105,7 @@ import type {
   ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   ToolOutputTruncatedEvent,
   ExtensionDisableEvent,
   ExtensionEnableEvent,
@@ -409,6 +411,30 @@ export function logRipgrepFallback(
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `Switching to grep as fallback.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logRipgrepRuntimeRecovery(
+  config: Config,
+  event: RipgrepRuntimeRecoveryEvent,
+): void {
+  // Runtime recovery is separate from startup fallback; it describes a selected
+  // ripgrep binary that started but did not complete normally.
+  QwenLogger.getInstance(config)?.logRipgrepRuntimeRecoveryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_RIPGREP_RUNTIME_RECOVERY,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Ripgrep runtime recovery: ${event.failure_kind}.`,
     attributes,
   };
   logger.emit(logRecord);

@@ -1031,6 +1031,111 @@ describe('KeypressContext - Kitty Protocol', () => {
         expect(mouseHandler).not.toHaveBeenCalled();
       });
 
+      it('dispatches a standalone SGR wheel event to mouse subscribers (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // A pure SGR scroll-down event (button 65) arriving alone.
+        act(() => {
+          stdin.emit('data', Buffer.from('\x1b[<65;10;20M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-down', col: 10, row: 20 }),
+        );
+      });
+
+      it('dispatches SGR wheel event arriving in fragmented chunks (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // SGR sequence split across two stdin chunks.
+        act(() => {
+          stdin.emit('data', Buffer.from('\x1b[<64;5'));
+          stdin.emit('data', Buffer.from(';15M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-up', col: 5, row: 15 }),
+        );
+      });
+
+      it('dispatches SGR wheel event when \\r arrives in the same chunk (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // Windows Terminal may deliver a preceding Enter (\r) in the same
+        // stdin chunk as the SGR mouse sequence. The \r must not cause
+        // shouldFlushRawDataAsPaste to misclassify the SGR data as paste.
+        act(() => {
+          stdin.emit('data', Buffer.from('\r\x1b[<65;10;20M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-down', col: 10, row: 20 }),
+        );
+      });
+
+      it('dispatches SGR wheel event when \\r\\n arrives in the same chunk (pasteWorkaround path)', async () => {
+        const mouseHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribeMouse(mouseHandler);
+        });
+
+        // Windows-style \r\n followed by SGR in one chunk.
+        act(() => {
+          stdin.emit('data', Buffer.from('\r\n\x1b[<65;3;7M'));
+        });
+
+        await waitFor(() => {
+          expect(mouseHandler).toHaveBeenCalledTimes(1);
+        });
+        expect(mouseHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'scroll-down', col: 3, row: 7 }),
+        );
+      });
+
       it('should handle empty paste sequence', async () => {
         const keyHandler = vi.fn();
 
