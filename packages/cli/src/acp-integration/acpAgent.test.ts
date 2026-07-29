@@ -13198,6 +13198,38 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['load', 'resume'] as const)(
+    'disables native Cron when %s restores a channel session',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const requestSettings = makeRestoreSettings();
+      requestSettings.merged.experimental = { cron: true };
+      vi.mocked(loadSettings).mockReturnValue(requestSettings);
+      const { agent, agentPromise } = await spawnAgent();
+      const params = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: { sourceType: 'channel' },
+        },
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(params);
+      } else {
+        await agent.unstable_resumeSession(params);
+      }
+
+      const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+      expect(sessionSettings?.experimental?.cron).toBe(false);
+      expect(requestSettings.merged.experimental?.cron).toBe(true);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
   /**
    * A persisted `system` / `slash_command` record carrying goal cards — the only
    * place a daemon transcript stores them.
