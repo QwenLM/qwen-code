@@ -26,6 +26,7 @@ import {
   HookCallEvent,
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
+  RipgrepRuntimeRecoveryEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -360,6 +361,38 @@ describe('QwenLogger', () => {
   });
 
   describe('event handlers', () => {
+    it('logs ripgrep runtime recovery without search details', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new RipgrepRuntimeRecoveryEvent({
+        selection_mode: 'builtin',
+        retry_triggered: true,
+        retry_succeeded: true,
+        failure_kind: 'eagain',
+      });
+
+      logger.logRipgrepRuntimeRecoveryEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'misc',
+          name: 'ripgrep_runtime_recovery',
+          properties: {
+            platform: process.platform,
+            arch: process.arch,
+            selection_mode: 'builtin',
+            retry_triggered: true,
+            retry_succeeded: true,
+            failure_kind: 'eagain',
+          },
+        }),
+      );
+      expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).not.toMatch(
+        /pattern|path|stdout|stderr|needle/,
+      );
+    });
+
     it('logs protocol tag sanitization without model content', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');

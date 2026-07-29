@@ -18,17 +18,16 @@ import type { Intent, ResolvedPath } from './paths.js';
  * doesn't fill on a single read.
  *
  * Full-snapshot reads above this cap are refused with `file_too_large`
- * rather than truncated. `readText` can serve explicit line windows
- * from larger files, but the default read/edit contract still needs a
- * bounded snapshot for hash stability, SSE buffering, and oldText
- * matching. Files at or below the cap honor a tighter `opts.maxBytes`
- * via post-decode truncation (`enforceReadSize`); that's where the
- * `meta.truncated = true` flag fires.
+ * rather than truncated. `readText` can serve finite-limit line windows from
+ * larger files, but the default read/edit contract still needs a bounded
+ * snapshot for hash stability, SSE buffering, and oldText matching. Files at
+ * or below the cap honor a tighter `opts.maxBytes` as a post-decode UTF-8
+ * output cap; `enforceReadSize` also supplies source-size truncation metadata.
  *
- * `enforceReadBytesSize` (the `readBytes` gate) and `edit()` use the
- * same constant as a hard upper bound — multi-GB files in the
- * workspace can no longer reach `fsp.readFile` through any
- * boundary path.
+ * `edit()` uses the same constant as a hard upper bound.
+ * `readBytesWindow` instead binds an fd and returns at most its explicit
+ * byte window without buffering the whole file. `enforceReadBytesSize`
+ * remains available to strict callers that do require a full byte snapshot.
  */
 export const MAX_READ_BYTES = 256 * 1024;
 
@@ -165,14 +164,13 @@ export interface ReadSizeOutcome {
  *
  * **Note**: this helper is the *soft* truncation gate that fires
  * when `opts.maxBytes < fileSize <= MAX_READ_BYTES`. It runs only
- * AFTER `readText`'s pre-stat hard-cap check has rejected files
- * above `MAX_READ_BYTES` with `file_too_large` (see
- * `workspace-file-system.ts:readText`). Within the hard cap the
- * caller can opt into a tighter byte ceiling via `opts.maxBytes`,
- * and we surface that truncation via `truncated: true` rather
- * than throwing — operators want to see a partial config file
- * rather than an opaque error when they explicitly opted in to a
- * smaller window.
+ * on the full-snapshot path: unbounded files above `MAX_READ_BYTES`
+ * are rejected before this helper, while finite line windows use
+ * the separate streaming path. Within the full-snapshot cap the caller
+ * can opt into a tighter byte ceiling via `opts.maxBytes`, and we
+ * surface that truncation via `truncated: true` rather than throwing —
+ * operators want to see a partial config file rather than an opaque
+ * error when they explicitly opted in to a smaller window.
  */
 export function enforceReadSize(
   fileBytes: number,
@@ -205,17 +203,14 @@ export function enforceWriteSize(
 }
 
 /**
- * Throw `file_too_large` when `fileBytes` exceeds the hard
- * `MAX_READ_BYTES` cap. This is the OOM-defense gate `readBytes`
- * runs at stat time — a 5 GB file is rejected before
- * `fsp.readFile` allocates the buffer.
+ * Throw `file_too_large` when a strict full-byte-snapshot caller exceeds the
+ * hard `MAX_READ_BYTES` cap. The production `readBytesWindow` path does not
+ * use this helper: it reads an explicit bounded window from an opened handle,
+ * so a multi-GB file never requires a multi-GB allocation.
  *
  * Soft window-read (`opts.maxBytes` truncation) is NOT this
- * function's job: `readBytes` truncates the returned buffer
- * post-read so a caller asking for `maxBytes: 1024` on a 200 KB
- * file gets 1 KB back, matching the parameter's window-read
- * promise. Mixing the soft window into the hard reject was the
- * round-7 reviewer-flagged contract violation.
+ * function's job. Mixing a bounded window contract into this strict
+ * full-snapshot gate would make the helper's safety guarantee ambiguous.
  */
 export function enforceReadBytesSize(fileBytes: number): void {
   if (fileBytes > MAX_READ_BYTES) {
@@ -223,7 +218,7 @@ export function enforceReadBytesSize(fileBytes: number): void {
       'file_too_large',
       `file of ${fileBytes} bytes exceeds read limit of ${MAX_READ_BYTES} bytes`,
       {
-        hint: 'use readText for capped truncation, or raise the daemon limit',
+        hint: 'use an explicit bounded readBytesWindow request for large files',
       },
     );
   }
