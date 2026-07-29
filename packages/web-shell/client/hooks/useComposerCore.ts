@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useCallback,
@@ -936,6 +937,17 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   return tags;
 }
 
+function hasInlineComposerTags(view: EditorView): boolean {
+  const tags = view.state.field(inlineComposerTagField, false);
+  if (!tags) return false;
+  let hasTags = false;
+  tags.between(0, view.state.doc.length, () => {
+    hasTags = true;
+    return false;
+  });
+  return hasTags;
+}
+
 function getInlineComposerTagPlacements(
   view: EditorView,
 ): InlineTagPlacement[] {
@@ -1173,6 +1185,35 @@ export interface SlashMenuState extends SlashCommandCompletionResult {
   selectedIndex: number;
 }
 
+function shallowEqualSlashMenu(
+  current: SlashMenuState | null,
+  next: SlashMenuState | null,
+): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  const keys = Object.keys(current) as Array<keyof SlashMenuState>;
+  return (
+    keys.length === Object.keys(next).length &&
+    keys.every((key) => {
+      if (key !== 'items') return Object.is(current[key], next[key]);
+      return (
+        current.items.length === next.items.length &&
+        current.items.every((item, index) => {
+          const nextItem = next.items[index];
+          if (!nextItem) return false;
+          const itemKeys = Object.keys(item) as Array<keyof typeof item>;
+          return (
+            itemKeys.length === Object.keys(nextItem).length &&
+            itemKeys.every((itemKey) =>
+              Object.is(item[itemKey], nextItem[itemKey]),
+            )
+          );
+        })
+      );
+    })
+  );
+}
+
 type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
 
 function handleMultilineHistoryBoundary(
@@ -1371,6 +1412,7 @@ export function useComposerCore(
   // mirrored into a ref so submit/getText read synchronously.
   const isTouchComposer = useIsTouchComposer();
   const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const mobileMaxHeightRef = useRef<number | null>(null);
   const [mobileText, setMobileTextState] = useState(() =>
     isTouchComposer ? (loadComposerDraft(composerDraftStorageKey) ?? '') : '',
   );
@@ -1610,6 +1652,7 @@ export function useComposerCore(
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
   const [hasInlineTags, setHasInlineTags] = useState(false);
+  const hasInlineTagsRef = useRef(false);
   const historyDraftComposerTagsRef = useRef<WebShellComposerTag[] | null>(
     null,
   );
@@ -1804,6 +1847,7 @@ export function useComposerCore(
   }, []);
 
   const setSlashMenu = useCallback((next: SlashMenuState | null) => {
+    if (shallowEqualSlashMenu(slashMenuRef.current, next)) return;
     slashMenuRef.current = next;
     setSlashMenuState(next);
   }, []);
@@ -1862,19 +1906,29 @@ export function useComposerCore(
         setSlashMenu(null);
         return;
       }
-      const result = getSlashCommandCompletionResult(
-        view.state.doc.toString(),
-        selection.head,
+      const line = view.state.doc.lineAt(selection.head);
+      if (!line.text.startsWith('/')) {
+        setSlashMenu(null);
+        return;
+      }
+      const relativeResult = getSlashCommandCompletionResult(
+        line.text,
+        selection.head - line.from,
         commandsRef.current,
         skillsRef.current,
         languageRef.current,
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
       );
-      if (!result) {
+      if (!relativeResult) {
         setSlashMenu(null);
         return;
       }
+      const result = {
+        ...relativeResult,
+        from: line.from + relativeResult.from,
+        to: line.from + relativeResult.to,
+      };
       closeAtMenu();
       const currentIndex =
         preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
@@ -1937,6 +1991,12 @@ export function useComposerCore(
 
   // Track whether editor has content for send button state
   const [hasContent, setHasContent] = useState(false);
+  const hasContentRef = useRef(false);
+  const updateHasContent = useCallback((next: boolean) => {
+    if (hasContentRef.current === next) return;
+    hasContentRef.current = next;
+    setHasContent(next);
+  }, []);
 
   // Update hasContent when tags or images change
   useEffect(() => {
@@ -1946,7 +2006,7 @@ export function useComposerCore(
       text,
       followupState?.isVisible ? followupState.suggestion : null,
     );
-    setHasContent(
+    updateHasContent(
       text.trim().length > 0 ||
         !!followupCompletion ||
         composerTags.length > 0 ||
@@ -1958,6 +2018,7 @@ export function useComposerCore(
     mobileText,
     followupState?.isVisible,
     followupState?.suggestion,
+    updateHasContent,
   ]);
 
   const promptHistory = useInputHistory(
@@ -2100,6 +2161,15 @@ export function useComposerCore(
     [setMobileText],
   );
 
+  useLayoutEffect(() => {
+    if (!isTouchComposer) return;
+    const el = mobileTextareaRef.current;
+    if (!el) return;
+    const cap = parseFloat(getComputedStyle(el).maxHeight);
+    mobileMaxHeightRef.current =
+      Number.isFinite(cap) && cap > 0 ? cap : Number.POSITIVE_INFINITY;
+  }, [isTouchComposer]);
+
   // Auto-grow the mobile textarea with its content, capped by the CSS
   // max-height (the cap is read from the computed style so a deployment
   // overriding --chat-editor-input-max-height stays authoritative). Without
@@ -2108,13 +2178,17 @@ export function useComposerCore(
     if (!isTouchComposer) return;
     const el = mobileTextareaRef.current;
     if (!el) return;
+    if (
+      typeof CSS !== 'undefined' &&
+      CSS.supports?.('field-sizing', 'content')
+    ) {
+      el.style.height = '';
+      return;
+    }
     el.style.height = 'auto';
     if (el.scrollHeight > 0) {
-      const cap = parseFloat(getComputedStyle(el).maxHeight);
-      const next =
-        Number.isFinite(cap) && cap > 0
-          ? Math.min(el.scrollHeight, cap)
-          : el.scrollHeight;
+      const cap = mobileMaxHeightRef.current ?? Number.POSITIVE_INFINITY;
+      const next = Math.min(el.scrollHeight, cap);
       el.style.height = `${next}px`;
     }
   }, [isTouchComposer, mobileText]);
@@ -2442,7 +2516,7 @@ export function useComposerCore(
           }
           if (completionStatus(view.state) === 'active') return false;
           const followup = followupStateRef.current;
-          const hasInlineTags = getInlineComposerTags(view).length > 0;
+          const hasInlineTags = hasInlineComposerTags(view);
           const followupCompletion = hasInlineTags
             ? null
             : getFollowupCompletion(
@@ -2828,7 +2902,23 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
-          setHasInlineTags(getInlineComposerTags(update.view).length > 0);
+          const inlineTagsChanged =
+            update.docChanged ||
+            update.transactions.some((transaction) =>
+              transaction.effects.some(
+                (effect) =>
+                  effect.is(addInlineTagEffect) ||
+                  effect.is(removeInlineTagEffect) ||
+                  effect.is(clearInlineTagsEffect),
+              ),
+            );
+          if (inlineTagsChanged) {
+            const nextHasInlineTags = hasInlineComposerTags(update.view);
+            if (hasInlineTagsRef.current !== nextHasInlineTags) {
+              hasInlineTagsRef.current = nextHasInlineTags;
+              setHasInlineTags(nextHasInlineTags);
+            }
+          }
           if (update.docChanged) {
             const text = getDocText(update.state);
             if (draftIdentityRef.current.storageKey === undefined) {
@@ -2843,7 +2933,7 @@ export function useComposerCore(
               text,
               followup?.isVisible ? followup.suggestion : null,
             );
-            setHasContent(
+            updateHasContent(
               text.trim().length > 0 ||
                 !!followupCompletion ||
                 composerTagsRef.current.length > 0 ||
@@ -2960,7 +3050,7 @@ export function useComposerCore(
     if (initialTextValue) {
       onInputTextChangeRef.current?.(initialTextValue);
     }
-    setHasContent(
+    updateHasContent(
       initialText.length > 0 ||
         composerTagsRef.current.length > 0 ||
         pastedImagesRef.current.length > 0,

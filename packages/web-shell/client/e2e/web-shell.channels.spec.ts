@@ -135,7 +135,9 @@ test('creates and deletes a typed Channel configuration', async ({
   ).toBeVisible();
   await expect(page.getByText('Ada', { exact: true })).toBeVisible();
   await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Approve' }).click();
+  await page
+    .getByRole('button', { name: 'Approve Ada, code ABCD1234' })
+    .click();
   await expect(page.getByText('No pending requests')).toBeVisible();
   await expect
     .poll(() =>
