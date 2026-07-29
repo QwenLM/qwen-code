@@ -1958,8 +1958,23 @@ async function runQwenServeImpl(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
+  if (
+    optsIn.memoryProjectScope !== undefined &&
+    optsIn.memoryProjectScope !== 'git-root' &&
+    optsIn.memoryProjectScope !== 'workspace'
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
+  }
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
+    ...(optsIn.memoryProjectScope !== undefined
+      ? {
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
+        }
+      : {}),
   });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat

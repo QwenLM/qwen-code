@@ -1397,7 +1397,11 @@ describe('runQwenServe telemetry validation', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
-      merged: {},
+      merged: {
+        env: {
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace',
+        },
+      },
     } as ReturnType<typeof settingsRuntime.loadSettings>);
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
@@ -2440,6 +2444,7 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       Number.POSITIVE_INFINITY,
       /compactedReplayMaxBytes/,
     ],
+    ['memoryProjectScope', 'unsupported', /memoryProjectScope/],
   ] as const)(
     'rejects invalid %s=%s before printing the listening line',
     async (optionName, value, message) => {
@@ -3051,6 +3056,79 @@ describe('runQwenServe runtime startup failures', () => {
         delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
       } else {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      await handle.close();
+    }
+  });
+
+  it('applies memoryProjectScope to every runtime without mutating process.env', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-memory-project-scope-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      )
+      .mockReturnValueOnce(
+        makeRuntimeBridge() as ReturnType<
+          typeof acpBridge.createAcpSessionBridge
+        >,
+      );
+    let workspaceRegistry:
+      | import('./workspace-registry.js').WorkspaceRegistry
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        workspaceRegistry = deps?.workspaceRegistry;
+        return express();
+      },
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        memoryProjectScope: 'git-root',
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(workspaceRegistry?.list()).toHaveLength(2);
+      for (const runtime of workspaceRegistry?.list() ?? []) {
+        expect(
+          runtime.env.effectiveEnv?.['QWEN_CODE_MEMORY_PROJECT_SCOPE'],
+        ).toBe('git-root');
+      }
+      expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe('workspace');
+    } finally {
+      if (originalScope === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = originalScope;
       }
       await handle.close();
     }
