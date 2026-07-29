@@ -16,6 +16,9 @@
 - **State dir** `~/.qwen/rc/` = `join(homedir(), '.qwen', 'rc')`. State file `launcher-state.json`; TLS pair under `~/.qwen/rc/tls/`; the owner pairing code is read from the gateway's existing `~/.qwen/rc/owner-bootstrap.code`.
 - **`--json` and printed output carry only connect metadata** (url, host, port, unit, certExpiry) + the pairing code the operator already sees locally — never session or tool content.
 - Idempotent: `up` while running re-prints connect info (no second instance); `down` while stopped succeeds.
+- **PATH-independence:** the transient unit runs under systemd's environment, NOT the caller's shell — so the gateway is launched by an explicit argv prefix (`serveCmd`, e.g. `[process.argv[0], process.argv[1]]`), never by relying on `qwen-rc` being on PATH.
+- **Known integration risk (document, don't test around):** `systemd-run --user` / `systemctl --user` require a user-session D-Bus — under `wsl.exe -- qwen-rc up` (a non-login shell, the Electron path) that can be absent, failing with "Failed to connect to bus." `up` MUST detect this and emit an actionable hint (remedy: `XDG_RUNTIME_DIR=/run/user/$(id -u)` + `loginctl enable-linger $USER`). This is the analogue of the mirrored-networking risk — surfaced, not silently swallowed.
+- **Tests prove orchestration, not reachability.** Every test stubs `RunCommand`, so a green `up` only proves the flow composed the right commands — it does NOT prove the phone can reach the gateway (real Tailscale/systemd/TLS). That end-to-end check stays on the operator's manual first-run checklist; do not add a test that pretends to cover it.
 
 ---
 
@@ -362,7 +365,7 @@ git commit -m "feat(rc-gateway): launcher exec seam + tailscale/cert layer"
   - `state.ts`: `interface LauncherState { unit: string; url: string; host: string; port: number; certExpiry?: string }`; `readState(dir): LauncherState | null`; `writeState(dir, s): void`; `clearState(dir): void`.
   - `process.ts`: `startUnit(run, unit, argv): Promise<CommandResult>`; `stopUnit(run, unit): Promise<CommandResult>`; `isActive(run, unit): Promise<boolean>`.
   - `qr.ts`: `renderQr(text): Promise<string>`.
-  - `orchestrator.ts`: `interface UpResult { ok: boolean; url?: string; host?: string; port?: number; unit?: string; bootstrapCode?: string; certExpiry?: string; qr?: string; hint?: string }`; `up(deps): Promise<UpResult>`; `down(deps): Promise<{ ok: boolean }>`; `status(deps): Promise<{ running: boolean; url?: string; certExpiry?: string }>`. `deps = { run: RunCommand; dir: string; port: number; unit: string }`.
+  - `orchestrator.ts`: `interface UpResult { ok: boolean; url?: string; host?: string; port?: number; unit?: string; bootstrapCode?: string; certExpiry?: string; qr?: string; hint?: string }`; `up(deps): Promise<UpResult>`; `down(deps): Promise<{ ok: boolean }>`; `status(deps): Promise<{ running: boolean; url?: string; certExpiry?: string }>`. `deps = { run: RunCommand; dir: string; port: number; unit: string; serveCmd: string[] }` (`serveCmd` = argv prefix to launch qwen-rc, PATH-independent).
 
 - [ ] **Step 1: Add the `qrcode` dependency**
 
@@ -475,9 +478,12 @@ export async function isActive(
  */
 import QRCode from 'qrcode';
 
-/** Render `text` as a terminal-drawable QR (small/`utf8` type). */
+/** Render `text` as a terminal-drawable QR (`utf8` type — half-block chars). */
 export function renderQr(text: string): Promise<string> {
-  return QRCode.toString(text, { type: 'utf8', small: true });
+  // `type: 'utf8'` is documented for all qrcode versions; do NOT add
+  // `{ small: true }` (not part of the toString options — it would be ignored
+  // or throw and, because up swallows a renderQr rejection, silently drop the QR).
+  return QRCode.toString(text, { type: 'utf8' });
 }
 ```
 
@@ -513,6 +519,7 @@ const DEPS = (d: string, run: RunCommand) => ({
   dir: d,
   port: 8443,
   unit: 'qwen-rc-gateway',
+  serveCmd: ['qwen-rc'],
 });
 
 // tailnet Running + cert ok; the is-active answer is read live from `active()`,
@@ -614,6 +621,40 @@ describe('up', () => {
     expect(res.ok).toBe(false);
     expect(res.hint).toContain('https://login.tailscale.com/a/deadbeef');
   });
+
+  it('gives the D-Bus remedy when systemd --user is unavailable', async () => {
+    const d = mkdir();
+    const run: RunCommand = async (argv) => {
+      const k = argv.join(' ');
+      if (k === 'tailscale status --json') return ok(RUNNING);
+      if (argv[0] === 'tailscale' && argv[1] === 'cert') return ok();
+      if (k.startsWith('systemctl --user is-active'))
+        return {
+          code: 1,
+          stdout: '',
+          stderr: 'Failed to connect to bus: No such file or directory',
+        };
+      if (argv[0] === 'systemd-run')
+        return {
+          code: 1,
+          stdout: '',
+          stderr: 'Failed to connect to bus: No such file or directory',
+        };
+      return { code: 1, stdout: '', stderr: k };
+    };
+    const res = await up(DEPS(d, run));
+    expect(res.ok).toBe(false);
+    expect(res.hint).toMatch(/XDG_RUNTIME_DIR|enable-linger/);
+  });
+});
+
+describe('renderQr', () => {
+  it('returns a non-empty multi-line QR string', async () => {
+    const { renderQr } = await import('./qr.js');
+    const out = await renderQr('https://example.ts.net:8443/ui/');
+    expect(out.length).toBeGreaterThan(0);
+    expect(out.split('\n').length).toBeGreaterThan(3);
+  });
 });
 
 describe('down', () => {
@@ -677,6 +718,7 @@ export interface Deps {
   dir: string; // ~/.qwen/rc
   port: number;
   unit: string; // e.g. qwen-rc-gateway
+  serveCmd: string[]; // PATH-independent argv prefix for qwen-rc, e.g. [process.argv[0], process.argv[1]]
 }
 
 export interface UpResult {
@@ -703,7 +745,7 @@ function readBootstrapCode(dir: string): string | undefined {
 }
 
 export async function up(deps: Deps): Promise<UpResult> {
-  const { run, dir, port, unit } = deps;
+  const { run, dir, port, unit, serveCmd } = deps;
 
   // 1. Tailnet.
   const upOutcome = await ensureUp(run);
@@ -741,7 +783,7 @@ export async function up(deps: Deps): Promise<UpResult> {
   // 3. Start the gateway unit — unless already active (idempotent).
   if (!(await isActive(run, unit))) {
     const serveArgv = [
-      'qwen-rc',
+      ...serveCmd, // PATH-independent (systemd --user has systemd's env, not the shell's)
       'serve',
       '--host',
       id.ip,
@@ -754,10 +796,15 @@ export async function up(deps: Deps): Promise<UpResult> {
     ];
     const started = await startUnit(run, unit, serveArgv);
     if (started.code !== 0) {
-      return {
-        ok: false,
-        hint: `Failed to start the gateway unit: ${(started.stderr || started.stdout).trim().slice(0, 500)}`,
-      };
+      const err = started.stderr || started.stdout;
+      // The Electron path (`wsl.exe -- qwen-rc up`) may have no user-session
+      // D-Bus, so systemd --user fails; give the specific remedy, not a raw error.
+      const busDown =
+        /failed to connect to bus|XDG_RUNTIME_DIR|no medium found/i.test(err);
+      const hint = busDown
+        ? 'systemd --user is unavailable in this shell (no session D-Bus). Set `XDG_RUNTIME_DIR=/run/user/$(id -u)` and run `loginctl enable-linger $USER` once — this is the usual cause when launched via wsl.exe.'
+        : `Failed to start the gateway unit: ${err.trim().slice(0, 500)}`;
+      return { ok: false, hint };
     }
   }
 
@@ -829,6 +876,9 @@ After the existing top-level branches (e.g. near the `daemons discover` branch, 
       dir: join(homedir(), '.qwen', 'rc'),
       port: portFlag ?? 8443,
       unit: 'qwen-rc-gateway',
+      // PATH-independent self-invocation: [node, this cli.js] so the systemd
+      // --user unit can exec qwen-rc even when it isn't on PATH.
+      serveCmd: [process.argv[0], process.argv[1]],
     };
     const cmd = process.argv[2];
     if (cmd === 'up') {
@@ -918,7 +968,13 @@ it('up -> status(running) -> down -> status(stopped)', async () => {
     }
     return { code: 1, stdout: '', stderr: k };
   };
-  const deps = { run, dir, port: 8443, unit: 'qwen-rc-gateway' };
+  const deps = {
+    run,
+    dir,
+    port: 8443,
+    unit: 'qwen-rc-gateway',
+    serveCmd: ['qwen-rc'],
+  };
 
   const u = await up(deps);
   expect(u.ok).toBe(true);
