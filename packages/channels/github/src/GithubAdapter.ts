@@ -275,7 +275,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         !this.reasonFilterSet.has(notification.reason)
       ) {
         process.stderr.write(
-          `[Channel:${this.name}] skipping notification (reason=${notification.reason} not in reasonFilter)\n`,
+          `[Channel:${this.name}] skipping notification (reason=${notification.reason} not in reasonFilter, subject=${notification.subject.url})\n`,
         );
         continue;
       }

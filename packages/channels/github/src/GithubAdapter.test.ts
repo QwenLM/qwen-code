@@ -1029,7 +1029,7 @@ describe('GithubChannel', () => {
         );
         expect(stderrWrite).toHaveBeenCalledWith(
           expect.stringContaining(
-            'skipping notification (reason=comment not in reasonFilter)',
+            'skipping notification (reason=comment not in reasonFilter, subject=https://api.github.com/repos/owner/repo/issues/42)',
           ),
         );
       } finally {
@@ -1076,6 +1076,22 @@ describe('GithubChannel', () => {
 
     it('processes all reasons when filter is empty or unset', async () => {
       await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'subscribed',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'plain comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('processes all reasons when filter is an empty array', async () => {
+      await initWithoutLoop({ reasonFilter: [] });
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({
