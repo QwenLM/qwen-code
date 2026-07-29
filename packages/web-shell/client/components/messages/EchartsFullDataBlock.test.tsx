@@ -256,7 +256,7 @@ describe('EchartsFullDataBlock', () => {
     );
     expect(headerTexts[1]).toContain('day');
     expect(headerTexts[2]).toContain('orders');
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
     expect(
       container.querySelector('button[aria-label="Sort by orders"]'),
     ).not.toBeNull();
