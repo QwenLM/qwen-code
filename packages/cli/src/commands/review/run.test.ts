@@ -130,8 +130,10 @@ describe('review run (handler)', () => {
   let cwd: string;
   let outs: string[];
   let exitCode: number | undefined;
+  let processKill: ReturnType<typeof vi.spyOn>;
 
   class FakeChild extends EventEmitter {
+    pid = 12345;
     stdout = Object.assign(new EventEmitter(), { resume: () => {} });
     stderr = Object.assign(new EventEmitter(), { resume: () => {} });
     kill = vi.fn();
@@ -148,6 +150,7 @@ describe('review run (handler)', () => {
       return true;
     });
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
     spawnMock.mockReset();
   });
 
@@ -241,9 +244,10 @@ describe('review run (handler)', () => {
     const [, argvUsed, opts] = spawnMock.mock.calls[0] as [
       string,
       string[],
-      { stdio: unknown[] },
+      { stdio: unknown[]; detached: boolean },
     ];
     expect(opts.stdio[0]).toBe('ignore');
+    expect(opts.detached).toBe(true);
     expect(argvUsed).toContain('--prompt');
     expect(argvUsed).toContain('/review');
   });
@@ -270,7 +274,7 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  it('reports a timed-out run as incomplete and kills the child', async () => {
+  it('reports a timed-out run as incomplete and kills the process group', async () => {
     vi.useFakeTimers();
     const child = new FakeChild();
     spawnMock.mockImplementation(() => child);
@@ -286,6 +290,57 @@ describe('review run (handler)', () => {
     expect(result.childExitCode).toBeNull();
     expect(result.childSignal).toBe('SIGTERM');
     expect(process.exitCode).toBe(1);
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+  });
+
+  it('prints the verdict line and report path in human-readable mode', async () => {
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ json: false });
+
+    const output = outs.join('');
+    expect(output).toContain('Verdict: Approve');
+    expect(output).toContain('Report: ');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('distinguishes a corrupt composed artifact from a missing one', async () => {
+    spawnMock.mockImplementation(() => {
+      const child = new FakeChild();
+      setImmediate(() => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          '{truncated',
+          'utf8',
+        );
+        child.emit('close', 0);
+      });
+      return child;
+    });
+    await runHandler({ json: false });
+
+    const output = outs.join('');
+    expect(output).toContain('could not be parsed');
+    expect(output).not.toContain('no composed verdict was produced');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('clamps a negative timeout to the 1-minute floor', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => child);
+
+    const done = runHandler({ 'timeout-minutes': -5 });
+    // 59 s is under the 1-minute floor — must not fire.
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(processKill).not.toHaveBeenCalled();
+    // Crossing the floor fires the timeout.
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', null, 'SIGTERM');
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.timedOut).toBe(true);
+    expect(process.exitCode).toBe(1);
   });
 });

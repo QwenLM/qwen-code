@@ -176,6 +176,10 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       // prompt and the leading `/` would no longer be the first character —
       // the slash command would reach the model as plain text.
       stdio: ['ignore', 'pipe', 'pipe'],
+      // The CLI relaunches itself in a child (for --max-old-space-size), so
+      // the pid we spawn is a wrapper whose grandchild is the real review.
+      // A new process group lets the timeout kill reach both.
+      detached: true,
     },
   );
 
@@ -206,9 +210,24 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     writeStderrLineSafe(
       `review run: timeout after ${args.timeoutMinutes} minutes — terminating the review`,
     );
-    child.kill('SIGTERM');
-    // The runner traps SIGTERM for cleanup; give it a moment, then insist.
-    setTimeout(() => child.kill('SIGKILL'), 10_000).unref();
+    // Kill the process group, not just the wrapper: child.kill() would only
+    // reach the relaunch wrapper, leaving the real review reparented to PID 1
+    // and still burning API calls.
+    const pid = child.pid;
+    if (pid !== undefined) {
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch {
+        // Already dead.
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // Already dead.
+        }
+      }, 10_000).unref();
+    }
   }, timeoutMs);
 
   const childOutcome = await new Promise<{
@@ -268,10 +287,14 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     writeStdoutLine(result.verdictLine ?? `Event: ${result.event}`);
     if (result.reportPath) writeStdoutLine(`Report: ${result.reportPath}`);
   } else {
+    const detail =
+      composedPath !== null
+        ? `a composed verdict was found at ${resolve(composedPath)} but could not be parsed`
+        : 'no composed verdict was produced';
     writeStdoutLine(
       timedOut
         ? 'Review did not complete: timed out.'
-        : `Review did not complete: no composed verdict was produced` +
+        : `Review did not complete: ${detail}` +
             `${childExitCode !== null ? ` (CLI exit ${childExitCode})` : ''}` +
             `${childSignal !== null ? ` (killed by ${childSignal})` : ''}.`,
     );
@@ -341,7 +364,7 @@ export const runCommand: CommandModule = {
       comment: Boolean(argv['comment']),
       json: Boolean(argv['json']),
       failOn: (argv['fail-on'] as 'none' | 'request-changes') ?? 'none',
-      timeoutMinutes: Number(argv['timeout-minutes']) || 120,
+      timeoutMinutes: Math.max(1, Number(argv['timeout-minutes']) || 120),
       approvalMode: String(argv['approval-mode'] ?? 'yolo'),
       quiet: Boolean(argv['quiet']),
     });
