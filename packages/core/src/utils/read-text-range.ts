@@ -303,6 +303,9 @@ async function* readFileHandleChunks(
     signal?.throwIfAborted();
     if (bytesRead === 0) return;
     position += bytesRead;
+    // `buffer` is reused across iterations, so each yielded view is valid
+    // only until the next read; consumers must decode or copy it before
+    // advancing the generator.
     yield buffer.subarray(0, bytesRead);
   }
 }

@@ -448,7 +448,10 @@ describe('WorkspaceFileSystem - readText', () => {
               await writer.close();
             }
             // Restore mtime to prove ctime still detects a same-size overwrite
-            // that size+mtime checks alone would accept.
+            // that size+mtime checks alone would accept. Pause first so the
+            // change-time lands in a later timestamp quantum than the pre-read
+            // snapshot even on coarse-resolution filesystems.
+            await new Promise((resolve) => setTimeout(resolve, 50));
             await fsp.utimes(target, before.atime, before.mtime);
           }
           return result;
@@ -512,6 +515,11 @@ describe('WorkspaceFileSystem - readText', () => {
             } finally {
               await writer.close();
             }
+            // Pause so the overwrite's change-time lands in a later timestamp
+            // quantum than the pre-read snapshot even on coarse-resolution
+            // filesystems; detection here relies on ctime since mtime is
+            // restored.
+            await new Promise((resolve) => setTimeout(resolve, 50));
             await fsp.utimes(target, before.atime, before.mtime);
           }
           return result;
