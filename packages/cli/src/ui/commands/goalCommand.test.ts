@@ -67,6 +67,12 @@ describe('parseGoalCommand', () => {
     ['pause', { kind: 'pause' }],
     ['resume', { kind: 'resume' }],
     ['clear', { kind: 'clear' }],
+    ['stop', { kind: 'clear' }],
+    ['off', { kind: 'clear' }],
+    ['reset', { kind: 'clear' }],
+    ['none', { kind: 'clear' }],
+    ['cancel', { kind: 'clear' }],
+    ['cancel after tests', { kind: 'set', objective: 'cancel after tests' }],
     ['pause after tests', { kind: 'set', objective: 'pause after tests' }],
     ['/goal', { kind: 'status' }],
     ['/goal ship it', { kind: 'set', objective: 'ship it' }],
@@ -76,6 +82,7 @@ describe('parseGoalCommand', () => {
     ['/goal pause', { kind: 'pause' }],
     ['/goal resume', { kind: 'resume' }],
     ['/goal clear', { kind: 'clear' }],
+    ['/goal stop', { kind: 'clear' }],
   ] as const)('parses %j', (args, expected) => {
     expect(parseGoalCommand(args)).toEqual(expected);
   });

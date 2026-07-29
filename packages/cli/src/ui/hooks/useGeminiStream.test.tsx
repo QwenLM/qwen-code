@@ -453,7 +453,9 @@ describe('useGeminiStream', () => {
       continuationContext: 'continue from the last accepted evidence',
       verifierFeedback: 'show the final verification result',
     };
-    const peekNextUserBatchKey = vi.fn(() => 'message-queue:next-user');
+    const peekNextUserBatchKey = vi.fn((goalTurnActive?: boolean) =>
+      goalTurnActive ? undefined : 'message-queue:next-user',
+    );
     const { result, mockSendMessageStream: streamMock } = renderTestHook(
       [],
       undefined,
@@ -499,7 +501,9 @@ describe('useGeminiStream', () => {
       getQueuedGoalTurnKey: () => string | undefined;
     };
     expect(options.goalSignal).not.toBe(streamMock.mock.calls[0][1]);
-    expect(options.getQueuedGoalTurnKey()).toBe('message-queue:next-user');
+    // A Goal turn must not reserve the next turn for a held plain message.
+    expect(options.getQueuedGoalTurnKey()).toBeUndefined();
+    expect(peekNextUserBatchKey).toHaveBeenCalledWith(true);
     expect(mockHandleSlashCommand).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: MessageType.USER }),

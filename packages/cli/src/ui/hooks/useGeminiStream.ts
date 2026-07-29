@@ -482,7 +482,7 @@ export const useGeminiStream = (
   terminalWidthRef?: React.RefObject<number>,
   midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
   goalQueueRef?: React.RefObject<{
-    peekNextUserBatchKey: () => string | undefined;
+    peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
     claimDirectUserAdmission?: () => DirectUserAdmission;
     claimGoalTurn?: () => QueuedGoalTurn | undefined;
     hasQueuedUserMessages?: () => boolean;
@@ -3232,7 +3232,7 @@ export const useGeminiStream = (
                     goalSignal: goalBinding.controller.signal,
                     goalOrigin: goalBinding.origin,
                     getQueuedGoalTurnKey: () =>
-                      goalQueueRef?.current?.peekNextUserBatchKey(),
+                      goalQueueRef?.current?.peekNextUserBatchKey(true),
                   }
                 : userAdmission
                   ? {
@@ -3240,12 +3240,9 @@ export const useGeminiStream = (
                       goalSignal: turnController!.signal,
                       goalOrigin: 'user' as const,
                       getQueuedGoalTurnKey: () =>
-                        goalQueueRef?.current?.peekNextUserBatchKey(),
+                        goalQueueRef?.current?.peekNextUserBatchKey(true),
                     }
                   : {}),
-              ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
-                ? { getSteerInput: drainSteerAtBoundary }
-                : {}),
             },
           );
 
@@ -4207,6 +4204,12 @@ export const useGeminiStream = (
         });
       if (backgroundLaunchExhaustedCapacity) {
         geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation stopped: background capacity exhausted',
+          );
+        }
         return;
       }
 

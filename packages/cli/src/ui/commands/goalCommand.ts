@@ -207,7 +207,7 @@ export function parseGoalCommand(args: string): ParsedGoalCommand {
   if (tail.length === 0) {
     if (keyword === 'pause') return { kind: 'pause' };
     if (keyword === 'resume') return { kind: 'resume' };
-    if (keyword === 'clear') return { kind: 'clear' };
+    if (CLEAR_KEYWORDS.has(keyword)) return { kind: 'clear' };
   }
   return { kind: 'set', objective: input };
 }

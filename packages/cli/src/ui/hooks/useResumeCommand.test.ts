@@ -790,6 +790,9 @@ describe('useResumeCommand', () => {
       'old-session-id',
       undefined,
     );
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      'old-session-id',
+    );
     // UI never swapped.
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();

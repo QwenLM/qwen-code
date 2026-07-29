@@ -43,7 +43,7 @@ export interface UseMessageQueueReturn {
   enqueueGoalTurn: (
     input: Parameters<GoalTurnHost['startGoalTurn']>[0],
   ) => void;
-  peekNextUserBatchKey: () => string | undefined;
+  peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
   hasQueuedUserMessages: () => boolean;
   getPendingSubmissionCount: () => number;
   claimGoalTurn: () => QueuedGoalTurn | undefined;
@@ -139,7 +139,10 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   const peekNextUserBatchKey = useCallback(
-    () => queueRef.current.find(({ text }) => !isSlashCommand(text))?.key,
+    (goalTurnActive = false) =>
+      goalTurnActive
+        ? undefined
+        : queueRef.current.find(({ text }) => !isSlashCommand(text))?.key,
     [],
   );
   const hasQueuedUserMessages = useCallback(

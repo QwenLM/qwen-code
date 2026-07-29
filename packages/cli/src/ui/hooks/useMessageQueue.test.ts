@@ -164,6 +164,25 @@ describe('useMessageQueue', () => {
     expect(queue.peekNextUserBatchKey!()).toBeUndefined();
   });
 
+  it('hides the plain-user batch key from an active Goal turn reservation', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('queued user');
+    });
+    const queue = result.current as typeof result.current & {
+      peekNextUserBatchKey?: (goalTurnActive?: boolean) => string | undefined;
+    };
+
+    // Idle boundary: the plain message is deliverable, so it is reservable.
+    expect(queue.peekNextUserBatchKey!()).toEqual(expect.any(String));
+    // Active Goal turn: the two-lane drain gate holds plain messages, so no
+    // key is reported and the Goal loop continues instead of reserving a turn
+    // the queue will never release.
+    expect(queue.peekNextUserBatchKey!(true)).toBeUndefined();
+    expect(result.current.messageQueue).toEqual(['queued user']);
+    expect(queue.peekNextUserBatchKey!()).toEqual(expect.any(String));
+  });
+
   it('keeps a Goal permit hidden until plain user preprocessing succeeds', () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-1',
