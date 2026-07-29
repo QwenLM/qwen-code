@@ -190,7 +190,9 @@ import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import {
+  registerSessionModel,
   registerSessionProjectDir,
+  unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
@@ -1994,8 +1996,9 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
-  // True on the Config that claimed the QWEN_CODE_MODEL slot (first in this
-  // process); gates publishModelEnv so no other instance updates it.
+  // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
+  // (first in this process); gates the global write in publishModelEnv so no
+  // other instance updates it. Per-session publishing is not gated on it.
   private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
 
@@ -2320,17 +2323,19 @@ export class Config {
       onModelChange: this.handleModelChange.bind(this),
     });
 
-    // Publish the active model id for shell subprocesses, under the same claim
-    // discipline as QWEN_CODE_SESSION_ID above: the first Config wins, and only
-    // the claiming instance republishes on model changes (publishModelEnv), so
-    // throwaway Configs never clobber the live session's model. Claimed here
-    // rather than alongside the session ID because the value comes from the
-    // ModelsConfig just constructed.
+    // Publish the active model id for shell subprocesses. Every Config
+    // publishes its own session's model — publishModelEnv registers it per
+    // session, like the project dir above, so daemon-mode subprocesses read
+    // theirs, not the first session's. The process-global slot is claimed
+    // first-writer-wins, as QWEN_CODE_SESSION_ID is, so a throwaway Config
+    // never clobbers the live session's global value. Done here rather than
+    // alongside the session ID because the value comes from the ModelsConfig
+    // just constructed.
     if (!modelEnvClaimed && process.env) {
       modelEnvClaimed = true;
       this.ownsModelEnvSlot = true;
-      this.publishModelEnv();
     }
+    this.publishModelEnv();
 
     if (
       this.telemetrySettings.enabled &&
@@ -3853,13 +3858,21 @@ export class Config {
 
   // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
   // has no other authoritative source: settings files miss /model switches and
-  // describe the wrong home under QWEN_HOME isolation. Gated on the claiming
-  // instance (see the constructor), so in daemon mode the slot — like
-  // QWEN_CODE_SESSION_ID — only ever reflects the first session; later
-  // sessions' Configs never write it.
+  // describe the wrong home under QWEN_HOME isolation. Published per session —
+  // every Config writes its OWN session's model, keyed on sessionId exactly
+  // like the project dir, so in daemon mode each session's subprocesses read
+  // theirs, not the first session's (a process-global slot alone would hold
+  // whichever session booted first). The process-global slot is the
+  // single-session CLI fallback, gated on the claiming instance so a throwaway
+  // Config never clobbers the live session's value there.
   private publishModelEnv(): void {
-    if (this.ownsModelEnvSlot && process.env) {
-      process.env['QWEN_CODE_MODEL'] = this.getModel();
+    if (!process.env) {
+      return;
+    }
+    const model = this.getModel();
+    registerSessionModel(this.sessionId, model);
+    if (this.ownsModelEnvSlot) {
+      process.env['QWEN_CODE_MODEL'] = model;
     }
   }
 
@@ -4735,6 +4748,10 @@ export class Config {
         unregisterSessionProjectDir(this.sessionId);
         this.sessionProjectDirRegistered = false;
       }
+      // Drop this session's model registry entry. It is registered at
+      // construction (publishModelEnv), so it is released on every shutdown —
+      // same daemon-mode leak rationale as the project dir above.
+      unregisterSessionModel(this.sessionId);
 
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.goalTurnHostUnbind?.();

@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { accessSync, chmodSync, constants, existsSync } from 'node:fs';
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  existsSync,
+  statSync,
+} from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
@@ -483,6 +489,15 @@ function writeStderrLine(line: string): void {
  * unset either way. Empty counts as unset: a parent session's spawn filter
  * writes '' for an entry its shell could not exec, and that verdict is about
  * the parent's entry, not this build's.
+ *
+ * scripts/dev.js and scripts/start.js assign QWEN_CODE_CLI unconditionally —
+ * the opposite policy on purpose, not an oversight: those files ARE the outer
+ * launcher (they spawn the CLI as a child and must re-point an inherited value
+ * at this build), whereas this module runs in-process AFTER an outer launcher
+ * may already have stamped, so it yields. The bundled `node dist/cli.js` launch
+ * (the desktop error message's instruction) is not stamped either — cli.js sits
+ * at the package root, so the derived ../index.js does not exist and the
+ * existence check skips it, consistent with this PR's workspace-entry scope.
  */
 export function stampCliEntryEnv(entryPath?: string): void {
   if (process.env['QWEN_CODE_CLI']) {
@@ -503,7 +518,10 @@ export function stampCliEntryEnv(entryPath?: string): void {
       accessSync(entry, constants.X_OK);
     } catch {
       try {
-        chmodSync(entry, 0o755);
+        // Add exec bits to whatever mode the build/umask chose, rather than
+        // setting 0o755 — a deliberately-private 0o600 checkout becomes
+        // execable without also becoming world-readable.
+        chmodSync(entry, statSync(entry).mode | 0o111);
       } catch {
         // Not chmoddable (read-only checkout): the spawn filter blanks the
         // stamp and subprocesses fall back to `qwen`, as before this stamp.

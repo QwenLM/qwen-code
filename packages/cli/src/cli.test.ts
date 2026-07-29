@@ -1202,5 +1202,11 @@ describe('bootstrap error handling', () => {
       source.indexOf('export async function runCliEntryPoint'),
     );
     expect(entryPoint).toContain('stampCliEntryEnv()');
+    // "First thing in runCliEntryPoint" is the property the doc relies on: the
+    // stamp must land before the CLI runs, not merely somewhere in the body —
+    // a stamp moved below `await run()` would still pass a contains() check.
+    expect(entryPoint.indexOf('stampCliEntryEnv()')).toBeLessThan(
+      entryPoint.indexOf('await run()'),
+    );
   });
 });

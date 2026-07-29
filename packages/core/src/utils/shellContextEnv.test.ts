@@ -15,6 +15,8 @@ import {
   sessionIdContext,
   registerSessionProjectDir,
   unregisterSessionProjectDir,
+  registerSessionModel,
+  unregisterSessionModel,
 } from './sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
@@ -343,6 +345,45 @@ describe('getShellContextEnvVars', () => {
       expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
         'model-after-switch',
       );
+    });
+  });
+
+  describe('model is per-session, not per-process', () => {
+    it('hands each session its own active model', () => {
+      // One daemon process, two sessions, two /model selections. A single
+      // process-global slot holds whichever booted first — and every later
+      // session would then stamp a model that never ran the review, the exact
+      // bug this PR opens with, relocated to the consumer.
+      registerSessionModel('sess-A', 'model-A');
+      registerSessionModel('sess-B', 'model-B');
+      process.env['QWEN_CODE_MODEL'] = 'model-A'; // the first to boot
+
+      const a = sessionIdContext.run('sess-A', () => getShellContextEnvVars());
+      const b = sessionIdContext.run('sess-B', () => getShellContextEnvVars());
+
+      expect(a['QWEN_CODE_MODEL']).toBe('model-A');
+      expect(b['QWEN_CODE_MODEL']).toBe('model-B'); // NOT A's
+    });
+
+    it('drops a session entry on unregister — no daemon leak', () => {
+      registerSessionModel('sess-X', 'model-X');
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_MODEL'
+        ],
+      ).toBe('model-X');
+      unregisterSessionModel('sess-X');
+      delete process.env['QWEN_CODE_MODEL'];
+      expect(
+        sessionIdContext.run('sess-X', () => getShellContextEnvVars())[
+          'QWEN_CODE_MODEL'
+        ],
+      ).toBeUndefined();
+    });
+
+    it('falls back to the global slot for the single-session CLI', () => {
+      process.env['QWEN_CODE_MODEL'] = 'model-only';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe('model-only');
     });
   });
 

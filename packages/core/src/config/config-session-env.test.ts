@@ -43,7 +43,7 @@ vi.mock('../core/contentGenerator.js', () => ({
   }),
   createContentGeneratorConfig: vi.fn().mockReturnValue({}),
   createContentGenerator: vi.fn().mockReturnValue({}),
-  AuthType: { USE_GEMINI: 'gemini' },
+  AuthType: { USE_GEMINI: 'gemini', QWEN_OAUTH: 'qwen-oauth' },
 }));
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -246,5 +246,21 @@ describe('Config modelEnvClaimed guard', () => {
     await config.refreshAuth(AuthType.USE_GEMINI);
 
     expect(process.env['QWEN_CODE_MODEL']).toBe('auth-resolved-model');
+  });
+
+  it("registers each Config's model per session, so a daemon side-session reads its own", async () => {
+    const { Config } = await import('./config.js');
+    // Import from the same cold module graph the Config above bound to, so this
+    // reads the registry the constructor actually wrote.
+    const { getSessionModel } = await import('../utils/sessionIdContext.js');
+    const first = new Config({ ...baseParams });
+    const later = new Config({ ...baseParams, model: 'other-model' });
+
+    // The process-global slot is first-writer-wins (covered above), but the
+    // per-session registry holds EACH session's model — this is what daemon
+    // mode reads at spawn time, so a later session is not stuck reporting the
+    // first session's model.
+    expect(getSessionModel(first.getSessionId())).toBe('test-model');
+    expect(getSessionModel(later.getSessionId())).toBe('other-model');
   });
 });
