@@ -4661,7 +4661,7 @@ describe('qwen-autofix workflow', () => {
       /CAUSE="(ran out of time before finishing[^"]*)"/,
     )?.[1];
     const emitRejected = reviewAddressReportStep.match(
-      /HEADLINE="(🤖 Could not address the latest feedback[^"]*)"/,
+      /HEADLINE="(🤖 Could not (?:address the latest feedback|produce a passing fix)[^"]*)"/,
     )?.[1];
     expect(emitPush).toBeTruthy();
     expect(emitNoop).toBeTruthy();
