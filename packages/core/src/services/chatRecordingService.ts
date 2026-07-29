@@ -411,13 +411,13 @@ export interface AgentBootstrapRecordPayload {
    */
   history: Content[];
   /**
-   * Immutable launch-time system instruction for the fork runtime. Resume must
-   * reuse this exact value rather than reading the current parent config.
+   * Legacy launch-time system instruction. Current writers omit this field and
+   * resume reconstructs the instruction from the current parent runtime.
    */
   systemInstruction?: string | Content;
   /**
-   * Immutable launch-time tool declarations / allowlist for the fork runtime.
-   * Resume must reuse this exact capability set or stay blocked.
+   * Legacy launch-time tool declarations / allowlist. Current writers omit
+   * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
 }

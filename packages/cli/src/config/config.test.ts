@@ -2423,6 +2423,43 @@ describe('mergeExcludeTools', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).not.toContain('tool_search');
   });
+
+  it('should pass tools.toolSearch.threshold through to the config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { threshold: 25 } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getToolSearchThreshold()).toBe(25);
+  });
+
+  it('should default tools.toolSearch.threshold to 10', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getToolSearchThreshold()).toBe(10);
+  });
+
+  it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { threshold: 25 } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getToolSearchThreshold()).toBe(0);
+  });
+
+  it('should force tools.toolSearch.threshold to 0 in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { threshold: 25 } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getToolSearchThreshold()).toBe(0);
+  });
 });
 
 describe('Approval mode tool exclusion logic', () => {
@@ -3151,6 +3188,53 @@ describe('loadCliConfig folderTrust', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
+  });
+});
+
+describe('loadCliConfig allowPrivateNetworkHooks', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should be false by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(false);
+  });
+
+  it('should pass through security.allowPrivateNetworkHooks from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const settings: Settings = {
+      security: {
+        allowPrivateNetworkHooks: true,
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(true);
+  });
+
+  it('should be false in bare mode even when enabled in settings', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const settings: Settings = {
+      security: {
+        allowPrivateNetworkHooks: true,
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowPrivateNetworkHooks()).toBe(false);
   });
 });
 

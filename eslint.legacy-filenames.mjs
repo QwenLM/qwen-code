@@ -563,7 +563,6 @@ export const legacyFilenames = [
   'toolResultDisplayCompaction',
   'usageHistoryService',
   'useMcpApproval',
-  'useResizeSettleRepaint',
   'useStatsDialog',
   'useTeamInProcess',
   'userMemory',
