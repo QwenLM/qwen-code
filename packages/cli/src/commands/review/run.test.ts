@@ -82,6 +82,17 @@ describe('buildReviewPrompt', () => {
       /Invalid review target/,
     );
   });
+
+  it('rejects a target carrying quote characters', () => {
+    // tokenizeArgs strips quotes, so `src/it's-a-file.ts` would re-tokenize
+    // to `src/its-a-file.ts` — silently re-targeting a file never named.
+    expect(() => buildReviewPrompt({ target: "src/it's-a-file.ts" })).toThrow(
+      /Invalid review target/,
+    );
+    expect(() => buildReviewPrompt({ target: 'src/"quoted".ts' })).toThrow(
+      /Invalid review target/,
+    );
+  });
 });
 
 describe('newestArtifactSince', () => {
@@ -251,21 +262,28 @@ describe('review run (handler)', () => {
   }
 
   it('republishes the composed verdict and exits 0', async () => {
+    // Non-default values for every republished field, so a dropped or
+    // hard-coded `composed?.X ?? default` mapping cannot pass.
     armChild(0, {
-      event: 'REQUEST_CHANGES',
-      verdictLine: 'Verdict: Request changes',
+      event: 'COMMENT',
+      verdictLine: 'Verdict: Comment',
       baseEvent: 'REQUEST_CHANGES',
-      cappedBy: [],
-      downgraded: false,
-      downgradedFrom: null,
-      remediation: [],
+      cappedBy: ['unreviewed-dimension'],
+      downgraded: true,
+      downgradedFrom: 'Request changes',
+      remediation: ['do x'],
     });
     await runHandler();
 
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
-    expect(result.event).toBe('REQUEST_CHANGES');
-    expect(result.verdictLine).toBe('Verdict: Request changes');
+    expect(result.event).toBe('COMMENT');
+    expect(result.verdictLine).toBe('Verdict: Comment');
+    expect(result.baseEvent).toBe('REQUEST_CHANGES');
+    expect(result.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(result.downgraded).toBe(true);
+    expect(result.downgradedFrom).toBe('Request changes');
+    expect(result.remediation).toEqual(['do x']);
     expect(result.reportPath).toContain('review.md');
     expect(process.exitCode).toBe(0);
   });
@@ -424,6 +442,52 @@ describe('review run (handler)', () => {
     expect(result.childExitCode).toBeNull();
     expect(result.childSignal).toBe('SIGTERM');
     expect(process.exitCode).toBe(1);
+  });
+
+  it('forwards a parent signal to the child group and exits 128+signum', async () => {
+    // The detached child sits outside the foreground group a terminal's
+    // Ctrl+C signals, and a cancelled CI job sends the parent SIGTERM.
+    // Without forwarding, the parent dies and the review is reparented to
+    // PID 1, burning API calls for the full timeout. Pin the registration
+    // and the 128+signum mapping so a refactor cannot silently drop them.
+    vi.useFakeTimers();
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => child);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    const onSpy = vi.spyOn(process, 'on');
+
+    const done = runHandler({ 'timeout-minutes': 1 });
+
+    // All three signals must be registered.
+    const registered = onSpy.mock.calls
+      .map(([sig]) => sig)
+      .filter((sig) => ['SIGHUP', 'SIGINT', 'SIGTERM'].includes(sig as string));
+    expect(registered).toEqual(
+      expect.arrayContaining(['SIGHUP', 'SIGINT', 'SIGTERM']),
+    );
+
+    const handler = onSpy.mock.calls.find(
+      ([sig]) => sig === 'SIGTERM',
+    )?.[1] as (signal: NodeJS.Signals) => void;
+    handler('SIGHUP');
+    handler('SIGINT');
+    handler('SIGTERM');
+
+    // The group is killed and each signal maps onto 128+signum.
+    expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+    expect(exitSpy).toHaveBeenNthCalledWith(1, 129);
+    expect(exitSpy).toHaveBeenNthCalledWith(2, 130);
+    expect(exitSpy).toHaveBeenNthCalledWith(3, 143);
+
+    // The handler cleared the timeout timer: crossing it must not fire the
+    // timeout path (which would write its own stderr notice).
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(errs.join('')).not.toContain('timeout after');
+
+    child.emit('close', null, 'SIGTERM');
+    await done;
   });
 
   it('prints the verdict line and report path in human-readable mode', async () => {

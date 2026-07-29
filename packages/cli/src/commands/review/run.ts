@@ -47,7 +47,12 @@ export interface RunReviewArgs {
   quiet: boolean;
 }
 
-/** The composed-verdict fields this command republishes (see compose-review). */
+/**
+ * The composed-verdict fields this command republishes (see compose-review).
+ * `findings`, `model`, and `disclosures` (named by #7981) are deliberately
+ * absent: compose-review does not emit them as discrete fields, so there is
+ * nothing to republish until the composed artifact grows them.
+ */
 interface ComposedVerdict {
   event?: string;
   verdictLine?: string;
@@ -102,8 +107,14 @@ export function buildReviewPrompt(args: {
   if (args.target) {
     // The child re-tokenizes this string; a target carrying whitespace or a
     // leading dash would split into extra tokens (`123 --comment` would
-    // silently authorise posting) — refuse anything but a single clean token.
-    if (/\s/.test(args.target) || args.target.startsWith('-')) {
+    // silently authorise posting), and a quote is stripped by the tokenizer
+    // (`src/it's.ts` would re-target to `src/its.ts`) — refuse anything but a
+    // single clean token.
+    if (
+      /\s/.test(args.target) ||
+      args.target.startsWith('-') ||
+      /['"]/.test(args.target)
+    ) {
       throw new Error(
         `Invalid review target ${JSON.stringify(args.target)}: expected a single PR number, PR URL, or file path`,
       );
