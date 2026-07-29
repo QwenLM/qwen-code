@@ -1552,6 +1552,7 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 let projectDirEnvClaimed = false;
+let modelEnvClaimed = false;
 
 function resolveSensitiveSpanAttributeMaxLength(
   value: number | undefined,
@@ -1993,6 +1994,9 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  // True on the Config that claimed the QWEN_CODE_MODEL slot (first in this
+  // process); gates publishModelEnv so no other instance updates it.
+  private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
@@ -2315,6 +2319,18 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+
+    // Publish the active model id for shell subprocesses, under the same claim
+    // discipline as QWEN_CODE_SESSION_ID above: the first Config wins, and only
+    // the claiming instance republishes on model changes (publishModelEnv), so
+    // throwaway Configs never clobber the live session's model. Claimed here
+    // rather than alongside the session ID because the value comes from the
+    // ModelsConfig just constructed.
+    if (!modelEnvClaimed && process.env) {
+      modelEnvClaimed = true;
+      this.ownsModelEnvSlot = true;
+      this.publishModelEnv();
+    }
 
     if (
       this.telemetrySettings.enabled &&
@@ -3534,6 +3550,9 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+    // Auth flows call refreshAuth directly — no model-change notification
+    // fires — and the resolved model can differ from the pre-auth one.
+    this.publishModelEnv();
 
     // Re-apply the user's reasoning effort that the provider sync above wiped.
     if (priorReasoningEffort) {
@@ -3825,9 +3844,22 @@ export class Config {
   }
 
   private notifyModelChangeListeners(): void {
+    this.publishModelEnv();
     const model = this.getModel();
     for (const listener of this.modelChangeListeners) {
       listener(model);
+    }
+  }
+
+  // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
+  // has no other authoritative source: settings files miss /model switches and
+  // describe the wrong home under QWEN_HOME isolation. Gated on the claiming
+  // instance (see the constructor), so in daemon mode the slot — like
+  // QWEN_CODE_SESSION_ID — only ever reflects the first session; later
+  // sessions' Configs never write it.
+  private publishModelEnv(): void {
+    if (this.ownsModelEnvSlot && process.env) {
+      process.env['QWEN_CODE_MODEL'] = this.getModel();
     }
   }
 

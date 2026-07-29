@@ -41,6 +41,9 @@ describe('getShellContextEnvVars', () => {
   // here also cleans up after the per-session tests below, which assign it and
   // used to leak the assignment into every later test in the file.
   let originalProjectDir: string | undefined;
+  // And QWEN_CODE_MODEL — Config claims it into process.env, so a test run
+  // started from inside a qwen session inherits it too.
+  let originalModel: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -49,6 +52,8 @@ describe('getShellContextEnvVars', () => {
     delete process.env['QWEN_CODE_CLI'];
     originalProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
     delete process.env['QWEN_CODE_PROJECT_DIR'];
+    originalModel = process.env['QWEN_CODE_MODEL'];
+    delete process.env['QWEN_CODE_MODEL'];
   });
 
   afterEach(() => {
@@ -66,6 +71,11 @@ describe('getShellContextEnvVars', () => {
       process.env['QWEN_CODE_PROJECT_DIR'] = originalProjectDir;
     } else {
       delete process.env['QWEN_CODE_PROJECT_DIR'];
+    }
+    if (originalModel !== undefined) {
+      process.env['QWEN_CODE_MODEL'] = originalModel;
+    } else {
+      delete process.env['QWEN_CODE_MODEL'];
     }
   });
 
@@ -303,6 +313,36 @@ describe('getShellContextEnvVars', () => {
 
       expect(envSeenByA['QWEN_CODE_SESSION_ID']).toBe('session-A');
       expect(envSeenByB['QWEN_CODE_SESSION_ID']).toBe('session-B');
+    });
+  });
+
+  describe('active model id (QWEN_CODE_MODEL)', () => {
+    it('passes the active model down from the Config-claimed slot', () => {
+      // A subprocess that must report which model ran (the /review compose
+      // step) has no other authoritative source — settings files miss /model
+      // switches and describe the wrong home under QWEN_HOME isolation.
+      process.env['QWEN_CODE_MODEL'] = 'qwen3-coder-plus';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
+        'qwen3-coder-plus',
+      );
+    });
+
+    it('omits the key when no Config has claimed the slot', () => {
+      // Same rule as the session ID: nothing in process.env means the
+      // spawn-site spread has nothing stale to leak, so absence is correct.
+      expect('QWEN_CODE_MODEL' in getShellContextEnvVars()).toBe(false);
+    });
+
+    it('reflects a republished slot after a model switch', () => {
+      // publishModelEnv in config.ts rewrites the slot on set/switchModel and
+      // refreshAuth; spawn-time reads must see the CURRENT value, not one
+      // captured earlier.
+      process.env['QWEN_CODE_MODEL'] = 'model-before-switch';
+      getShellContextEnvVars();
+      process.env['QWEN_CODE_MODEL'] = 'model-after-switch';
+      expect(getShellContextEnvVars()['QWEN_CODE_MODEL']).toBe(
+        'model-after-switch',
+      );
     });
   });
 

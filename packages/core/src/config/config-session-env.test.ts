@@ -7,14 +7,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /**
- * Tests for the module-level `sessionEnvClaimed` guard in Config.
+ * Tests for the module-level `sessionEnvClaimed` and `modelEnvClaimed`
+ * guards in Config.
  *
- * The guard ensures that only the first Config instance in a process sets
- * `process.env['QWEN_CODE_SESSION_ID']`, preventing throwaway instances
- * (e.g. telemetry-only) from overwriting the real session's ID.
+ * The guards ensure that only the first Config instance in a process sets
+ * `process.env['QWEN_CODE_SESSION_ID']` / `process.env['QWEN_CODE_MODEL']`,
+ * preventing throwaway instances (e.g. telemetry-only) from overwriting the
+ * real session's values.
  *
  * We use `vi.isolateModules` to get a fresh module scope (resetting the
- * module-level flag) for each test.
+ * module-level flags) for each test.
  */
 
 // Shared mocks needed by Config constructor
@@ -110,36 +112,44 @@ const baseParams: ConfigParameters = {
 // The reset is load-bearing for what these tests check, so give them headroom.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-describe('Config sessionEnvClaimed guard', () => {
-  let originalEnv: string | undefined;
+let originalEnv: string | undefined;
+let originalModelEnv: string | undefined;
 
-  beforeEach(() => {
-    originalEnv = process.env['QWEN_CODE_SESSION_ID'];
+beforeEach(() => {
+  originalEnv = process.env['QWEN_CODE_SESSION_ID'];
+  delete process.env['QWEN_CODE_SESSION_ID'];
+  originalModelEnv = process.env['QWEN_CODE_MODEL'];
+  delete process.env['QWEN_CODE_MODEL'];
+
+  (fs.existsSync as Mock).mockReturnValue(true);
+  (fs.readdirSync as Mock).mockReturnValue([]);
+  (fs.statSync as Mock).mockReturnValue({
+    isDirectory: vi.fn().mockReturnValue(true),
+  });
+  vi.mocked(fs.realpathSync).mockImplementation((p) => String(p));
+  (fs.mkdirSync as Mock).mockImplementation(() => undefined);
+  (fs.writeFileSync as Mock).mockImplementation(() => undefined);
+  (fs.renameSync as Mock).mockImplementation(() => undefined);
+  (fs.copyFileSync as Mock).mockImplementation(() => undefined);
+  (fs.unlinkSync as Mock).mockImplementation(() => undefined);
+  (fs.readFileSync as Mock).mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  if (originalEnv !== undefined) {
+    process.env['QWEN_CODE_SESSION_ID'] = originalEnv;
+  } else {
     delete process.env['QWEN_CODE_SESSION_ID'];
+  }
+  if (originalModelEnv !== undefined) {
+    process.env['QWEN_CODE_MODEL'] = originalModelEnv;
+  } else {
+    delete process.env['QWEN_CODE_MODEL'];
+  }
+  vi.resetModules();
+});
 
-    (fs.existsSync as Mock).mockReturnValue(true);
-    (fs.readdirSync as Mock).mockReturnValue([]);
-    (fs.statSync as Mock).mockReturnValue({
-      isDirectory: vi.fn().mockReturnValue(true),
-    });
-    vi.mocked(fs.realpathSync).mockImplementation((p) => String(p));
-    (fs.mkdirSync as Mock).mockImplementation(() => undefined);
-    (fs.writeFileSync as Mock).mockImplementation(() => undefined);
-    (fs.renameSync as Mock).mockImplementation(() => undefined);
-    (fs.copyFileSync as Mock).mockImplementation(() => undefined);
-    (fs.unlinkSync as Mock).mockImplementation(() => undefined);
-    (fs.readFileSync as Mock).mockImplementation(() => undefined);
-  });
-
-  afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env['QWEN_CODE_SESSION_ID'] = originalEnv;
-    } else {
-      delete process.env['QWEN_CODE_SESSION_ID'];
-    }
-    vi.resetModules();
-  });
-
+describe('Config sessionEnvClaimed guard', () => {
   it('first Config sets process.env QWEN_CODE_SESSION_ID to its sessionId', async () => {
     const { Config } = await import('./config.js');
     const config = new Config({ ...baseParams });
@@ -177,5 +187,38 @@ describe('Config sessionEnvClaimed guard', () => {
 
     expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
     expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
+  });
+});
+
+describe('Config modelEnvClaimed guard', () => {
+  it('first Config publishes its model to QWEN_CODE_MODEL', async () => {
+    const { Config } = await import('./config.js');
+    new Config({ ...baseParams });
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
+  });
+
+  it('a later Config does not overwrite the claimed slot', async () => {
+    const { Config } = await import('./config.js');
+    new Config({ ...baseParams });
+
+    // Second Config (daemon side-session or telemetry-only throwaway)
+    new Config({ ...baseParams, model: 'other-model' });
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
+  });
+
+  it('only the claiming Config republishes on setModel', async () => {
+    const { Config } = await import('./config.js');
+    const owner = new Config({ ...baseParams });
+    const later = new Config({ ...baseParams, model: 'other-model' });
+
+    // Simulate /model on the live session
+    await owner.setModel('switched-model');
+    expect(process.env['QWEN_CODE_MODEL']).toBe('switched-model');
+
+    // A non-owner's switch must not touch the process-global slot
+    await later.setModel('hijacked-model');
+    expect(process.env['QWEN_CODE_MODEL']).toBe('switched-model');
   });
 });

@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { pathToFileURL } from 'node:url';
+import { accessSync, chmodSync, constants, existsSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
@@ -449,10 +450,75 @@ function writeStderrLine(line: string): void {
   process.stderr.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
+/**
+ * The entry a subprocess should call to reach THIS build, consumed by shell
+ * children as `"${QWEN_CODE_CLI:-qwen}"` (see getShellContextEnvVars in core).
+ * The npm bin wrapper (scripts/cli-entry.js) stamps installed launches, but a
+ * workspace launch — `node dist/index.js`, `npm start` — never passes through
+ * it, so every skill shell-out resolved `qwen` off PATH: a different install,
+ * silently.
+ *
+ * Stamps the bin entry (dist/index.js), not this module: cli.ts compiles to
+ * dist/src/cli.js, which carries no shebang, and the spawn-time filter blanks
+ * an entry a shell cannot exec. Skipped when the derived path does not exist
+ * (dev runs execute .ts sources with no built entry; the bare-`qwen` fallback
+ * is the pre-existing behavior there) and when the module was not loaded from
+ * the filesystem at all — test runners rewrite import.meta.url to non-file
+ * schemes, and the stamp must never take the CLI down.
+ *
+ * The execute bit is granted here when missing, best-effort: the stamped file
+ * must be shell-execable, but tsc emits dist/index.js as 0644 and only npm's
+ * bin-link ever chmods it — on a plain `npm run build` checkout the spawn
+ * filter would blank the stamp and the version skew this exists to fix would
+ * survive. A failed chmod keeps the old fallback: the filter writes '' and
+ * subprocesses run `qwen`.
+ *
+ * First writer wins, unlike the wrapper's unconditional assignment: an
+ * already-set value may come from an outer launcher in THIS process —
+ * cli-entry.js selecting a standalone shim, or the desktop app's vendored
+ * bundle — which knows launch details this module cannot see and must not be
+ * overwritten. The cost is that a value inherited from a PARENT qwen session
+ * also survives, since the two cases are indistinguishable here; the primary
+ * skew scenario — a workspace launch from a plain terminal — has the slot
+ * unset either way. Empty counts as unset: a parent session's spawn filter
+ * writes '' for an entry its shell could not exec, and that verdict is about
+ * the parent's entry, not this build's.
+ */
+export function stampCliEntryEnv(entryPath?: string): void {
+  if (process.env['QWEN_CODE_CLI']) {
+    return;
+  }
+  let entry = entryPath;
+  if (entry === undefined) {
+    // dist/src/cli.js → dist/index.js. In dev (src/cli.ts) this lands on the
+    // unbuilt packages/cli/index.js and the existence check below skips it.
+    const entryUrl = new URL('../index.js', import.meta.url);
+    if (entryUrl.protocol !== 'file:') {
+      return;
+    }
+    entry = fileURLToPath(entryUrl);
+  }
+  if (existsSync(entry)) {
+    try {
+      accessSync(entry, constants.X_OK);
+    } catch {
+      try {
+        chmodSync(entry, 0o755);
+      } catch {
+        // Not chmoddable (read-only checkout): the spawn filter blanks the
+        // stamp and subprocesses fall back to `qwen`, as before this stamp.
+      }
+    }
+    process.env['QWEN_CODE_CLI'] = entry;
+  }
+}
+
 export async function runCliEntryPoint(
   run: () => Promise<void> = runCliEntry,
   handleError: (error: unknown) => Promise<void> = handleCriticalError,
 ): Promise<void> {
+  stampCliEntryEnv();
+
   process.on('uncaughtException', (error) => {
     if (isExpectedPtyRaceError(error)) {
       return;
