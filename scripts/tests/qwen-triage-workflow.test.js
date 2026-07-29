@@ -1095,6 +1095,26 @@ describe('qwen-triage verify hardening', () => {
     }
   });
 
+  // The pre-run wipe answers what an external run inherits; the
+  // post-run wipe answers what it leaves behind for the next pool job.
+  it('wipes the workspace after external code, on every outcome', () => {
+    const verifyJob = job('verify');
+    const postWipe = stepIn('verify', 'Wipe workspace after external code');
+    expect(postWipe).not.toBe('');
+    // Gated on the trust level: a trusted run keeps its warm workspace.
+    expect(postWipe).toContain(
+      "needs.authorize.outputs.verify_trust == 'external'",
+    );
+    // Must run on every outcome, including cancellation and timeout.
+    expect(postWipe).toContain('always()');
+    // Ordering: after the agent, not before it.
+    expect(verifyJob.indexOf('Run verification agent')).toBeLessThan(
+      verifyJob.indexOf('Wipe workspace after external code'),
+    );
+    // Same path guard as the pre-run wipe.
+    expect(postWipe).toContain('refusing to wipe suspicious workspace path');
+  });
+
   // The sponsored lane's pre-execution risk screen, driven for real: the
   // actual resolve-step text runs against a stubbed gh and a live local
   // HTTP server standing in for the model endpoint, so the heredoc's
@@ -1106,6 +1126,12 @@ describe('qwen-triage verify hardening', () => {
       .match(/run: \|-\n([\s\S]*)$/)?.[1]
       .replace(/^ {10}/gm, '');
     expect(script).toBeTruthy();
+    // The screen prompt must describe the ACTUAL environment. The pool is
+    // persistent and network-isolated, not ephemeral — a stale prompt
+    // calibrates the model for leniency it should not have.
+    expect(script).not.toContain('ephemeral');
+    expect(script).not.toContain('credential-free');
+    expect(script).toContain('network-isolated');
 
     // The model endpoint must be a SEPARATE process: the scenarios run the
     // step via spawnSync, which blocks this process's event loop — an
@@ -1284,8 +1310,25 @@ describe('qwen-triage verify hardening', () => {
         expect(pm.reason).toContain('package-manager configuration');
       }
 
-      // Long opaque single-line content: 600+ chars with no space is the
-      // shape of a packed payload, and the arm must skip lockfile
+      // The regex must not be root-anchored: a .npmrc in a package
+      // subdirectory is just as dangerous as one at the root.
+      const nested = run({
+        trust: 'external',
+        diff: '+++ b/packages/core/.npmrc\n+script-shell=/tmp/evil\n',
+      });
+      expect(nested.decision, 'nested .npmrc was not flagged').toBe('skip');
+      expect(nested.reason).toContain('package-manager configuration');
+
+      // A rename-only hunk emits `rename to` with no `+++ b/` header.
+      const renamed = run({
+        trust: 'external',
+        diff: 'rename from something\nrename to .npmrc\n',
+      });
+      expect(renamed.decision, 'rename to .npmrc was not flagged').toBe('skip');
+      expect(renamed.reason).toContain('package-manager configuration');
+
+      // Long opaque single-line content: a space-free field of 600+ chars
+      // is the shape of a packed payload, and the arm must skip lockfile
       // integrity/resolved lines or every dependency bump would refuse.
       const packed = run({
         trust: 'external',
@@ -1299,6 +1342,35 @@ describe('qwen-triage verify hardening', () => {
           diff: `+++ b/package-lock.json\n+      "integrity": "sha512-${'B'.repeat(700)}",\n`,
         }).decision,
       ).toBe('run');
+
+      // A line with spaces is still caught when one space-free field
+      // is >= 600 chars (the old rule required the WHOLE line to be
+      // space-free, so a single space anywhere was a bypass).
+      const spacedOpaque = run({
+        trust: 'external',
+        diff: `+++ b/src/x.js\n+const p = '${'C'.repeat(650)}';\n`,
+      });
+      expect(spacedOpaque.decision, 'spaced opaque field was not flagged').toBe(
+        'skip',
+      );
+      expect(spacedOpaque.reason).toContain('long opaque');
+      // ...but a line whose fields are all short must still pass, or the
+      // arm would be refusing ordinary code.
+      expect(
+        run({
+          trust: 'external',
+          diff: `+++ b/src/x.js\n+${'word '.repeat(200)}\n`,
+        }).decision,
+      ).toBe('run');
+
+      // Oversized diff: the model screen reads at most 200 KB, so a
+      // larger diff would be screened on a prefix only — fail closed.
+      const oversized = run({
+        trust: 'external',
+        diff: CLEAN + '+'.padEnd(200001, 'x') + '\n',
+      });
+      expect(oversized.decision).toBe('skip');
+      expect(oversized.reason).toContain('too large to screen');
 
       // Unconfigured model screen -> refuse. A missing key must never mean
       // "nothing flagged it, proceed".
