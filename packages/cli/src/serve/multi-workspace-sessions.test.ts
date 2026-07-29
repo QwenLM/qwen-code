@@ -3638,7 +3638,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('keeps archive and delete blocked while a workspace export is in flight', async () => {
+  it('reports archive and delete conflicts while a workspace export is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440283';
       await writeStoredSession({
@@ -3679,10 +3679,15 @@ describe('multi-workspace session dispatch', () => {
           .post('/workspaces/secondary-id/sessions/archive')
           .set('Host', host())
           .send({ sessionIds: [sessionId] });
-        expect(archive.status).toBe(409);
+        expect(archive.status).toBe(200);
         expect(archive.body).toMatchObject({
-          code: 'session_archiving',
-          sessionId,
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         });
 
         const remove = await request(app)
@@ -3891,7 +3896,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('keeps unarchive and delete blocked while archived export is in flight', async () => {
+  it('reports unarchive and delete conflicts while archived export is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440289';
       await writeStoredSession({
@@ -3933,8 +3938,16 @@ describe('multi-workspace session dispatch', () => {
           .post('/workspaces/secondary-id/sessions/unarchive')
           .set('Host', host())
           .send({ sessionIds: [sessionId] });
-        expect(unarchive.status).toBe(409);
-        expect(unarchive.body.code).toBe('session_archiving');
+        expect(unarchive.status).toBe(200);
+        expect(unarchive.body).toMatchObject({
+          unarchived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
+        });
 
         const remove = await request(app)
           .post('/workspaces/secondary-id/sessions/delete')

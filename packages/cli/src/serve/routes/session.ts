@@ -105,6 +105,7 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 import {
+  resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
@@ -642,6 +643,30 @@ export function registerSessionRoutes(
         workspaceCwd: runtime.workspaceCwd,
       });
       sendUntrustedWorkspaceResponse(res);
+      return null;
+    }
+    return runtime;
+  };
+
+  const resolveLegacyPrimaryRuntimeFromParam = (
+    req: Request,
+    res: Response,
+  ): WorkspaceRuntime | null => {
+    const entry = resolveWorkspaceEntryFromParam(
+      workspaceRegistry,
+      req,
+      res,
+      'id',
+    );
+    if (!entry) return null;
+    if (!entry.primary) {
+      sendWorkspaceMismatch(res, entry.workspaceCwd);
+      return null;
+    }
+    const runtime =
+      entry.state === 'active' ? entry.current?.runtime : undefined;
+    if (!runtime) {
+      sendWorkspaceRuntimeUnavailable(res, entry);
       return null;
     }
     return runtime;
@@ -3675,12 +3700,7 @@ export function registerSessionRoutes(
   });
 
   app.post('/workspace/:id/session-groups', mutate(), async (req, res) => {
-    const runtime = resolveWorkspaceRuntimeFromParam(
-      workspaceRegistry,
-      req,
-      res,
-      'id',
-    );
+    const runtime = resolveLegacyPrimaryRuntimeFromParam(req, res);
     if (runtime === null) return;
     const body = safeBody(req);
     try {
@@ -3703,12 +3723,7 @@ export function registerSessionRoutes(
     '/workspace/:id/session-groups/:groupId',
     mutate(),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
-        workspaceRegistry,
-        req,
-        res,
-        'id',
-      );
+      const runtime = resolveLegacyPrimaryRuntimeFromParam(req, res);
       if (runtime === null) return;
       const body = safeBody(req);
       try {
@@ -3742,12 +3757,7 @@ export function registerSessionRoutes(
     '/workspace/:id/session-groups/:groupId',
     mutate(),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
-        workspaceRegistry,
-        req,
-        res,
-        'id',
-      );
+      const runtime = resolveLegacyPrimaryRuntimeFromParam(req, res);
       if (runtime === null) return;
       try {
         const deleted = await runWithWorkspaceRuntimeStorage(runtime, () =>

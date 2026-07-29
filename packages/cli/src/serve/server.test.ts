@@ -17696,7 +17696,7 @@ describe('createServeApp', () => {
       });
     });
 
-    it('keeps archive blocked while a legacy export is in flight', async () => {
+    it('reports an archive conflict while a legacy export is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
       await writeExportSession(sid);
       let loadStarted!: () => void;
@@ -17730,10 +17730,15 @@ describe('createServeApp', () => {
           .post('/sessions/archive')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sessionIds: [sid] });
-        expect(archive.status).toBe(409);
+        expect(archive.status).toBe(200);
         expect(archive.body).toMatchObject({
-          code: 'session_archiving',
-          sessionId: sid,
+          archived: [],
+          errors: [
+            {
+              sessionId: sid,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         });
 
         releaseLoad();
@@ -19262,7 +19267,7 @@ describe('createServeApp', () => {
       expect(archiveRes.body.archived).toEqual([sid]);
     });
 
-    it('returns session_archiving for archive while load is in flight', async () => {
+    it('reports an archive conflict while load is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
       await writeSession(sid);
       let loadStarted!: () => void;
@@ -19300,12 +19305,16 @@ describe('createServeApp', () => {
         .post('/sessions/archive')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ sessionIds: [sid] });
-      expect(archiveRes.status).toBe(409);
+      expect(archiveRes.status).toBe(200);
       expect(archiveRes.body).toMatchObject({
-        code: 'session_archiving',
-        sessionId: sid,
+        archived: [],
+        errors: [
+          {
+            sessionId: sid,
+            error: expect.stringContaining('is being archived or unarchived'),
+          },
+        ],
       });
-      expect(archiveRes.body.error).toContain('being archived or unarchived');
 
       releaseLoad();
       const loadRes = await loadPromise;

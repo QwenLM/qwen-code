@@ -3847,7 +3847,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('session/load holds archive gate while restore is in flight', async () => {
+  it('session/load reports an archive conflict while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';
       await writeStoredSession(sessionId);
@@ -3890,9 +3890,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(await reader.next()).toMatchObject({
         id: 213,
-        error: {
-          code: -32603,
-          data: { errorKind: 'session_archiving', sessionId },
+        result: {
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         },
       });
 
@@ -3960,7 +3965,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/prompt holds archive gate while prompt is in flight', async () => {
+  it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440127';
       await writeStoredSession(sessionId);
@@ -4010,9 +4015,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(await connReader.next()).toMatchObject({
         id: 219,
-        error: {
-          code: -32603,
-          data: { errorKind: 'session_archiving', sessionId },
+        result: {
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         },
       });
       expect(bridge.closedSessions).toEqual([]);
@@ -6596,7 +6606,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+    it('_qwen/session/artifacts/add reports an archive conflict while mutating', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440131';
         await writeStoredSession(sessionId);
@@ -6646,9 +6656,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         expect(await reader.next()).toMatchObject({
           id: 61,
-          error: {
-            code: -32603,
-            data: { errorKind: 'session_archiving', sessionId },
+          result: {
+            archived: [],
+            errors: [
+              {
+                sessionId,
+                error: expect.stringContaining(
+                  'is being archived or unarchived',
+                ),
+              },
+            ],
           },
         });
 
@@ -6661,7 +6678,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+    it('_qwen/session/artifacts/remove reports an archive conflict while mutating', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440132';
         await writeStoredSession(sessionId);
@@ -6719,9 +6736,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         expect(await reader.next()).toMatchObject({
           id: 63,
-          error: {
-            code: -32603,
-            data: { errorKind: 'session_archiving', sessionId },
+          result: {
+            archived: [],
+            errors: [
+              {
+                sessionId,
+                error: expect.stringContaining(
+                  'is being archived or unarchived',
+                ),
+              },
+            ],
           },
         });
 
