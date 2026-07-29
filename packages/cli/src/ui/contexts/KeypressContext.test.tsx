@@ -425,13 +425,15 @@ describe('KeypressContext - Kitty Protocol', () => {
         result.current.subscribe(keyHandler);
       });
 
-      // Cmd+Up: modifier 9 = base 1 + Super 8
+      // Cmd+Home: modifier 9 = base 1 + Super 8. Use Home (H), not an arrow
+      // (A/B/C/D): readline claims modified arrows before they reach the Kitty
+      // arrowPrefix decoder, so an arrow case would pass even without the fix.
       act(() => {
-        stdin.sendKittySequence(`\x1b[1;9A`);
+        stdin.sendKittySequence(`\x1b[1;9H`);
       });
 
       expect(keyHandler).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'up', meta: true }),
+        expect.objectContaining({ name: 'home', meta: true }),
       );
     });
 
