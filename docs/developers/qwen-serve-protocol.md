@@ -1616,7 +1616,12 @@ exists for.
 does, so a client reassembling pages joins them with `\n`. `hasMore` is not a
 restatement of `nextCursor`: a small non-UTF-8 file read with a `limit` has
 more content but no derivable byte offset, so it reports `hasMore: true` with
-`nextCursor: null`.
+`nextCursor: null`. The cursor is also null when the byte cap cuts the current
+line, because resuming from that offset would return a partial line. For many
+short lines, lower `limit` until the page ends before the byte cap and returns
+a cursor. For a single oversized line, request the following line explicitly
+(for example, `line=2` when starting at line 1), then continue with cursors;
+use `GET /file/bytes` when the complete oversized line is required.
 
 ```json
 {
