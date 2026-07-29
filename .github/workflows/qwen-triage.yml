@@ -1112,14 +1112,30 @@ jobs:
           # not racing a live process. This also removes the localhost blind
           # scan surface the bearer-gated proxy defends against. The proxy
           # started further below runs as root, so this cannot touch it.
+          #    Zombies do not count. A zombie has already exited and released
+          #    everything except its exit status, so it cannot re-plant an
+          #    artifact or touch the agent's inputs — and it cannot be killed
+          #    either, so counting it means this check can never clear. The
+          #    container runs no init to reap orphans, so they are expected.
+          live_build_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
           pkill -KILL -u node 2>/dev/null || true
           for _ in 1 2 3; do
-            pgrep -u node >/dev/null 2>&1 || break
+            [ -n "$(live_build_processes)" ] || break
             sleep 1
             pkill -KILL -u node 2>/dev/null || true
           done
-          if pgrep -u node >/dev/null 2>&1; then
-            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+          survivors="$(live_build_processes)" || true
+          if [ -n "$survivors" ]; then
+            # Name them. The first version of this guard failed the job with
+            # nothing but "processes survived", so a real threat and a
+            # harmless leftover were indistinguishable — including to the
+            # person who wrote it.
+            echo "::error::Processes owned by the build user survived SIGKILL; refusing to start the agent."
+            printf '%s\n' "$survivors" | while IFS= read -r proc; do
+              echo "::error::  surviving process: ${proc}"
+            done
             exit 1
           fi
 
@@ -1162,8 +1178,13 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
-            mkdir -p "$proxy_bin"
+            # This job runs in a container, and RUNNER_TEMP is bind-mounted
+            # from the self-hosted runner's host filesystem. Writing the
+            # wrappers there leaves root-owned files on the host that later
+            # non-container jobs (the PR review) can neither overwrite nor
+            # delete, breaking every review scheduled on that runner. Keep
+            # them on the container's own disk, under a per-run directory.
+            proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
 
             if command -v gh >/dev/null 2>&1; then
               local real_gh
@@ -1522,6 +1543,15 @@ jobs:
             find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
           fi
           git worktree prune -v || true
+          # Restore workspace ownership to the runner user so the next job's
+          # checkout step can clean the tree without EACCES. The prepare step
+          # chowned everything to node:node; without this, node_modules and
+          # .qwen/ remain node-owned and the next checkout's rm -rf fails.
+          RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
   # with the write PAT and never checks out PR code, so the write credential is
@@ -2320,14 +2350,30 @@ jobs:
           #    child can outlive its step, wait for the sweeps below, and then
           #    re-plant artifacts or tamper with the agent's inputs. Without
           #    this, every one-shot cleanup here is racing a live process.
+          #    Zombies do not count. A zombie has already exited and released
+          #    everything except its exit status, so it cannot re-plant an
+          #    artifact or touch the agent's inputs — and it cannot be killed
+          #    either, so counting it means this check can never clear. The
+          #    container runs no init to reap orphans, so they are expected.
+          live_build_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
           pkill -KILL -u node 2>/dev/null || true
           for _ in 1 2 3; do
-            pgrep -u node >/dev/null 2>&1 || break
+            [ -n "$(live_build_processes)" ] || break
             sleep 1
             pkill -KILL -u node 2>/dev/null || true
           done
-          if pgrep -u node >/dev/null 2>&1; then
-            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+          survivors="$(live_build_processes)" || true
+          if [ -n "$survivors" ]; then
+            # Name them. The first version of this guard failed the job with
+            # nothing but "processes survived", so a real threat and a
+            # harmless leftover were indistinguishable — including to the
+            # person who wrote it.
+            echo "::error::Processes owned by the build user survived SIGKILL; refusing to start the agent."
+            printf '%s\n' "$survivors" | while IFS= read -r proc; do
+              echo "::error::  surviving process: ${proc}"
+            done
             exit 1
           fi
 
@@ -2406,8 +2452,13 @@ jobs:
             export QWEN_CI_https_proxy="${https_proxy:-}"
             export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
             export QWEN_CI_http_proxy="${http_proxy:-}"
-            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
-            mkdir -p "$proxy_bin"
+            # This job runs in a container, and RUNNER_TEMP is bind-mounted
+            # from the self-hosted runner's host filesystem. Writing the
+            # wrappers there leaves root-owned files on the host that later
+            # non-container jobs (the PR review) can neither overwrite nor
+            # delete, breaking every review scheduled on that runner. Keep
+            # them on the container's own disk, under a per-run directory.
+            proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
 
             if command -v gh >/dev/null 2>&1; then
               local real_gh
@@ -2825,6 +2876,15 @@ jobs:
             esac
           done
           git worktree prune -v || true
+          # Restore workspace ownership to the runner user so the next job's
+          # checkout step can clean the tree without EACCES. The prepare step
+          # chowned everything to node:node; without this, node_modules and
+          # .qwen/ remain node-owned and the next checkout's rm -rf fails.
+          RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted
   # runner with the write PAT and never checks out PR code, so the write
@@ -3176,7 +3236,7 @@ jobs:
                           and ([.pass, .fail, .total] | all(type == "number" and . >= 0 and . == floor))
                           and (.total > 0)
                           and (.total == .pass + .fail)
-                       then "Scripted assertions: \(.pass) passed · \(.fail) failed · \(.total) total"
+                       then "Scripted assertions: \(.pass) passed · \(.fail) failed · \(.total) total\n\n脚本断言：\(.pass) 通过 · \(.fail) 失败 · \(.total) 总计"
                        else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
               )"
               if [ -z "$ASSERT_LINE" ]; then
@@ -3198,20 +3258,25 @@ jobs:
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
               esac
             fi
+            # The verdict headline carries its Chinese twin. The verdict is the one
+            # line a reader acts on, and until now it was the only part of
+            # the unfolded comment that was English-only — the scope
+            # disclaimer below it has been bilingual all along, so a Chinese
+            # reader got the caveat and not the conclusion.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
               case "$AGENT_VERDICT" in
-                merge-ready) HEADLINE='merge-ready (agent verdict)' ;;
-                findings) HEADLINE='findings reported (agent verdict)' ;;
-                blocked) HEADLINE='blocked (agent verdict)' ;;
-                inconclusive) HEADLINE='inconclusive (agent verdict)' ;;
+                merge-ready) HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
+                findings) HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                blocked) HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
+                inconclusive) HEADLINE='inconclusive (agent verdict)'; HEADLINE_ZH='结论不足（agent 判定）' ;;
               esac
             else
               case "${VERDICT:-}" in
-                pass) HEADLINE='completed (no usable structured verdict)' ;;
-                fail) HEADLINE='agent run failed' ;;
-                timeout) HEADLINE='timeout — partial evidence' ;;
-                infra-error) HEADLINE='infra-error (crash, OOM, or unwritable results)' ;;
-                *) HEADLINE='unknown' ;;
+                pass) HEADLINE='completed (no usable structured verdict)'; HEADLINE_ZH='已完成（无可用的结构化判定）' ;;
+                fail) HEADLINE='agent run failed'; HEADLINE_ZH='agent 运行失败' ;;
+                timeout) HEADLINE='timeout — partial evidence'; HEADLINE_ZH='超时——证据不完整' ;;
+                infra-error) HEADLINE='infra-error (crash, OOM, or unwritable results)'; HEADLINE_ZH='基础设施故障（崩溃、OOM 或结果不可写）' ;;
+                *) HEADLINE='unknown'; HEADLINE_ZH='未知' ;;
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
@@ -3237,7 +3302,8 @@ jobs:
                 printf '%s\n' '<!-- qwen-triage:verify-substantive -->'
               fi
               printf '\n'
-              printf '**Sandboxed verification: %s** - [workflow run](%s)\n\n' "$HEADLINE" "$RUN_URL"
+              printf '**Sandboxed verification: %s** - [workflow run](%s)\n' "$HEADLINE" "$RUN_URL"
+              printf '**沙箱验证：%s**\n\n' "${HEADLINE_ZH:-$HEADLINE}"
               if [ "${VERDICT:-}" = 'pass' ]; then
                 printf '%s\n\n' "$SCOPE_EN"
                 printf '%s\n\n' "$SCOPE_ZH"

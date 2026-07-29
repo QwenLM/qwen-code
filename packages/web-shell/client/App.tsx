@@ -2618,6 +2618,9 @@ export function App({
     null,
   );
   const [composerText, setComposerText] = useState('');
+  const [hasComposerAttachments, setHasComposerAttachments] = useState<
+    boolean | null
+  >(null);
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
@@ -3516,6 +3519,43 @@ export function App({
       sessionActions,
     ],
   );
+
+  const resolveSessionForWorkspace = useCallback(
+    async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
+      try {
+        if (!forceCreate) {
+          // Reuse the connected session only when it owns the target checkout.
+          // For a linked-worktree session the owned checkout is the worktree
+          // path, not the base workspace (activeWorkspaceCwd), so a Commit
+          // opened on the base workspace must not borrow the worktree session.
+          const sessionOwnerCwd = sessionWorktree?.path ?? activeWorkspaceCwd;
+          if (connection.sessionId && sessionOwnerCwd === cwd) {
+            return connection.sessionId;
+          }
+          // Fetch the most recent session for this workspace.
+          const sessions = await workspace.client
+            .workspaceByCwd(cwd)
+            .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
+          if (sessions.length > 0) return sessions[0].sessionId;
+        }
+        // No session exists or forced: create one.
+        const result = await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).createSession({ workspaceCwd: cwd });
+        return result.sessionId;
+      } catch {
+        return undefined;
+      }
+    },
+    [
+      connection.sessionId,
+      activeWorkspaceCwd,
+      workspace.client,
+      sessionActions,
+      sessionWorktree,
+    ],
+  );
+
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -3544,6 +3584,14 @@ export function App({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
       view: 'diff',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenCommit = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'commit',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
@@ -4619,8 +4667,14 @@ export function App({
       lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
+    // After a session is cleared the connection's workspaceCwd is a leftover
+    // from the previous session; reporting it would misroute the host back to
+    // the old workspace. activeWorkspaceCwd resolves the workspace picked for
+    // the next session (locked / selected / primary) and is what the composer
+    // chip reports, so the host and the chip stay in agreement.
+    const reportedWorkspaceCwd = activeWorkspaceCwd ?? connection.workspaceCwd;
     const activeWorkspace = workspaces.find(
-      (entry) => entry.cwd === connection.workspaceCwd,
+      (entry) => entry.cwd === reportedWorkspaceCwd,
     );
     if (connection.sessionId && !workspace.capabilities) return;
     const workspaceId =
@@ -4630,23 +4684,24 @@ export function App({
     if (
       lastNotifiedSessionIdRef.current === connection.sessionId &&
       lastNotifiedWorkspaceIdRef.current === workspaceId &&
-      lastNotifiedWorkspaceCwdRef.current === connection.workspaceCwd
+      lastNotifiedWorkspaceCwdRef.current === reportedWorkspaceCwd
     ) {
       return;
     }
     lastNotifiedSessionIdRef.current = connection.sessionId;
     lastNotifiedWorkspaceIdRef.current = workspaceId;
-    lastNotifiedWorkspaceCwdRef.current = connection.workspaceCwd;
+    lastNotifiedWorkspaceCwdRef.current = reportedWorkspaceCwd;
     onSessionIdChange?.(
       connection.sessionId,
       workspaceId,
-      connection.workspaceCwd,
+      reportedWorkspaceCwd,
     );
   }, [
     connection.missingSession,
     connection.sessionId,
     connection.workspaceCwd,
     onSessionIdChange,
+    activeWorkspaceCwd,
     workspace.capabilities,
     workspaces,
   ]);
@@ -5132,6 +5187,13 @@ export function App({
     }, 120);
   }, []);
 
+  const handleComposerAttachmentsChange = useCallback(
+    (hasAttachments: boolean) => {
+      setHasComposerAttachments(hasAttachments);
+    },
+    [],
+  );
+
   const {
     suggestion: newSessionSuggestion,
     dismiss: dismissNewSessionSuggestion,
@@ -5148,6 +5210,7 @@ export function App({
         : 0,
     isRunning: streamingState !== 'idle',
     dialogOpen: interactionBlocked || approvalOverlayActive,
+    hasAttachments: hasComposerAttachments,
     generateContent: sessionActions.generateSessionContent,
   });
 
@@ -5211,7 +5274,11 @@ export function App({
   const handleAcceptNewSessionSuggestion = useCallback(() => {
     const draft = composerTextRef.current.trim();
     if (!draft || isStartingNewSessionSuggestion) return;
-    if (newSessionSuggestion?.classifiedInput !== draft) {
+    if (
+      newSessionSuggestion?.suggestion !== 'new_session' ||
+      newSessionSuggestion.classifiedInput !== draft ||
+      newSessionSuggestion.sourceSessionId !== connectionRef.current.sessionId
+    ) {
       dismissNewSessionSuggestion();
       return;
     }
@@ -5250,6 +5317,24 @@ export function App({
     onSessionIdChange,
     suppressNewSessionSuggestion,
   ]);
+
+  const handleAcceptBtwSuggestion = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    if (
+      !draft ||
+      newSessionSuggestion?.suggestion !== 'btw' ||
+      newSessionSuggestion.classifiedInput !== draft ||
+      newSessionSuggestion.sourceSessionId !==
+        connectionRef.current.sessionId ||
+      editorRef.current?.hasAttachments() !== false
+    ) {
+      dismissNewSessionSuggestion();
+      return;
+    }
+    dismissNewSessionSuggestion();
+    editorRef.current?.submit({ text: `/btw ${draft}` });
+    editorRef.current?.focus();
+  }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
@@ -7477,6 +7562,8 @@ export function App({
               workspaceCwd={gitDialog.workspaceCwd}
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
+              sessionId={connection.sessionId}
+              resolveSessionForWorkspace={resolveSessionForWorkspace}
               onClose={() => setGitDialog(undefined)}
             />
           )}
@@ -7778,7 +7865,28 @@ export function App({
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
-                    setGitDialog({ workspaceCwd, view: 'diff' })
+                    setGitDialog({
+                      workspaceCwd,
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'diff',
+                    })
+                  }
+                  onOpenCommit={(workspaceCwd) =>
+                    setGitDialog({
+                      workspaceCwd,
+                      // A worktree session commits in the worktree checkout,
+                      // not the base workspace cwd — but only for the active
+                      // session's own workspace chip; another workspace's chip
+                      // has no association with this session's worktree.
+                      gitCwd:
+                        workspaceCwd === activeWorkspaceCwd
+                          ? sessionWorktree?.path
+                          : undefined,
+                      view: 'commit',
+                    })
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
@@ -8578,7 +8686,11 @@ export function App({
                           <div
                             className={styles.composerActionTip}
                             role="status"
-                            data-testid="new-session-suggestion"
+                            data-testid={
+                              newSessionSuggestion.suggestion === 'btw'
+                                ? 'btw-suggestion'
+                                : 'new-session-suggestion'
+                            }
                           >
                             <span
                               className={styles.composerActionTipIcon}
@@ -8587,17 +8699,29 @@ export function App({
                               ✦
                             </span>
                             <span className={styles.composerActionTipText}>
-                              {t('editor.newSessionSuggestionTitle')}
+                              {newSessionSuggestion.suggestion === 'btw'
+                                ? t('editor.btwSuggestionTitle')
+                                : t('editor.newSessionSuggestionTitle')}
                             </span>
                             <div className={styles.composerActionTipActions}>
                               <button
                                 type="button"
                                 className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                data-testid="new-session-suggestion-start"
+                                data-testid={
+                                  newSessionSuggestion.suggestion === 'btw'
+                                    ? 'btw-suggestion-send'
+                                    : 'new-session-suggestion-start'
+                                }
                                 onMouseDown={(event) => event.preventDefault()}
-                                onClick={handleAcceptNewSessionSuggestion}
+                                onClick={
+                                  newSessionSuggestion.suggestion === 'btw'
+                                    ? handleAcceptBtwSuggestion
+                                    : handleAcceptNewSessionSuggestion
+                                }
                               >
-                                {t('editor.newSessionSuggestionStart')}
+                                {newSessionSuggestion.suggestion === 'btw'
+                                  ? t('editor.btwSuggestionSend')
+                                  : t('editor.newSessionSuggestionStart')}
                               </button>
                             </div>
                           </div>
@@ -8628,6 +8752,9 @@ export function App({
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
                           onInputTextChange={handleComposerTextChange}
+                          onAttachmentsChange={
+                            handleComposerAttachmentsChange
+                          }
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -8673,12 +8800,18 @@ export function App({
                                     undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
+                          gitCwd={sessionWorktree?.path}
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd
                               ? handleOpenGitDiff
+                              : undefined
+                          }
+                          onOpenCommit={
+                            gitDiffWorkspaceCwd
+                              ? handleOpenCommit
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

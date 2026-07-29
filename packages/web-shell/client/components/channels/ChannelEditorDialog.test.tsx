@@ -77,6 +77,8 @@ async function renderDialog(
           onOpenChange={vi.fn()}
           onSave={vi.fn().mockResolvedValue(undefined)}
           onReload={vi.fn().mockResolvedValue(undefined)}
+          listPairingRequests={vi.fn().mockResolvedValue({ requests: [] })}
+          approvePairingRequest={vi.fn()}
           {...props}
         />
       </I18nProvider>,
@@ -177,6 +179,15 @@ describe('ChannelEditorDialog', () => {
         },
       },
     });
+  });
+
+  it('explains that pairing requests appear after a new Channel is saved', async () => {
+    await renderDialog();
+
+    expect(document.body.textContent).toContain('Save pairing mode first');
+    expect(document.body.textContent).toContain(
+      'Pending requests will appear here after this Channel is saved in pairing mode.',
+    );
   });
 
   it('keeps the dialog open and offers a reload after a stale write', async () => {

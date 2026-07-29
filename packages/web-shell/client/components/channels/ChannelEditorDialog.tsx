@@ -15,6 +15,8 @@ import { CheckCircle2Icon, KeyRoundIcon } from 'lucide-react';
 import type {
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelInstanceSnapshot,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingRequestsSnapshot,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
@@ -43,6 +45,7 @@ import {
 import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
+import { ChannelPairingRequests } from './ChannelPairingRequests';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
@@ -85,6 +88,13 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
+  listPairingRequests: (
+    name: string,
+  ) => Promise<DaemonChannelPairingRequestsSnapshot>;
+  approvePairingRequest: (
+    name: string,
+    code: string,
+  ) => Promise<DaemonChannelPairingApprovalResult>;
 }
 
 function FieldShell({
@@ -134,6 +144,8 @@ export function ChannelEditorDialog({
   onOpenChange,
   onSave,
   onReload,
+  listPairingRequests,
+  approvePairingRequest,
 }: ChannelEditorDialogProps) {
   const { t } = useI18n();
   const formId = useId();
@@ -518,6 +530,25 @@ export function ChannelEditorDialog({
                 <p role="alert" className="text-xs text-destructive">
                   {errors['senderPolicy']}
                 </p>
+              ) : null}
+              {draft.senderPolicy === 'pairing' ? (
+                instance?.config.senderPolicy === 'pairing' ? (
+                  <ChannelPairingRequests
+                    channelName={instance.name}
+                    listRequests={listPairingRequests}
+                    approveRequest={approvePairingRequest}
+                  />
+                ) : (
+                  <Alert>
+                    <KeyRoundIcon />
+                    <AlertTitle>
+                      {t('channels.editor.pairing.saveFirst.title')}
+                    </AlertTitle>
+                    <AlertDescription>
+                      {t('channels.editor.pairing.saveFirst.description')}
+                    </AlertDescription>
+                  </Alert>
+                )
               ) : null}
             </section>
           </div>
