@@ -27,6 +27,19 @@ export function containsXmlToolCalls(text: string): boolean {
 }
 
 /**
+ * Parses a raw parameter value, restoring structured JSON values (objects,
+ * arrays, numbers, booleans) when the model emitted them inline, and falling
+ * back to the plain string otherwise.
+ */
+function parseParameterValue(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Extracts XML-style tool calls from plain text content.
  * Returns an array of extracted tool calls, or an empty array if none found.
  */
@@ -48,7 +61,7 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
     while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
       const paramName = paramMatch[1];
       const paramValue = paramMatch[2].trim();
-      args[paramName] = paramValue;
+      args[paramName] = parseParameterValue(paramValue);
     }
 
     if (toolName && Object.keys(args).length > 0) {
