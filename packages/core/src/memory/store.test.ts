@@ -138,6 +138,7 @@ describe('auto-memory storage scaffold', () => {
 
   it('shares managed auto-memory across nested directories in the same git checkout by default', async () => {
     delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
     const runtimeDir = path.join(tempDir, 'runtime-output');
     Storage.setRuntimeBaseDir(runtimeDir);
 
