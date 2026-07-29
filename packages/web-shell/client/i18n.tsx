@@ -2388,12 +2388,16 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access.',
+    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
+  'channels.editor.pairing.approveFor': (v) =>
+    `Approve ${v?.sender ?? 'request'}, code ${v?.code ?? ''}`,
   'channels.editor.pairing.approved': (v) =>
     `${v?.sender ?? 'This person'} can now use this Channel.`,
   'channels.editor.pairing.error': 'Pairing requests were not updated',
+  'channels.editor.pairing.unavailable':
+    'Pairing requests are temporarily unavailable. Try again.',
   'channels.editor.pairing.retry': 'Try again',
   'channels.editor.pairing.empty.title': 'No pending requests',
   'channels.editor.pairing.empty.description':
@@ -4751,12 +4755,15 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。',
+    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
   'channels.editor.pairing.refresh': '刷新配对请求',
-  'channels.editor.pairing.approve': '允许',
+  'channels.editor.pairing.approve': '批准',
+  'channels.editor.pairing.approveFor': (v) =>
+    `批准${v?.sender ?? '该请求'}，配对码 ${v?.code ?? ''}`,
   'channels.editor.pairing.approved': (v) =>
     `${v?.sender ?? '该用户'}现在可以使用此频道。`,
   'channels.editor.pairing.error': '未能更新配对请求',
+  'channels.editor.pairing.unavailable': '暂时无法获取配对请求，请重试。',
   'channels.editor.pairing.retry': '重试',
   'channels.editor.pairing.empty.title': '暂无待处理请求',
   'channels.editor.pairing.empty.description':
