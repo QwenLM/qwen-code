@@ -8833,6 +8833,9 @@ describe('createServeApp', () => {
         .send({ cwd: '/work/a' });
       expect(res.status).toBe(200);
       expect(bridge.calls).toEqual([{ workspaceCwd: WORK_A }]);
+      // toEqual ignores undefined-valued keys, so assert the `sessionScope` key
+      // is truly absent — that absence is the invariant this test guards.
+      expect(bridge.calls[0]).not.toHaveProperty('sessionScope');
     });
 
     it('500 when bridge throws', async () => {

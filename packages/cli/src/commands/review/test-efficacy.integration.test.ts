@@ -18,7 +18,6 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
-  chmodSync,
   rmSync,
   existsSync,
   symlinkSync,
@@ -131,7 +130,6 @@ process.stdout.write(JSON.stringify({
 }));
 `,
   );
-  chmodSync(script, 0o755);
 });
 
 afterEach(() => {

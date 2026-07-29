@@ -17,7 +17,10 @@ jobs:
       LC_ALL: 'C.UTF-8'
     steps:
       - name: 'Configure Windows test environment'
-        shell: 'powershell'
+        # pwsh (PowerShell 7) defaults Out-File to UTF-8 without a BOM. Windows
+        # PowerShell 5.1 writes UTF-16LE, which the runner parses as UTF-8 and
+        # turns into NUL-interleaved bytes — silently leaving TEMP/TMP unset.
+        shell: 'pwsh'
         run: |-
           git config --global core.autocrlf false
           "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -31,6 +34,7 @@ jobs:
         run: |-
           $ErrorActionPreference = 'Stop'
           whoami
+          "TEMP=$env:TEMP"
           git --version
           $nodeVersion = node --version
           $nodeVersion
