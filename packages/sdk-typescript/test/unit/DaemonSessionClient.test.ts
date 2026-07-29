@@ -967,6 +967,79 @@ describe('DaemonSessionClient', () => {
     }
   });
 
+  it('coalesces a prompt abort with an explicit session cancel', async () => {
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    let resolveCancel!: (response: Response) => void;
+    const cancelResponse = new Promise<Response>((resolve) => {
+      resolveCancel = resolve;
+    });
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/events')) {
+        return pendingSseResponse(
+          () => {},
+          (controller) => {
+            eventsController = controller;
+          },
+        );
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+      }
+      if (req.url.endsWith('/session/s-1/cancel')) {
+        return cancelResponse;
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+    const eventsAbort = new AbortController();
+    const eventPump = (async () => {
+      for await (const _event of session.events({
+        signal: eventsAbort.signal,
+      })) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
+
+    await vi.waitFor(() => {
+      expect(calls.filter((call) => call.url.endsWith('/events'))).toHaveLength(
+        1,
+      );
+    });
+    const promptAbort = new AbortController();
+    const prompt = session
+      .prompt(
+        { prompt: [{ type: 'text', text: 'cancel me' }] },
+        promptAbort.signal,
+      )
+      .catch((error: unknown) => error);
+    await waitForPendingPrompt(session, 'p-1');
+
+    promptAbort.abort();
+    const explicitCancel = session.cancel();
+    await vi.waitFor(() => {
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        1,
+      );
+    });
+
+    resolveCancel(new Response(null, { status: 204 }));
+    await explicitCancel;
+    await prompt;
+    eventsController?.close();
+    eventsAbort.abort();
+    await eventPump;
+  });
+
   it('releases a subscription prompt slot after a non-202 result', async () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>
