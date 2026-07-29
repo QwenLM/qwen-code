@@ -93,24 +93,26 @@ describe('extractXmlToolCalls', () => {
     expect(extractXmlToolCalls(text)).toEqual([]);
   });
 
-  it('restores structured JSON parameter values', () => {
+  it('parses structured JSON but preserves scalar strings', () => {
     const text = invoke(
       'tool',
       param('count', '3') +
         param('flag', 'true') +
         param('opts', '{"a": 1}') +
         param('list', '[1, 2]') +
-        param('plain', 'hello world'),
+        param('plain', 'hello world') +
+        param('nil', 'null'),
     );
     expect(extractXmlToolCalls(text)).toEqual([
       {
         name: 'tool',
         args: {
-          count: 3,
-          flag: true,
+          count: '3',
+          flag: 'true',
           opts: { a: 1 },
           list: [1, 2],
           plain: 'hello world',
+          nil: 'null',
         },
       },
     ]);
@@ -130,6 +132,19 @@ describe('extractXmlToolCalls', () => {
     const second = extractXmlToolCalls(text);
     expect(second).toEqual(first);
     expect(second).toHaveLength(1);
+  });
+
+  it('is safe against __proto__ parameter names', () => {
+    const text = invoke(
+      'tool',
+      param('__proto__', '{"polluted": true}') + param('safe', 'yes'),
+    );
+    const result = extractXmlToolCalls(text);
+    expect(result).toHaveLength(1);
+    const args = result[0]!.args;
+    expect(args['safe']).toBe('yes');
+    expect(Object.getPrototypeOf(args)).toBeNull();
+    expect((args as Record<string, unknown>)['polluted']).toBeUndefined();
   });
 });
 
@@ -153,16 +168,11 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(call?.id).toMatch(/^xml-recovered-/);
   });
 
-  it('preserves surrounding non-XML text in remainingText', () => {
-    const text =
-      'Let me check that file for you.\n' +
-      invoke('read_file', param('file_path', 'a.ts')) +
-      '\nLet me know if you need more.';
+  it('preserves short surrounding text in remainingText', () => {
+    const text = 'Sure.\n' + invoke('read_file', param('file_path', 'a.ts'));
     const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
-    expect(result.remainingText).toBe(
-      'Let me check that file for you.\n\nLet me know if you need more.',
-    );
+    expect(result.remainingText).toBe('Sure.');
   });
 
   it('returns empty remainingText when the content is only XML', () => {
@@ -171,5 +181,26 @@ describe('tryRecoverXmlToolCalls', () => {
     );
     expect(result.recovered).toBe(true);
     expect(result.remainingText).toBe('');
+  });
+
+  it('does not recover when substantial prose surrounds the XML', () => {
+    const prose =
+      'Here is how you use the tool. First you open the file, then you read it. ' +
+      'The invoke block below shows the format. Remember to always check the path. ' +
+      'This is a documentation example for the read_file tool call format.';
+    const text = prose + '\n' + invoke('read_file', param('file_path', 'a.ts'));
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+  });
+
+  it('preserves parameterless invoke blocks as plain text', () => {
+    const parameterless = invoke('think', 'Let me reason about this problem');
+    const parameterized = invoke('read_file', param('file_path', 'a.ts'));
+    const text = parameterized + '\n' + parameterless;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.remainingText).toContain(parameterless);
   });
 });

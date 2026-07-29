@@ -4221,7 +4221,7 @@ export class GeminiChat {
       }
     }
 
-    const contentParts = allModelParts.filter((part) => !part.thought);
+    let contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
     for (const part of contentParts) {
       const lastPart =
@@ -4237,7 +4237,7 @@ export class GeminiChat {
       }
     }
 
-    const contentText = consolidatedHistoryParts
+    let contentText = consolidatedHistoryParts
       .filter((part) => part.text)
       .map((part) => part.text)
       .join('')
@@ -4247,12 +4247,15 @@ export class GeminiChat {
     // long contexts) occasionally emit tool calls as raw XML in the content
     // field instead of using the structured tool_calls array. Detect and
     // recover these so the agent loop is not broken. See #8003.
-    if (!hasToolCall && contentText && containsXmlToolCalls(contentText)) {
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      contentText &&
+      containsXmlToolCalls(contentText)
+    ) {
       const recovery = tryRecoverXmlToolCalls(contentText);
       if (recovery.recovered) {
         hasToolCall = true;
-        // Preserve any non-XML text the model emitted alongside the tool
-        // calls, then replace the XML text part with the recovered parts.
         const replacementParts: Part[] = [];
         if (recovery.remainingText) {
           replacementParts.push({ text: recovery.remainingText });
@@ -4265,6 +4268,25 @@ export class GeminiChat {
             break;
           }
         }
+        // Recompute contentText and contentParts so the JSONL recording
+        // below stays aligned with in-memory history (--resume fidelity).
+        contentText = consolidatedHistoryParts
+          .filter((part) => part.text)
+          .map((part) => part.text)
+          .join('')
+          .trim();
+        contentParts = consolidatedHistoryParts;
+        // Yield a synthetic chunk so the agent loop (turn.ts) actually
+        // executes the recovered tool calls.
+        const syntheticChunk = {
+          candidates: [
+            {
+              content: { role: 'model', parts: recovery.functionCallParts },
+            },
+          ],
+        } as GenerateContentResponse;
+        syncFunctionCallsField(syntheticChunk, recovery.functionCallParts);
+        yield syntheticChunk;
         debugLogger.warn(
           `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) from plain text content`,
         );

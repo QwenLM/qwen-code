@@ -27,16 +27,20 @@ export function containsXmlToolCalls(text: string): boolean {
 }
 
 /**
- * Parses a raw parameter value, restoring structured JSON values (objects,
- * arrays, numbers, booleans) when the model emitted them inline, and falling
- * back to the plain string otherwise.
+ * Parses a raw parameter value. Only values that look like structured JSON
+ * (objects or arrays) are parsed; scalar strings are preserved as-is to
+ * avoid coercing e.g. a file named "null" or a string port "8080".
  */
 function parseParameterValue(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
+  const trimmed = value.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return value;
+    }
   }
+  return value;
 }
 
 /**
@@ -54,7 +58,10 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
     const toolName = match[1];
     const paramsBlock = match[2];
 
-    const args: Record<string, unknown> = {};
+    const args: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
     PARAMETER_PATTERN.lastIndex = 0;
 
     let paramMatch: RegExpExecArray | null;
@@ -74,8 +81,10 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
 
 /**
  * Attempts to recover tool calls from XML-formatted text content.
- * If XML tool calls are found, returns functionCall parts and the
- * remaining text (with XML blocks removed).
+ * If XML tool calls are found and dominate the content, returns
+ * functionCall parts and the remaining text (with recovered XML
+ * blocks removed). Parameterless invoke blocks are preserved as
+ * plain text since extractXmlToolCalls intentionally skips them.
  */
 export function tryRecoverXmlToolCalls(text: string): {
   recovered: boolean;
@@ -88,6 +97,30 @@ export function tryRecoverXmlToolCalls(text: string): {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 
+  // Intent guard: only recover when XML blocks dominate the content.
+  // Substantial surrounding prose suggests the model is documenting or
+  // echoing the format, not emitting a tool call. Measure against all
+  // invoke blocks (including parameterless ones the extraction skips).
+  INVOKE_PATTERN.lastIndex = 0;
+  const proseOnly = text
+    .replace(INVOKE_PATTERN, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (text.length > 0 && proseOnly.length / text.length > 0.2) {
+    return { recovered: false, functionCallParts: [], remainingText: text };
+  }
+
+  // Strip only invoke blocks that contain parameters (the ones we actually
+  // recovered). Parameterless blocks are preserved as plain text.
+  INVOKE_PATTERN.lastIndex = 0;
+  const remainingText = text
+    .replace(INVOKE_PATTERN, (block) => {
+      PARAMETER_PATTERN.lastIndex = 0;
+      return PARAMETER_PATTERN.test(block) ? '' : block;
+    })
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
   debugLogger.warn(
     `Recovered ${extracted.length} XML-style tool call(s) from plain text content: ${extracted.map((t) => t.name).join(', ')}`,
   );
@@ -99,13 +132,6 @@ export function tryRecoverXmlToolCalls(text: string): {
       args: toolCall.args,
     },
   }));
-
-  // Remove XML blocks from text, keep surrounding content
-  INVOKE_PATTERN.lastIndex = 0;
-  const remainingText = text
-    .replace(INVOKE_PATTERN, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
 
   return { recovered: true, functionCallParts, remainingText };
 }
