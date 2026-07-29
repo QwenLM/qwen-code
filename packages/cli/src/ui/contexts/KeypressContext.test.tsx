@@ -851,6 +851,64 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('does not treat Kitty Ctrl+Shift+C as the escape hatch while a paste is stuck', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Enter keypress-level paste mode with no paste-end (a stuck paste),
+      // driving the state machine directly via keypress events the way the
+      // passthrough path feeds it.
+      act(() => {
+        stdin.pressKey({
+          name: 'paste-start',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b[200~',
+        });
+      });
+
+      // Ctrl+Shift+C must NOT fire the Ctrl+C escape hatch: with a paste
+      // active it has to be buffered as paste content, not dispatched. Without
+      // the `!key.shift` guard this key would clear the paste and broadcast.
+      act(() => {
+        stdin.pressKey({
+          name: 'c',
+          ctrl: true,
+          meta: false,
+          shift: true,
+          paste: false,
+          sequence: '\x1b[99;6u',
+        });
+      });
+
+      const ctrlShiftC = keyHandler.mock.calls.find(
+        (c) =>
+          c[0]?.ctrl === true && c[0]?.name === 'c' && c[0]?.shift === true,
+      );
+      expect(ctrlShiftC).toBeUndefined();
+
+      // The key was buffered as paste content: ending the paste flushes it.
+      act(() => {
+        stdin.pressKey({
+          name: 'paste-end',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b[201~',
+        });
+      });
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          paste: true,
+          sequence: '\x1b[99;6u',
+        }),
+      );
+    });
+
     it('should still treat Kitty Ctrl+C as the escape hatch', async () => {
       const keyHandler = vi.fn();
       const { result } = renderHook(() => useKeypressContext(), { wrapper });
