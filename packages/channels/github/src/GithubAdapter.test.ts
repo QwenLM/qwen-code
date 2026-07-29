@@ -247,6 +247,44 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
+    it('rejects an allowlist containing only the authenticated GitHub account', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['TEST-BOT', 'test-bot'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'allowlist only contains the authenticated GitHub account "test-bot"',
+        );
+      } finally {
+        channel.disconnect();
+      }
+      expect(config.allowedUsers).toEqual(['test-bot', 'test-bot']);
+    });
+
+    it('warns when the authenticated GitHub account is part of a mixed allowlist', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['TEST-BOT', 'operator'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      try {
+        await channel.connect();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] warning: authenticated GitHub account "test-bot" is allowlisted but cannot trigger this channel; use a separate operator account.\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
     it('connect() is idempotent across reconnects', async () => {
       const config = makeConfig({
         senderPolicy: 'allowlist',
@@ -822,6 +860,45 @@ describe('GithubChannel', () => {
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
       },
     );
+
+    it('skips notifications whose reason is not in reasonFilter', async () => {
+      await initWithoutLoop({
+        reasonFilter: ['mention', 'review_requested', 'assign'],
+      });
+      mockOctokit.paginate.mockClear();
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'author',
+          last_read_at: '2026-07-01T12:00:00.000Z',
+        }),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('normalizes configured reasonFilter entries before matching', async () => {
+      await initWithoutLoop({
+        reasonFilter: [' COMMENT ', 123, ''],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'allowed comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.text).toContain('allowed comment');
+    });
 
     it('excludes comments from disallowed senders when aggregating', async () => {
       await initWithoutLoop({

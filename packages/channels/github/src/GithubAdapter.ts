@@ -12,16 +12,7 @@ import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
-  /**
-   * Optional allowlist of GitHub notification reasons to process.
-   * When set, notifications whose `reason` is not in this list are skipped
-   * before any lane dispatch. Valid reasons: "mention", "review_requested",
-   * "assign", "author", "comment", "ci_activity", "manual", "state_change",
-   * "subscribed", "team_mention", "security_alert", "approval_requested",
-   * "invitation", "member_feature_requested", "security_advisory_credit".
-   * Defaults to undefined (all reasons processed).
-   */
-  reasonFilter?: string[];
+  reasonFilter?: unknown;
 }
 
 const KNOWN_NOTIFICATION_REASONS = new Set([
@@ -105,12 +96,36 @@ interface NotificationContext {
   reason: string;
 }
 
+function normalizeReasonFilter(
+  config: GithubConfig,
+  channelName: string,
+): Set<string> | null {
+  if (config.reasonFilter === undefined) return null;
+  if (!Array.isArray(config.reasonFilter)) {
+    throw new Error(
+      'reasonFilter must be an array of GitHub notification reasons.',
+    );
+  }
+  const reasons = config.reasonFilter
+    .filter((reason): reason is string => typeof reason === 'string')
+    .map((reason) => reason.trim().toLowerCase())
+    .filter((reason) => reason.length > 0);
+  const unknownReasons = reasons.filter(
+    (reason) => !KNOWN_NOTIFICATION_REASONS.has(reason),
+  );
+  if (unknownReasons.length > 0) {
+    throw new Error(
+      `Unrecognized reasonFilter values for channel ${channelName}: ${unknownReasons.join(', ')}`,
+    );
+  }
+  return reasons.length > 0 ? new Set(reasons) : null;
+}
+
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
-  /** Set form of `reasonFilter` for O(1) lookup; undefined = no filter. */
-  private reasonFilterSet: Set<string> | undefined;
+  private reasonFilter: Set<string> | null = null;
 
   constructor(
     name: string,
@@ -119,23 +134,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    const reasonFilter = config.reasonFilter as unknown;
-    if (reasonFilter !== undefined && !Array.isArray(reasonFilter)) {
-      throw new Error(
-        'reasonFilter must be an array of GitHub notification reasons.',
-      );
-    }
-    if (reasonFilter && reasonFilter.length > 0) {
-      const unknownReasons = reasonFilter.filter(
-        (reason) => !KNOWN_NOTIFICATION_REASONS.has(reason),
-      );
-      if (unknownReasons.length > 0) {
-        throw new Error(
-          `Unrecognized reasonFilter values for channel ${name}: ${unknownReasons.join(', ')}`,
-        );
-      }
-      this.reasonFilterSet = new Set(reasonFilter);
-    }
+    this.reasonFilter = normalizeReasonFilter(config, name);
   }
 
   protected createInitialCursor(): GithubCursor {
@@ -193,6 +192,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    const botUsername = this.botUsername?.toLowerCase();
+    if (
+      this.config.senderPolicy === 'allowlist' &&
+      botUsername &&
+      allowed.includes(botUsername)
+    ) {
+      if (allowed.every((user) => user === botUsername)) {
+        throw new Error(
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+        );
+      }
+      process.stderr.write(
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+      );
+    }
     this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
   }
@@ -270,15 +284,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
-      if (
-        this.reasonFilterSet &&
-        !this.reasonFilterSet.has(notification.reason)
-      ) {
-        process.stderr.write(
-          `[Channel:${this.name}] skipping notification (reason=${notification.reason} not in reasonFilter, subject=${notification.subject.url})\n`,
-        );
-        continue;
-      }
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
       if (!extracted) {
         continue;
@@ -286,6 +291,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
+      const reason = String(notification.reason ?? '').toLowerCase();
+      if (this.reasonFilter && !this.reasonFilter.has(reason)) {
+        process.stderr.write(
+          `[Channel:${this.name}] skipping notification (reason=${reason} not in reasonFilter, subject=${notification.subject.url})\n`,
+        );
+        this.logDebugPayload('Github', {
+          event: 'reasonFilter.skip',
+          chatId,
+          threadId,
+          reason: notification.reason,
+        });
+        continue;
+      }
       const ctx: NotificationContext = {
         chatId,
         threadId,
@@ -295,11 +313,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metaFloor: this.cursor.metaFloor,
         maxUpdatedAt,
         subjectTitle: notification.subject.title || '',
-        reason: notification.reason,
+        reason,
       };
 
       try {
-        switch (notification.reason) {
+        switch (reason) {
           case 'mention':
             await this.processCommentLane(ctx, true);
             break;
