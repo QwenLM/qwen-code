@@ -1239,10 +1239,20 @@ describe('qwen-triage verify hardening', () => {
 
     const CLEAN = '+++ b/packages/core/src/x.ts\n+const x = 1;\n';
     try {
+      const before = modelHits();
+
+      // Fail closed on an unfetchable diff: a transient `gh pr diff`
+      // failure or an empty result must refuse rather than hand the model
+      // an empty string it would almost certainly call "clear". No model
+      // call is spent: the fetch guard runs before the screen.
+      const noDiff = run({ trust: 'external', diff: '' });
+      expect(noDiff.decision).toBe('skip');
+      expect(noDiff.reason).toContain('could not be fetched');
+      expect(modelHits()).toBe(before);
+
       // Mechanical: an added npm lifecycle script refuses WITHOUT spending
       // a model call — a mechanical flag cannot be un-refused by a second
       // opinion, so paying for one would be pure waste.
-      const before = modelHits();
       const lifecycle = run({
         trust: 'external',
         diff: '+++ b/package.json\n+    "postinstall": "node evil.js",\n',
