@@ -193,18 +193,10 @@ const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 const LONG_CELL_TEXT_LENGTH = 60;
 const LONG_CELL_LINE_COUNT = 3;
 const DENSITY_OPTIONS: TableDensity[] = ['standard', 'compact', 'comfortable'];
-const DEFAULT_COLUMN_STYLE: CSSProperties = {
-  width: DEFAULT_COLUMN_WIDTH,
-  minWidth: DEFAULT_COLUMN_WIDTH,
-  maxWidth: DEFAULT_COLUMN_WIDTH,
-};
 const ACTION_COLUMN_STYLE: CSSProperties = {
   width: ACTION_COLUMN_WIDTH,
   minWidth: ACTION_COLUMN_WIDTH,
   maxWidth: ACTION_COLUMN_WIDTH,
-};
-const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
-  width: 'auto',
 };
 
 function clampColumnWidth(width: number): number {
@@ -2152,26 +2144,6 @@ export function EnhancedTable({
     );
   };
 
-  const columnStyle = (
-    columnIndex: number,
-    extra?: CSSProperties,
-  ): CSSProperties => {
-    const width = columnWidths[columnIndex];
-    if (width === undefined) {
-      const defaultStyle =
-        density === 'compact'
-          ? COMPACT_AUTO_COLUMN_STYLE
-          : DEFAULT_COLUMN_STYLE;
-      return extra ? { ...defaultStyle, ...extra } : defaultStyle;
-    }
-    return {
-      width,
-      minWidth: width,
-      maxWidth: width,
-      ...extra,
-    };
-  };
-
   const flexibleColumnWidth = (
     minWidth: number,
     fixedWidth: number,
@@ -2790,7 +2762,7 @@ export function EnhancedTable({
                     onContextMenu={(event) =>
                       openColumnContextMenu(event, columnIndex)
                     }
-                    style={columnStyle(columnIndex, headerAlignStyle)}
+                    style={headerAlignStyle}
                     title={columnName}
                   >
                     <div className={styles.headerControls}>
@@ -2935,7 +2907,7 @@ export function EnhancedTable({
                               ? styles.selectedCell
                               : ''
                           } ${isFrozenColumn ? styles.frozenCell : ''}`}
-                          style={columnStyle(columnIndex, cellAlignStyle)}
+                          style={cellAlignStyle}
                           data-row-index={rowIndex}
                           data-column-index={columnIndex}
                           onMouseDown={(event) =>

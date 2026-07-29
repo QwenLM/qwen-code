@@ -321,6 +321,17 @@ function dataCell(
   return cell!;
 }
 
+function columnGroup(
+  container: HTMLElement,
+  visibleColumnIndex: number,
+): HTMLColElement {
+  const col = [...container.querySelectorAll<HTMLColElement>('col')].slice(1)[
+    visibleColumnIndex
+  ];
+  expect(col).toBeDefined();
+  return col!;
+}
+
 function dragCells(from: Element, to: Element): void {
   act(() => {
     from.dispatchEvent(
@@ -1213,10 +1224,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '220px',
-    );
-    expect(dataCell(container, 0, 0).style.width).toBe('220px');
+    expect(columnGroup(container, 0).style.width).toBe('220px');
   });
 
   it('clamps resized columns to the minimum width', () => {
@@ -1239,10 +1247,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '80px',
-    );
-    expect(dataCell(container, 0, 0).style.width).toBe('80px');
+    expect(columnGroup(container, 0).style.width).toBe('80px');
   });
 
   it('clamps resized columns to the maximum width', () => {
@@ -1265,10 +1270,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '640px',
-    );
-    expect(dataCell(container, 0, 0).style.width).toBe('640px');
+    expect(columnGroup(container, 0).style.width).toBe('640px');
   });
 
   it('stops resizing a column when the window blurs', () => {
@@ -1293,9 +1295,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('flushes pending resize width when the window blurs', () => {
@@ -1318,9 +1318,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new Event('blur'));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '260px',
-    );
+    expect(columnGroup(container, 0).style.width).toBe('260px');
   });
 
   it('stops resizing a column when page visibility changes', () => {
@@ -1349,9 +1347,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('keeps resizing when page visibility changes while visible', () => {
@@ -1381,9 +1377,7 @@ describe('EnhancedMarkdownTable', () => {
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '280px',
-    );
+    expect(columnGroup(container, 0).style.width).toBe('280px');
   });
 
   it('resizes a column with keyboard arrows', () => {
@@ -1399,9 +1393,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '176px',
-    );
+    expect(columnGroup(container, 0).style.width).toBe('176px');
 
     act(() => {
       resize.dispatchEvent(
@@ -1412,9 +1404,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('uses a filler column after every visible column is manually sized', () => {
@@ -1522,7 +1512,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(header?.style.width).toBe('108px');
+    expect(columnGroup(container, 0).style.width).toBe('108px');
   });
 
   it('ignores keyboard resize arrows with modifiers', () => {
@@ -1539,9 +1529,7 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
 
-    expect(button(container, 'Sort by Team').closest('th')?.style.width).toBe(
-      '160px',
-    );
+    expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
   it('reorders columns and quick copies in the visible order', () => {
@@ -2144,13 +2132,11 @@ describe('EnhancedMarkdownTable', () => {
   it('selects display density from the toolbar', () => {
     const container = renderTable();
     const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
-    const teamHeader = button(container, 'Sort by Team').closest('th');
     const columns = () => Array.from(container.querySelectorAll('col'));
     expect(shell?.className).toContain('densityStandard');
     expect(button(container, 'Table density').textContent).toContain(
       'Standard density',
     );
-    expect(teamHeader?.style.width).toBe('160px');
     expect(columns()[0]?.style.width).toBe('40px');
     expect(columns()[1]?.style.width).toContain('160px');
 
@@ -2159,9 +2145,6 @@ describe('EnhancedMarkdownTable', () => {
     expect(button(container, 'Table density').textContent).toContain(
       'Compact density',
     );
-    expect(teamHeader?.style.width).toBe('auto');
-    expect(teamHeader?.style.minWidth).toBe('');
-    expect(teamHeader?.style.maxWidth).toBe('');
     expect(columns()[0]?.style.width).toBe('40px');
     expect(columns()[1]?.style.width).toContain('72px');
     expect(columns()[1]?.style.width).not.toContain('160px');
@@ -2171,7 +2154,6 @@ describe('EnhancedMarkdownTable', () => {
     expect(button(container, 'Table density').textContent).toContain(
       'Comfortable density',
     );
-    expect(teamHeader?.style.width).toBe('160px');
     expect(columns()[0]?.style.width).toBe('40px');
     expect(columns()[1]?.style.width).toContain('160px');
   });
