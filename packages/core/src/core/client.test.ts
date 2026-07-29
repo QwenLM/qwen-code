@@ -1368,6 +1368,19 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
     });
 
+    it('skips deferred preload when the threshold is not finite', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(NaN);
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
+    });
+
     it('clamps a threshold above 100% to a full-context budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>

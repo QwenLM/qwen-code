@@ -653,6 +653,35 @@ describe('ToolRegistry', () => {
         expect(revealed).toBe(0);
         expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
       });
+
+      it('excludes visible deferred tools from the preload budget', () => {
+        const visibleTool = new MockTool({
+          name: 'visible',
+          description: 'x'.repeat(CHARS_PER_TOKEN * 10),
+          shouldDefer: true,
+        });
+        const deferredTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+        });
+        const visibleConfig = new Config({
+          ...baseConfigParams,
+          visibleTools: [visibleTool.name],
+        });
+        const registry = new ToolRegistry(visibleConfig);
+        registry.registerTool(visibleTool);
+        registry.registerTool(deferredTool);
+
+        const revealed = registry.preloadDeferredToolsWithinBudget(
+          tokensFor(deferredTool),
+        );
+
+        expect(revealed).toBe(1);
+        expect(registry.isDeferredToolRevealed(deferredTool.name)).toBe(true);
+        expect(registry.getFunctionDeclarations().map((d) => d.name)).toEqual(
+          expect.arrayContaining([visibleTool.name, deferredTool.name]),
+        );
+      });
     });
 
     it('getDeferredToolSummary includes MCP server names', () => {

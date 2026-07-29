@@ -2338,6 +2338,16 @@ describe('mergeExcludeTools', () => {
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(10);
   });
+
+  it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { threshold: 25 } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getToolSearchThreshold()).toBe(0);
+  });
 });
 
 describe('Approval mode tool exclusion logic', () => {
