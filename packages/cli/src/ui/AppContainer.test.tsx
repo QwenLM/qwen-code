@@ -1092,13 +1092,10 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
-    // #4891 changed the resize contract: width changes now trigger ONE full
-    // clearTerminal after RESIZE_REPAINT_SETTLE_MS (trailing-edge debounce),
-    // instead of never (#3967) or per-event (pre-#3967). This test pins the
-    // synchronous half: no immediate clear during the burst. The settle-time
-    // half is not observable here — ink-testing-library's rerender does not
-    // flush update-time passive effects — and is covered by
-    // useResizeSettleRepaint.test.ts.
+    // Resize no longer triggers a clearTerminal or history remount (#8004).
+    // The old settle → refreshStatic path caused a scroll storm; the dynamic
+    // region now re-renders via useTerminalSize alone. This test pins that
+    // no synchronous clear fires during a width change.
     it('does not clear the terminal synchronously on width change', () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
