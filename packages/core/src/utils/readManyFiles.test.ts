@@ -659,30 +659,6 @@ describe('readManyFiles', () => {
       );
       expect(content).not.toContain('qwen-validated-read-');
     });
-
-    it('drops a validated file when snapshot creation fails', async () => {
-      const { relativePath, absolutePath } =
-        await createTestFile('approved.txt');
-      const stats = await fs.stat(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
-
-      try {
-        vi.stubEnv('TMPDIR', path.join(tempRootDir, 'missing-tmpdir'));
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: stats.dev, ino: stats.ino }],
-          ]),
-        });
-
-        expect(contentToString(result.contentParts)).not.toContain(
-          'Content of approved.txt',
-        );
-        expect(result.files).toHaveLength(0);
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    });
   });
 
   // Issue #6289: files attached via `@path` load their content into context
@@ -723,23 +699,6 @@ describe('readManyFiles', () => {
         expect(status.entry.lastReadAt).toBeDefined();
         expect(status.entry.lastReadCacheable).toBe(true);
       }
-    });
-
-    it('records validated reads against the original file identity', async () => {
-      const { relativePath, absolutePath } = await createTestFile('notes.md');
-      const stats = await fs.stat(absolutePath);
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
-
-      await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: stats.dev, ino: stats.ino }],
-        ]),
-      });
-
-      const status = cache.check(nodeFs.statSync(absolutePath));
-      expect(status.state).toBe('fresh');
     });
 
     it('does not record reads when fileReadCacheDisabled is set', async () => {

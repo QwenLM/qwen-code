@@ -816,8 +816,7 @@ export async function runNonInteractive(
           const { processedQuery, shouldProceed } = await handleAtCommand({
             query: input,
             config,
-            onDebugMessage: (message) =>
-              debugLogger.debug(`[at-command] ${message}`),
+            onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
           });
