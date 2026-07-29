@@ -128,7 +128,10 @@ import type {
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -3649,6 +3652,35 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelPairingApprovals(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalsSnapshot> {
+    return this.jsonRequest<DaemonChannelPairingApprovalsSnapshot>(
+      `/workspace/channels/${urlEncode(name)}/pairing-approvals`,
+      'GET /workspace/channels/:name/pairing-approvals',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  revokeWorkspaceChannelPairingApproval(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRevocationResult> {
+    return this.jsonRequest<DaemonChannelPairingRevocationResult>(
+      `/workspace/channels/${urlEncode(name)}/pairing-approvals`,
+      'DELETE /workspace/channels/:name/pairing-approvals',
+      {
+        method: 'DELETE',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   private workspaceChannelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -4737,6 +4769,31 @@ export class WorkspaceDaemonClient {
       `/channels/${urlEncode(name)}/pairing-requests/approve`,
       'POST /workspaces/:workspace/channels/:name/pairing-requests/approve',
       { method: 'POST', body: request },
+      opts,
+    );
+  }
+
+  workspaceChannelPairingApprovals(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalsSnapshot> {
+    return this.channelRequest(
+      `/channels/${urlEncode(name)}/pairing-approvals`,
+      'GET /workspaces/:workspace/channels/:name/pairing-approvals',
+      undefined,
+      opts,
+    );
+  }
+
+  revokeWorkspaceChannelPairingApproval(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRevocationResult> {
+    return this.channelRequest(
+      `/channels/${urlEncode(name)}/pairing-approvals`,
+      'DELETE /workspaces/:workspace/channels/:name/pairing-approvals',
+      { method: 'DELETE', body: request },
       opts,
     );
   }

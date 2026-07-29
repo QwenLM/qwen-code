@@ -1331,6 +1331,11 @@
             "description": "URL pattern (supports * wildcard)",
             "type": "string"
           }
+        },
+        "allowPrivateNetworkHooks": {
+          "description": "When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.",
+          "type": "boolean",
+          "default": false
         }
       }
     },

@@ -55,6 +55,20 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(storeB.isApproved('sender-1')).toBe(false);
   });
 
+  it('revokes an approved sender only from the selected workspace', () => {
+    const storeA = new PairingStore('support-bot', workspaceA);
+    const storeB = new PairingStore('support-bot', workspaceB);
+
+    for (const store of [storeA, storeB]) {
+      const code = store.createRequest('sender-1', 'Sender One')!;
+      store.approve(code);
+    }
+
+    expect(storeA.revoke('sender-1')).toBe(true);
+    expect(storeA.isApproved('sender-1')).toBe(false);
+    expect(storeB.isApproved('sender-1')).toBe(true);
+  });
+
   it('keeps path-traversal channel names inside the workspace scope', () => {
     // Channel names come from unrestricted config keys. Without encoding,
     // `../support` climbs out of the scope directory and both workspaces
@@ -164,6 +178,24 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(storeA.isApproved('new-sender')).toBe(true);
       expect(storeB.isApproved('new-sender')).toBe(false);
       // The legacy global file is left untouched by scoped writes.
+      const legacy = JSON.parse(
+        fs.readFileSync(
+          path.join(channelsRoot(), 'support-bot-allowlist.json'),
+          'utf-8',
+        ),
+      ) as string[];
+      expect(legacy).toEqual(['legacy-sender']);
+    });
+
+    it('does not mutate the legacy baseline when revoking in one workspace', () => {
+      seedLegacy();
+      const storeA = new PairingStore('support-bot', workspaceA);
+
+      expect(storeA.revoke('legacy-sender')).toBe(true);
+      expect(storeA.isApproved('legacy-sender')).toBe(false);
+
+      const storeB = new PairingStore('support-bot', workspaceB);
+      expect(storeB.isApproved('legacy-sender')).toBe(true);
       const legacy = JSON.parse(
         fs.readFileSync(
           path.join(channelsRoot(), 'support-bot-allowlist.json'),

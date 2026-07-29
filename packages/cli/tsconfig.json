@@ -117,6 +117,7 @@
     { "path": "../channels/weixin" },
     { "path": "../channels/dingtalk" },
     { "path": "../channels/wecom" },
-    { "path": "../channels/feishu" }
+    { "path": "../channels/feishu" },
+    { "path": "../channels/gitlab" }
   ]
 }
