@@ -1195,4 +1195,12 @@ describe('bootstrap error handling', () => {
     expect(output).toContain('Error handler failed:');
     expect(output).toContain('handler failed');
   });
+
+  it('wires stampCliEntryEnv into the entry point', () => {
+    const source = readFileSync('src/cli.ts', 'utf8');
+    const entryPoint = source.slice(
+      source.indexOf('export async function runCliEntryPoint'),
+    );
+    expect(entryPoint).toContain('stampCliEntryEnv()');
+  });
 });
