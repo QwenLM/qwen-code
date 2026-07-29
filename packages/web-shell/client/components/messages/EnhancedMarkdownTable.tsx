@@ -181,7 +181,9 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
 
 export const MAX_ENHANCED_TABLE_ROWS = 500;
 export const MAX_ENHANCED_TABLE_COLUMNS = 50;
+const ACTION_COLUMN_WIDTH = 40;
 const DEFAULT_COLUMN_WIDTH = 160;
+const COMPACT_COLUMN_WIDTH = 72;
 const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
@@ -193,6 +195,11 @@ const DEFAULT_COLUMN_STYLE: CSSProperties = {
   width: DEFAULT_COLUMN_WIDTH,
   minWidth: DEFAULT_COLUMN_WIDTH,
   maxWidth: DEFAULT_COLUMN_WIDTH,
+};
+const ACTION_COLUMN_STYLE: CSSProperties = {
+  width: ACTION_COLUMN_WIDTH,
+  minWidth: ACTION_COLUMN_WIDTH,
+  maxWidth: ACTION_COLUMN_WIDTH,
 };
 const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
   width: 'auto',
@@ -2106,6 +2113,66 @@ export function EnhancedTable({
     };
   };
 
+  const flexibleColumnWidth = (
+    minWidth: number,
+    fixedWidth: number,
+    flexibleColumnCount: number,
+    containerWidth: '100cqw' | '100%',
+  ): string =>
+    `max(${minWidth}px, calc((${containerWidth} - ${ACTION_COLUMN_WIDTH}px - ${fixedWidth}px) / ${flexibleColumnCount}))`;
+
+  const columnGroupStyle = (columnIndex: number): CSSProperties => {
+    const width = columnWidths[columnIndex];
+    if (width !== undefined) return { width };
+    const minWidth =
+      density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
+    const fixedWidth = orderedVisibleColumnIndexes.reduce(
+      (total, index) => total + (columnWidths[index] ?? 0),
+      0,
+    );
+    const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
+      (index) => columnWidths[index] === undefined,
+    ).length;
+    if (flexibleColumnCount === 0) return { width: minWidth };
+    return {
+      width: flexibleColumnWidth(
+        minWidth,
+        fixedWidth,
+        flexibleColumnCount,
+        '100cqw',
+      ),
+    };
+  };
+
+  const frozenColumnShadowStyle = (): CSSProperties | undefined => {
+    if (!freezeFirstColumn || frozenColumnIndex === undefined) return undefined;
+    const width = columnWidths[frozenColumnIndex];
+    if (width !== undefined) {
+      return { left: ACTION_COLUMN_WIDTH + width };
+    }
+    const minWidth =
+      density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
+    const fixedWidth = orderedVisibleColumnIndexes.reduce(
+      (total, index) => total + (columnWidths[index] ?? 0),
+      0,
+    );
+    const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
+      (index) => columnWidths[index] === undefined,
+    ).length;
+    const columnWidth =
+      flexibleColumnCount === 0
+        ? `${minWidth}px`
+        : flexibleColumnWidth(
+            minWidth,
+            fixedWidth,
+            flexibleColumnCount,
+            '100%',
+          );
+    return {
+      left: `calc(${ACTION_COLUMN_WIDTH}px + ${columnWidth})`,
+    };
+  };
+
   const startColumnResize = (
     event: ReactMouseEvent<HTMLButtonElement>,
     columnIndex: number,
@@ -2615,6 +2682,15 @@ export function EnhancedTable({
         onCopy={handleCopy}
       >
         <table className={styles.table}>
+          <colgroup>
+            <col className={styles.actionColumn} style={ACTION_COLUMN_STYLE} />
+            {orderedVisibleColumnIndexes.map((columnIndex) => (
+              <col
+                key={`column-${columnIndex}`}
+                style={columnGroupStyle(columnIndex)}
+              />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               <th
@@ -2879,6 +2955,13 @@ export function EnhancedTable({
           </div>
         )}
       </div>
+      {freezeFirstColumn && (
+        <div
+          className={styles.frozenColumnShadow}
+          style={frozenColumnShadowStyle()}
+          aria-hidden="true"
+        />
+      )}
       {columnContextMenu && orderedVisibleColumnIndexes.length > 0 && (
         <div
           ref={columnContextMenuRef}

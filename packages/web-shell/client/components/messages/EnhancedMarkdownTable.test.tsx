@@ -1921,11 +1921,14 @@ describe('EnhancedMarkdownTable', () => {
     const container = renderTable();
     const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
     const teamHeader = button(container, 'Sort by Team').closest('th');
+    const columns = () => Array.from(container.querySelectorAll('col'));
     expect(shell?.className).toContain('densityStandard');
     expect(button(container, 'Table density').textContent).toContain(
       'Standard density',
     );
     expect(teamHeader?.style.width).toBe('160px');
+    expect(columns()[0]?.style.width).toBe('40px');
+    expect(columns()[1]?.style.width).toContain('160px');
 
     selectValue(button(container, 'Table density'), 'compact');
     expect(shell?.className).toContain('densityCompact');
@@ -1935,6 +1938,9 @@ describe('EnhancedMarkdownTable', () => {
     expect(teamHeader?.style.width).toBe('auto');
     expect(teamHeader?.style.minWidth).toBe('');
     expect(teamHeader?.style.maxWidth).toBe('');
+    expect(columns()[0]?.style.width).toBe('40px');
+    expect(columns()[1]?.style.width).toContain('72px');
+    expect(columns()[1]?.style.width).not.toContain('160px');
 
     selectValue(button(container, 'Table density'), 'comfortable');
     expect(shell?.className).toContain('densityComfortable');
@@ -1942,6 +1948,8 @@ describe('EnhancedMarkdownTable', () => {
       'Comfortable density',
     );
     expect(teamHeader?.style.width).toBe('160px');
+    expect(columns()[0]?.style.width).toBe('40px');
+    expect(columns()[1]?.style.width).toContain('160px');
   });
 
   it('renders compact row details with blank values and globally expandable long values', () => {
