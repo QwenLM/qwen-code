@@ -85,6 +85,8 @@ function plan(
     step45?: boolean;
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
+    /** Override the fixture's 5000 — the low-signal floor reads this. */
+    srcDiffLines?: number;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -98,7 +100,7 @@ function plan(
       // The effort the capturing command recorded — the roster and the
       // reverse-audit floor both read it from here.
       ...(opts.effort ? { effort: opts.effort } : {}),
-      srcDiffLines: 5000,
+      srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       // Real plans carry each chunk's files (`DiffChunk.files`) — the body
@@ -312,7 +314,11 @@ function blindPrompt(chunk: number): string {
  */
 function coveredPlan(
   step45Keys: string[] = ['verify', 'reverse-audit'],
-  planOpts: { han?: boolean; effort?: 'low' | 'medium' | 'high' } = {},
+  planOpts: {
+    han?: boolean;
+    effort?: 'low' | 'medium' | 'high';
+    srcDiffLines?: number;
+  } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -383,6 +389,53 @@ describe('composeReview — the C/S table', () => {
     const r = composeReview(base({ bodyCriticals: ['whole-PR blocker X'] }));
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+});
+
+describe('composeReview — the low-signal Approve disclosure', () => {
+  // The coverage gate proves the agents READ the diff, not that the review had
+  // discriminating power: a dogfooded weak-model run drafted nothing from all
+  // of its agents on a non-trivial source diff where stronger same-condition
+  // runs found a verified blocker, and composed a bare confident Approve.
+  it('a zero-finding APPROVE over a non-trivial source diff carries the marker — event and body unchanged', () => {
+    const r = composeReview(base({}));
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
+    // The fixture's roster: two chunk agents plus the test matrix.
+    expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
+    expect(verdictLine(r)).toBe(
+      'Verdict: Approve — low signal: none of the 3 review agents reported ' +
+        'a finding on a non-trivial diff (5000 source diff lines)',
+    );
+  });
+
+  it('a docs-only diff keeps the bare Approve — finding nothing there is the expected outcome', () => {
+    const r = composeReview({
+      planPath: coveredPlan(undefined, { srcDiffLines: 0 }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.lowSignal).toBeNull();
+    expect(verdictLine(r)).toBe('Verdict: Approve');
+  });
+
+  it('a tiny source change at the floor keeps the bare Approve — the marker needs strictly more', () => {
+    const r = composeReview({
+      planPath: coveredPlan(undefined, { srcDiffLines: 100 }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.lowSignal).toBeNull();
+    expect(verdictLine(r)).toBe('Verdict: Approve');
+  });
+
+  it('a review with findings never carries the marker — low signal is about empty reviews', () => {
+    const r = composeReview(base({ suggestionsInline: 1 }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.lowSignal).toBeNull();
+    expect(verdictLine(r)).not.toContain('low signal');
   });
 });
 
@@ -2013,6 +2066,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgraded: false,
       downgradedFrom: null,
       remediation: [],
+      lowSignal: null,
       ...over,
     });
 
@@ -2104,6 +2158,19 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
   it('is bare for a clean Approve', () => {
     expect(line({ event: 'APPROVE', baseEvent: 'APPROVE' })).toBe(
       'Verdict: Approve',
+    );
+  });
+
+  it("marks a low-signal Approve, with the run's own numbers", () => {
+    expect(
+      line({
+        event: 'APPROVE',
+        baseEvent: 'APPROVE',
+        lowSignal: { agents: 11, srcDiffLines: 642 },
+      }),
+    ).toBe(
+      'Verdict: Approve — low signal: none of the 11 review agents reported ' +
+        'a finding on a non-trivial diff (642 source diff lines)',
     );
   });
 });
