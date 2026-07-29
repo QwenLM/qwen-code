@@ -2974,12 +2974,15 @@ jobs:
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi
 
+          # The agent's graceful kill budget in minutes. The watchdog
+          # threshold below derives from it, so the two cannot drift apart.
+          AGENT_BUDGET_M=120
           # Elapsed time of the WATCHDOG CHILD only: $SECONDS includes proxy
           # and network setup, so an OOM kill late in the step could cross a
           # global threshold and be mislabeled a configured timeout.
           AGENT_START=$SECONDS
           set +e
-          timeout --kill-after=10s 120m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+          timeout --kill-after=10s "${AGENT_BUDGET_M}m" runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
             --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/verify-results/output.jsonl"
@@ -3007,13 +3010,12 @@ jobs:
 
           # 137 is ambiguous: the watchdog escalating past --kill-after looks
           # identical to an OOM kill. Use the elapsed budget to tell them
-          # apart instead of labelling every 137 a crash.
-          # 7200 = the 120m budget above, in seconds. These two MUST move
-          # together: if the threshold stays below the budget, an OOM kill
-          # after that many seconds is mislabelled `timeout` and publishes
-          # "partial evidence" for a crash.
+          # apart instead of labelling every 137 a crash. The threshold is
+          # derived from AGENT_BUDGET_M so it cannot drift from the budget:
+          # a 137 at or after the full budget is the watchdog, an earlier
+          # 137 is an OOM.
           WATCHDOG_FIRED=false
-          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge 7200 ]; then
+          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge $((AGENT_BUDGET_M * 60)) ]; then
             WATCHDOG_FIRED=true
           fi
           if [ "$EXIT_CODE" -eq 124 ] || [ "$WATCHDOG_FIRED" = true ]; then

@@ -2900,32 +2900,33 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
   });
 
-  // Three values encode one budget and drift silently when edited apart:
-  // the agent's graceful kill, the watchdog threshold that distinguishes
-  // that kill from an OOM, and the job limit that must not fire first.
-  // Each mismatch has its own quiet failure, so pin the relationships
-  // rather than the numbers.
+  // One budget drives the agent's graceful kill and the watchdog threshold
+  // that distinguishes that kill from an OOM — both derive from a single
+  // AGENT_BUDGET_M, so they cannot drift apart. The job limit and the
+  // skill's advertised budget are still separate literals with their own
+  // quiet failures, so pin their relationship to the budget, not the number.
   it('keeps the verify budget, watchdog and job limit consistent', () => {
     const verifyJob = job('verify');
     const runStep = stepIn('verify', 'Run verification agent');
 
-    const agentMinutes = Number(
-      runStep.match(/timeout --kill-after=10s (\d+)m /)?.[1],
-    );
-    const watchdogSeconds = Number(
-      runStep.match(/"\$AGENT_ELAPSED" -ge (\d+)/)?.[1],
-    );
+    const agentMinutes = Number(runStep.match(/AGENT_BUDGET_M=(\d+)/)?.[1]);
     const jobMinutes = Number(
       verifyJob.match(/^ {4}timeout-minutes: (\d+)/m)?.[1],
     );
     expect(agentMinutes).toBeGreaterThan(0);
-    expect(watchdogSeconds).toBeGreaterThan(0);
     expect(jobMinutes).toBeGreaterThan(0);
 
-    // The watchdog threshold IS the agent budget. Set it lower and a
-    // late OOM (137) reads as `timeout`, publishing "partial evidence"
-    // for a crash; set it higher and a real timeout reads as a crash.
-    expect(watchdogSeconds).toBe(agentMinutes * 60);
+    // The graceful kill and the watchdog threshold must both derive from
+    // AGENT_BUDGET_M rather than carry their own literals — that derivation
+    // is what makes the coupling correct by construction. A hardcoded
+    // `120m` or `7200` would reintroduce the drift this test exists to
+    // catch: set the threshold below the budget and a late OOM (137) reads
+    // as `timeout`, publishing "partial evidence" for a crash; set it above
+    // and a real timeout reads as a crash.
+    expect(runStep).toMatch(/timeout --kill-after=10s "\$\{AGENT_BUDGET_M\}m"/);
+    expect(runStep).toMatch(
+      /"\$AGENT_ELAPSED" -ge \$\(\(AGENT_BUDGET_M \* 60\)\)/,
+    );
 
     // That comparison is only meaningful if the elapsed-time chain exists:
     // drop the baseline and AGENT_ELAPSED is total shell uptime, so a late
