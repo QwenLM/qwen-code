@@ -1815,29 +1815,39 @@ jobs:
           )
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
-          # Idle backoff, from the list's own updatedAt (no extra API call):
-          # a candidate with no activity for >24h gets inspected on roughly
+          # Idle backoff, from the list's own updatedAt (no API call): a
+          # candidate with no activity for >24h gets inspected on roughly
           # every 4th scan instead of every one. The pool doubled in two
-          # days (28 takeover PRs, 8 of them idle in "nothing new" state for
-          # 10+ hours), and idle candidates crowd the SHARED inspection and
-          # target budgets — #8002 was admitted and then deferred by the
-          # 10-target cap while long-idle PRs re-confirmed "nothing new".
-          # Safe because every real wake-up path bumps updatedAt (reviews,
-          # comments, labels, pushes) or routes in real time anyway; the only
-          # thing deferred is the scheduled re-confirmation of idleness, plus
-          # worst-case ~a few hours of latency on base-conflict detection for
-          # a PR nobody has touched in a day. Slotting is deterministic —
-          # one eligible hour in every four, keyed by PR number — so no PR
-          # is unlucky forever. The forced-dispatch path never builds the
-          # list files, so a forced PR is always inspected.
-          IDLE_UPDATED='{}'
+          # days (28 takeover PRs, 8 of them idle in "nothing new" state
+          # for 10+ hours), and every idle inspection costs twice: a unit
+          # of the SHARED MAX_CANDIDATE_INSPECTIONS budget, and a slice of
+          # the serial API walk over the candidate list — the walk is what
+          # delayed #8002's first pickup (admitted at 09:09, six minutes
+          # into the 09:03 scan's serial reads). Idle PRs never reach the
+          # 10-target budget (the "nothing new" branch continues before
+          # the TARGETS append), so that cap is NOT what this relieves —
+          # the win is inspection budget plus scan-walk latency for fresh
+          # engagements. Safe because comments, reviews, labels, and
+          # pushes all bump updatedAt or route in real time; the two
+          # scan-only signals that do NOT bump it — a base conflict
+          # appearing when main moves, and still-red checks awaiting the
+          # redcheck marker — wait at most the backoff gap (~30 min) on a
+          # PR nobody touched in a day, and self-correct (the eventual
+          # address run comments/pushes). Slotting is deterministic — one
+          # eligible 10-minute tick in every four, keyed by PR number, the
+          # same 600s quantum as ROT_OFF — so the gap is bounded at ~30
+          # minutes and no PR is unlucky forever. The forced-dispatch path
+          # never builds the list files, so a forced PR is always
+          # inspected (fail-open, like a PR missing from the set).
+          IDLE_PRS=' '
           if [[ -f "${WORKDIR}/bot-prs.json" && -f "${WORKDIR}/takeover-prs.json" ]]; then
-            IDLE_UPDATED="$(jq -cs 'add | unique_by(.number)
-              | map({(.number | tostring): (.updatedAt // "")}) | add // {}' \
-              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json" 2> /dev/null || echo '{}')"
+            IDLE_CUTOFF="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+            IDLE_PRS=" $(jq -rs --arg cut "${IDLE_CUTOFF}" 'add | unique_by(.number)
+              | map(select((.updatedAt // "") != "" and .updatedAt < $cut) | .number | tostring)
+              | join(" ")' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json" 2> /dev/null || echo '') "
           fi
-          IDLE_CUTOFF="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
-          IDLE_SLOT_NOW="$(( ($(date -u +%s) / 3600) % 4 ))"
+          IDLE_SLOT_NOW="$(( ($(date -u +%s) / 600) % 4 ))"
 
           TARGETS='[]'
           INSPECTED=0
@@ -1849,12 +1859,12 @@ jobs:
               fleet_row "${PR}" 'busy' 'address run in flight'
               continue
             fi
-            # The idle-backoff skip is free too (in-memory lookup) — it must
+            # The idle-backoff skip is free too (a bash substring test on
+            # the precomputed set, same idiom as the busy skip) — it must
             # not consume inspection budget either.
-            PR_UPDATED="$(jq -r --arg pr "${PR}" '.[$pr] // ""' <<< "${IDLE_UPDATED}")"
-            if [[ -n "${PR_UPDATED}" && "${PR_UPDATED}" < "${IDLE_CUTOFF}" && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then
-              echo "😴 #${PR}: idle since ${PR_UPDATED} (>24h) — deferring to its rotation slot (slot $(( PR % 4 )), current ${IDLE_SLOT_NOW})"
-              fleet_row "${PR}" 'idle-backoff' "idle since ${PR_UPDATED}; inspected roughly every 4th scan"
+            if [[ "${IDLE_PRS}" == *" ${PR} "* && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then
+              echo "😴 #${PR}: idle >24h — deferring to its rotation slot (slot $(( PR % 4 )), current ${IDLE_SLOT_NOW}, next eligible tick ≤30m away)"
+              fleet_row "${PR}" 'idle-backoff' 'idle >24h; inspected roughly every 4th scan (gap ≤30m)'
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
