@@ -413,11 +413,7 @@ jobs:
               const dropped = (process.env.DROPPED_MSGS || "").split("\n").filter(Boolean);
               const moved = [];
               f.fixes = f.fixes.filter(fix => {
-                const match = dropped.some(msg => {
-                  const summary = msg.replace(/^\w+\([^)]+\):\s*/, "");
-                  return fix.rootCause.toLowerCase().includes(summary.toLowerCase().slice(0, 30)) ||
-                         fix.minimalFix.toLowerCase().includes(summary.toLowerCase().slice(0, 30));
-                });
+                const match = dropped.some(msg => msg.includes(`[${fix.id}]`));
                 if (match) { fix.status = "dropped-gate"; moved.push(fix); return false; }
                 return true;
               });

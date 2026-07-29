@@ -30,8 +30,10 @@ against this checkout before touching code.
    `"status": "dropped"` and the drop reason appended to `minimalFix`, and
    move on. A dropped finding must surface in the consolidated issue, not
    vanish. Never commit a finding whose verification failed.
-   d. Commit as ONE Conventional Commit, e.g. `fix(cli): summary` or
-   `docs(cli): summary`, then mark `"status": "committed"`.
+   d. Commit as ONE Conventional Commit whose subject ends with the
+   finding's id in brackets, e.g. `fix(cli): summary [<id>]`, then mark
+   `"status": "committed"`. The workflow correlates commits to findings by
+   that bracketed id — a commit without it cannot be tracked when dropped.
 5. After all fixes: run `npm run build`, `npm run typecheck`, `npm run lint`,
    and focused Vitest runs for every touched package (plus
    `npm run generate:settings-schema` if a settings source changed). If any
