@@ -1683,6 +1683,15 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(infra).toContain('infrastructure failure');
       expect(infra).not.toContain('treated as a PR failure');
+      // The qualitative glyph is what a swapped assignment would corrupt
+      // while every substring above still matched: an infra incident is
+      // nobody's-fault (warning); a real build failure is the PR's (cross).
+      expect(infra).toContain(
+        '\u26a0\ufe0f incomplete \u2014 infrastructure failure',
+      );
+      expect(infra).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c</summary>',
+      );
 
       const real = render(dir, {
         NAME: 'fail',
@@ -1696,6 +1705,15 @@ describe('qwen-triage verify publish fidelity', () => {
       // reader cannot tell this verdict from the single-shot one that
       // mis-blamed a PR for an ETXTBSY race.
       expect(real).toContain('failed twice in a row');
+      expect(real).toContain(
+        '\u274c not passed \u2014 the PR could not be built',
+      );
+      expect(real).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u274c \u4e0d\u901a\u8fc7 \u00b7 PR \u6784\u5efa\u5931\u8d25</summary>',
+      );
+      // The retry clause has a Chinese counterpart on this same arm; pin
+      // it so a dropped PREPARE_ATTEMPTS_ZH interpolation cannot ship silent.
+      expect(real).toContain('\u8fde\u7eed\u4e24\u6b21');
 
       // The build arm of the phase mapping was never rendered by any test,
       // so a typo in that command name would have shipped unnoticed.
@@ -1785,6 +1803,16 @@ describe('qwen-triage verify publish fidelity', () => {
           { VERDICT: 'timeout' },
           '\u26a0\ufe0f incomplete \u2014 timeout \u2014 partial evidence',
           '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u8d85\u65f6\u2014\u2014\u8bc1\u636e\u4e0d\u5b8c\u6574',
+        ],
+        [
+          { VERDICT: 'infra-error' },
+          '\u26a0\ufe0f incomplete \u2014 infra-error (crash, OOM, or unwritable results)',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c\uff08\u5d29\u6e83\u3001OOM \u6216\u7ed3\u679c\u4e0d\u53ef\u5199\uff09',
+        ],
+        [
+          { VERDICT: 'bogus' },
+          '\u26a0\ufe0f inconclusive \u2014 unknown',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u672a\u77e5',
         ],
       ];
       const seenEn = new Set();
