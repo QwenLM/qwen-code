@@ -2281,7 +2281,7 @@ jobs:
             # bot's own eval markers, and known non-actionable bot comments
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
-            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             # Command-style comments (@qwen-code /takeover, /triage, /review …)
             # are INSTRUCTIONS to tooling, not review feedback on the diff:
             # counting them as actionable burns a full agent cycle to post a
@@ -3507,48 +3507,87 @@ jobs:
 
           gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
 
-          # Takeover milestone digest — every 10th pushed round. The takeover
+          # Takeover milestone digest — roughly every 10 rounds. The takeover
           # cap (100) bounds runaway but says nothing about when a human
           # should step in: #7469 ground to round 12 over 7 days with the
           # only "this is burning budget" signal buried in Actions logs.
-          # Every 10th round, surface a window-scoped census on the PR so
-          # the maintainer who engaged it can decide: keep going, split the
-          # PR, or release. A SEPARATE comment with its OWN marker and
-          # WITHOUT the autofix-eval marker: every census (round, consec,
-          # watermark) selects on autofix-eval, so this comment is invisible
-          # to all of them, and the feedback filters drop bot comments, so
-          # the agent never sees it either. Best-effort: a digest failure
-          # must never fail a good push.
+          # Once 10+ rounds accumulate since the last digest, surface a
+          # window-scoped census on the PR so the maintainer who engaged it
+          # can decide: keep going, split the PR, or release. A SEPARATE
+          # comment with its OWN marker and WITHOUT the autofix-eval marker:
+          # every census (round, consec, watermark) selects on autofix-eval,
+          # so this comment is invisible to all of them, and the feedback
+          # filters drop bot comments, so the agent never sees it either.
+          # Best-effort: a digest failure must never fail a good push.
           if [[ "${OUTCOME}" == "fixed" && "${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}" ]] \
-            && [[ "$(( NEXT_ROUND % 10 ))" == "0" && -f "${WORKDIR}/ic.json" ]]; then
-            WIN_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
-              [.[] | select((.user.login // "") == $ab)
-                   | select((.body // "") | contains("<!-- autofix-eval "))
-                   | select(
-                       ((.body // "") | contains("win=" + $win + " -->"))
-                       or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
-              | sort_by(.created_at) | .[]
-              | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
-            N_PUSHED="$(grep -c 'Addressed the latest review feedback' <<< "${WIN_HEADS}" || true)"
-            # This round's own marker was posted just above but ic.json
-            # predates it — count it in by hand.
-            N_PUSHED=$(( N_PUSHED + 1 ))
-            N_NOOP="$(grep -c 'no changes needed' <<< "${WIN_HEADS}" || true)"
-            N_TIMEOUT="$(grep -c 'ran out of time' <<< "${WIN_HEADS}" || true)"
-            # Both wordings of the gate-rejection handoff, past and present —
-            # the census must not silently zero when the headline is reworded.
-            N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)' <<< "${WIN_HEADS}" || true)"
-            # Base updates carry their own marker with no win= field; their
-            # window is recovered by timestamp (the window key IS the engage
-            # ack's created_at — 'none' means count all).
-            N_BASE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
-              [.[] | select((.user.login // "") == $ab)
-                   | select((.body // "") | contains("<!-- autofix-base-updated -->"))
-                   | select($win == "none" or ((.created_at // "") > $win))]
-              | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
-            gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '📊 Takeover milestone — round %s/%s in the current window. Census: %s pushed fix(es), %s no-change review(s), %s timeout(s), %s rejected attempt(s), %s base update(s).\n\nThis many rounds deserves a human look. Options: keep going (fine — nothing changes), split or reduce the PR if rounds keep accumulating, or release takeover (remove the `%s` label or comment `%s stop`). Management continues unchanged unless you act.\n\n<details>\n<summary>中文说明</summary>\n\n📊 接管里程碑 —— 当前窗口第 %s/%s 轮。统计：推送修复 %s 次、审阅无需改动 %s 次、超时 %s 次、验证拒绝 %s 次、base 更新 %s 次。\n\n轮次到这个量值得人工看一眼。可选：继续（无需操作）；若轮次持续累积，考虑拆分或缩减 PR；或释放接管（移除 `%s` 标签或评论 `%s stop`）。不操作则托管照常继续。\n\n</details>\n\n<!-- autofix-milestone round=%s win=%s -->' "${NEXT_ROUND}" "${MAX_ROUNDS}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${MAX_ROUNDS}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${WINDOW:-none}")" \
-              || echo "::warning::milestone digest failed to post on PR #${PR}; the round report above already landed"
-            echo "📊 milestone digest posted on #${PR} (round ${NEXT_ROUND})"
+            && [[ "${NEXT_ROUND}" -ge 10 && -f "${WORKDIR}/ic.json" ]]; then
+            # Crossing trigger, not an equality test: failure rounds also
+            # advance the round counter, so `push@9, crash@10, push@11`
+            # would skip an exact %10 check forever — and a failure-heavy
+            # PR is the very PR the digest exists for. Post on the first
+            # PUSHED round once 10+ rounds have accumulated since the last
+            # digest in THIS window (or since the window opened).
+            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+              [ .[] | select((.user.login // "") == $ab) | (.body // "")
+                | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]
+                | select(.[1] == $win) | (.[0] | tonumber) ]
+              | max // 0' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+            if [[ "$(( NEXT_ROUND - MS_LAST ))" -ge 10 ]]; then
+              WIN_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                [.[] | select((.user.login // "") == $ab)
+                     | select((.body // "") | contains("<!-- autofix-eval "))
+                     | select(
+                         ((.body // "") | contains("win=" + $win + " -->"))
+                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                | sort_by(.created_at) | .[]
+                | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+              if [[ -z "${WIN_HEADS}" ]]; then
+                # Reaching round 10+ with zero window markers means the
+                # parse failed (prior markers must exist to be here) — a
+                # fabricated all-zero census is worse than no digest.
+                echo "::warning::milestone census found no window markers on #${PR}; skipping the digest"
+              else
+                N_PUSHED="$(grep -c 'Addressed the latest review feedback' <<< "${WIN_HEADS}" || true)"
+                # This round's own marker was posted just above but ic.json
+                # predates it — count it in by hand.
+                N_PUSHED=$(( N_PUSHED + 1 ))
+                N_NOOP="$(grep -c 'no changes needed' <<< "${WIN_HEADS}" || true)"
+                # Needle matches the emitted headline verbatim — first
+                # lines can embed provider error text.
+                N_TIMEOUT="$(grep -c 'AutoFix ran out of time before finishing' <<< "${WIN_HEADS}" || true)"
+                # Both wordings of the gate-rejection handoff, past and
+                # present — the census must not silently zero when the
+                # headline is reworded.
+                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)' <<< "${WIN_HEADS}" || true)"
+                # Every other outcome (crash, model error, gate error,
+                # infra) lands in a residual bucket: a window that burned
+                # 80% of its budget on crashes must be the LOUDEST line in
+                # the digest, not four zeros quieter than a healthy one.
+                N_TOTAL=$(( $(grep -c . <<< "${WIN_HEADS}" || true) + 1 ))
+                N_OTHER=$(( N_TOTAL - N_PUSHED - N_NOOP - N_TIMEOUT - N_REJECTED ))
+                (( N_OTHER < 0 )) && N_OTHER=0
+                # Base updates carry their own marker with no win= field;
+                # their window is recovered by timestamp (the window key IS
+                # the engage ack's created_at — 'none' means count all,
+                # and the header says so).
+                N_BASE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                  [.[] | select((.user.login // "") == $ab)
+                       | select((.body // "") | contains("<!-- autofix-base-updated -->"))
+                       | select($win == "none" or ((.created_at // "") > $win))]
+                  | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+                WIN_DESC='in the current window'
+                WIN_DESC_ZH='当前窗口'
+                if [[ "${WINDOW:-none}" == 'none' ]]; then
+                  WIN_DESC='since the PR opened (no counting window yet)'
+                  WIN_DESC_ZH='自 PR 创建以来（尚无计数窗口）'
+                fi
+                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '📊 Takeover milestone — round %s/%s, %s. Census: %s pushed fix(es), %s no-change review(s), %s timeout(s), %s rejected attempt(s), %s other round(s) (crash / model error / gate error / infra), %s base update(s).\n\nThis many rounds deserves a human look. Options: keep going (fine — nothing changes), split or reduce the PR if rounds keep accumulating, or release takeover (remove the `%s` label or comment `%s stop`). Management continues unchanged unless you act.\n\n<details>\n<summary>中文说明</summary>\n\n📊 接管里程碑 —— 第 %s/%s 轮（%s）。统计：推送修复 %s 次、审阅无需改动 %s 次、超时 %s 次、验证拒绝 %s 次、其他轮次（崩溃/模型错误/门错误/infra）%s 次、base 更新 %s 次。\n\n轮次到这个量值得人工看一眼。可选：继续（无需操作）；若轮次持续累积，考虑拆分或缩减 PR；或释放接管（移除 `%s` 标签或评论 `%s stop`）。不操作则托管照常继续。\n\n</details>\n\n<!-- autofix-milestone round=%s win=%s -->' "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC_ZH}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${WINDOW:-none}")"; then
+                  echo "📊 milestone digest posted on #${PR} (round ${NEXT_ROUND})"
+                else
+                  echo "::warning::milestone digest failed to post on PR #${PR}; the round report above already landed"
+                fi
+              fi
+            fi
           fi
 
           {
