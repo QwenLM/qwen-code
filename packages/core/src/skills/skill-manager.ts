@@ -945,6 +945,11 @@ export class SkillManager {
       return [];
     }
 
+    if (this.config.getDisabledSkillLevels().has(level)) {
+      debugLogger.debug(`Skipping disabled ${level} skill level`);
+      return [];
+    }
+
     const projectRoot = this.config.getProjectRoot();
     const homeDir = os.homedir();
     const isHomeDirectory = path.resolve(projectRoot) === path.resolve(homeDir);

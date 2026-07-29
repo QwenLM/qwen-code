@@ -4732,3 +4732,38 @@ describe('loadCliConfig skills.directories', () => {
     expect(config.getCustomSkillDirs()).toEqual([]);
   });
 });
+
+describe('loadCliConfig skills.disabledLevels', () => {
+  beforeEach(() => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('passes valid disabled skill levels to core and ignores invalid values', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      skills: {
+        disabledLevels: ['bundled', 'invalid', 42 as unknown as string, 'user'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getDisabledSkillLevels()).toEqual(
+      new Set(['bundled', 'user']),
+    );
+  });
+
+  it('keeps every skill level enabled by default', async () => {
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getDisabledSkillLevels()).toEqual(new Set());
+  });
+});

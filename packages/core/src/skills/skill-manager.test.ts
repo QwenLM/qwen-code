@@ -1130,6 +1130,32 @@ Review content`;
       expect(simplifySkill!.level).toBe('bundled');
     });
 
+    it('should skip disabled skill levels without scanning them', async () => {
+      const disabledConfig = makeFakeConfig({
+        disabledSkillLevels: ['bundled'],
+      });
+      vi.spyOn(disabledConfig, 'getProjectRoot').mockReturnValue(
+        '/test/project',
+      );
+      const disabledManager = new SkillManager(disabledConfig);
+      mockReaddirForLevels(new Set(['project', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await disabledManager.listSkills({ force: true });
+
+      expect(skills.map((skill) => [skill.name, skill.level])).toEqual([
+        ['review', 'project'],
+      ]);
+      expect(await disabledManager.loadSkill('simplify')).toBeNull();
+      expect(
+        vi
+          .mocked(fs.readdir)
+          .mock.calls.some(([dirPath]) =>
+            String(dirPath).endsWith(bundledDirSegment),
+          ),
+      ).toBe(false);
+    });
+
     it('should prioritize project-level over bundled skills with same name', async () => {
       mockReaddirForLevels(new Set(['project', 'bundled']));
       setupReviewSkillMocks();
