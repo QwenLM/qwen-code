@@ -263,7 +263,7 @@ type StreamingBlockState = {
 // stay in lockstep when a third shape (e.g. `extended`) eventually lands.
 type AnthropicThinkingParam =
   | { type: 'enabled'; budget_tokens: number }
-  | { type: 'adaptive' };
+  | { type: 'adaptive'; display: 'summarized' };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
@@ -703,6 +703,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
+        // Claude 4.6+ removed assistant-message prefill (HTTP 400 when the
+        // conversation ends on an assistant turn). Same model cutoff as the
+        // adaptive-thinking shape, so reuse that gate rather than adding a
+        // second version predicate that could drift.
+        stripTrailingAssistantPrefill: this.modelSupportsAdaptiveThinking(),
         enableCacheControl,
         useGlobalCacheScope,
         // Read per request (not latched at construction): the client
@@ -1008,8 +1013,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Models that support adaptive thinking use { type: 'adaptive' } without
     // a budget_tokens field. The server controls the thinking budget via
     // output_config.effort instead.
+    //
+    // `display` is pinned to 'summarized' because the server-side default
+    // changed between model generations: Sonnet 4.6 / Opus 4.6 default to
+    // 'summarized' but Opus 4.7+ and every 5.x family default to 'omitted',
+    // which streams thinking blocks with empty text — reasoning silently
+    // disappears from the UI. Pinning is a no-op where the default already
+    // matches. https://github.com/QwenLM/qwen-code/issues/8039
     if (this.modelSupportsAdaptiveThinking()) {
-      return { type: 'adaptive' };
+      return { type: 'adaptive', display: 'summarized' };
     }
 
     // Budget path for non-adaptive (pre-4.6) models. resolveEffectiveEffort has

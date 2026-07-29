@@ -90,6 +90,20 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Ensure the request does not end on an assistant message. Claude 4.6+
+   * models removed assistant-message prefill and reject such requests with
+   * HTTP 400 ("This model does not support assistant message prefill. The
+   * conversation must end with a user message."). History can legitimately
+   * end on a model turn — context trimming that drops the next user turn,
+   * subagent transcript replay, or cleanOrphanedToolCalls dropping a
+   * trailing tool_result-only user message. A trailing assistant message
+   * with no meaningful content (empty or thinking-only) is dropped; one
+   * carrying real content (text or tool_use) is kept and a synthetic user
+   * turn is appended so nothing the model already said is discarded.
+   * https://github.com/QwenLM/qwen-code/issues/8039
+   */
+  stripTrailingAssistantPrefill?: boolean;
+  /**
    * Per-call override for `enableCacheControl`. Falls back to the value
    * captured at construction. The generator passes the live
    * `contentGeneratorConfig.enableCacheControl` here so a hot
@@ -183,6 +197,13 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
+    // Runs last among the structural passes (the earlier cleanups can
+    // themselves leave a trailing assistant message) and before the cache
+    // pass so an appended synthetic user turn becomes the per-turn cache
+    // breakpoint target like any other final user message.
+    if (options.stripTrailingAssistantPrefill) {
+      messages = this.stripTrailingAssistantPrefill(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -953,6 +974,42 @@ export class AnthropicContentConverter {
       } as unknown as AnthropicContentBlockParam;
       message.content = [emptyThinking, ...blocks];
     }
+  }
+
+  /**
+   * Make a history that ends on an assistant message safe for Claude 4.6+
+   * models, which reject assistant-message prefill with HTTP 400. At this
+   * point the merge passes guarantee at most one trailing assistant message.
+   * If it carries nothing the model visibly said (no tool_use, no non-empty
+   * text — e.g. a thinking-only turn cut off by max_tokens), drop it; a
+   * thinking block without a continuation is useless on replay anyway.
+   * Otherwise keep it and append a synthetic user turn so the model's own
+   * words are preserved as ordinary history rather than discarded.
+   */
+  private stripTrailingAssistantPrefill(
+    messages: AnthropicMessageParam[],
+  ): AnthropicMessageParam[] {
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== 'assistant') {
+      return messages;
+    }
+
+    const hasMeaningfulContent = Array.isArray(last.content)
+      ? last.content.some((block) => {
+          const type = (block as { type?: string }).type;
+          if (type === 'tool_use') return true;
+          return type === 'text' && Boolean((block as { text?: string }).text);
+        })
+      : Boolean(last.content);
+
+    if (!hasMeaningfulContent) {
+      return messages.slice(0, -1);
+    }
+
+    return [
+      ...messages,
+      { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+    ];
   }
 
   /**

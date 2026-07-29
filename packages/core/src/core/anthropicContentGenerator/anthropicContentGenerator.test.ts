@@ -1696,7 +1696,7 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({
           output_config: { effort: 'max' },
           // 4.6+ uses adaptive thinking; the server controls the budget.
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -1733,7 +1733,7 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           output_config: { effort: 'xhigh' },
-          thinking: { type: 'adaptive' },
+          thinking: { type: 'adaptive', display: 'summarized' },
         }),
       );
     });
@@ -2169,12 +2169,15 @@ describe('AnthropicContentGenerator', () => {
       it('selects adaptive for claude-opus-4-6 / sonnet-4-6 / opus-4-7', async () => {
         expect(await thinkingFor('claude-opus-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-sonnet-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(await thinkingFor('claude-opus-4-7')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2182,6 +2185,7 @@ describe('AnthropicContentGenerator', () => {
         // Single-digit character-class regex would have missed haiku entirely.
         expect(await thinkingFor('claude-haiku-4-6')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2190,12 +2194,14 @@ describe('AnthropicContentGenerator', () => {
         // invalid `{ type: 'enabled', budget_tokens: ... }` body.
         expect(await thinkingFor('claude-opus-4-10')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
       it('selects adaptive for a future major like claude-opus-5-1', async () => {
         expect(await thinkingFor('claude-opus-5-1')).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
       });
 
@@ -2241,7 +2247,7 @@ describe('AnthropicContentGenerator', () => {
             effort: 'medium',
             budget_tokens: 42_000,
           }),
-        ).toEqual({ type: 'adaptive' });
+        ).toEqual({ type: 'adaptive', display: 'summarized' });
       });
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
@@ -2288,6 +2294,7 @@ describe('AnthropicContentGenerator', () => {
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect((req as { thinking?: unknown }).thinking).toEqual({
           type: 'adaptive',
+          display: 'summarized',
         });
         expect(req).toEqual(
           expect.not.objectContaining({ output_config: expect.anything() }),
@@ -2301,6 +2308,60 @@ describe('AnthropicContentGenerator', () => {
         expect(headers['anthropic-beta']).toContain(
           'prompt-caching-scope-2026-01-05',
         );
+      });
+    });
+
+    describe('trailing assistant prefill gating (Claude 4.6+ removed prefill)', () => {
+      // Claude 4.6+ rejects a conversation ending on an assistant message
+      // with HTTP 400 ("This model does not support assistant message
+      // prefill."). The generator turns the converter's
+      // stripTrailingAssistantPrefill pass on for exactly the models that
+      // support adaptive thinking — the same 4.6+ cutoff.
+      async function messagesFor(model: string): Promise<unknown[]> {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model,
+          content: [{ type: 'text', text: 'hi' }],
+        });
+        const generator = new AnthropicContentGenerator(
+          {
+            model,
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here is' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+        const [req] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        return (req as { messages: unknown[] }).messages;
+      }
+
+      it('terminates a trailing assistant turn with a synthetic user turn on 4.6+ models', async () => {
+        const messages = await messagesFor('claude-opus-4-7');
+        expect(messages).toHaveLength(3);
+        expect(messages[2]).toMatchObject({
+          role: 'user',
+          content: [
+            expect.objectContaining({ type: 'text', text: 'Continue.' }),
+          ],
+        });
+      });
+
+      it('leaves the trailing assistant turn untouched on pre-4.6 models (prefill still supported)', async () => {
+        const messages = await messagesFor('claude-opus-4-5');
+        expect(messages).toHaveLength(2);
+        expect(messages[1]).toMatchObject({ role: 'assistant' });
       });
     });
 
@@ -2624,7 +2685,10 @@ describe('AnthropicContentGenerator', () => {
         'https://internal-proxy.example/anthropic',
       );
 
-      expect(request.thinking).toEqual({ type: 'adaptive' });
+      expect(request.thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+      });
       expect(request.messages[1]).toEqual({
         role: 'assistant',
         content: [{ type: 'text', text: 'Visible answer' }],

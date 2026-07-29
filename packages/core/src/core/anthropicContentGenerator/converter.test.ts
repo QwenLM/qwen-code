@@ -2099,6 +2099,119 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
+  describe('trailing assistant prefill (Claude 4.6+ removed prefill)', () => {
+    it('appends a synthetic user turn when the trailing assistant message has real content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here is' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true },
+      );
+
+      expect(messages).toHaveLength(3);
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Sure, here is' }],
+      });
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'Continue.',
+            // The synthetic turn is the final user message, so the per-turn
+            // cache breakpoint lands on it like any other last user turn.
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('drops a trailing assistant message that carries no meaningful content (thinking-only)', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'planning...', thought: true, thoughtSignature: 'sig' },
+              ],
+            },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true },
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.role).toBe('user');
+    });
+
+    it('treats a trailing tool_use assistant turn left by orphan cleanup as real content', () => {
+      // Context trimming can drop the user turn carrying the tool_result;
+      // cleanOrphanedToolCalls then strips the orphaned tool_use, and the
+      // remaining assistant text still ends the conversation. The pass must
+      // still terminate the request on a user turn.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'Let me look that up' },
+                { functionCall: { id: 't1', name: 'lookup', args: {} } },
+              ],
+            },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true },
+      );
+
+      const last = messages[messages.length - 1]!;
+      expect(last.role).toBe('user');
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Let me look that up' }],
+      });
+    });
+
+    it('does nothing when the conversation already ends on a user message', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'model', parts: [{ text: 'earlier answer' }] },
+            { role: 'user', parts: [{ text: 'follow-up' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true },
+      );
+
+      expect(messages).toHaveLength(2);
+      expect(messages[1]!.role).toBe('user');
+    });
+
+    it('does nothing when the option is disabled (default, pre-4.6 models keep prefill)', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'hi' }] },
+          { role: 'model', parts: [{ text: 'Sure, here is' }] },
+        ],
+      });
+
+      expect(messages).toHaveLength(2);
+      expect(messages[1]!.role).toBe('assistant');
+    });
+  });
+
   describe('convertGeminiToolsToAnthropic', () => {
     it('converts Tool.functionDeclarations to Anthropic tools and runs schema conversion', async () => {
       const tools = [
