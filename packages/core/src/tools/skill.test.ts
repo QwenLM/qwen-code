@@ -1056,6 +1056,32 @@ describe('SkillTool', () => {
         }),
       );
     });
+
+    it('records auto-skill usage on re-invocation of an already-loaded skill', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockRuntimeConfig,
+      );
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      vi.mocked(recordAutoSkillUsage).mockClear();
+
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result2 = await inv2.execute();
+
+      expect(partToString(result2.llmContent)).toBe(
+        'Skill "code-review" is already loaded in context.',
+      );
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
+    });
   });
 
   describe('modelInvocableCommands integration', () => {
