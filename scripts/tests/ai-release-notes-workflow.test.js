@@ -78,11 +78,11 @@ describe('stable release notes workflow', () => {
     const stepTimeoutMin = Number(
       generate.match(/timeout-minutes:\s*(\d+)/)[1],
     );
-    const budgetMs = Number(
-      releaseNotesScript
-        .match(/totalTimeoutMs\s*=\s*([\d_]+)/)[1]
-        .replace(/_/g, ''),
-    );
+    const budgetMs = releaseNotesScript
+      .match(/totalTimeoutMs\s*=\s*([\d_]+)\s*\*\s*([\d_]+)/)
+      .slice(1)
+      .map((part) => Number(part.replace(/_/g, '')))
+      .reduce((a, b) => a * b, 1);
     expect(stepTimeoutMin * 60_000).toBeGreaterThan(budgetMs);
 
     expect(generate).toContain('GitHub-generated notes');
