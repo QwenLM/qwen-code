@@ -1088,15 +1088,26 @@ export class ShellExecutionService {
           // and then mojibake the post-promote tail. The foreground
           // `stdoutDecoder` / `stderrDecoder` are initialized in
           // `handleOutput` from `getCachedEncodingForBuffer(data)` on
-          // the first chunk; if they're still null at promote time
-          // (no bytes yet), fall back to `'utf-8'`. Capture the
+          // the first chunk in streaming mode; in buffered mode they stay
+          // null and the encoding is re-detected from stdoutChunks below
+          // (falling back to `'utf-8'` when no bytes have arrived). Capture the
           // detected encoding rather than the decoder instance — the
           // foreground decoder has already seen pre-promote bytes
           // (its multibyte state machine is at an arbitrary midpoint)
           // and may have accumulated continuation-byte state that the
           // post-promote stream shouldn't inherit; new instances with
           // the same `encoding` start fresh.
-          const detectedEncoding = stdoutDecoder?.encoding ?? 'utf-8';
+          //
+          // In buffered mode the foreground decoders are never created
+          // (raw chunks accumulate in stdoutChunks instead), so re-detect
+          // from the accumulated buffer rather than falling straight to
+          // utf-8 — otherwise a non-UTF-8 child's post-promote tail would
+          // mojibake even though its pre-promote snapshot decoded fine.
+          const detectedEncoding =
+            stdoutDecoder?.encoding ??
+            (stdoutChunks.length > 0
+              ? getCachedEncodingForBuffer(Buffer.concat(stdoutChunks))
+              : 'utf-8');
           // SEPARATE decoders for stdout and stderr. A single shared
           // decoder corrupts interleaved multibyte UTF-8 (the streaming
           // state machine assumes one byte source); independent

@@ -3257,7 +3257,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe with chcp 65001 UTF-8 prefix on Windows', async () => {
+    it('should skip chcp 65001 prefix for cmd.exe in pipe mode on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'cmd.exe',

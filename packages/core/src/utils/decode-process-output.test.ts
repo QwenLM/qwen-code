@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { getCachedEncodingForBuffer } from './systemEncoding.js';
-import { TextDecoder } from 'node:util';
+import {
+  getCachedEncodingForBuffer,
+  decodeProcessOutput,
+} from './systemEncoding.js';
 
 // These tests verify the encoding detection logic that underpins the
 // childProcessFallback fix: accumulating raw buffers and decoding the
@@ -20,14 +22,14 @@ describe('buffered output encoding detection', () => {
     // CP-866 "Ошибка" — bytes 0x80+ are not valid UTF-8
     const cp866Buf = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0, 0x20]);
     const encoding = getCachedEncodingForBuffer(cp866Buf);
-    // Should NOT be utf-8 — these bytes are invalid UTF-8
-    // (On Windows it should be cp866; on Linux it may be detected as
-    // another encoding or fall back to system encoding — all acceptable.)
-    if (encoding === 'utf-8') {
-      // If it somehow returns utf-8, verify the bytes are actually invalid
-      const decoder = new TextDecoder('utf-8', { fatal: true });
-      expect(() => decoder.decode(cp866Buf)).toThrow();
-    }
+    // Should NOT be utf-8 — these bytes are invalid UTF-8. chardet
+    // deterministically detects a non-UTF-8 encoding (e.g. koi8-r/cp866)
+    // on every platform, so this assertion is cross-platform safe.
+    expect(encoding).not.toBe('utf-8');
+    // The real decode path must not throw even when the detected encoding
+    // is an unsupported OEM code page — a throw here would leave the
+    // shell-execution promise unsettled.
+    expect(() => decodeProcessOutput(cp866Buf)).not.toThrow();
   });
 
   it('decodes complete mixed buffer correctly (ASCII prefix + CP-866)', () => {
@@ -37,8 +39,7 @@ describe('buffered output encoding detection', () => {
     const cp866Chunk = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
     const fullBuffer = Buffer.concat([asciiChunk, cp866Chunk]);
 
-    const encoding = getCachedEncodingForBuffer(fullBuffer);
-    const decoded = new TextDecoder(encoding).decode(fullBuffer);
+    const decoded = decodeProcessOutput(fullBuffer);
 
     // The ASCII part should always be correct
     expect(decoded.startsWith('Status: OK\n')).toBe(true);

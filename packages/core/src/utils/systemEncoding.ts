@@ -62,7 +62,16 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
 
 export function decodeProcessOutput(buffer: Buffer): string {
   if (buffer.length === 0) return '';
-  return new TextDecoder(getCachedEncodingForBuffer(buffer)).decode(buffer);
+  const encoding = getCachedEncodingForBuffer(buffer);
+  try {
+    return new TextDecoder(encoding).decode(buffer);
+  } catch {
+    // The detected label may be a Windows OEM code page (cp437/cp850/cp852)
+    // that Node's WHATWG TextDecoder rejects with RangeError. Fall back to
+    // utf-8 so a throw never escapes into an 'exit'/'data' handler, which
+    // would otherwise leave the shell-execution promise unsettled.
+    return new TextDecoder('utf-8').decode(buffer);
+  }
 }
 
 /**
