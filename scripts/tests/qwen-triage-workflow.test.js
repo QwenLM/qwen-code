@@ -2167,6 +2167,14 @@ describe('qwen-triage verify round-3 hardening', () => {
     // for a crash; set it higher and a real timeout reads as a crash.
     expect(watchdogSeconds).toBe(agentMinutes * 60);
 
+    // That comparison is only meaningful if the elapsed-time chain exists:
+    // drop the baseline and AGENT_ELAPSED is total shell uptime, so a late
+    // OOM reads as `timeout`; drop the assignment and it is empty, so the
+    // watchdog never fires and a real timeout reads as a crash. Pin both
+    // lines so deleting either fails here instead of silently in CI.
+    expect(runStep).toMatch(/AGENT_START=\$SECONDS/);
+    expect(runStep).toMatch(/AGENT_ELAPSED=\$\(\(SECONDS - AGENT_START\)\)/);
+
     // A step-level `timeout-minutes` on the run step would cap the agent
     // below the budget while every relationship above stays green — the
     // job limit must be the only cap.
