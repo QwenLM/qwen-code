@@ -19,7 +19,11 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
-import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import {
+  fakeToolCall,
+  startFakeOpenAIServer,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
 import {
   SDKTestHelper,
   extractText,
@@ -56,6 +60,18 @@ function fakeModelOptions(baseUrl: string) {
       QWEN_MODEL: 'fake-model',
     },
   };
+}
+
+function advertisedToolNames(fakeServer: FakeOpenAIServer): string[] {
+  const tools = fakeServer.requests[0]?.body['tools'];
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool): string[] => {
+    if (typeof tool !== 'object' || tool === null) return [];
+    const fn = (tool as { function?: unknown }).function;
+    if (typeof fn !== 'object' || fn === null) return [];
+    const name = (fn as { name?: unknown }).name;
+    return typeof name === 'string' ? [name] : [];
+  });
 }
 
 describe('Tool Control Parameters (E2E)', () => {
@@ -95,6 +111,7 @@ describe('Tool Control Parameters (E2E)', () => {
                   },
                   'write-test',
                 ),
+                fakeToolCall('list_directory', { path: testDir }, 'list-dir'),
               ],
             };
           }
@@ -129,8 +146,14 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(toolNames).toContain('read_file');
           expect(toolNames).toContain('write_file');
 
-          // Should NOT have list_directory since it's not in coreTools
-          expect(toolNames).not.toContain('list_directory');
+          // list_directory is not in coreTools: it must not be advertised to
+          // the model, and the scripted call must be declined at execution.
+          expect(advertisedToolNames(fakeServer)).not.toContain(
+            'list_directory',
+          );
+          const blocked = findToolResults(messages, 'list_directory');
+          expect(blocked.length).toBeGreaterThan(0);
+          expect(blocked[0].isError).toBe(true);
 
           // Verify the write_file call itself requested different content
           // than the original. Asserting on the tool-call arguments (rather
@@ -1235,6 +1258,9 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Should NOT use tools outside coreTools
           expect(toolNames).not.toContain('run_shell_command');
+          expect(advertisedToolNames(fakeServer)).not.toContain(
+            'run_shell_command',
+          );
 
           // Verify file was actually modified (content changed from original).
           // Don't assert on specific wording — the model may paraphrase.
@@ -1300,6 +1326,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Should NOT use excluded tool
           expect(toolNames).not.toContain('edit');
+          expect(advertisedToolNames(fakeServer)).not.toContain('edit');
 
           // File should still exist
           expect(helper.fileExists('test.txt')).toBe(true);
@@ -1378,6 +1405,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Should NOT use excluded tool
           expect(toolNames).not.toContain('edit');
+          expect(advertisedToolNames(fakeServer)).not.toContain('edit');
 
           // canUseTool should be called for core write tools
           expect(canUseToolCalls).toContain('write_file');

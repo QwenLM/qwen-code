@@ -175,7 +175,10 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should handle abort immediately after query starts', async () => {
       const controller = new AbortController();
 
-      const fakeServer = await startFakeOpenAIServer(() => {
+      // Hold the model response open so the 200ms abort below lands inside
+      // the model request instead of racing CLI startup.
+      const fakeServer = await startFakeOpenAIServer(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
         return { contentChunks: LONG_CONTENT_CHUNKS };
       }, FAKE_SERVER_OPTIONS);
 
@@ -623,7 +626,10 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should throw AbortError with correct properties', async () => {
       const controller = new AbortController();
 
-      const fakeServer = await startFakeOpenAIServer(() => {
+      // Hold the model response open so the 1000ms abort below lands inside
+      // the model request instead of racing CLI startup.
+      const fakeServer = await startFakeOpenAIServer(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
         return { contentChunks: LONG_CONTENT_CHUNKS };
       }, FAKE_SERVER_OPTIONS);
 
@@ -768,7 +774,10 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
     it('should handle multiple abort calls gracefully', async () => {
       const controller = new AbortController();
 
-      const fakeServer = await startFakeOpenAIServer(() => {
+      // Hold the model response open so the timer aborts below land inside
+      // the model request instead of racing CLI startup.
+      const fakeServer = await startFakeOpenAIServer(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
         return { contentChunks: LONG_CONTENT_CHUNKS };
       }, FAKE_SERVER_OPTIONS);
 
