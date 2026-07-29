@@ -2150,6 +2150,9 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(tools).toContain('install-deps chromium');
     expect(tools).not.toContain('install --with-deps');
     expect(tools).toContain('::warning::Chromium system deps install failed');
+    // No hardcoded Playwright pin here either: the apt list must track
+    // current Playwright so it covers the lockfile-matched binary below.
+    expect(tools).not.toMatch(/playwright@[\d.]/);
 
     // Browser binary: downloaded after npm ci so npx resolves the
     // checkout's lockfile version — never a hardcoded pin (M5).

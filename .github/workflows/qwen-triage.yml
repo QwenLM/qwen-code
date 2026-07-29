@@ -2074,11 +2074,13 @@ jobs:
           qwen --version
 
           # Chromium system dependencies (apt packages) for evidence
-          # screenshots. The browser BINARY is downloaded after checkout
-          # by the "Install evidence browser" step, using the checkout's
-          # own Playwright so the binary always matches the lockfile.
-          # Best-effort: a failure here must not fail the job.
-          if ! (cd "${RUNNER_TEMP:?}" && npx --yes playwright@1.56.1 install-deps chromium); then
+          # screenshots. install-deps is unpinned so the apt list tracks
+          # current Playwright (a superset of the lockfile binary's needs);
+          # the version-sensitive BINARY is downloaded after checkout by the
+          # "Install evidence browser" step, using the checkout's own
+          # Playwright so it always matches the lockfile. Best-effort: a
+          # failure here must not fail the job.
+          if ! (cd "${RUNNER_TEMP:?}" && npx --yes playwright install-deps chromium); then
             echo "::warning::Chromium system deps install failed; the verification agent will produce a text-only report."
           fi
 
