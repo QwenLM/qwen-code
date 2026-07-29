@@ -83,11 +83,15 @@ jobs:
       contents: 'read'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
-      # /verify routing: 'ecs' when the PR author has write (trusted code on
-      # the persistent pool), 'hosted' when they do not (sponsored run on an
-      # ephemeral GitHub-hosted VM). Empty for every non-verify event.
-      verify_runner: '${{ steps.perm.outputs.verify_runner }}'
-      # Head OID snapped AT SPONSORSHIP TIME for the hosted lane: the
+      # /verify trust level: 'trusted' when the PR author has write,
+      # 'external' when they do not. Both run on the persistent ECS pool
+      # (maintainer decision, 2026-07-29: the pool is network-isolated and
+      # the alternative — verifying on a personal machine — is worse), so
+      # this selects CONTROLS, not machines: an external run additionally
+      # gets a pinned head OID, a pre-execution risk screen, and a full
+      # workspace wipe. Empty for every non-verify event.
+      verify_trust: '${{ steps.perm.outputs.verify_trust }}'
+      # Head OID snapped AT SPONSORSHIP TIME for an external run: the
       # maintainer's /verify comment approves the code that exists now, not
       # whatever the author pushes while the job queues.
       verify_head_oid: '${{ steps.perm.outputs.verify_head_oid }}'
@@ -121,18 +125,19 @@ jobs:
               # /tmux executes the PR AUTHOR's code on the persistent pool,
               # so it gates on the author's permission (whose code runs).
               # /verify gates on the COMMENTER (who spends a runner slot and
-              # a full model budget) and treats the author's permission as
-              # ROUTING, not a gate: a write-access author runs on the
-              # persistent ECS pool as before, while an external author's
-              # code is sponsored by the commenter onto an ephemeral
-              # GitHub-hosted VM behind a pre-execution risk screen — the
-              # machine is destroyed after the run, so the PERSISTENCE
-              # threat that justifies the ECS gate does not exist there.
-              # (Persistence is the decisive ECS risk: the pool is
-              # network-isolated, but machines are reused, and the next
-              # run arrives carrying credentials that planted artifacts
-              # could harvest.) /triage only reads content, so the
-              # commenter's permission gates it.
+              # a full model budget) and treats the author's permission as a
+              # TRUST LEVEL, not a gate: both lanes run on the persistent
+              # ECS pool, and an external author's run additionally carries
+              # a pinned head OID, a pre-execution risk screen, and a full
+              # workspace wipe.
+              # The residual ECS risk for untrusted code is PERSISTENCE —
+              # the pool is network-isolated, but machines are reused, and
+              # the next run arrives carrying credentials (CI_BOT_PAT, the
+              # model key) that artifacts planted now could harvest. The
+              # wipe is what answers it, and unlike the vector-by-vector
+              # sweep below it is deny-by-default.
+              # /triage only reads content, so the commenter's permission
+              # gates it.
               # Match case-INSENSITIVELY: the job predicates above are
               # GitHub Actions expressions, whose string comparisons ignore
               # case, so `@QWEN-CODE /VERIFY` reaches this step. A
@@ -207,25 +212,24 @@ jobs:
                 ;;
             esac
           done
-          # /verify routing, decided only after the commenter gate passed.
-          # The author's permission picks the machine, it no longer denies:
-          # write -> the persistent ECS pool (unchanged trust level);
-          # anything else -> a sponsored run on an ephemeral GitHub-hosted
-          # VM, with the head OID snapped NOW so the run executes the code
-          # the sponsor saw, not whatever gets pushed while the job queues.
+          # /verify trust level, decided only after the commenter gate
+          # passed. The author's permission selects CONTROLS, it no longer
+          # denies: write -> unchanged; anything else -> external, with the
+          # head OID snapped NOW so the run executes the code the sponsor
+          # saw, not whatever gets pushed while the job queues.
           # Fail closed on every lookup: an unreadable author permission or
-          # an unresolvable head OID denies the run outright — routing a
-          # request we cannot classify would silently pick a trust level.
+          # an unresolvable head OID denies the run outright — classifying
+          # a request we cannot read would silently pick a trust level.
           if [ "$IS_VERIFY" = true ]; then
             if [ -z "$ISSUE_AUTHOR" ] ||
                ! author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ISSUE_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
-              echo "Could not resolve the PR author's permission for /verify routing; denying." >> "$GITHUB_STEP_SUMMARY"
+              echo "Could not resolve the PR author's permission for /verify; denying." >> "$GITHUB_STEP_SUMMARY"
               echo "should_run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             case "$author_perm" in
               admin|maintain|write)
-                echo "verify_runner=ecs" >> "$GITHUB_OUTPUT"
+                echo "verify_trust=trusted" >> "$GITHUB_OUTPUT"
                 ;;
               *)
                 if ! sponsor_oid="$(gh pr view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid' 2>/dev/null)" ||
@@ -234,9 +238,9 @@ jobs:
                   echo "should_run=false" >> "$GITHUB_OUTPUT"
                   exit 0
                 fi
-                echo "verify_runner=hosted" >> "$GITHUB_OUTPUT"
+                echo "verify_trust=external" >> "$GITHUB_OUTPUT"
                 echo "verify_head_oid=${sponsor_oid}" >> "$GITHUB_OUTPUT"
-                echo "Routing /verify for external author ${ISSUE_AUTHOR} to an ephemeral hosted runner at ${sponsor_oid} (sponsored by ${COMMENT_USER})." >> "$GITHUB_STEP_SUMMARY"
+                echo "Sponsored /verify for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
                 ;;
             esac
           fi
@@ -269,15 +273,14 @@ jobs:
             -f content='eyes' > /dev/null ||
             echo "Failed to add verify acknowledgement reaction; continuing." >&2
 
-      # When the maintainer kill switch is set, an ECS-routed verify would
-      # queue against a disabled pool forever, so say so here instead of
-      # leaving an acknowledged request hanging. The verify job's `if`
-      # excludes the same condition. The HOSTED lane is exempt on both
-      # sides: an ephemeral GitHub runner does not depend on the pool.
+      # The verify job is ECS-only (it needs the container + the persistent
+      # pool). When the maintainer kill switch is set, that job would queue
+      # against a disabled pool forever, so say so here instead of leaving an
+      # acknowledged request hanging. The verify job's `if` excludes the same
+      # condition.
       - name: 'Report disabled verify lane'
         if: >-
           steps.perm.outputs.should_run == 'true' &&
-          steps.perm.outputs.verify_runner != 'hosted' &&
           vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' &&
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
@@ -1828,8 +1831,7 @@ jobs:
       (github.event.comment.body == '@qwen-code /verify' ||
        startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
       needs.authorize.outputs.should_run == 'true' &&
-      (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' ||
-       needs.authorize.outputs.verify_runner == 'hosted')
+      vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'
     # One verification per PR at a time, mirroring the tmux job: concurrent
     # runs would share the same self-hosted workspace and clobber each other.
     # GitHub evaluates concurrency before the job `if`, but after `needs`, so
@@ -1843,8 +1845,7 @@ jobs:
            (github.event.comment.body == '@qwen-code /verify' ||
             startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
            needs.authorize.outputs.should_run == 'true' &&
-           (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' ||
-            needs.authorize.outputs.verify_runner == 'hosted')) &&
+           vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
           format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
@@ -1855,15 +1856,7 @@ jobs:
     # timeout kill the container mid-run, bypassing the agent's
     # ship-what-ran path entirely.
     timeout-minutes: 60
-    # Routed by the AUTHOR's permission (decided in authorize): write-access
-    # authors run on the persistent ECS pool; external authors run sponsored
-    # on an ephemeral GitHub-hosted VM that is destroyed after the job — the
-    # PERSISTENCE threat the ECS gate exists for does not apply there. (The
-    # pool is network-isolated, so persistence — planted artifacts
-    # harvesting a later run's credentials — is the decisive ECS risk, not
-    # lateral movement.) Same container image on both, so the environment
-    # contract is identical.
-    runs-on: "${{ needs.authorize.outputs.verify_runner == 'hosted' && fromJSON('[\"ubuntu-latest\"]') || fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') }}"
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
     # host filesystem across workflow runs.
@@ -1909,7 +1902,7 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ github.event.issue.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-          VERIFY_LANE: '${{ needs.authorize.outputs.verify_runner }}'
+          VERIFY_TRUST: '${{ needs.authorize.outputs.verify_trust }}'
           SPONSORED_OID: '${{ needs.authorize.outputs.verify_head_oid }}'
           # Screen credentials, used ONLY on the hosted lane and only by
           # this trusted step — no PR code has executed yet, and the diff
@@ -1992,22 +1985,22 @@ jobs:
             --json number,title,body,author,baseRefName,baseRefOid,headRefOid,commits \
             > "$RUNNER_TEMP/verify-context/pr.json"
           # Re-authorize at execution time, not just at queue time — per
-          # LANE, because the two lanes trust different things.
+          # TRUST LEVEL, because the two answer to different controls.
           #
-          # ECS lane: the AUTHOR's write permission is the control (their
-          # code runs on the persistent pool), and it can be revoked while
-          # this job queues, so re-check it now. The head may move freely:
-          # a write-access author's newest code is exactly as trusted as
-          # the code the trigger saw.
+          # Trusted: the AUTHOR's write permission IS the control, and it
+          # can be revoked while this job queues, so re-check it now. The
+          # head may move freely: a write-access author's newest code is
+          # exactly as trusted as the code the trigger saw.
           #
-          # Hosted lane: the author is external by construction, so their
-          # permission proves nothing. The control is the SPONSORSHIP: the
-          # maintainer's /verify comment approved the head OID authorize
-          # snapped at that moment. If the head moved since, the code on
-          # the PR is no longer the code anyone vouched for — skip, and say
-          # how to re-sponsor. The ephemeral VM bounds what the code can do
-          # either way; this check bounds WHOSE code gets that budget.
-          if [ "${VERIFY_LANE:-}" = 'hosted' ]; then
+          # External: the author's permission proves nothing by
+          # construction. The control is the SPONSORSHIP — the maintainer's
+          # /verify comment approved the head OID authorize snapped at that
+          # moment. If the head moved since, the code on the PR is no
+          # longer the code anyone vouched for, so skip and say how to
+          # re-sponsor. Both run on the persistent pool, so this check is
+          # load-bearing rather than a convenience: nothing downstream
+          # re-establishes whose code this is.
+          if [ "${VERIFY_TRUST:-}" = 'external' ]; then
             CURRENT_OID="$(jq -r '.headRefOid // empty' "$RUNNER_TEMP/verify-context/pr.json")"
             if [ -z "${SPONSORED_OID:-}" ] || [ -z "$CURRENT_OID" ]; then
               echo "::error::Sponsored verify is missing the approved head OID; refusing to run."
@@ -2039,25 +2032,28 @@ jobs:
                 echo "::error::PR author ${AUTHOR} no longer has write access (${AUTHOR_PERM}); refusing to execute their code on the persistent pool."
                 echo "decision=skip" >> "$GITHUB_OUTPUT"
                 echo "verdict=skipped" >> "$GITHUB_OUTPUT"
-                echo "skip_reason=the PR author no longer has write access to this repository — a maintainer can re-comment \`@qwen-code /verify\` to sponsor a run on an ephemeral runner instead" >> "$GITHUB_OUTPUT"
+                echo "skip_reason=the PR author no longer has write access to this repository — a maintainer can re-comment \`@qwen-code /verify\` to sponsor an external-trust run instead" >> "$GITHUB_OUTPUT"
                 exit 0
                 ;;
             esac
           fi
           echo "head_oid=$(jq -r '.headRefOid' "$RUNNER_TEMP/verify-context/pr.json")" >> "$GITHUB_OUTPUT"
-          # Sponsored lane only: a pre-execution risk screen over the PR
-          # diff. Defense in depth, NOT the control — the model can be
-          # fooled by obfuscation and the mechanical greps only know shapes
-          # that have been seen before; what bounds a malicious PR is the
-          # ephemeral VM it executes on. The screen keeps obviously hostile
-          # diffs from spending a sponsored run at all, and it fails
-          # CLOSED: an unfetchable diff, a missing screen config, a model
-          # error, or an unparseable answer each refuse the run.
+          # External runs only: a pre-execution risk screen over the PR
+          # diff. Because this executes on the PERSISTENT pool, the screen
+          # is load-bearing rather than a cost-saver — but it is still not
+          # sufficient on its own, and must not be read as if it were: the
+          # model can be fooled by obfuscation and the mechanical greps
+          # only know shapes that have been seen before. What actually
+          # bounds a screened-but-hostile diff is the workspace wipe below
+          # plus the sweep, and those are the parts to strengthen first if
+          # this lane ever produces an incident.
+          # It fails CLOSED: an unfetchable diff, a missing screen config, a
+          # model error, or an unparseable answer each refuse the run.
           # The diff is DATA throughout. Every reason posted back to the PR
           # is a fixed string chosen here — never text from the diff — so a
           # crafted diff cannot steer the screen's own output, and a model
           # reply is reduced to one word before it is used.
-          if [ "${VERIFY_LANE:-}" = 'hosted' ]; then
+          if [ "${VERIFY_TRUST:-}" = 'external' ]; then
             flag_reasons=''
             add_reason() { flag_reasons="${flag_reasons:+${flag_reasons}; }$1"; }
             diff_file="$RUNNER_TEMP/verify-context/screen.diff"
@@ -2232,6 +2228,48 @@ jobs:
       # root). Run the same exec-vector sweep as the triage job's cleaner:
       # keep a known-safe config allowlist, unset everything else, drop hook
       # files, and clear stale worktrees/results. Never fail the job.
+      # An external author's code is about to execute on a machine that is
+      # REUSED, and the next run on it starts by handling credentials
+      # (CI_BOT_PAT in the resolve step, the model key in the proxy). The
+      # sweep below is an allowlist of vectors we have thought of; an
+      # adversarial author gets unlimited attempts to find one we have not.
+      # So for external runs, do not sweep the workspace — delete it.
+      # Deny-by-default costs one cold clone (checkout below re-creates
+      # everything) and removes every workspace-resident vector at once,
+      # known or not: hooks, worktree config, planted dotfiles, staged
+      # artifacts, symlinks pointing out of the tree.
+      #
+      # Scope, stated plainly: this covers the WORKSPACE. RUNNER_TEMP and
+      # /tmp also persist on this pool; the steps that read them already
+      # rm -rf their own subtrees (verify-results, verify-context, the
+      # agent home) before use. The container itself is recreated per job,
+      # so /home/node and the npm cache inside it are not cross-run state.
+      - name: 'Wipe workspace before external code'
+        if: >-
+          steps.pr.outputs.decision == 'run' &&
+          needs.authorize.outputs.verify_trust == 'external'
+        run: |-
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE:?}"
+          # Refuse to run anywhere unexpected: a wipe pointed at the wrong
+          # path by a mangled env is far worse than a skipped wipe, and
+          # this job cannot proceed safely without it either way.
+          case "$WS" in
+            /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: ${WS}"; exit 1 ;;
+          esac
+          # Contents, not the directory itself: the runner owns the mount
+          # point. Dotfiles included — a planted .npmrc or .git is exactly
+          # what this removes. `find -delete` rather than a glob so the
+          # empty case is not an error and nothing is expanded by the
+          # shell from PR-controlled names.
+          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+          remaining="$(find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$remaining" != '0' ]; then
+            echo "::error::workspace still has ${remaining} entries after the wipe; refusing to execute external code on it."
+            exit 1
+          fi
+          echo "Workspace wiped before external code (deny-by-default; the sweep is the trusted-lane path)." >> "$GITHUB_STEP_SUMMARY"
+
       - name: 'Clean stale agent state'
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
