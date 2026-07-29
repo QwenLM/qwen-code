@@ -1,0 +1,7 @@
+C3  title > 200 chars            record_artifact(model title) -> RECORDED  (recoverable on main, lost at HEAD)
+[artifacts] session=rec-C4 action=dropped reason="workspacePath contains control characters"
+C4  U+200B in title              record_artifact(model title) -> dropped too (no loss)
+[artifacts] session=rec-C5 action=dropped reason="workspacePath contains unsafe markup"
+C5  entity markup in directory   record_artifact(model title) -> dropped too (no loss)
+[artifacts] session=rec-C7 action=dropped reason="workspacePath exceeds 500 characters"
+C7  workspacePath > 500 chars    record_artifact(model title) -> dropped too (no loss)

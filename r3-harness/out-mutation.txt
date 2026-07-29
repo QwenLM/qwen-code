@@ -1,0 +1,29 @@
+$ bash mutate.sh          # each mutation proved to land (diff non-empty) before the run counts
+
+=== PR 7914 mutation matrix (write-file.test.ts, 70 tests) ===
+M1 | guard: drop 'title.length > 200'                     | CAUGHT (1 failed | 69 passed)
+M2 | guard: drop 'hasControlCharacter(title)'              | SURVIVED (70 passed)   <- subsumed, not a gap
+M3 | guard: drop 'hasUnsafeDisplayPayload(title)'          | SURVIVED (70 passed)   <- subsumed, not a gap
+M4 | guard: drop 'workspacePath.length > 500'              | SURVIVED (70 passed)   <- real gap
+M5 | guard: drop 'hasControlCharacter(workspacePath)'      | SURVIVED (70 passed)   <- real gap
+M6 | guard: drop 'hasUnsafeDisplayPayload(workspacePath)'  | CAUGHT (1 failed | 69 passed)
+M7 | mimeType: remove .ipynb fallback                      | CAUGHT (1 failed | 69 passed)
+M8 | kind: .htm -> 'file'                                  | CAUGHT (1 failed | 69 passed)
+M9 | delegation: buildRecordArtifactReminder bypasses guard| SURVIVED (70 passed)   <- real gap
+     ... and also SURVIVED packages/cli workspace-file-read.test.ts (40 passed)
+=== source restored ===
+
+--- why M2/M3 cannot be caught: title is always a substring of workspacePath ---
+workspacePath                                  | title trips | path trips
+-----------------------------------------------|-------------|-----------
+reports/chart onerror=alert(1).html            | true        | true
+reports/q3<U+200B>chart.html                   | true        | true
+a/b/<script>.html                              | true        | true
+deep/dir/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...  | true        | true
+
+title is a suffix of workspacePath in every case: true
+cases where the title clauses fire but the path clauses do NOT: 0
+
+--- the two clauses that ARE independently reachable (M4, M5) ---
+workspacePath > 500 (len=524) with title "r.html" (len=6): titleClauses=false
+control char in DIRECTORY only: titleTrips=false pathTrips=true

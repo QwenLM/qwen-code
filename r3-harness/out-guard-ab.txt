@@ -1,0 +1,67 @@
+workspace = /private/var/folders/61/qrmqxmfj7kz1w5p3_02kj7wm0000gn/T/pr7914-VjJaYG
+
+=== A. Guard cases: producer -> real store ===
+
+C1  ordinary html report
+     path      reports/quarterly.html
+     REVIEWED  recorded + note (truthful)
+     HEAD      recorded + note (truthful)
+
+C2  notebook mimeType fallback
+     path      notes/analysis.ipynb
+     REVIEWED  recorded + note (truthful)
+     HEAD      recorded + note (truthful)
+
+[artifacts] session=s-REVIEWED-C3 action=dropped reason="title exceeds 200 characters"
+C3  title > 200 chars
+     path      reports/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...
+     REVIEWED  NOTE SHOWN but store DROPPED it -> silent
+     HEAD      no artifact, no note
+
+[artifacts] session=s-REVIEWED-C4 action=dropped reason="title contains control characters"
+C4  U+200B in title
+     path      reports/q3​chart.html
+     REVIEWED  NOTE SHOWN but store DROPPED it -> silent
+     HEAD      no artifact, no note
+
+[artifacts] session=s-REVIEWED-C5 action=dropped reason="workspacePath contains unsafe markup"
+C5  entity markup in DIRECTORY segment
+     path      out&amp;dir/weather.html
+     REVIEWED  NOTE SHOWN but store DROPPED it -> silent
+     HEAD      no artifact, no note
+
+C6  unsafe markup in title (PR test case)
+     path      reports/chart onerror=alert(1).html
+     REVIEWED  no artifact, no note
+     HEAD      no artifact, no note
+
+[artifacts] session=s-REVIEWED-C7 action=dropped reason="workspacePath exceeds 500 characters"
+C7  workspacePath > 500 chars
+     path      d0pppppppppppppppppppppppppppppppppppppppp/d1pppppppppppppppppppppppppppppppppppppppp/d...
+     REVIEWED  NOTE SHOWN but store DROPPED it -> silent
+     HEAD      no artifact, no note
+
+=== B. All nine artifact extensions at HEAD (kind / mimeType / store accepts) ===
+
+.htm    kind=html      mimeType=text/html                  stored=1
+.html   kind=html      mimeType=text/html                  stored=1
+.ipynb  kind=notebook  mimeType=application/x-ipynb+json   stored=1
+.jpeg   kind=image     mimeType=image/jpeg                 stored=1
+.jpg    kind=image     mimeType=image/jpeg                 stored=1
+.pdf    kind=pdf       mimeType=application/pdf            stored=1
+.png    kind=image     mimeType=image/png                  stored=1
+.svg    kind=image     mimeType=image/svg+xml              stored=1
+.webp   kind=image     mimeType=image/webp                 stored=1
+
+=== C. Is the .ipynb mimeType fallback load-bearing? ===
+
+getSpecificMimeType("a.ipynb") = undefined
+getSpecificMimeType("a.html") = text/html
+getSpecificMimeType("a.svg") = image/svg+xml
+
+=== D. Win32 reserved characters in the PR test filenames ===
+
+"<img src=x onerror=alert(1)>.html"
+   win32Reserved=true  triggersGuard=true
+"chart onerror=alert(1).html"
+   win32Reserved=false  triggersGuard=true

@@ -1,0 +1,35 @@
+$ node harness/live-daemon.mjs      # real `qwen serve`, real write_file, fake model
+                                    # the model writes the file and ENDS THE TURN.
+                                    # it never calls record_artifact — not once, in either arm.
+
+Single-variable proof (same tree, same daemon, only one source file swapped):
+  packages/core/dist:  3607 files hashed per arm
+  differing files:     ./src/tools/write-file.js
+                       ./src/tools/write-file.d.ts
+                       ./src/tools/write-file.js.map
+                       ./tsconfig.tsbuildinfo
+  everything else — acp-bridge, cli, the store, the routes — byte-identical.
+
+=== BASE arm (packages/core/src/tools/write-file.ts = origin/main) ===
+
+A  ordinary HTML report        reports/quarterly.html
+     file written true         NEW artifacts this turn: expected=1 got=0   [FAIL]
+B  guard rejects unsafe title  reports/chart onerror=alert(1).html
+     file written true         NEW artifacts this turn: expected=0 got=0   [PASS]
+C  not artifact-like           src/index.ts
+     file written true         NEW artifacts this turn: expected=0 got=0   [PASS]
+
+=== HEAD arm (a96c93bdc2) ===
+
+A  ordinary HTML report        reports/quarterly.html
+     file written true         NEW artifacts this turn: expected=1 got=1   [PASS]
+       {"title":"quarterly.html","kind":"html","storage":"workspace",
+        "workspacePath":"reports/quarterly.html","mimeType":"text/html",
+        "sizeBytes":59,"toolName":"write_file"}
+B  guard rejects unsafe title  reports/chart onerror=alert(1).html
+     file written true         NEW artifacts this turn: expected=0 got=0   [PASS]
+C  not artifact-like           src/index.ts
+     file written true         NEW artifacts this turn: expected=0 got=0   [PASS]
+
+GET /session/:id/artifacts  --  BASE 0 artifacts, HEAD 1 artifact, toolName "write_file".
+The file lands on disk in both arms; only the metadata differs.
