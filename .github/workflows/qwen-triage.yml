@@ -2239,8 +2239,11 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           # rm first: on the persistent pool a stale verify-results from an
           # EARLIER PR's run would otherwise ride along into this run's
-          # artifact upload and report selection.
+          # artifact upload and report selection. The chromium marker is
+          # cleared too, so a previous run's success cannot promise this run
+          # a browser it never installed.
           rm -rf "$RUNNER_TEMP/verify-results"
+          rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
@@ -2333,18 +2336,27 @@ jobs:
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
         run: |-
           set -uo pipefail
-          # Download the browser binary matching the checkout's Playwright
-          # (node_modules/.bin/playwright resolves the exact lockfile
-          # version). System deps were installed as root in the tools step;
-          # this runs as node so the tree is agent-readable without chmod.
-          # Best-effort: failure degrades to a text-only report.
+          # Download the browser binary for the Playwright package the
+          # capture harness actually imports. This lockfile has TWO
+          # Playwright trees: terminal-capture.ts imports `playwright`, but
+          # node_modules/.bin/playwright is @playwright/test's CLI, which
+          # pins a different chromium revision — so `npx playwright install`
+          # would download a browser the harness cannot launch. Call the
+          # imported package's cli.js directly so the binary always matches
+          # the lockfile. System deps were installed as root in the tools
+          # step; this runs as node so the tree is agent-readable without
+          # chmod. Best-effort: failure degrades to a text-only report.
           PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
           mkdir -p "$PW_PATH"
           chown node:node "$PW_PATH"
-          if runuser -u node -- env PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
-            npx playwright install chromium; then
+          if runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+            PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
+            node ./node_modules/playwright/cli.js install chromium; then
             printf '%s' "$PW_PATH" > "${RUNNER_TEMP:?}/verify-chromium-path"
             echo "Chromium available for evidence screenshots." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -3057,7 +3069,7 @@ jobs:
           }
 
           # Host the agent's evidence images (if any) on a per-PR branch
-          # (pr-assets/pr<N>-verify, matching hand-run convention) and build
+          # (pr-assets/<N>-verify, matching hand-run convention) and build
           # a markdown section referencing them. Image bytes come from a run
           # that executed PR code: inert but untrusted, so filenames pass a
           # strict allowlist, count/size are capped (8 files, <2 MB each; the
@@ -3068,7 +3080,7 @@ jobs:
           collect_and_host_evidence() {
             local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
             local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-            local assets_branch="pr-assets/pr${PR_NUMBER}-verify"
+            local assets_branch="pr-assets/${PR_NUMBER}-verify"
             local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
             local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
             # `|| true` on every find: the artifact download is

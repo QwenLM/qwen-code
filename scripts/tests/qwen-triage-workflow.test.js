@@ -999,15 +999,19 @@ describe('qwen-triage verify hardening', () => {
   // The lifecycle-script command-file guards must be asserted on the verify
   // job's own commands: a bare step() lookup returns the tmux job's
   // identically named step, so verify-side regressions would pass silently.
-  it('strips GitHub command files from both verify lifecycle commands', () => {
-    // Bound to the prepare step: the agent step's own `runuser` launches
-    // qwen under `env -i`, which needs no per-variable stripping.
+  it('strips GitHub command files from every node-run verify command', () => {
+    // Bound to the lifecycle commands that run as node before the agent:
+    // npm ci and npm run build in the prepare step, plus the evidence
+    // browser download. The slice stops at the agent step, whose own
+    // `runuser` launches qwen under `env -i` and needs no per-variable
+    // stripping. Covering all three by construction (not enumeration) is
+    // what catches a future node-run command added without the strip.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
-      verifyJob.indexOf("name: 'Install evidence browser'"),
+      verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(2);
+    expect(commands.length).toBe(3);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -1353,7 +1357,7 @@ describe('qwen-triage verify hardening round 2', () => {
       // A bare remote with a pr-assets branch, plus a gh stub.
       sh(`git init -q --bare "${dir}/assets.git"`);
       sh(
-        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/pr7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/pr7999-verify`,
+        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/7999-verify`,
       );
       writeFileSync(
         join(dir, 'gh'),
@@ -1415,7 +1419,7 @@ describe('qwen-triage verify hardening round 2', () => {
       });
       expect(res.status).toBe(0);
       const hosted = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/pr7999-verify | grep verify/ || true`,
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
       )
         .stdout.trim()
         .split('\n')
@@ -1468,10 +1472,10 @@ describe('qwen-triage verify hardening round 2', () => {
       // remote), so neither proves orphan-init can actually DELIVER. Without
       // this, a bug in `checkout --orphan` or a dropped `remote add origin`
       // would silently discard every image on every PR's first run.
-      sh(`git -C "${dir}/assets.git" branch -D pr-assets/pr7999-verify`);
+      sh(`git -C "${dir}/assets.git" branch -D pr-assets/7999-verify`);
       expect(
         sh(
-          `git -C "${dir}/assets.git" branch --list pr-assets/pr7999-verify`,
+          `git -C "${dir}/assets.git" branch --list pr-assets/7999-verify`,
         ).stdout.trim(),
       ).toBe('');
       const out3 = join(dir, 'comment3.md');
@@ -1500,7 +1504,7 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(res3.status).toBe(0);
       // The branch was created by orphan-init and carries this run's images.
       const hosted3 = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/pr7999-verify | grep verify/ || true`,
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
       )
         .stdout.trim()
         .split('\n')
@@ -1512,7 +1516,7 @@ describe('qwen-triage verify hardening round 2', () => {
       // Orphan, not a graft onto unrelated history: exactly one commit.
       expect(
         sh(
-          `git -C "${dir}/assets.git" rev-list --count pr-assets/pr7999-verify`,
+          `git -C "${dir}/assets.git" rev-list --count pr-assets/7999-verify`,
         ).stdout.trim(),
       ).toBe('1');
       expect(readFileSync(out3, 'utf8')).toContain('![01-ab](');
@@ -2210,10 +2214,24 @@ describe('qwen-triage verify round-3 hardening', () => {
     // current Playwright so it covers the lockfile-matched binary below.
     expect(tools).not.toMatch(/playwright@[\d.]/);
 
-    // Browser binary: downloaded after npm ci so npx resolves the
-    // checkout's lockfile version — never a hardcoded pin (M5).
+    // Browser binary: downloaded after npm ci, and by the CLI of the
+    // package the capture harness actually imports — never a hardcoded pin
+    // (M5). This lockfile has TWO Playwright trees: terminal-capture.ts
+    // imports `playwright`, but node_modules/.bin/playwright (what `npx
+    // playwright` resolves) is @playwright/test's CLI, which pins a
+    // different chromium revision. The install must therefore call the
+    // imported package's cli.js directly; binding this assertion to the
+    // harness's import keeps the two from drifting apart.
+    const capture = readFileSync(
+      'integration-tests/terminal-capture/terminal-capture.ts',
+      'utf8',
+    );
+    expect(capture).toMatch(/from 'playwright'/);
     const browser = stepIn('verify', 'Install evidence browser');
-    expect(browser).toContain('npx playwright install chromium');
+    expect(browser).toContain(
+      'node ./node_modules/playwright/cli.js install chromium',
+    );
+    expect(browser).not.toContain('npx playwright install chromium');
     expect(browser).not.toMatch(/playwright@[\d.]/);
     expect(browser).toContain('PLAYWRIGHT_BROWSERS_PATH');
     // Marker is written ONLY inside the success branch (M6): the if
@@ -2229,6 +2247,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(elseIdx).toBeGreaterThan(markerIdx);
     // Best-effort: a failed download must not fail a verification.
     expect(browser).not.toContain('exit 1');
+    // A stale marker from an earlier run on the persistent pool must not
+    // ride along: prepare clears it before this step writes a fresh one,
+    // so absence stays a real signal even though RUNNER_TEMP outlives the
+    // run.
+    expect(stepIn('verify', 'Install and build PR app')).toContain(
+      'rm -f "$RUNNER_TEMP/verify-chromium-path"',
+    );
 
     // The agent is told ONLY when the install actually succeeded, so the
     // variable's absence is a real signal rather than a stale promise.
@@ -2248,9 +2273,14 @@ describe('qwen-triage verify round-3 hardening', () => {
     const path = runStep.indexOf('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
     expect(guard).toBeLessThan(marker);
     expect(guard).toBeLessThan(path);
-    // The if-fi block must wrap the QWEN_ENV+= assignment.
-    const ifBlock = runStep.slice(guard - 20, marker + 30);
-    expect(ifBlock).toContain('if');
+    // The if-fi block must wrap the QWEN_ENV+= assignment. Anchor the
+    // slice at the real `if` keyword: `guard - 20` lands inside the marker
+    // path, where "ver-if-y-chromium-path" satisfies toContain('if') even
+    // with the guard deleted.
+    const runIfIdx = runStep.lastIndexOf('if CHROMIUM_PATH', guard);
+    expect(runIfIdx).toBeGreaterThan(-1);
+    const ifBlock = runStep.slice(runIfIdx, marker + 30);
+    expect(ifBlock).toMatch(/(^|\s)if\s/);
     expect(ifBlock).toContain('then');
 
     // The tmux lane is untouched: it has no evidence-image path.
@@ -2275,7 +2305,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       'publish-verify',
       'Post verification report comment',
     );
-    expect(publish).toContain('pr-assets/pr${PR_NUMBER}-verify');
+    expect(publish).toContain('pr-assets/${PR_NUMBER}-verify');
     expect(publish).toContain('checkout -q --orphan');
     expect(publish).not.toMatch(/--branch pr-assets["\s]/);
   });
@@ -2291,7 +2321,7 @@ describe('qwen-triage verify round-3 hardening', () => {
     );
     // Both branch names, built from the same PR number.
     expect(cleanup).toContain('pr-assets/web-shell-visuals-${PR_NUMBER}');
-    expect(cleanup).toContain('pr-assets/pr${PR_NUMBER}-verify');
+    expect(cleanup).toContain('pr-assets/${PR_NUMBER}-verify');
     // Runs in the base context and never touches PR code.
     expect(cleanup).toContain('pull_request_target');
     expect(cleanup).not.toContain('actions/checkout');
@@ -2345,10 +2375,10 @@ describe('qwen-triage verify round-3 hardening', () => {
       // ...and the loop carried on to the verify branch and deleted it.
       // This is the assertion the whole test exists for: a `set -e` script
       // would have exited on the first 404 and never reached here.
-      expect(deletes.some((l) => l.includes('pr-assets/pr7999-verify'))).toBe(
+      expect(deletes.some((l) => l.includes('pr-assets/7999-verify'))).toBe(
         true,
       );
-      expect(res.stdout).toContain('Deleted pr-assets/pr7999-verify');
+      expect(res.stdout).toContain('Deleted pr-assets/7999-verify');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

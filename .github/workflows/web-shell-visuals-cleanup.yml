@@ -35,7 +35,7 @@ jobs:
           status=0
           for branch in \
             "pr-assets/web-shell-visuals-${PR_NUMBER}" \
-            "pr-assets/pr${PR_NUMBER}-verify"; do
+            "pr-assets/${PR_NUMBER}-verify"; do
             if ! gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
               echo "No asset branch ${branch}; nothing to delete."
               continue
