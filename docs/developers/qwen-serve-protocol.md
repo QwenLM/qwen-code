@@ -791,9 +791,15 @@ Pairing management is available only for instances configured with the
 
 - `GET .../channels/:name/pairing-requests`
 - `POST .../channels/:name/pairing-requests/approve` with `{ "code": "..." }`
+- `GET .../channels/:name/pairing-approvals`
+- `DELETE .../channels/:name/pairing-approvals` with
+  `{ "senderId": "..." }`
 
-Both pairing routes require a bearer token and use `Cache-Control: no-store`.
-Approval is scoped to the selected Channel instance and workspace.
+All pairing routes require a bearer token and use `Cache-Control: no-store`.
+Requests, approvals, and revocations are scoped to the selected Channel
+instance and workspace. The approvals snapshot contains sender IDs because the
+allowlist does not persist sender display names. Revoking an unknown sender
+returns `404 channel_pairing_approval_not_found`.
 
 ### Channel delivery and Notify
 
