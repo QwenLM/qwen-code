@@ -610,7 +610,10 @@ export class ChatCompressionService {
     // anything — indistinguishable downstream from a genuinely empty
     // summary. Bail out before sending a request that's guaranteed to fail.
     const estimatedPromptTokens =
-      originalTokenCount + pendingToolResultTokenCount;
+      estimateContentTokens(
+        slim.slimmedHistory,
+        slimmingConfig.imageTokenEstimate,
+      ) + 1_000; // compression system prompt + kick-off turn, per the comment at line ~853
     const compressionOutputBudget = computeCompactionOutputBudget(
       contextLimit,
       estimatedPromptTokens,

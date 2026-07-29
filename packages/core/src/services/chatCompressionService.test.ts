@@ -630,7 +630,13 @@ describe('ChatCompressionService', () => {
   });
 
   it('does not deep-clone full history while compressing', async () => {
-    const largeToolOutput = 'x'.repeat(1024 * 1024);
+    // 200_000 chars (was 1024*1024): still large enough to make the
+    // deep-clone-avoidance point (see test name/assertions below), but small
+    // enough that the side-query output-budget gate — now sized from the
+    // real slimmed history rather than originalTokenCount, see
+    // computeCompactionOutputBudget review — doesn't bail before ever
+    // reaching runSideQuery on this test's 100_000-token window.
+    const largeToolOutput = 'x'.repeat(200_000);
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'review this PR' }] },
       {
@@ -664,7 +670,13 @@ describe('ChatCompressionService', () => {
     });
     vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
     // Scaled up from the old 1000/900/1600 toy numbers — see the identical
-    // comment in 'should compress if over token threshold' above.
+    // comment in 'should compress if over token threshold' above. Left at
+    // 100_000 (not bumped) — the cheap auto-compact gate above this in
+    // compress() checks originalTokenCount(75_000, mocked below) against a
+    // threshold derived from this same contextWindowSize, so raising it here
+    // would make the gate NOOP before ever reaching the side-query budget
+    // code this test is meant to exercise. See largeToolOutput's size above
+    // for the other half of this constraint.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
       contextWindowSize: 100_000,
@@ -2024,6 +2036,139 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(result.newHistory).toBeNull();
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+    );
+  });
+
+  it('sizes maxOutputTokens from the real side-query payload, not originalTokenCount (issue #7960 follow-up)', async () => {
+    // Regression test for the maintainer review on this PR: the budget gate
+    // used to feed `originalTokenCount` (the *main-turn* prompt size, which
+    // includes the core system prompt + full tool declarations that the
+    // side-query never sends) into computeCompactionOutputBudget. That
+    // over-estimated the side-query's real prompt size and could bail out
+    // a compaction that would have fit. This test pins the budget to the
+    // real slimmed-history estimate instead.
+    //
+    // window=65_536, margin=max(10_000, 5%*65_536)=10_000.
+    // History is 2 messages (curatedHistory needs >= 2 entries — see
+    // `curatedHistory.length < 2` NOOP guard) totaling 170_196 chars, so
+    // estimateContentTokens(...) === 42_549 (170_196 / 4, exact) — plus the
+    // fixed +1_000 for the compression system prompt/kick-off turn — giving
+    // estimatedPromptTokens = 43_549, matching issue #7960's scenario A.
+    // budget = 65_536 - 43_549 - 10_000 = 11_987 (not 20_000).
+    vi.mocked(outputClampMargin).mockImplementation((contextWindowSize) =>
+      Math.max(10_000, Math.round(0.05 * contextWindowSize)),
+    );
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 43_549,
+        candidatesTokenCount: 500,
+        totalTokenCount: 44_049,
+      },
+    } as never);
+
+    const largeText = 'x'.repeat(170_194);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: largeText }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 65_536 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    const service = new ChatCompressionService();
+    await service.compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      // Deliberately mismatched with the real history size above — this is
+      // the main-turn's prompt count (includes system prompt + tool decls),
+      // not the side-query's. The budget must NOT be computed from this.
+      originalTokenCount: 43_549,
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const callArg = spy.mock.calls[0]![1] as {
+      config?: { maxOutputTokens?: number };
+    };
+    expect(callArg.config?.maxOutputTokens).toBe(11_987);
+  });
+
+  it('bails out before calling runSideQuery when the real payload leaves no budget (issue #7960 follow-up)', async () => {
+    // Same window/margin as the test above (65_536 / 10_000), but the real
+    // slimmed history is now large enough that no output budget is left:
+    // estimateContentTokens(...) = 59_000 (236_000 chars / 4) + 1_000 fixed
+    // = 60_000 estimatedPromptTokens. budget = 65_536 - 60_000 - 10_000 =
+    // -4_464 -> clamped to 0, which is below COMPACT_MIN_OUTPUT_TOKENS
+    // (2_000). The service must bail out before ever calling runSideQuery.
+    vi.mocked(outputClampMargin).mockImplementation((contextWindowSize) =>
+      Math.max(10_000, Math.round(0.05 * contextWindowSize)),
+    );
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    const largeText = 'x'.repeat(235_998);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: largeText }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 65_536 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    const service = new ChatCompressionService();
+    const result = await service.compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 55_000,
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.newHistory).toBeNull();
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
     );
   });
 });
