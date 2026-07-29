@@ -1554,6 +1554,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // The rule must state the publisher-side consequence, or an agent has no
     // reason to believe the count semantics are load-bearing.
     expect(rules).toContain('cannot be `merge-ready`');
+    expect(rules).toContain('`inconclusive`, not `findings`');
     // And it must sit in Hard rules, not in narrative prose.
     expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
       verifySkill.indexOf('## Hard rules'),
@@ -1666,6 +1667,76 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('results unavailable');
       expect(body).not.toContain('A/B against the base build');
       expect(body).not.toContain('merge-ready');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Every weak terminal body carries the qualitative prefix and folds its
+  // Chinese into <details>, matching the full-report path's layout.
+  it('renders weak terminal bodies with qualitative glyphs and folded Chinese', () => {
+    const dir = fixture();
+    try {
+      const cancelled = render(dir, {
+        NAME: 'wk-cancelled',
+        VERIFY_RESULT: 'cancelled',
+      });
+      expect(cancelled).toContain('\u26a0\ufe0f incomplete \u2014 cancelled');
+      expect(cancelled).toContain('<details>');
+      expect(cancelled).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u5df2\u53d6\u6d88</summary>',
+      );
+
+      const infra = render(dir, {
+        NAME: 'wk-infra',
+        VERIFY_RESULT: 'failure',
+        VERDICT: '',
+      });
+      expect(infra).toContain(
+        '\u26a0\ufe0f incomplete \u2014 infrastructure failure',
+      );
+      expect(infra).toContain('<details>');
+      expect(infra).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c</summary>',
+      );
+
+      const skipped = render(dir, {
+        NAME: 'wk-skipped',
+        VERDICT: 'skipped',
+        SKIP_REASON: 'the PR is a draft',
+      });
+      expect(skipped).toContain('\u26a0\ufe0f not run \u2014 skipped');
+      expect(skipped).toContain('the PR is a draft');
+      expect(skipped).toContain('<details>');
+      expect(skipped).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u8fd0\u884c \u00b7 \u5df2\u8df3\u8fc7</summary>',
+      );
+
+      const na = render(dir, { NAME: 'wk-na', VERDICT: 'n/a' });
+      expect(na).toContain('\u26a0\ufe0f not run \u2014 n/a');
+      expect(na).toContain('<details>');
+      expect(na).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u8fd0\u884c \u00b7 \u4e0d\u9002\u7528</summary>',
+      );
+      // The Chinese body must be INSIDE the fold, not unfolded below.
+      const naDetails = na.indexOf('<details>');
+      const naZh = na.indexOf('\u8be5 PR \u4ec5\u6539\u52a8\u6587\u6863');
+      expect(naZh).toBeGreaterThan(naDetails);
+
+      const dl = render(dir, {
+        NAME: 'wk-dl',
+        DOWNLOAD_OUTCOME: 'failure',
+      });
+      expect(dl).toContain(
+        '\u26a0\ufe0f incomplete \u2014 results unavailable',
+      );
+      expect(dl).toContain('<details>');
+      expect(dl).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u7ed3\u679c\u4e0d\u53ef\u7528</summary>',
+      );
+      const dlDetails = dl.indexOf('<details>');
+      const dlZh = dl.indexOf('\u9a8c\u8bc1\u5df2\u6267\u884c');
+      expect(dlZh).toBeGreaterThan(dlDetails);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1786,8 +1857,8 @@ describe('qwen-triage verify publish fidelity', () => {
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
-          '\u26a0\ufe0f inconclusive \u2014 inconclusive (agent verdict)',
-          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u7ed3\u8bba\u4e0d\u8db3\uff08agent \u5224\u5b9a\uff09',
+          '\u26a0\ufe0f inconclusive \u2014 the agent could not reach a conclusion',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 agent \u672a\u80fd\u5f97\u51fa\u7ed3\u8bba',
         ],
         [
           { VERDICT: 'pass' },
@@ -1801,8 +1872,8 @@ describe('qwen-triage verify publish fidelity', () => {
         ],
         [
           { VERDICT: 'timeout' },
-          '\u26a0\ufe0f incomplete \u2014 timeout \u2014 partial evidence',
-          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u8d85\u65f6\u2014\u2014\u8bc1\u636e\u4e0d\u5b8c\u6574',
+          '\u26a0\ufe0f incomplete \u2014 the run timed out with partial evidence',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u8fd0\u884c\u8d85\u65f6\uff0c\u8bc1\u636e\u4e0d\u5b8c\u6574',
         ],
         [
           { VERDICT: 'infra-error' },
@@ -1811,8 +1882,8 @@ describe('qwen-triage verify publish fidelity', () => {
         ],
         [
           { VERDICT: 'bogus' },
-          '\u26a0\ufe0f inconclusive \u2014 unknown',
-          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u672a\u77e5',
+          '\u26a0\ufe0f inconclusive \u2014 the run ended in an unrecognized state',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u8fd0\u884c\u4ee5\u672a\u8bc6\u522b\u7684\u72b6\u6001\u7ed3\u675f',
         ],
       ];
       const seenEn = new Set();
@@ -1844,42 +1915,54 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
-  it('keeps English unfolded and folds the Chinese into one details', () => {
-    // The maintainer asked for the repo PR-body convention: English default,
-    // Chinese collapsed. The fold summary must carry the qualitative verdict
-    // so a collapsed block still shows a conclusion, not just a label.
-    const dir = fixture();
-    try {
-      const body = render(dir, {
-        NAME: 'fold',
-        VERDICT: 'pass',
-        AGENT_VERDICT: 'merge-ready',
-      });
-      const details = body.indexOf(
-        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a',
-      );
-      const detailsEnd = body.indexOf('</details>');
-      expect(details).toBeGreaterThan(-1);
-      // English scope + assertion line sit BEFORE the fold...
-      expect(body.indexOf('Ran the PR in an isolated')).toBeLessThan(details);
-      expect(body.indexOf('Scripted assertions:')).toBeLessThan(details);
-      // ...and every Chinese body line sits INSIDE it.
-      const scopeZh = body.indexOf(
-        '\u6c99\u7bb1\u9a8c\u8bc1\u5728\u9694\u79bb',
-      );
-      const assertZh = body.indexOf('\u811a\u672c\u65ad\u8a00\uff1a');
-      expect(scopeZh).toBeGreaterThan(details);
-      expect(scopeZh).toBeLessThan(detailsEnd);
-      expect(assertZh).toBeGreaterThan(details);
-      expect(assertZh).toBeLessThan(detailsEnd);
-      // The report block stays outside the Chinese fold.
-      expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
-        detailsEnd,
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.each([
+    ['pass', { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' }],
+    ['timeout', { VERDICT: 'timeout', AGENT_VERDICT: '' }],
+  ])(
+    'keeps English unfolded and folds the Chinese into one details (%s)',
+    (_label, env) => {
+      const dir = fixture();
+      try {
+        const body = render(dir, { NAME: `fold-${_label}`, ...env });
+        const details = body.indexOf(
+          '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a',
+        );
+        const detailsEnd = body.indexOf('</details>');
+        expect(details).toBeGreaterThan(-1);
+        // English body sits BEFORE the fold...
+        if (_label === 'pass') {
+          expect(body.indexOf('Ran the PR in an isolated')).toBeLessThan(
+            details,
+          );
+          expect(body.indexOf('Scripted assertions:')).toBeLessThan(details);
+        } else {
+          expect(
+            body.indexOf('The verification run did not complete'),
+          ).toBeLessThan(details);
+        }
+        // ...and every Chinese body line sits INSIDE it.
+        const zhBody =
+          _label === 'pass'
+            ? body.indexOf('\u6c99\u7bb1\u9a8c\u8bc1\u5728\u9694\u79bb')
+            : body.indexOf(
+                '\u672c\u6b21\u9a8c\u8bc1\u8fd0\u884c\u672a\u6b63\u5e38\u7ed3\u675f',
+              );
+        expect(zhBody).toBeGreaterThan(details);
+        expect(zhBody).toBeLessThan(detailsEnd);
+        if (_label === 'pass') {
+          const assertZh = body.indexOf('\u811a\u672c\u65ad\u8a00\uff1a');
+          expect(assertZh).toBeGreaterThan(details);
+          expect(assertZh).toBeLessThan(detailsEnd);
+        }
+        // The report block stays outside the Chinese fold.
+        expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
+          detailsEnd,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('renders the assertion count in both languages', () => {
     const dir = fixture();
@@ -1908,6 +1991,56 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(bad).not.toContain('Scripted assertions:');
       expect(bad).not.toContain('脚本断言');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #7836: when the agent claims merge-ready but assertions.json records
+  // failures, the publisher must explain the mismatch in the comment body
+  // so a reader does not see a hedged headline above "7 failed" with
+  // nothing connecting them.
+  it('explains why a merge-ready claim was not trusted', () => {
+    const dir = fixture();
+    try {
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1675,"fail":7,"total":1682}',
+      );
+      const body = render(dir, {
+        NAME: 'mismatch',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'The agent reported `merge-ready`, but `assertions.json` recorded 7 failures',
+      );
+      expect(body).toContain('\u26a0\ufe0f inconclusive');
+      expect(body).not.toContain('\u2705 passed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Float counts (10.0) must be floored to integers (10) so a clean run
+  // is not downgraded by a string comparison against '0.0'.
+  it('floors float assertion counts to integers', () => {
+    const dir = fixture();
+    try {
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":10.0,"fail":0.0,"total":10}',
+      );
+      const body = render(dir, {
+        NAME: 'float',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed \u00b7 0 failed \u00b7 10 total',
+      );
+      expect(body).toContain('\u2705 passed');
+      expect(body).not.toContain('10.0');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

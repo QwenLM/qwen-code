@@ -384,7 +384,11 @@ central claim from being tested — say why.
   red) instead of counting the control's raw red as a failure. `fail` in
   `assertions.json` counts only UNEXPECTED outcomes, so a nonzero `fail` means
   the verdict cannot be `merge-ready` — and the publisher enforces exactly
-  that. Real case: a `merge-ready` report shipped `fail: 7` where all seven
+  that. When the unexpected failure is in the harness itself (a flaky probe,
+  a broken A/B control cell) rather than in the PR's code, the verdict is
+  `inconclusive`, not `findings` — `findings` stamps ❌ on the PR for a
+  problem it did not cause.
+  Real case: a `merge-ready` report shipped `fail: 7` where all seven
   were intended base-cell reds proving the tests load-bearing; the publisher
   correctly refused the mismatch and the headline degraded to "no usable
   structured verdict". The counts said the opposite of the report, and both
