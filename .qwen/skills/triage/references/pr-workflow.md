@@ -499,6 +499,20 @@ skipped. The value is in naming what is currently **unsubstantiated**; a
 reader who disagrees with that assessment can ignore the line, which is a
 better outcome than never seeing it.
 
+**Text trigger — this rule is mechanical, not a judgement call.** Before
+posting, grep your own draft. If your comment contains a sentence of the
+shape "not verified …", "author tested on <one platform> only", "author's
+claim, not independently re-run", or any other admission that a behavioural
+claim rests on the author's word or a single environment — **that sentence
+is the trigger.** You have already written down the gap; the 2b-bis line is
+the same sentence with the remedy attached, and omitting it means telling
+the maintainer what is missing while withholding the one command that would
+supply it. "CI is still running" does not lift the trigger: a green suite
+proves the tests pass, not that the untested behaviour holds. (Real miss
+this rule exists for: a serve-side bounded-read change whose own Stage 2
+comment said "author tested on macOS only" and never named a lane — the
+gap was written down and the remedy was not.)
+
 **Skip it — explicitly — in exactly two cases:**
 
 - **No behavioural claim to settle**: docs, types, pure refactor with an
