@@ -50,7 +50,9 @@ describe('truncateAndSaveToFile', () => {
       500,
     );
 
-    expect(result.outputFile).toBe('/tmp/separate-preview.output');
+    expect(result.outputFile).toBe(
+      path.join('/tmp', 'separate-preview.output'),
+    );
     expect(result.content.length).toBeLessThan(2000);
   });
 

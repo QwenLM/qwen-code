@@ -131,6 +131,12 @@ export function writeSkillArgs(skillName: string, args: string): string | null {
       );
       return null;
     }
+    if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
+      debugLogger.warn(
+        `Skill args file ${path} is a symlink; refusing to write through it.`,
+      );
+      return null;
+    }
     // `O_NOFOLLOW`, so a symlink planted at this path is an error, not a write
     // through it. `O_TRUNC` because a bare invocation leaves no file, so a stale
     // one from a previous run must not survive to authorise this one. Mode 0600:

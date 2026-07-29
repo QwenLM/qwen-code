@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { join } from 'node:path';
 import type {
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
@@ -221,10 +222,10 @@ describe('session persistence paths', () => {
 
   it('uses per-channel sessions files when QQChannel owns the router', () => {
     expect(getGlobalSessionsPath(makeChannel('bot one'))).toBe(
-      '/tmp/test-qwen/channels/bot_one-sessions.json',
+      join('/tmp/test-qwen', 'channels', 'bot_one-sessions.json'),
     );
     expect(getGlobalSessionsPath(makeChannel('bot/two'))).toBe(
-      '/tmp/test-qwen/channels/bot_two-sessions.json',
+      join('/tmp/test-qwen', 'channels', 'bot_two-sessions.json'),
     );
   });
 
@@ -235,7 +236,7 @@ describe('session persistence paths', () => {
 
     expect(
       getGlobalSessionsPath(makeChannel('bot-one', { router: externalRouter })),
-    ).toBe('/tmp/test-qwen/channels/sessions.json');
+    ).toBe(join('/tmp/test-qwen', 'channels', 'sessions.json'));
   });
 
   it('asks ChannelBase to register bridge events when QQ owns the router', () => {

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   channelLoopPath,
@@ -38,30 +39,48 @@ vi.mock('./channel-registry.js', () => ({
 
 it('isolates daemon route stores by workspace hash', () => {
   expect(daemonSessionRoutesPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/routes.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'workspace-hash',
+      'routes.json',
+    ),
   );
   expect(daemonSessionRoutesPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/routes.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'other-hash', 'routes.json'),
   );
   expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
 });
 
 it('isolates observed contact stores beside daemon routes', () => {
   expect(daemonObservedContactsPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'workspace-hash',
+      'observed-contacts.json',
+    ),
   );
   expect(daemonObservedContactsPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/observed-contacts.json',
+    path.join(
+      '/tmp/qwen',
+      'channels',
+      'daemon',
+      'other-hash',
+      'observed-contacts.json',
+    ),
   );
   expect(daemonObservedContactsPath('/workspace')).not.toBe(sessionsPath());
 });
 
 it('isolates daemon loop stores by workspace hash', () => {
   expect(daemonChannelLoopPath('/workspace')).toBe(
-    '/tmp/qwen/channels/daemon/workspace-hash/cron.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'workspace-hash', 'cron.json'),
   );
   expect(daemonChannelLoopPath('/other')).toBe(
-    '/tmp/qwen/channels/daemon/other-hash/cron.json',
+    path.join('/tmp/qwen', 'channels', 'daemon', 'other-hash', 'cron.json'),
   );
   expect(daemonChannelLoopPath('/workspace')).not.toBe(channelLoopPath());
   expect(daemonChannelLoopPath('/workspace')).not.toBe(sessionsPath());
@@ -103,7 +122,7 @@ describe('parseConfiguredChannels', () => {
         config: expect.objectContaining({
           type: 'telegram',
           token: 'secret',
-          cwd: '/workspace',
+          cwd: path.resolve('/workspace'),
         }),
       }),
     ]);
