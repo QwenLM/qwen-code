@@ -867,6 +867,39 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireSessionDeleteEvent', () => {
+    it('should execute hooks with the deleted session id', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      const result =
+        await hookEventHandler.fireSessionDeleteEvent('deleted-session-id');
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.SessionDelete,
+        undefined,
+      );
+      const input = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls[0][2] as {
+        hook_event_name: HookEventName;
+        deleted_session_id: string;
+      };
+      expect(input.hook_event_name).toBe(HookEventName.SessionDelete);
+      expect(input.deleted_session_id).toBe('deleted-session-id');
+      expect(result.success).toBe(true);
+    });
+  });
+
   describe('session hook matcher targets', () => {
     it('matches SessionStart session hooks against the session source', async () => {
       const sessionHook = createSessionHookEntry(

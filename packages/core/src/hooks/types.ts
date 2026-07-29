@@ -52,6 +52,8 @@ export enum HookEventName {
   PostCompact = 'PostCompact',
   // SessionEnd - When a session is ending
   SessionEnd = 'SessionEnd',
+  // SessionDelete - After an explicitly selected session is deleted
+  SessionDelete = 'SessionDelete',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
   // When a tool call is denied before a permission dialog is displayed
@@ -1066,6 +1068,13 @@ export interface SessionEndOutput extends HookOutput {
     hookEventName: 'SessionEnd';
     additionalContext?: string;
   };
+}
+
+/**
+ * SessionDelete hook input
+ */
+export interface SessionDeleteInput extends HookInput {
+  deleted_session_id: string;
 }
 
 /**

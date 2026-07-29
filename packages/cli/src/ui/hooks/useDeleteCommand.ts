@@ -75,6 +75,14 @@ export function useDeleteCommand(
         const success = await sessionService.removeSession(sessionId);
 
         if (success) {
+          void config
+            .getHookSystem()
+            ?.fireSessionDeleteEvent(sessionId)
+            .catch((error) => {
+              config
+                .getDebugLogger()
+                .warn(`SessionDelete hook failed: ${String(error)}`);
+            });
           addItem?.(
             {
               type: 'info',
@@ -161,6 +169,17 @@ export function useDeleteCommand(
 
         const sessionService = config.getSessionService();
         const result = await sessionService.removeSessions(filtered);
+
+        for (const sessionId of result.removed) {
+          void config
+            .getHookSystem()
+            ?.fireSessionDeleteEvent(sessionId)
+            .catch((error) => {
+              config
+                .getDebugLogger()
+                .warn(`SessionDelete hook failed: ${String(error)}`);
+            });
+        }
 
         const removedCount = result.removed.length;
         const failedIds = [

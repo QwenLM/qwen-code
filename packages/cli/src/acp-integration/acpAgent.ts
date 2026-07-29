@@ -9694,6 +9694,16 @@ class QwenAgent implements Agent {
             return sessionService.removeSession(sessionId);
           },
         );
+        if (success) {
+          void this.config
+            .getHookSystem()
+            ?.fireSessionDeleteEvent(sessionId)
+            .catch((error) => {
+              debugLogger.warn(
+                `SessionDelete hook failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+        }
         return { success };
       }
       case 'renameSession': {
