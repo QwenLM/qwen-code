@@ -28,6 +28,7 @@ Missing or false `agent` capability keeps the existing Vision Bridge transcripti
 - If the selected vision model is not agent-capable, transcribe through Vision Bridge and answer on the primary.
 - If the selected vision model is agent-capable, keep the original image parts and set a turn-local exact model selector.
 - The exact provider, model, and endpoint are reused for provider retries, tool execution, tool-result continuations, and blocking ACP Stop Hook continuations.
+- Headless tool execution receives the same runtime view as the selected image model; queued notification and cron drains remain independent turns and do not inherit it.
 - Configured fallback models are disabled for that turn. Failure to resolve the exact route fails closed instead of sending raw image data to the primary.
 - The next independent user turn clears the selector and returns to the primary. Every model request, including side queries, receives only media modalities supported by its exact target.
 
@@ -39,4 +40,6 @@ LLM-based automatic chat compression remains on the primary-model path. A full-t
 
 ## Entry points
 
-Phase 1 covers the interactive TUI and ACP. Non-interactive routing is intentionally unchanged until it has an equivalent turn-local lifecycle.
+Phase 1 covers the interactive TUI, ACP, and non-interactive CLI.
+
+Textual `@` paths are resolved to their canonical target before MIME detection, workspace checks, ignore filtering, and file reads. Both the user-supplied alias and canonical target must pass ignore filtering, so a symlink cannot disguise an ignored file or a non-image target.
