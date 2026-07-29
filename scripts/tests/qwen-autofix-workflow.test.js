@@ -4609,6 +4609,39 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('cat > "${proxy_script}"');
   });
 
+  it('posts a takeover milestone digest every tenth pushed round', () => {
+    // The takeover cap (100) bounds runaway but says nothing about when a
+    // human should step in: #7469 ground to round 12 over 7 days with the
+    // only budget signal buried in Actions logs. Every 10th pushed round
+    // under takeover, a window-scoped census lands on the PR itself.
+    expect(pushAndReportStep).toContain(
+      '"${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}"',
+    );
+    expect(pushAndReportStep).toContain('$(( NEXT_ROUND % 10 ))');
+    // Its own marker, NOT autofix-eval: every census (round, consec,
+    // watermark) selects on autofix-eval, so the digest must stay
+    // invisible to all of them; the feedback filters drop bot comments,
+    // so the agent never reads it as feedback either.
+    expect(pushAndReportStep).toContain('<!-- autofix-milestone round=');
+    const milestone = pushAndReportStep.match(
+      /printf '[^']*autofix-milestone[^']*'/,
+    )?.[0];
+    expect(milestone).toBeTruthy();
+    expect(milestone).not.toContain('autofix-eval');
+    // Bilingual with collapsed Chinese, like every takeover-flow comment.
+    expect(milestone).toContain('<summary>中文说明</summary>');
+    // The census survives the gate-rejection headline reword: both the old
+    // and the new wording count as rejected attempts.
+    expect(pushAndReportStep).toContain(
+      "grep -cE 'Could not (address the latest feedback|produce a passing fix)'",
+    );
+    // Base updates carry no win= field; they are windowed by timestamp
+    // instead (the window key IS the engage ack's created_at).
+    expect(pushAndReportStep).toContain('autofix-base-updated');
+    // Best-effort: a digest failure must never fail a good push.
+    expect(pushAndReportStep).toContain('milestone digest failed to post');
+  });
+
   it('pushes autofix branches without rewriting remote history', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
     // No bare -f / +refspec force forms either. (--no-verify is NOT a force
