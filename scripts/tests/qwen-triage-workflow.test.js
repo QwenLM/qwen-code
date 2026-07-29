@@ -2017,6 +2017,13 @@ describe('qwen-triage verify publish fidelity', () => {
       );
       expect(body).toContain('\u26a0\ufe0f inconclusive');
       expect(body).not.toContain('\u2705 passed');
+      // The Chinese counterpart must sit INSIDE the fold, so a Chinese-only
+      // reader expanding it sees the reason, not just the raw numbers.
+      const details = body.indexOf('<details>');
+      const detailsEnd = body.indexOf('</details>');
+      const zhMismatch = body.indexOf('agent \u62a5\u544a\u4e86 `merge-ready`');
+      expect(zhMismatch).toBeGreaterThan(details);
+      expect(zhMismatch).toBeLessThan(detailsEnd);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -3309,7 +3309,13 @@ jobs:
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 if [ "${VERDICT:-}" = 'pass' ]; then
-                  echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  if [ -z "$REPORT" ]; then
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
+                  elif [ -z "$ASSERT_LINE" ]; then
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
+                  else
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  fi
                 else
                   echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
                 fi
@@ -3360,6 +3366,9 @@ jobs:
               fi
               if [ -n "$ASSERT_LINE_ZH" ]; then
                 printf '%s\n\n' "$ASSERT_LINE_ZH"
+              fi
+              if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
+                printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
               fi
               printf '</details>\n\n'
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
