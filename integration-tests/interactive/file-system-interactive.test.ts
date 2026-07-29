@@ -112,9 +112,17 @@ describe('Interactive file system', () => {
         await type(ptyProcess, '\r');
 
         const readCall = await rig.waitForToolCall('read_file');
+        if (!readCall) {
+          printDebugInfo(rig, rig._interactiveOutput, { readCall });
+        }
         expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
         const containsExpectedVersion = await rig.waitForText('1.0.0');
+        if (!containsExpectedVersion) {
+          printDebugInfo(rig, rig._interactiveOutput, {
+            containsExpectedVersion,
+          });
+        }
         expect(
           containsExpectedVersion,
           'Expected to see version "1.0.0" in output',
