@@ -183,6 +183,22 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.8.0-preview.1');
     });
 
+    it('should auto-increment when the version exists only on a channel package', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (
+          command.includes(
+            'npm view @qwen-code/channel-telegram@0.8.0-preview.0 version',
+          )
+        )
+          return '0.8.0-preview.0';
+
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.8.0-preview.1');
+    });
+
     it('should keep the nightly base when no stable is published yet (greenfield)', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         // No latest dist-tag
