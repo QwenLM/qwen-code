@@ -400,13 +400,9 @@ describe('McpPromptLoader', () => {
           },
         } as CommandContext;
         const suggestions = await completion(context, '');
-        expect(suggestions).toEqual([
-          '--name="',
-          '--age="',
-          '--species="',
-          '--enclosure="',
-          '--trail="',
-        ]);
+        // Only required args are suggested; optional args don't block
+        // Enter-to-execute (#7991).
+        expect(suggestions).toEqual(['--name="', '--age="', '--species="']);
       });
 
       it('should suggest remaining optional arguments when all required are present', async () => {
@@ -423,7 +419,9 @@ describe('McpPromptLoader', () => {
           },
         } as CommandContext;
         const suggestions = await completion(context, '');
-        expect(suggestions).toEqual(['--enclosure="', '--trail="']);
+        // All required args are filled; only optional remain → empty list
+        // so Enter executes the prompt with defaults (#7991).
+        expect(suggestions).toEqual([]);
       });
 
       it('should suggest all arguments when required args are still missing', async () => {
@@ -440,13 +438,9 @@ describe('McpPromptLoader', () => {
           },
         } as CommandContext;
         const suggestions = await completion(context, '');
-        expect(suggestions).toEqual([
-          '--name="',
-          '--age="',
-          '--species="',
-          '--enclosure="',
-          '--trail="',
-        ]);
+        // Only the remaining required arg is suggested; optional args
+        // are not suggested until all required are filled (#7991).
+        expect(suggestions).toEqual(['--species="']);
       });
 
       it('should suggest no arguments when all are present', async () => {
