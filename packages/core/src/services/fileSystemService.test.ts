@@ -56,7 +56,17 @@ vi.mock('../utils/fileUtils.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../utils/read-text-range.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/read-text-range.js')>();
+  return {
+    ...actual,
+    readTextRange: vi.fn(),
+  };
+});
+
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
+import { readTextRange } from '../utils/read-text-range.js';
 
 describe('StandardFileSystemService', () => {
   let fileSystem: StandardFileSystemService;
@@ -181,6 +191,77 @@ describe('StandardFileSystemService', () => {
         maxOutputBytes: 128,
         stats,
       });
+    });
+
+    it('should route handle-bound reads through the bounded range path', async () => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+      const stats = { size: 300_000 } as import('node:fs').Stats;
+      vi.mocked(readTextRange).mockResolvedValue({
+        content: 'line 2',
+        bom: false,
+        encoding: 'utf-8',
+        originalLineCount: 3,
+        originalLineCountExact: false,
+        truncatedByBytes: false,
+      });
+
+      const result = await fileSystem.readTextFileFromHandle({
+        path: '/test/large.txt',
+        fileHandle,
+        stats,
+        limit: 1,
+        line: 1,
+        maxOutputBytes: 262_144,
+      });
+
+      expect(readTextRange).toHaveBeenCalledWith({
+        path: '/test/large.txt',
+        fileHandle,
+        stats,
+        limit: 1,
+        offset: 1,
+        maxOutputBytes: 262_144,
+      });
+      expect(result.content).toBe('line 2');
+      expect(result._meta?.originalLineCountExact).toBe(false);
+    });
+
+    it('should reject unbounded handle reads', async () => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+      const stats = { size: 300_000 } as import('node:fs').Stats;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          path: '/test/large.txt',
+          fileHandle,
+          stats,
+          limit: Number.POSITIVE_INFINITY,
+          maxOutputBytes: 262_144,
+        }),
+      ).rejects.toThrow(/positive finite limit/);
+      expect(readTextRange).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['maxOutputBytes', { maxOutputBytes: 0 }],
+      ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
+      ['line', { line: -1 }],
+      ['line', { line: 1.5 }],
+    ])('should reject invalid handle-bound %s', async (field, over) => {
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+      const stats = { size: 300_000 } as import('node:fs').Stats;
+
+      await expect(
+        fileSystem.readTextFileFromHandle({
+          path: '/test/large.txt',
+          fileHandle,
+          stats,
+          limit: 1,
+          maxOutputBytes: 262_144,
+          ...over,
+        }),
+      ).rejects.toThrow(new RegExp(field));
+      expect(readTextRange).not.toHaveBeenCalled();
     });
 
     it('should return encoding info for GBK file', async () => {
