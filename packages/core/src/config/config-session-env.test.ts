@@ -43,7 +43,7 @@ vi.mock('../core/contentGenerator.js', () => ({
   }),
   createContentGeneratorConfig: vi.fn().mockReturnValue({}),
   createContentGenerator: vi.fn().mockReturnValue({}),
-  AuthType: { API_KEY: 'apiKey' },
+  AuthType: { USE_GEMINI: 'gemini' },
 }));
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -94,6 +94,7 @@ vi.mock('../memory/const.js', () => ({
 import * as fs from 'node:fs';
 import type { Mock } from 'vitest';
 import type { ConfigParameters } from './config.js';
+import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 
 const baseParams: ConfigParameters = {
   cwd: '/tmp',
@@ -220,5 +221,30 @@ describe('Config modelEnvClaimed guard', () => {
     // A non-owner's switch must not touch the process-global slot
     await later.setModel('hijacked-model');
     expect(process.env['QWEN_CODE_MODEL']).toBe('switched-model');
+  });
+
+  it('republishes on refreshAuth when the resolved model changes', async () => {
+    const { Config } = await import('./config.js');
+    // Import from the same (mocked) module instance the cold config.js import
+    // above binds to, so the re-mock below is what refreshAuth actually calls.
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    const config = new Config({ ...baseParams });
+    expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
+
+    // Auth flows call refreshAuth directly — no model-change listener fires —
+    // and the resolved model can differ from the pre-auth one; the slot must
+    // follow it so subprocesses report the model that is actually active.
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'auth-resolved-model',
+        apiKey: 'k',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('auth-resolved-model');
   });
 });

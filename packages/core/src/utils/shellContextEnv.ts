@@ -132,11 +132,11 @@ export function getShellContextEnvVars(): Record<string, string> {
   // Settings files are not a substitute: they miss /model switches, and under
   // QWEN_HOME isolation they describe a different home entirely. Config claims
   // this slot at construction and republishes on every model change
-  // (publishModelEnv in config.ts). Process-global like the session-ID
-  // fallback above, with the same daemon limitation: later sessions read the
-  // first session's model. Omitted (not blanked) when absent, for the session
-  // ID's reason — no value in this process means the spawn-site spread has
-  // nothing stale to leak.
+  // (publishModelEnv in config.ts). Process-global only — unlike the session ID
+  // above, there is no per-session ALS context here, so in daemon mode later
+  // sessions read the first session's model and nothing corrects it per-session.
+  // Omitted (not blanked) when absent, for the session ID's reason — no value in
+  // this process means the spawn-site spread has nothing stale to leak.
   const model = process.env['QWEN_CODE_MODEL'];
   if (model) {
     env['QWEN_CODE_MODEL'] = model;
