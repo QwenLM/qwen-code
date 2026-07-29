@@ -195,19 +195,24 @@ export function isDestructiveCommand(
   cwd: string = process.cwd(),
 ): DestructiveCommandResult | null {
   const stripped = stripShellQuotes(command);
-  const expanded = command + ' ' + stripped;
-  // Test the two spellings separately rather than scanning the concatenation.
-  // For an unquoted command `stripShellQuotes` is the identity, so `expanded`
-  // is `cmd + ' ' + cmd`, and a pattern whose match spans more than two tokens
-  // runs off the end of the first copy into the second: the `-f` in
-  // `rm -f stale.log && git clean` is separator-bounded within one copy, but
-  // not across the seam between them.
+  // Test the two spellings separately rather than scanning their concatenation.
+  // For an unquoted command `stripShellQuotes` is the identity, so concatenating
+  // gives `cmd + ' ' + cmd`, and a pattern can match across the seam where the
+  // two copies join — an adjacency that exists nowhere in what the user typed.
+  // Two ways that bites: a match spanning more than two tokens runs off the end
+  // of the first copy into the second (the `-f` in `rm -f stale.log && git
+  // clean` is separator-bounded within one copy but not across the seam), and a
+  // two-token pattern matches the tail of one copy against the head of the
+  // next, so `destroy.sh --cdk` reads as `cdk destroy` and is blocked outright.
   const matchesAny = (pattern: RegExp) =>
     pattern.test(command) || pattern.test(stripped);
+  // The match may live in either spelling; report the one that actually hit.
+  const firstMatch = (pattern: RegExp) =>
+    command.match(pattern)?.[0] ?? stripped.match(pattern)?.[0];
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {
     if (matchesAny(pattern) && !userMentionsDiscard(userPrompt)) {
-      const matched = command.match(pattern)?.[0] ?? command;
+      const matched = firstMatch(pattern) ?? command;
       return {
         blocked: true,
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,
@@ -215,7 +220,7 @@ export function isDestructiveCommand(
     }
   }
 
-  if (GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd)) {
+  if (matchesAny(GIT_AMEND_PATTERN) && !isAmendOfSessionCommit(cwd)) {
     return {
       blocked: true,
       reason:
@@ -224,9 +229,8 @@ export function isDestructiveCommand(
   }
 
   for (const pattern of IAC_DESTROY_PATTERNS) {
-    if (pattern.test(expanded)) {
-      const toolName =
-        command.match(pattern)?.[0]?.split(/\s+/)[0] ?? 'unknown';
+    if (matchesAny(pattern)) {
+      const toolName = firstMatch(pattern)?.split(/\s+/)[0] ?? 'unknown';
       if (!userMentionsStack(userPrompt, toolName)) {
         return {
           blocked: true,

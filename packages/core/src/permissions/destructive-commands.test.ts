@@ -398,6 +398,42 @@ describe('isDestructiveCommand — IaC patterns', () => {
       expect(result).toBeNull();
     }
   });
+
+  // Scanning `command + ' ' + stripped` let a two-token pattern match the tail
+  // of one copy against the head of the next. `destroy.sh --cdk` concatenates
+  // to `destroy.sh --cdk destroy.sh --cdk`, where `cdk destroy` appears only at
+  // the seam — an adjacency the user never typed.
+  it.each([['destroy.sh --cdk'], ['./destroy-stack.sh --with terraform']])(
+    'does not block %s, where the tool name and destroy are not adjacent',
+    (command) => {
+      expect(isDestructiveCommand(command, 'clean up')).toBeNull();
+    },
+  );
+
+  // Over-correction guard: unwrapping `bash -c "…"` is the whole reason both
+  // spellings are tested, and it must still be caught. Passes before and after.
+  it('still blocks a wrapped IaC destroy', () => {
+    const result = isDestructiveCommand(
+      'bash -c "terraform destroy"',
+      'update infra',
+    );
+    expect(result?.blocked).toBe(true);
+    expect(result!.reason).toContain('terraform');
+  });
+
+  it('names the tool when only the unwrapped spelling matches', () => {
+    // Contrived, but it is the one shape that reaches this branch: the quote
+    // breaks the adjacency in the raw command, so the pattern matches only
+    // after unwrapping. Reading the tool name off the raw command alone
+    // reported "unknown" in the message.
+    const result = isDestructiveCommand(
+      'bash -c "terraform" destroy',
+      'update infra',
+    );
+    expect(result?.blocked).toBe(true);
+    expect(result!.reason).toContain('terraform');
+    expect(result!.reason).not.toContain('unknown');
+  });
 });
 
 // ─── isDestructiveCommand — git commit --amend ────────────────────────────
@@ -423,6 +459,18 @@ describe('isDestructiveCommand — git commit --amend', () => {
       'commit changes',
     );
     expect(result).toBeNull();
+  });
+
+  // The amend check tests both spellings rather than their concatenation, so
+  // pin the wrapped form that only the unwrapped spelling reaches. Passes
+  // before and after.
+  it('blocks an amend inside a shell wrapper', () => {
+    const result = isDestructiveCommand(
+      'bash -c "git commit --amend --no-edit"',
+      'amend the commit',
+    );
+    expect(result?.blocked).toBe(true);
+    expect(result!.reason).toContain('amend');
   });
 });
 
