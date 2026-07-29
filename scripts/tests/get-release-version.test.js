@@ -108,16 +108,15 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.8.1-preview.0');
     });
 
-    it('should reject the preview when the latest stable is ahead', () => {
+    it('should bump the preview base when the latest stable is ahead', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.9.0';
         return mockExecSync(command);
       });
 
-      expect(() => getVersion({ type: 'preview' })).toThrow(
-        'Nightly base 0.8.0 is lower than published latest 0.9.0. Refusing divergent preview baseline.',
-      );
+      const result = getVersion({ type: 'preview' });
+      expect(result.releaseVersion).toBe('0.9.1-preview.0');
     });
 
     it('should calculate the next nightly version from package.json', () => {
