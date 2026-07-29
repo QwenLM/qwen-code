@@ -24,7 +24,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { testEfficacyCommand } from './test-efficacy.js';
 
 type Handler = (args: {
@@ -37,6 +37,7 @@ const runHandler = testEfficacyCommand.handler as unknown as Handler;
 
 let repo: string;
 let outside: string;
+const originalPath = process.env['PATH'];
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -102,18 +103,15 @@ beforeEach(() => {
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
   git(repo, 'init', '-q', '-b', 'main', '.');
   git(repo, 'config', 'core.autocrlf', 'false');
+  const hooksDir = join(repo, '.git-hooks-disabled');
+  mkdirSync(hooksDir);
+  git(repo, 'config', 'core.hooksPath', hooksDir);
 
-  // A fake `vitest` on the up-tree bin path so `npx vitest` in the probe tree
-  // resolves locally — fast, deterministic, no network. It echoes each test
-  // file it is handed back as PASSED, so a probe over reverted source reads as
-  // `inert` without a real runner. `npx` walks node_modules upward, and the
-  // probe tree is a direct child of `repo`, so this bin is what it finds.
+  // Put a fake `npx` first on PATH so the probe is independent of npm's
+  // platform-specific package lookup. It reports every test file as passed.
   mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
   const binDir = join(repo, 'node_modules', '.bin');
-  const script = join(
-    binDir,
-    process.platform === 'win32' ? 'vitest.cjs' : 'vitest.js',
-  );
+  const script = join(binDir, 'vitest.cjs');
   writeFileSync(
     script,
     `#!/usr/bin/env node
@@ -130,18 +128,17 @@ process.stdout.write(JSON.stringify({
 `,
   );
   if (process.platform === 'win32') {
-    writeFileSync(
-      join(binDir, 'vitest.cmd'),
-      '@node "%~dp0\\vitest.cjs" %*\r\n',
-    );
+    writeFileSync(join(binDir, 'npx.cmd'), '@node "%~dp0\\vitest.cjs" %*\r\n');
   } else {
-    const bin = join(binDir, 'vitest');
+    const bin = join(binDir, 'npx');
     writeFileSync(bin, readFileSync(script));
     chmodSync(bin, 0o755);
   }
+  process.env['PATH'] = `${binDir}${delimiter}${originalPath ?? ''}`;
 });
 
 afterEach(() => {
+  process.env['PATH'] = originalPath;
   // The handler removes its own probe tree; force-remove any a failed test left.
   try {
     git(repo, 'worktree', 'remove', '--force', join(repo, 'wt-probe'));
