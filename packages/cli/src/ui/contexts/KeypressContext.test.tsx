@@ -830,6 +830,46 @@ describe('KeypressContext - Kitty Protocol', () => {
         }),
       );
     });
+
+    it('should not treat Kitty Ctrl+Shift+C as the Ctrl+C escape hatch', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Modifier 6 is Ctrl+Shift
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;6u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          ctrl: true,
+          shift: true,
+          kittyProtocol: true,
+        }),
+      );
+    });
+
+    it('should still treat Kitty Ctrl+C as the escape hatch', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Modifier 5 is Ctrl
+      act(() => {
+        stdin.sendKittySequence(`\x1b[99;5u`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'c',
+          ctrl: true,
+          shift: false,
+          kittyProtocol: true,
+        }),
+      );
+    });
   });
 
   describe('paste mode', () => {

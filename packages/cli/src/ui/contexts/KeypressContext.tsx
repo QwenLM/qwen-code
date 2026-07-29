@@ -843,7 +843,7 @@ export function KeypressProvider({
       // including Ctrl+C itself — and the user has no way to recover
       // without killing the terminal.
       const isCtrlCKey =
-        (key.ctrl && key.name === 'c') ||
+        (key.ctrl && key.name === 'c' && !key.shift) ||
         key.sequence === `${ESC}${KITTY_CTRL_C}`;
       if (isCtrlCKey) {
         if (isPaste || pasteChunks.length > 0) {
