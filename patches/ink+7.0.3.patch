@@ -39,6 +39,32 @@ index 2e4b9ff..77ed0f6 100644
  }
  //# sourceMappingURL=Text.js.map
 \ No newline at end of file
+diff --git a/node_modules/ink/build/cursor-helpers.d.ts b/node_modules/ink/build/cursor-helpers.d.ts
+index c6e9466..6dd4c0f 100644
+--- a/node_modules/ink/build/cursor-helpers.d.ts
++++ b/node_modules/ink/build/cursor-helpers.d.ts
+@@ -11,9 +11,11 @@
+ export declare const cursorPositionChanged: (a: CursorPosition | undefined, b: CursorPosition | undefined) => boolean;
+ /**
+ Build escape sequence to move cursor from bottom of output to the target position and show it.
+-Assumes cursor is at (col 0, line visibleLineCount) — i.e. just after the last output line.
++When hasTrailingNewline is true the terminal cursor sits at (col 0, line visibleLineCount)
++— i.e. just after the last output line. When false (fullscreen mode) it sits at the END
++of the last visible line (line visibleLineCount - 1), so one fewer cursorUp is needed.
+ */
+-export declare const buildCursorSuffix: (visibleLineCount: number, cursorPosition: CursorPosition | undefined) => string;
++export declare const buildCursorSuffix: (visibleLineCount: number, cursorPosition: CursorPosition | undefined, hasTrailingNewline?: boolean) => string;
+ /**
+ Build escape sequence to move cursor from previousCursorPosition back to the bottom of output.
+ This must be done before eraseLines or any operation that assumes cursor is at the bottom.
+@@ -25,6 +27,7 @@
+     previousCursorPosition: CursorPosition | undefined;
+     visibleLineCount: number;
+     cursorPosition: CursorPosition | undefined;
++    hasTrailingNewline?: boolean;
+ };
+ /**
+ Build the escape sequence for cursor-only updates (output unchanged, cursor moved).
 diff --git a/node_modules/ink/build/cursor-helpers.js b/node_modules/ink/build/cursor-helpers.js
 index be49354..14215f0 100644
 --- a/node_modules/ink/build/cursor-helpers.js

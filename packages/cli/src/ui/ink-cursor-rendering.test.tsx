@@ -285,6 +285,41 @@ describe.each([false, true])(
       await unmount(app);
     });
 
+    it('preserves cursor-only position updates in fullscreen', async () => {
+      const capture = createTestStdout(2);
+      let moveCursor!: () => void;
+
+      function CursorOwner() {
+        const [x, setX] = useState(2);
+        moveCursor = () => setX(4);
+        useCursor().setCursorPosition({ x, y: 0 });
+        return <Text>input</Text>;
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <CursorOwner />
+          <Text>footer</Text>
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+      capture.reset();
+
+      await updateAndFlush(app, moveCursor);
+
+      // Fullscreen (2 lines >= 2 rows): no trailing newline, so
+      // moveUp = (visibleLines - 1) - y = 1, not visibleLines - y = 2.
+      const output = capture.read();
+      expect(output).toContain(
+        ansiEscapes.cursorUp(1) + ansiEscapes.cursorTo(4) + SHOW_CURSOR,
+      );
+      expect(output).not.toContain(
+        ansiEscapes.cursorUp(2) + ansiEscapes.cursorTo(4) + SHOW_CURSOR,
+      );
+      await unmount(app);
+    });
+
     it('reasserts the latest committed cursor after a later sibling update', async () => {
       const capture = createTestStdout();
       let moveCursor!: () => void;
