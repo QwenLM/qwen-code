@@ -462,6 +462,19 @@ describe('parseAddedLines', () => {
     expect(parseAddedLines(diff).get('src/a.ts')).toEqual([5]);
   });
 
+  it('does not count a "\\ No newline" marker as a context line', () => {
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -5,0 +6,2 @@',
+      '+added line',
+      '\\ No newline at end of file',
+      '+second added',
+    ].join('\n');
+    const got = parseAddedLines(diff);
+    expect(got.get('src/a.ts')).toEqual([6, 7]);
+  });
+
   it('does not read an added `++ x` line as a file header', () => {
     // `git diff --unified=0` prefixes each added line with `+`, so a spaced
     // pre-increment (`++ count;`) renders as `+++ count;`. Matching `+++ `
@@ -560,6 +573,26 @@ describe('selectMutants', () => {
     ]);
     expect(got).toEqual([
       { file: 'src/s.ts', line: 4, statement: 'this.cache.clear();' },
+    ]);
+  });
+
+  it('skips a class field when the class header spans multiple lines', () => {
+    const content = src([
+      'class Store',
+      '  extends Base',
+      '{',
+      '  cache = new Map();',
+      '  reset() {',
+      '    this.cache.clear();',
+      '  }',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(8), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 6, statement: 'this.cache.clear();' },
     ]);
   });
 

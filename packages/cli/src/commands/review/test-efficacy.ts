@@ -356,7 +356,15 @@ function insideClassBody(lines: string[], idx: number): boolean {
       const ch = code[i];
       if (ch === '}') depth++;
       else if (ch === '{') {
-        if (depth === 0) return /\bclass\b/.test(code.slice(0, i));
+        if (depth === 0) {
+          if (/\bclass\b/.test(code.slice(0, i))) return true;
+          for (let k = j - 1; k >= 0; k--) {
+            const prev = codeOnly(lines[k]);
+            if (/\bclass\b/.test(prev)) return true;
+            if (/[;{}]/.test(prev)) break;
+          }
+          return false;
+        }
         depth--;
       }
     }
