@@ -2932,12 +2932,16 @@ export function useDaemonActiveTodoList() {
 }
 
 export function useDaemonStreamingState() {
-  const blocks = useDaemonTranscriptBlocks();
+  const store = useDaemonTranscriptStore();
   const promptStatus = useDaemonPromptStatus();
-
-  return useMemo(
-    () => selectDaemonStreamingState(blocks, promptStatus),
-    [blocks, promptStatus],
+  const getStreamingState = useCallback(
+    () => selectDaemonStreamingState(store.getSnapshot().blocks, promptStatus),
+    [promptStatus, store],
+  );
+  return useSyncExternalStore(
+    store.subscribe,
+    getStreamingState,
+    getStreamingState,
   );
 }
 
