@@ -2181,9 +2181,17 @@ describe('qwen-triage verify round-3 hardening', () => {
     const runStep = stepIn('verify', 'Run verification agent');
     expect(runStep).toContain('verify-chromium-path');
     expect(runStep).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // Both variables, not just the flag. Losing the path alone is the
+    // nastiest arm: the agent is TOLD chromium is available, Playwright
+    // then looks in the default ~/.cache/ms-playwright instead of the
+    // shared install, and captures degrade to text-only after a successful
+    // install — verified by mutation, this test passed without this line.
+    expect(runStep).toContain('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
     const guard = runStep.indexOf('verify-chromium-path');
     const marker = runStep.indexOf('QWEN_VERIFY_CHROMIUM=1');
+    const path = runStep.indexOf('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
     expect(guard).toBeLessThan(marker);
+    expect(guard).toBeLessThan(path);
     // The if-fi block must wrap the QWEN_ENV+= assignment.
     const ifBlock = runStep.slice(guard - 20, marker + 30);
     expect(ifBlock).toContain('if');
