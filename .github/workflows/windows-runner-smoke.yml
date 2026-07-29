@@ -2,9 +2,6 @@ name: 'Windows Self-Hosted Runner Smoke'
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/windows-runner-smoke.yml'
 
 permissions:
   contents: 'read'
@@ -24,7 +21,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           whoami
           git --version
-          node --version
+          $nodeVersion = node --version
+          $nodeVersion
+          if ([int]($nodeVersion -replace '^v(\d+)\..*$', '$1') -lt 22) {
+            throw "Node.js 22 or newer is required, found $nodeVersion."
+          }
           npm --version
           qwen --version
           gh --version
