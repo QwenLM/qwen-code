@@ -2791,6 +2791,7 @@ jobs:
           TEE_STATUS=${PIPE_STATUS[1]:-0}
           EXIT_CODE=$AGENT_STATUS
           set -e
+          AGENT_ELAPSED=$((SECONDS - AGENT_START))
 
           # Collect the skill's artifacts (report.md, verdict.txt,
           # assertions.json, harness scripts, raw logs) into the upload dir.
@@ -2807,7 +2808,6 @@ jobs:
           # together: if the threshold stays below the budget, an OOM kill
           # after that many seconds is mislabelled `timeout` and publishes
           # "partial evidence" for a crash.
-          AGENT_ELAPSED=$((SECONDS - AGENT_START))
           WATCHDOG_FIRED=false
           if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge 7200 ]; then
             WATCHDOG_FIRED=true

@@ -2155,7 +2155,9 @@ describe('qwen-triage verify round-3 hardening', () => {
     const watchdogSeconds = Number(
       runStep.match(/"\$AGENT_ELAPSED" -ge (\d+)/)?.[1],
     );
-    const jobMinutes = Number(verifyJob.match(/timeout-minutes: (\d+)/)?.[1]);
+    const jobMinutes = Number(
+      verifyJob.match(/^ {4}timeout-minutes: (\d+)/m)?.[1],
+    );
     expect(agentMinutes).toBeGreaterThan(0);
     expect(watchdogSeconds).toBeGreaterThan(0);
     expect(jobMinutes).toBeGreaterThan(0);
@@ -2183,6 +2185,7 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(advertised).toBe(agentMinutes);
     const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
     expect(soft).toBeLessThan(agentMinutes);
+    expect(soft).toBeLessThanOrEqual(agentMinutes - 10);
     // A proportional lower bound catches the most common drift — the hard
     // kill is raised but the soft budget is forgotten, silently wasting CI
     // time — without freezing the reserve at a fixed minute count for every
