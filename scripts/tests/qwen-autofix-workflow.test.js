@@ -4714,21 +4714,31 @@ describe('qwen-autofix workflow', () => {
     });
     const runDigest = (
       comments,
-      { nextRound = 10, window = K, outcome = 'fixed', maxRounds = '100' } = {},
+      {
+        nextRound = 10,
+        window = K,
+        outcome = 'fixed',
+        maxRounds = '100',
+        commentExit = 0,
+      } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'milestone-'));
       try {
         writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
         const bin = join(dir, 'bin');
         mkdirSync(bin);
+        const commentBody =
+          commentExit === 0
+            ? `printf '%s' "$7" > ${JSON.stringify(join(dir, 'digest.md'))}; exit 0`
+            : `exit ${commentExit}`;
         writeFileSync(
           join(bin, 'gh'),
-          `#!/usr/bin/env bash\nif [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'digest.md'))}; exit 0; fi\nexit 1\n`,
+          `#!/usr/bin/env bash\nif [[ "$1" == 'pr' && "$2" == 'comment' ]]; then ${commentBody}; fi\nexit 1\n`,
         );
         chmodSync(join(bin, 'gh'), 0o755);
         const log = execFileSync(
           'bash',
-          ['-c', `set -uo pipefail\n${digestBlock.replace(/\n {10}/g, '\n')}`],
+          ['-c', `set -euo pipefail\n${digestBlock.replace(/\n {10}/g, '\n')}`],
           {
             env: {
               ...process.env,
@@ -4855,6 +4865,19 @@ describe('qwen-autofix workflow', () => {
     const empty = runDigest([]);
     expect(empty.body).toBe('');
     expect(empty.log).toContain('skipping the digest');
+
+    // Best-effort is behavioral, not just string-pinned: when `gh pr
+    // comment` fails, the block must still return normally (no throw under
+    // the step's `set -e` lineage) and only warn — a good push must never
+    // go red over a failed digest.
+    const commentFailed = runDigest(
+      [evalC(HEADS.push, K, '2026-07-02T00:00:00Z')],
+      { commentExit: 1 },
+    );
+    expect(commentFailed.body).toBe('');
+    expect(commentFailed.log).toContain(
+      '::warning::milestone digest failed to post on PR #1',
+    );
 
     // Best-effort stays pinned: the success log is chained to the post
     // (no unconditional "posted" after a failed comment), the failure
