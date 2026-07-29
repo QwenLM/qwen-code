@@ -245,6 +245,45 @@ function scanLineDelimiters(
 }
 
 /**
+ * The code portion of a line: line (`//`) and block comments stripped and the
+ * contents of single/double/template literals blanked (delimiters kept), then
+ * trimmed. The mutant-selection checks are end-anchored — `endsWith(';')`, the
+ * `$` alternatives in {@link SAFETY_VERB_RE}, the predecessor `/[;{}]$/` — so
+ * they must see the real statement end: a trailing comment
+ * (`reminders.clear(); // why`) otherwise hides it, and a verb inside a string
+ * (`log("sessions.clear()")`) fakes it. Same skip rules as
+ * {@link scanLineDelimiters}; a line that cannot be judged in isolation (an
+ * unterminated literal or comment) is returned as-is, which only ever keeps the
+ * conservative rejection those checks already apply.
+ */
+function codeOnly(line: string): string {
+  let out = '';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      out += ch;
+      i++;
+      while (i < line.length && line[i] !== ch) {
+        if (line[i] === '\\') i++;
+        i++;
+      }
+      if (i >= line.length) return line.trim();
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && line[i + 1] === '/') break;
+    if (ch === '/' && line[i + 1] === '*') {
+      const close = line.indexOf('*/', i + 2);
+      if (close < 0) return line.trim();
+      i = close + 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out.trim();
+}
+
+/**
  * For each line, whether it STARTS inside a template literal or block comment.
  * Without this, a safety-verb line inside a multi-line template (an agent-brief
  * string, a here-doc in a test) or a commented-out block would be "deleted"
@@ -263,7 +302,10 @@ function lineStartsInsideLiteral(content: string): boolean[] {
       continue;
     }
     if (state === 'template') {
-      if (ch === '\\') i++;
+      // Mirror the single/double-quote guard below: a `\`-continued template
+      // line swallows its newline, so skipping that newline here would drop a
+      // flags entry and shift every later line's verdict onto its neighbour.
+      if (ch === '\\' && content[i + 1] !== '\n') i++;
       else if (ch === '`') state = 'code';
       continue;
     }
@@ -308,7 +350,9 @@ function lineStartsInsideLiteral(content: string): boolean[] {
  */
 function isRemovableStatement(lines: string[], idx: number): boolean {
   const t = (lines[idx] ?? '').trim();
-  if (!t.endsWith(';')) return false;
+  // End-anchored checks run on the code portion only, so a trailing comment
+  // (`reminders.clear(); // why`) does not hide the statement's real end.
+  if (!codeOnly(t).endsWith(';')) return false;
   if (!/^(?:await\s+)?[A-Za-z_$]/.test(t)) return false;
   if (NON_STATEMENT_START_RE.test(t)) return false;
   const depth = scanLineDelimiters(t);
@@ -331,7 +375,7 @@ function isRemovableStatement(lines: string[], idx: number): boolean {
     break;
   }
   if (j < 0) return true;
-  return /[;{}]$/.test(lines[j].trim());
+  return /[;{}]$/.test(codeOnly(lines[j]));
 }
 
 export interface MutantSourceFile {
@@ -364,7 +408,7 @@ export function selectMutants(
       const raw = lines[n - 1];
       if (raw === undefined) continue;
       const t = raw.trim();
-      if (!SAFETY_VERB_RE.test(t)) continue;
+      if (!SAFETY_VERB_RE.test(codeOnly(t))) continue;
       if (inLiteral[n - 1]) continue;
       if (!isRemovableStatement(lines, n - 1)) continue;
       (f.hasNewTests ? preferred : rest).push({

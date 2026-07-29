@@ -583,6 +583,67 @@ describe('selectMutants', () => {
     ]);
   });
 
+  it('keeps line accounting across a backslash-continued template literal', () => {
+    // The template-state escape skip must not swallow a `\`-continued line's
+    // newline: doing so drops a per-line flag and shifts every later verdict
+    // onto its neighbour — here that would admit line 4, which starts inside a
+    // block comment, so deleting it removes the `*/` and comments out the code
+    // below. Mirrors the single-quote case above for the template branch.
+    const content = src([
+      'const brief = `weird \\',
+      'tail`;',
+      '/* block',
+      'note */ cache.clear();',
+      'after.clear();',
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(5), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 5, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('sees through a trailing comment on the candidate and its predecessor', () => {
+    // The end-anchored checks run on the code portion only. A trailing comment
+    // must not hide the candidate's `;` (dropping a genuine reset) nor the
+    // predecessor's statement end — `reminders.clear(); // why` is exactly the
+    // dogfood shape this probe was built to catch.
+    const content = src([
+      'export function reset() {',
+      '  const x = setup(); // prepare',
+      '  reminders.clear(); // why',
+      '}',
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: [2, 3], hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 3, statement: 'reminders.clear(); // why' },
+    ]);
+  });
+
+  it('does not select a safety verb that only appears inside a string', () => {
+    // A verb inside a string is not a statement: deleting the line removes a
+    // log call, the suite stays green, and a misleading `mutant-survived`
+    // finding is filed — a false positive that also burns a suite run.
+    const content = src([
+      'export function report() {',
+      '  logger.info("sessions.clear() done");',
+      '  live.clear();',
+      '}',
+      '',
+    ]);
+    const got = selectMutants([
+      { file: 'src/s.ts', content, addedLines: [2, 3], hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 3, statement: 'live.clear();' },
+    ]);
+  });
+
   it('caps at MAX_MUTANTS, preferring files that also have new tests', () => {
     const line = (i: number) => `store${i}.clear();`;
     const content = src([...all(5).map(line), '']);

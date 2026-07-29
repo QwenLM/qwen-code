@@ -97,6 +97,30 @@ function scaffoldModifiedPr(): { wt: string; base: string } {
   return { wt, base };
 }
 
+/**
+ * Swap the fake runner for one that reports every test file as FAILED. Used to
+ * drive the unmutated baseline red, so the mutant phase must skip wholesale.
+ */
+function installFailingVitest(): void {
+  const bin = join(repo, 'node_modules', '.bin', 'vitest');
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env node
+const path = require('path');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: 0,
+  numFailedTests: files.length,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'failed' }],
+  })),
+}));
+`,
+  );
+  chmodSync(bin, 0o755);
+}
+
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
@@ -299,6 +323,64 @@ describe('test-efficacy probe isolation (#6832)', () => {
       prSource,
     );
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
+  it('skips the mutants wholesale when the unmutated baseline is not green', async () => {
+    // A mutant is only evidence against a suite that is green WITHOUT it: against
+    // a baseline that already fails, every mutant would be "killed" by failures
+    // it did not cause. So when the unmutated run is not cleanly green, the whole
+    // mutant phase is skipped and the report says so — no probed mutants and no
+    // survivor finding, even though the diff adds an ungated safety statement.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    // The test FAILS, so the suite is not cleanly green under a real runner
+    // too — not only under the fake one installed below. Whichever runner the
+    // probe resolves to, the baseline is red and the mutants must be skipped.
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => { reset(); expect(1).toBe(2); });\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // The unmutated suite is NOT green: the fake runner reports a failure.
+    installFailingVitest();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toEqual([]);
+    expect(out.mutants.note).toContain('not cleanly green');
+    expect(
+      (out.findings as Array<{ kind: string }>).some(
+        (f) => f.kind === 'mutant-survived',
+      ),
+    ).toBe(false);
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
