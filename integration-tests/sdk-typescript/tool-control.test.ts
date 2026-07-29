@@ -54,8 +54,6 @@ function fakeModelOptions(baseUrl: string) {
     env: {
       NO_PROXY: LOCAL_OPENAI_NO_PROXY,
       no_proxy: LOCAL_OPENAI_NO_PROXY,
-      QWEN_HOME: process.env['E2E_TEST_FILE_DIR']!,
-      QWEN_RUNTIME_DIR: process.env['E2E_TEST_FILE_DIR']!,
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
@@ -83,7 +81,9 @@ describe('Tool Control Parameters (E2E)', () => {
 
   beforeEach(async () => {
     helper = new SDKTestHelper();
-    testDir = await helper.setup('tool-control');
+    testDir = await helper.setup('tool-control', {
+      settings: { fastModel: 'openai:fake-model' },
+    });
   });
 
   afterEach(async () => {
