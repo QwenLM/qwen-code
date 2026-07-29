@@ -8,6 +8,7 @@ import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
 import { shouldAllowCompletionQuery } from '../utils/slashCommandUtils.js';
+import { resolveCompletionTrigger } from '../utils/completionUtils.js';
 import { stripZeroWidthSpaces } from '@qwen-code/webui';
 
 interface CompletionTriggerState {
@@ -311,49 +312,20 @@ export function useCompletionTrigger(
         cursorPosition = found ? offset : text.length;
       }
 
-      // Find trigger character before cursor.
+      // Find the trigger character before the cursor.
       // A cursorPosition of 0 is a valid position (cursor at the very start),
       // so it must not be rewritten to text.length. We still clamp to
       // text.length because the DOM cursor offset may exceed the stripped text
       // length (e.g. after removing a leading zero-width space).
       const clampedCursorPosition = Math.min(cursorPosition, text.length);
 
-      const textBeforeCursor = text.substring(0, clampedCursorPosition);
-      const lastAtMatch = textBeforeCursor.lastIndexOf('@');
-      const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
-
-      // Check if we're in a trigger context
-      let triggerPos = -1;
-      let triggerChar: '@' | '/' | null = null;
-
-      // Priority: @ trigger takes precedence over / trigger
-      // This allows path-like queries (e.g., "src/components/Button") in @ mentions
-      // But skip if the trigger is inside a file tag
-      if (lastAtMatch >= 0) {
-        triggerPos = lastAtMatch;
-        triggerChar = '@';
-      } else if (lastSlashMatch >= 0) {
-        triggerPos = lastSlashMatch;
-        triggerChar = '/';
-      }
-
-      // Check if trigger is at word boundary (start of line or after space)
-      if (triggerPos >= 0 && triggerChar) {
-        const charBefore = triggerPos > 0 ? text[triggerPos - 1] : ' ';
-        const isValidTrigger =
-          charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
-
-        if (isValidTrigger) {
-          const query = text.substring(triggerPos + 1, clampedCursorPosition);
-
-          if (shouldAllowCompletionQuery(triggerChar, query)) {
-            // Get precise cursor position for menu
-            const cursorPos = getCursorPosition();
-            if (cursorPos) {
-              await openCompletion(triggerChar, query, cursorPos);
-              return;
-            }
-          }
+      const trigger = resolveCompletionTrigger(text, clampedCursorPosition);
+      if (trigger && shouldAllowCompletionQuery(trigger.char, trigger.query)) {
+        // Get precise cursor position for menu
+        const cursorPos = getCursorPosition();
+        if (cursorPos) {
+          await openCompletion(trigger.char, trigger.query, cursorPos);
+          return;
         }
       }
 

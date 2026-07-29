@@ -5,22 +5,37 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
+  GitWorktreeService,
   SessionService,
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+  SessionTranscriptPageTooLargeError,
+  SessionTranscriptCursorCodec,
+  SessionTranscriptReader,
+  SessionTranscriptSnapshotUnavailableError,
   addDaemonRequestAttribute,
+  runWithoutDebugLogSession,
+  writeWorktreeSessionMarker,
+  writeWorktreeSession,
+  readWorktreeSession,
   type ApprovalMode,
   type SessionGroupColor,
+  type SessionGroupPresetColor,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import { parseChannelDelivery } from '../channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
@@ -35,10 +50,7 @@ import {
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
-import {
-  PromptDeadlineExceededError,
-  resolvePromptDeadlineMs,
-} from '../server/prompt-deadline.js';
+import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';
 import {
   parseClientIdHeader,
   parseOptionalWorkspaceCwd,
@@ -48,12 +60,14 @@ import {
 } from '../server/request-helpers.js';
 import {
   InvalidCursorError,
+  getWorkspaceSessionInfoForResponse,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
+  assertSessionArchived,
   assertSessionLoadable,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -65,16 +79,58 @@ import {
   parseSessionExportFormat,
   sessionExportFormatValues,
 } from '../server/session-export.js';
+import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
-import { requireSessionRuntime } from './session-runtime.js';
+import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import {
+  formatGenerationSse,
+  GENERATION_HEARTBEAT_MS,
+  writeGenerationSseChunk,
+} from '../generation-sse.js';
+import {
+  requirePrimarySessionRuntime,
+  requireSessionRuntime,
+} from './session-runtime.js';
+import {
+  branchExists,
+  isDirtyTree,
+  getHeadCommit,
+  createBranch,
+  checkoutRef,
+  deleteBranch,
+} from '../server/git-branch-ops.js';
+import {
+  parseVirtualSubagentSessionId,
+  type VirtualSubagentSessions,
+} from '../virtual-subagent-sessions.js';
 import {
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
+  sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+
+// `HEAD` is the most prominent ref name git rejects as a branch name.
+// The surrounding predicate covers the remaining reserved forms (`@`, `-`,
+// `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref
+// storage is case-folding on macOS/Windows.
+const GIT_RESERVED_BRANCH = 'HEAD';
+
+// Byte-length caps for branch names. git creates loose refs as files under
+// `.git/refs/heads/`, so each `/`-separated component is bounded by the
+// filesystem's per-component name limit (255 bytes on Linux/macOS, minus the
+// `.lock` suffix git appends while writing). A component over that limit fails
+// inside `git checkout -b` with a raw error that embeds the absolute workspace
+// path; rejecting here keeps every bad name a clean 400. Unicode is allowed, so
+// count UTF-8 bytes, not code points. Mirrors validateBranchName in
+// GitModePopover.tsx; keep the two in sync.
+const MAX_BRANCH_NAME_BYTES = 1000;
+const MAX_BRANCH_COMPONENT_BYTES = 200;
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
@@ -84,9 +140,46 @@ interface RegisterSessionRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+  virtualSubagentSessions?: VirtualSubagentSessions;
+}
+
+const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
+const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
+  'Transcript pagination state exceeds the safe limit';
+// Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
+const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
+  'POST /session/:id/branch',
+  'POST /session/:id/fork',
+  'POST /session/:id/cd',
+] as const;
+type PrimaryOnlyLiveSessionRoute =
+  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
+
+function isPrimaryOnlyLiveSessionRoute(
+  route: string,
+): route is PrimaryOnlyLiveSessionRoute {
+  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
+    route,
+  );
+}
+
+function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
+  return !runtime.primary && !runtime.trusted;
+}
+
+function runWorkspaceInspectionWithLogPolicy<T>(
+  runtime: WorkspaceRuntime,
+  read: () => Promise<T>,
+): Promise<T> {
+  return isReadOnlyWorkspaceInspection(runtime)
+    ? runWithoutDebugLogSession(read)
+    : read();
 }
 
 function requireSessionArtifactClientId(
@@ -187,6 +280,76 @@ function parseTranscriptCursorQuery(
   return rawCursor;
 }
 
+function parseTranscriptRecordBoundaryQuery(
+  rawBoundary: unknown,
+  res: Response,
+): string | undefined | null {
+  if (rawBoundary === undefined) return undefined;
+  if (
+    typeof rawBoundary !== 'string' ||
+    rawBoundary.trim() === '' ||
+    rawBoundary.length > 200
+  ) {
+    res.status(400).json({
+      error: '`beforeRecordId` must be a non-empty record id',
+      code: 'invalid_transcript_cursor',
+    });
+    return null;
+  }
+  return rawBoundary;
+}
+
+function parseHistoryPageSize(
+  body: Record<string, unknown>,
+  res: Response,
+): number | undefined | null {
+  const value = body['historyPageSize'];
+  if (value === undefined) return undefined;
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > SESSION_TRANSCRIPT_MAX_LIMIT
+  ) {
+    res.status(400).json({
+      error: `\`historyPageSize\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      code: 'invalid_transcript_limit',
+      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
+    });
+    return null;
+  }
+  return value as number;
+}
+
+function workspaceTranscriptCursorExceedsLimit(
+  cursor: string,
+  maxBytes = WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
+): boolean {
+  return Buffer.byteLength(cursor) > maxBytes;
+}
+
+export const workspaceTranscriptCursorExceedsLimitForTesting =
+  workspaceTranscriptCursorExceedsLimit;
+
+function serializeWorkspaceTranscriptResponse(
+  result: unknown,
+  sessionId: string,
+  maxBytes = WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES,
+): string {
+  const serialized = JSON.stringify(result);
+  const responseBytes = Buffer.byteLength(serialized);
+  if (responseBytes > maxBytes) {
+    throw new SessionTranscriptPageTooLargeError(
+      sessionId,
+      responseBytes,
+      maxBytes,
+    );
+  }
+  return serialized;
+}
+
+export const serializeWorkspaceTranscriptResponseForTesting =
+  serializeWorkspaceTranscriptResponse;
+
 function transcriptSnapshotUnavailableError(sessionId: string): Error & {
   data: { errorKind: 'transcript_snapshot_unavailable'; sessionId: string };
 } {
@@ -242,8 +405,89 @@ export function registerSessionRoutes(
     daemonLog,
     promptDeadlineMs,
     sessionShellCommandEnabled,
+    virtualSubagentSessions,
   } = deps;
   const LANGUAGE_CODES = deps.languageCodes;
+  const transcriptCursorMasterKey = crypto.randomBytes(32);
+  const transcriptCursorCodecs = new Map<
+    string,
+    SessionTranscriptCursorCodec
+  >();
+
+  // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
+  // Prevents concurrent branch sessions that would conflict on HEAD. The
+  // POST /session branch block additionally rejects branch creation while any
+  // other live (client-attached) non-worktree session shares the workspace, so
+  // a concurrent current-branch session is not silently moved onto the new
+  // branch. A detached session is not blocked; the dirty-tree check still
+  // covers the most common dirty-tree case.
+  const activeBranchSessions = new Map<string, string>();
+  // Workspaces with a branch creation currently in flight (reserved between
+  // the conflict guard and `activeBranchSessions.set`, which only happens
+  // after spawn). Closes the TOCTOU where two concurrent requests both pass
+  // the guard before either populates `activeBranchSessions`.
+  const inFlightBranchWorkspaces = new Set<string>();
+
+  /** Remove the branch-session tracking entry when a session ends. */
+  const clearBranchSessionEntry = (sessionId: string): void => {
+    for (const [cwd, sid] of activeBranchSessions) {
+      if (sid === sessionId) {
+        activeBranchSessions.delete(cwd);
+      }
+    }
+  };
+
+  /** Roll back a branch creation: restore the base ref and delete the branch. */
+  const rollbackBranchCreation = async (
+    cwd: string,
+    meta: { name: string; baseBranch: string },
+    baseCommit: string | undefined,
+    log: typeof daemonLog,
+  ): Promise<void> => {
+    activeBranchSessions.delete(cwd);
+    inFlightBranchWorkspaces.delete(cwd);
+    // Restore the base ref first and only delete the new branch once the
+    // workspace is off it: `git branch -D` refuses to delete the checked-out
+    // branch, so deleting unconditionally after a failed checkout would just
+    // fail and relies on that git-specific protection. An orphaned branch left
+    // behind here is harmless and cleanable with `git branch -D`.
+    const baseRestored = await checkoutRef(
+      cwd,
+      meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
+    )
+      .then(() => true)
+      .catch((rollbackErr) => {
+        log?.warn('branch rollback checkout failed', {
+          error: rollbackErr,
+        });
+        return false;
+      });
+    if (!baseRestored) return;
+    await deleteBranch(cwd, meta.name).catch((rollbackErr) => {
+      log?.warn('branch rollback delete failed', {
+        error: rollbackErr,
+      });
+    });
+  };
+
+  const getTranscriptCursorCodec = (
+    runtime: WorkspaceRuntime,
+  ): SessionTranscriptCursorCodec => {
+    const canonicalCwd = canonicalizeWorkspace(runtime.workspaceCwd);
+    const cacheKey = `${runtime.workspaceId}\0${canonicalCwd}`;
+    const cached = transcriptCursorCodecs.get(cacheKey);
+    if (cached) return cached;
+    const derivedKey = crypto.hkdfSync(
+      'sha256',
+      transcriptCursorMasterKey,
+      Buffer.alloc(0),
+      Buffer.from(cacheKey, 'utf8'),
+      32,
+    );
+    const codec = new SessionTranscriptCursorCodec(new Uint8Array(derivedKey));
+    transcriptCursorCodecs.set(cacheKey, codec);
+    return codec;
+  };
 
   const logSessionRoutingFailure = (
     route: string,
@@ -290,7 +534,7 @@ export function registerSessionRoutes(
     try {
       key = canonicalizeWorkspace(cwd);
     } catch (err) {
-      if (workspaceRegistry.list().length > 1 && 'cwd' in body) {
+      if (workspaceRegistry.listEntries().length > 1 && 'cwd' in body) {
         logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
           requestedWorkspace: cwd,
         });
@@ -300,16 +544,26 @@ export function registerSessionRoutes(
       sendBridgeError(res, err, { route: 'POST /session' });
       return undefined;
     }
-    if (workspaceRegistry.list().length === 1) {
+    if (workspaceRegistry.listEntries().length === 1) {
+      const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+      if (!runtime) return undefined;
       return {
-        runtime: workspaceRegistry.primary,
-        workspaceCwd:
-          'cwd' in body ? key : workspaceRegistry.primary.workspaceCwd,
+        runtime,
+        workspaceCwd: 'cwd' in body ? key : runtime.workspaceCwd,
       };
     }
-    const runtime = workspaceRegistry.resolveWorkspaceCwd(
-      'cwd' in body ? key : undefined,
-    );
+    if (!('cwd' in body)) {
+      const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+      return runtime
+        ? { runtime, workspaceCwd: runtime.workspaceCwd }
+        : undefined;
+    }
+    const entry = workspaceRegistry.getEntryByWorkspaceCwd(key);
+    if (entry && (entry.state !== 'active' || !entry.current)) {
+      sendWorkspaceRuntimeUnavailable(res, entry);
+      return undefined;
+    }
+    const runtime = workspaceRegistry.resolveWorkspaceCwd(key);
     if (!runtime) {
       logSessionRoutingFailure('POST /session', 'workspace_mismatch', {
         requestedWorkspace: key,
@@ -317,6 +571,7 @@ export function registerSessionRoutes(
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       logSessionRoutingFailure('POST /session', 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
@@ -355,6 +610,33 @@ export function registerSessionRoutes(
     const runtime = workspaceRegistry.getByWorkspaceCwd(key);
     if (!runtime) {
       sendWorkspaceMismatch(res, key);
+      return null;
+    }
+    return runtime;
+  };
+
+  const resolveRuntimeForCatalogRoute = (
+    req: Request,
+    res: Response,
+    paramName: 'id' | 'workspace',
+    route: string,
+  ): WorkspaceRuntime | null => {
+    const runtime =
+      paramName === 'workspace'
+        ? resolveWorkspaceRuntimeFromParam(
+            workspaceRegistry,
+            req,
+            res,
+            'workspace',
+          )
+        : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+    if (runtime === null) return null;
+    if (paramName === 'workspace' && runtime.primary && !runtime.trusted) {
+      logSessionRoutingFailure(route, 'untrusted_workspace', {
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+      });
+      sendUntrustedWorkspaceResponse(res);
       return null;
     }
     return runtime;
@@ -404,6 +686,74 @@ export function registerSessionRoutes(
       return null;
     }
     return runtime;
+  };
+
+  const handleSessionExport = async (
+    req: Request,
+    res: Response,
+    target: {
+      route: string;
+      workspaceCwd: string;
+      workspaceQualified?: boolean;
+      archiveState?: SessionArchiveState;
+    },
+  ): Promise<void> => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const rawFormat = req.query['format'];
+    const format = parseSessionExportFormat(rawFormat);
+    if (!format) {
+      res.status(400).json({
+        error: 'Invalid export format',
+        code: 'invalid_export_format',
+        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
+        allowedFormats: sessionExportFormatValues(),
+      });
+      return;
+    }
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          if (target.archiveState === 'archived') {
+            await assertSessionArchived(target.workspaceCwd, sessionId);
+          } else {
+            await assertSessionLoadable(target.workspaceCwd, sessionId);
+          }
+          return exportSessionTranscript({
+            workspaceCwd: target.workspaceCwd,
+            sessionId,
+            format,
+            archiveState: target.archiveState,
+            config: { getChannel: () => 'daemon' },
+          });
+        },
+      );
+      const filename = result.filename.replace(/["\\\r\n]/g, '_');
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Content-Type', result.mimeType)
+        .set('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(result.content);
+    } catch (err) {
+      if (target.workspaceQualified && err instanceof SessionNotFoundError) {
+        res.status(404).json({
+          error: err.message,
+          code: 'session_not_found',
+          sessionId: err.sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, err, {
+        route: target.route,
+        sessionId,
+        ...(target.workspaceQualified
+          ? { workspaceCwd: target.workspaceCwd }
+          : {}),
+      });
+    }
   };
 
   const sendAmbiguousSessionOwner = (
@@ -461,15 +811,15 @@ export function registerSessionRoutes(
   };
   const inFlightRestoreOwners = new Map<
     string,
-    { workspaceCwd: string; count: number }
+    { workspaceId: string; workspaceCwd: string; count: number }
   >();
 
   const sendSessionWorkspaceConflict = (
     res: Response,
     route: string,
     sessionId: string,
-    runtime: WorkspaceRuntime,
-    liveRuntime: WorkspaceRuntime,
+    runtime: Pick<WorkspaceRuntime, 'workspaceCwd' | 'workspaceId'>,
+    liveRuntime: Pick<WorkspaceRuntime, 'workspaceCwd' | 'workspaceId'>,
   ): void => {
     logSessionRoutingFailure(route, 'workspace_conflict', {
       sessionId,
@@ -497,16 +847,7 @@ export function registerSessionRoutes(
   ): (() => void) | undefined => {
     const existing = inFlightRestoreOwners.get(sessionId);
     if (existing && existing.workspaceCwd !== runtime.workspaceCwd) {
-      const existingRuntime =
-        workspaceRegistry.getByWorkspaceCwd(existing.workspaceCwd) ??
-        workspaceRegistry.primary;
-      sendSessionWorkspaceConflict(
-        res,
-        route,
-        sessionId,
-        runtime,
-        existingRuntime,
-      );
+      sendSessionWorkspaceConflict(res, route, sessionId, runtime, existing);
       return undefined;
     }
 
@@ -514,6 +855,7 @@ export function registerSessionRoutes(
       existing.count += 1;
     } else {
       inFlightRestoreOwners.set(sessionId, {
+        workspaceId: runtime.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
         count: 1,
       });
@@ -564,6 +906,7 @@ export function registerSessionRoutes(
       sendWorkspaceMismatch(res, key);
       return undefined;
     }
+    setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
     if (!runtime.primary && !runtime.trusted) {
       logSessionRoutingFailure(route, 'untrusted_workspace', {
         workspaceId: runtime.workspaceId,
@@ -613,12 +956,12 @@ export function registerSessionRoutes(
 
   const sendNonPrimarySessionRouteUnsupported = (
     res: Response,
-    route: string,
+    route: PrimaryOnlyLiveSessionRoute,
     sessionId: string,
     runtime: WorkspaceRuntime,
   ): void => {
     res.status(400).json({
-      error: `Route "${route}" is primary-only for non-primary workspace sessions in Phase 2a.`,
+      error: `Route "${route}" is only available for primary workspace sessions.`,
       code: 'non_primary_session_route_not_supported',
       sessionId,
       workspaceId: runtime.workspaceId,
@@ -644,6 +987,7 @@ export function registerSessionRoutes(
         const runtime = resolveLiveSessionRuntime(sessionId, res, route);
         if (!runtime) return;
         await archiveCoordinator.runSharedMany([sessionId], async () => {
+          runtime.generationGuard?.assertOpen();
           await handler(req, res, sessionId, runtime);
         });
       } catch (err) {
@@ -695,8 +1039,9 @@ export function registerSessionRoutes(
       throw new SessionNotFoundError(sessionId);
     };
 
-    if (workspaceRegistry.list().length === 1) {
-      const runtime = workspaceRegistry.primary;
+    if (workspaceRegistry.listEntries().length === 1) {
+      const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+      if (!runtime) return undefined;
       if (await activeInRuntime(runtime)) {
         return runtime;
       }
@@ -709,6 +1054,7 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (liveOwner.kind === 'found') {
+      setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
       if (
         !assertTrustedSessionOwner(res, route, sessionId, liveOwner.runtime)
       ) {
@@ -758,6 +1104,7 @@ export function registerSessionRoutes(
     }
     if (activeRuntimes.length === 1) {
       const runtime = activeRuntimes[0]!;
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (!assertTrustedSessionOwner(res, route, sessionId, runtime)) {
         return undefined;
       }
@@ -835,32 +1182,46 @@ export function registerSessionRoutes(
     return key;
   };
 
-  const withMutableSession =
-    (
-      route: string,
-      handler: (
-        req: Request,
-        res: Response,
-        sessionId: string,
-      ) => Promise<void> | void,
-    ): RequestHandler =>
-    async (req, res) => {
+  const withPrimaryOnlyMutableSession = (
+    route: string,
+    handler: (
+      req: Request,
+      res: Response,
+      sessionId: string,
+      runtime: WorkspaceRuntime,
+    ) => Promise<void> | void,
+  ): RequestHandler => {
+    if (!isPrimaryOnlyLiveSessionRoute(route)) {
+      throw new Error(`Unregistered primary-only session route: ${route}`);
+    }
+    return async (req, res) => {
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
       const runtime = resolveLiveSessionRuntime(sessionId, res, route);
       if (!runtime) return;
       if (!runtime.primary) {
+        logSessionRoutingFailure(
+          route,
+          'non_primary_session_route_not_supported',
+          {
+            sessionId,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
         sendNonPrimarySessionRouteUnsupported(res, route, sessionId, runtime);
         return;
       }
       try {
         await archiveCoordinator.runSharedMany([sessionId], async () => {
-          await handler(req, res, sessionId);
+          runtime.generationGuard?.assertOpen();
+          await handler(req, res, sessionId, runtime);
         });
       } catch (err) {
         sendBridgeError(res, err, { route, sessionId });
       }
     };
+  };
 
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
@@ -887,8 +1248,296 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
+    const source = parseSessionSource(body['sourceType'], body['sourceId']);
+    if ('error' in source) {
+      res.status(400).json({
+        error: source.error,
+        code: 'invalid_session_source',
+      });
+      return;
+    }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+
+    // ── Branch creation ────────────────────────────────────────────
+    // When `branch` is present, create and checkout a new git branch
+    // before spawning. The session runs in the same working directory
+    // but on the new branch. Mutually exclusive with `worktree`.
+    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchBaseCommit: string | undefined;
+    const rawBranch = body['branch'];
+    if (rawBranch !== undefined && rawBranch !== null) {
+      if (body['worktree'] !== undefined && body['worktree'] !== null) {
+        res.status(400).json({
+          error: '`branch` and `worktree` are mutually exclusive',
+          code: 'branch_and_worktree_conflict',
+        });
+        return;
+      }
+      if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
+        res.status(400).json({
+          error:
+            '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
+          code: 'invalid_branch',
+        });
+        return;
+      }
+      const branchReq = rawBranch as Record<string, unknown>;
+      const branchName = branchReq['name'];
+      if (typeof branchName !== 'string' || branchName.length === 0) {
+        res.status(400).json({
+          error: '`branch.name` must be a non-empty string',
+          code: 'branch_invalid_name',
+        });
+        return;
+      }
+      // Validate git branch name characters and reserved names.
+      // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
+      if (
+        /[^\p{L}\p{N}._/-]/u.test(branchName) ||
+        branchName.includes('..') ||
+        branchName.includes('//') ||
+        branchName.startsWith('.') ||
+        branchName.startsWith('-') ||
+        branchName.startsWith('/') ||
+        branchName.endsWith('/') ||
+        branchName.endsWith('.') ||
+        branchName.endsWith('.git') ||
+        branchName.includes('@{') ||
+        branchName
+          .split('/')
+          .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+        branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
+        Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+        branchName
+          .split('/')
+          .some(
+            (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
+          )
+      ) {
+        res.status(400).json({
+          error: `Invalid branch name: ${branchName}`,
+          code: 'branch_invalid_name',
+        });
+        return;
+      }
+      // Reject when another branch session is already active for this
+      // workspace — concurrent branch sessions conflict on HEAD. Runs after
+      // shape/name validation so a malformed body gets 400, not 409.
+      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
+      if (existingBranchSession) {
+        try {
+          // Throws if the session is gone, letting us clean up the stale entry.
+          runtime.bridge.getSessionSummary(existingBranchSession);
+          res.status(409).json({
+            error: 'A branch session is already active for this workspace',
+            code: 'branch_session_conflict',
+            existingSessionId: existingBranchSession,
+          });
+          return;
+        } catch {
+          activeBranchSessions.delete(workspaceCwd);
+        }
+      }
+      // Reject when any other live (client-attached) non-worktree session
+      // already runs in this workspace. `git checkout -b` moves the shared
+      // HEAD, so a concurrent current-branch session with a clean tree would
+      // be silently relocated onto the new branch and commit to the wrong
+      // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
+      // to sessions with an attached client so a detached session left behind
+      // by a "new chat" does not block a fresh branch session.
+      const sharedCheckoutSession = runtime.bridge
+        .listWorkspaceSessions(workspaceCwd)
+        .find((session) => !session.worktree && session.clientCount > 0);
+      if (sharedCheckoutSession) {
+        res.status(409).json({
+          error:
+            'Another session is already active in this workspace; creating a branch would move its shared checkout',
+          code: 'branch_session_conflict',
+          existingSessionId: sharedCheckoutSession.sessionId,
+        });
+        return;
+      }
+      let wtService: GitWorktreeService;
+      try {
+        wtService = new GitWorktreeService(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to initialize git service',
+          code: 'branch_init_failed',
+        });
+        return;
+      }
+      if (!(await wtService.isGitRepository())) {
+        res.status(400).json({
+          error: 'Branch creation requires a git repository',
+          code: 'branch_not_git_repo',
+        });
+        return;
+      }
+      // Check the branch doesn't already exist.
+      if (await branchExists(workspaceCwd, branchName)) {
+        res.status(409).json({
+          error: `Branch "${branchName}" already exists`,
+          code: 'branch_already_exists',
+        });
+        return;
+      }
+      // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
+      // uncommitted tracked changes onto the new branch, which would silently
+      // mix the user's WIP with a fresh branch. Untracked files are excluded
+      // (`--untracked-files=no`) because they survive any checkout unchanged.
+      let dirty: boolean;
+      try {
+        dirty = await isDirtyTree(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to check working tree status',
+          code: 'branch_status_failed',
+        });
+        return;
+      }
+      if (dirty) {
+        res.status(409).json({
+          error: 'Uncommitted changes detected. Commit or stash first.',
+          code: 'branch_dirty_tree',
+        });
+        return;
+      }
+      const baseCommit = await getHeadCommit(workspaceCwd);
+      const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
+      // Reserve the workspace before mutating HEAD. The conflict guard above
+      // runs before several awaits (rev-parse, status, checkout), so two
+      // concurrent `POST /session { branch }` can both pass it and race on
+      // `git checkout -b`. This synchronous check-and-add (no await between)
+      // serializes the checkout; every exit path below clears the reservation
+      // (transferred to `activeBranchSessions` on success). Re-check
+      // `activeBranchSessions` here too: a request that passed the early guard
+      // before a concurrent request registered can still be in flight while
+      // the first request has already completed and populated the map.
+      if (
+        inFlightBranchWorkspaces.has(workspaceCwd) ||
+        activeBranchSessions.has(workspaceCwd)
+      ) {
+        res.status(409).json({
+          error: 'A branch session is already being created for this workspace',
+          code: 'branch_session_conflict',
+        });
+        return;
+      }
+      inFlightBranchWorkspaces.add(workspaceCwd);
+      try {
+        await createBranch(workspaceCwd, branchName);
+      } catch (checkoutErr) {
+        // `git checkout -b` can reject AFTER git already created the ref and
+        // moved HEAD — a failing post-checkout hook or a timeout past the ref
+        // update both leave the workspace on the new branch while the command
+        // exits nonzero. Roll back transactionally (restore the base ref, then
+        // delete the partial branch) so the shared workspace is never silently
+        // left on the new branch; when nothing was created the rollback is a
+        // harmless no-op. Log the full git error but return a generic detail —
+        // git stderr can embed the absolute workspace path, which must not
+        // reach the caller in the 500 body.
+        daemonLog?.warn('branch checkout failed', {
+          error:
+            checkoutErr instanceof Error
+              ? checkoutErr.message
+              : String(checkoutErr),
+        });
+        await rollbackBranchCreation(
+          workspaceCwd,
+          { name: branchName, baseBranch },
+          baseCommit,
+          daemonLog,
+        );
+        res.status(500).json({
+          error: 'Failed to create branch',
+          code: 'branch_checkout_failed',
+        });
+        return;
+      }
+      branchMeta = { name: branchName, baseBranch };
+      branchBaseCommit = baseCommit;
+      sessionScope = 'thread';
+    }
+
+    // ── Worktree isolation ──────────────────────────────────────────
+    // When `worktree` is present, create a git worktree before spawning
+    // and relocate the session into it immediately after. The workspace
+    // runtime resolution still uses the main workspace cwd; only the
+    // child process's effective working directory changes.
+    let worktreeMeta:
+      | { slug: string; path: string; branch: string }
+      | undefined;
+    const rawWorktree = body['worktree'];
+    if (rawWorktree !== undefined && rawWorktree !== null) {
+      if (typeof rawWorktree !== 'object' || Array.isArray(rawWorktree)) {
+        res.status(400).json({
+          error:
+            '`worktree` must be an object (e.g. `{}` or `{"slug":"my-task"}`)',
+          code: 'invalid_worktree',
+        });
+        return;
+      }
+      const wtReq = rawWorktree as Record<string, unknown>;
+      let wtService: GitWorktreeService;
+      try {
+        wtService = new GitWorktreeService(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to initialize worktree service',
+          code: 'worktree_init_failed',
+        });
+        return;
+      }
+      if (!(await wtService.isGitRepository())) {
+        res.status(400).json({
+          error: 'Worktree isolation requires a git repository',
+          code: 'worktree_not_git_repo',
+        });
+        return;
+      }
+      const rawSlug = wtReq['slug'];
+      let slug: string;
+      if (rawSlug === undefined || rawSlug === null) {
+        slug = GitWorktreeService.generateAutoSlug();
+      } else if (typeof rawSlug !== 'string' || rawSlug.length === 0) {
+        res.status(400).json({
+          error: '`worktree.slug` must be a non-empty string when provided',
+          code: 'worktree_invalid_slug',
+        });
+        return;
+      } else {
+        slug = rawSlug;
+      }
+      const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+      if (slugError) {
+        res
+          .status(400)
+          .json({ error: slugError, code: 'worktree_invalid_slug' });
+        return;
+      }
+      const baseBranch = await wtService
+        .getCurrentBranch()
+        .catch(() => undefined);
+      const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+      if (!wtResult.success || !wtResult.worktree) {
+        res.status(500).json({
+          error: wtResult.error ?? 'Failed to create worktree',
+          code: 'worktree_create_failed',
+        });
+        return;
+      }
+      worktreeMeta = {
+        slug,
+        path: wtResult.worktree.path,
+        branch: wtResult.worktree.branch,
+      };
+      // Worktree sessions must be independent — never coalesce onto an
+      // existing single-scope session that lives in the main checkout.
+      sessionScope = 'thread';
+    }
+
     try {
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
@@ -896,7 +1545,41 @@ export function registerSessionRoutes(
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
+        ...(source.sourceType !== undefined
+          ? { sourceType: source.sourceType }
+          : {}),
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+        ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
+        ...(branchMeta ? { branch: branchMeta } : {}),
       });
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (error) {
+        if (!session.attached) {
+          try {
+            const killed = await runtime.bridge.killSession(session.sessionId, {
+              requireZeroAttaches: true,
+            });
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd).removeSession(
+                session.sessionId,
+              );
+              if (worktreeMeta) {
+                await new GitWorktreeService(workspaceCwd)
+                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .catch(() => {});
+              }
+            }
+          } catch {
+            // Runtime disposal remains responsible for final containment.
+          }
+        } else {
+          await runtime.bridge
+            .detachClient(session.sessionId, session.clientId)
+            .catch(() => {});
+        }
+        throw error;
+      }
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
       // orphaned (in `byId` / `defaultEntry` with no client knowing the
@@ -942,11 +1625,46 @@ export function registerSessionRoutes(
           // dispatching, the bridge will see `attachCount > 0` and
           // skip the kill. Without the flag, that second client's
           // session would die mid-prompt.
-          runtime.bridge
-            .killSession(session.sessionId, { requireZeroAttaches: true })
-            .catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
+          try {
+            const killed = await runtime.bridge.killSession(session.sessionId, {
+              requireZeroAttaches: true,
             });
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd).removeSession(
+                session.sessionId,
+              );
+              // Clean up the worktree if one was created for this session.
+              if (worktreeMeta) {
+                await new GitWorktreeService(workspaceCwd)
+                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .catch(() => {});
+              }
+              // Roll back the branch if one was created for this session.
+              if (branchMeta) {
+                await rollbackBranchCreation(
+                  workspaceCwd,
+                  branchMeta,
+                  branchBaseCommit,
+                  daemonLog,
+                );
+              }
+            } else if (branchMeta) {
+              // Another client attached before we could reap — the session
+              // is alive. Transfer the in-flight reservation to the active
+              // map so the workspace is tracked, not permanently blocked.
+              activeBranchSessions.set(workspaceCwd, session.sessionId);
+              inFlightBranchWorkspaces.delete(workspaceCwd);
+            }
+          } catch {
+            // Best-effort cleanup; channel.exited will eventually reap the
+            // session, but it has no awareness of this route-local in-flight
+            // reservation. Pessimistically track the session so the workspace
+            // stays blocked until the stale-entry detection self-heals.
+            if (branchMeta) {
+              activeBranchSessions.set(workspaceCwd, session.sessionId);
+              inFlightBranchWorkspaces.delete(workspaceCwd);
+            }
+          }
         } else {
           // When an attaching client disconnects
           // before its 200 response can be written, the
@@ -962,11 +1680,122 @@ export function registerSessionRoutes(
             .catch(() => {
               // Best-effort cleanup; channel.exited will eventually reap.
             });
+          // Unreachable for branch sessions (sessionScope='thread' forces a
+          // fresh spawn, never attach), but kept as a safety net: release the
+          // in-flight reservation so the workspace is not permanently blocked.
+          if (branchMeta) {
+            inFlightBranchWorkspaces.delete(workspaceCwd);
+          }
         }
         return;
       }
+
+      // Relocate the freshly spawned session into its worktree. The
+      // cd chains onto the session's promptQueue, so it completes
+      // before any subsequent prompt is processed.
+      if (worktreeMeta) {
+        try {
+          // Compute allowed roots for the sessionCd containment check.
+          // Narrow to <root>/.qwen/worktrees (not the whole repo) so a
+          // symlink .qwen/worktrees/task -> <repo>/src is rejected.
+          const createAllowedRoots = [
+            path.join(workspaceCwd, '.qwen', 'worktrees'),
+          ];
+          let createRepoTop: string | null = null;
+          try {
+            createRepoTop = await new GitWorktreeService(
+              workspaceCwd,
+            ).getRepoTopLevel();
+          } catch {
+            // Not a git repo or getRepoTopLevel unavailable.
+          }
+          if (createRepoTop && createRepoTop !== workspaceCwd) {
+            createAllowedRoots.push(
+              path.join(createRepoTop, '.qwen', 'worktrees'),
+            );
+          }
+          await runtime.bridge.changeSessionCwd(session.sessionId, {
+            path: worktreeMeta.path,
+            allowedRoots: createAllowedRoots,
+          });
+          await writeWorktreeSessionMarker(
+            worktreeMeta.path,
+            session.sessionId,
+          ).catch(() => {});
+          // Write the worktree sidecar so the session list can restore
+          // worktree metadata after a daemon restart.
+          await writeWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(
+              session.sessionId,
+            ),
+            {
+              slug: worktreeMeta.slug,
+              worktreePath: worktreeMeta.path,
+              worktreeBranch: worktreeMeta.branch,
+              originalCwd: workspaceCwd,
+              originalBranch: '',
+              originalHeadCommit: '',
+            },
+          ).catch(() => {});
+        } catch (cdErr) {
+          // cd failed — relocation is transactional: kill the session,
+          // remove the worktree, and return an error. Leaving the session
+          // alive with stale worktree metadata in the bridge entry would
+          // make GET /session/:id/status claim isolation the session
+          // doesn't have.
+          if (daemonLog) {
+            daemonLog.warn('worktree cd failed, rolling back', {
+              sessionId: session.sessionId,
+              error: cdErr instanceof Error ? cdErr.message : String(cdErr),
+            });
+          }
+          const killed = await runtime.bridge
+            .killSession(session.sessionId, { requireZeroAttaches: true })
+            .catch(() => false);
+          if (killed) {
+            await new SessionService(workspaceCwd)
+              .removeSession(session.sessionId)
+              .catch(() => {});
+          }
+          // cd failed so the session never entered the worktree — the
+          // worktree is unused regardless of whether the session was
+          // killed or another client keeps it alive in the main checkout.
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .catch(() => {});
+          res.status(500).json({
+            error: 'Failed to relocate session into worktree',
+            code: 'worktree_relocate_failed',
+          });
+          return;
+        }
+      }
+
+      if (branchMeta) {
+        activeBranchSessions.set(workspaceCwd, session.sessionId);
+        inFlightBranchWorkspaces.delete(workspaceCwd);
+      }
+
       res.status(200).json(session);
     } catch (err) {
+      // Roll back the worktree if spawn failed — otherwise the directory
+      // and branch are orphaned (the agent-* stale cleanup won't collect
+      // user-named worktrees).
+      if (worktreeMeta) {
+        await new GitWorktreeService(workspaceCwd)
+          .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+          .catch(() => {});
+      }
+      // Roll back the branch if spawn failed — switch back to the base
+      // branch and delete the newly created one.
+      if (branchMeta) {
+        await rollbackBranchCreation(
+          workspaceCwd,
+          branchMeta,
+          branchBaseCommit,
+          daemonLog,
+        );
+      }
       sendBridgeError(res, err, { route: 'POST /session' });
     }
   });
@@ -975,6 +1804,55 @@ export function registerSessionRoutes(
     (action: 'load' | 'resume') => async (req: Request, res: Response) => {
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
+      const virtualKey = parseVirtualSubagentSessionId(sessionId);
+      if (virtualKey) {
+        const route = `POST /session/:id/${action}`;
+        if (action !== 'load') {
+          res.status(400).json({
+            error: `Virtual subagent sessions do not support ${action}`,
+            code: 'unsupported_action',
+            sessionId,
+          });
+          return;
+        }
+        if (!virtualSubagentSessions) {
+          res.status(404).json({
+            error: `No session with id "${sessionId}"`,
+            code: 'session_not_found',
+            sessionId,
+          });
+          return;
+        }
+        const runtime = requireSessionRuntime({
+          sessionId: virtualKey.parentSessionId,
+          route,
+          res,
+          workspaceRegistry,
+          daemonLog,
+        });
+        if (!runtime) return;
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const session = await virtualSubagentSessions.load(
+            runtime,
+            sessionId,
+            clientId,
+          );
+          if (!session) {
+            res.status(404).json({
+              error: 'Subagent session not found',
+              code: 'session_not_found',
+              sessionId,
+            });
+            return;
+          }
+          res.status(200).json(session);
+        } catch (err) {
+          sendBridgeError(res, err, { route, sessionId });
+        }
+        return;
+      }
       const body = safeBody(req);
       const route = `POST /session/:id/${action}`;
       let resolvedRuntime:
@@ -1005,6 +1883,12 @@ export function registerSessionRoutes(
         releaseRestoreOwner();
         return;
       }
+      const historyPageSize =
+        action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
+      if (historyPageSize === null) {
+        releaseRestoreOwner();
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) {
         releaseRestoreOwner();
@@ -1018,27 +1902,43 @@ export function registerSessionRoutes(
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
-            const parentSessionId = await new SessionService(
+            const metadata = await new SessionService(
               workspaceCwd,
-            ).readParentSessionId(sessionId);
+            ).readCreationMetadata(sessionId);
+            runtime.generationGuard?.assertOpen();
             return action === 'load'
               ? await runtime.bridge.loadSession({
                   sessionId,
                   workspaceCwd,
                   historyReplay: 'response',
+                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 })
               : await runtime.bridge.resumeSession({
                   sessionId,
                   workspaceCwd,
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                  ...metadata,
                 });
           },
         );
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (!session.attached) {
+            await runtime.bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => {});
+          } else {
+            await runtime.bridge
+              .detachClient(session.sessionId, session.clientId)
+              .catch(() => {});
+          }
+          throw error;
+        }
         if (daemonLog) {
           daemonLog.info(
             `session ${action}${session.attached ? ' (attached)' : ''}`,
@@ -1069,6 +1969,106 @@ export function registerSessionRoutes(
           }
           return;
         }
+        // Restore worktree isolation. Read the sidecar AFTER load/resume
+        // so we inherit the ACP layer's verdict: #restoreWorktreeOnResume
+        // clears the sidecar on dead-worktree / containment-failure paths,
+        // so a post-read naturally skips those cases. On the healthy path
+        // the sidecar is untouched and we relocate + populate the entry.
+        // Note: the !res.writable early-return above skips this restore;
+        // a client that disconnects mid-load leaves the session parked in
+        // the main workspace (pre-existing shape, low frequency).
+        if (!session.worktree) {
+          const sidecar = await readWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
+          ).catch(() => null);
+          if (sidecar) {
+            // Defense-in-depth: resolve symlinks on both the target and
+            // the expected worktrees root, then verify containment. This
+            // defeats both `..` traversal and symlink escapes (e.g.
+            // .qwen/worktrees/escape -> /etc). The allowed root is always
+            // derived from the server (never from the sidecar, which is
+            // attacker-writable). The canonical realTarget is passed to
+            // changeSessionCwd to eliminate the TOCTOU window between
+            // validation and relocation.
+            // For monorepo subdirectory workspaces, worktrees live under
+            // the repo top-level, not the workspace cwd. Try workspaceCwd
+            // first, then fall back to the git repo top-level.
+            let realTarget: string | undefined;
+            const candidateRoots = [
+              path.join(workspaceCwd, '.qwen', 'worktrees'),
+            ];
+            try {
+              realTarget = fs.realpathSync(sidecar.worktreePath);
+              let repoTop: string | null = null;
+              try {
+                repoTop = await new GitWorktreeService(
+                  workspaceCwd,
+                ).getRepoTopLevel();
+              } catch {
+                // Not a git repo or getRepoTopLevel unavailable.
+              }
+              if (repoTop && repoTop !== workspaceCwd) {
+                candidateRoots.push(path.join(repoTop, '.qwen', 'worktrees'));
+              }
+              const contained = candidateRoots.some((root) => {
+                try {
+                  const realRoot = fs.realpathSync(root);
+                  const rel = path.relative(realRoot, realTarget!);
+                  return !rel.startsWith('..') && !path.isAbsolute(rel);
+                } catch {
+                  return false;
+                }
+              });
+              if (!contained) {
+                realTarget = undefined;
+              }
+            } catch {
+              realTarget = undefined;
+            }
+            if (!realTarget) {
+              daemonLog?.warn('worktree sidecar path failed containment', {
+                sessionId,
+                path: sidecar.worktreePath,
+              });
+            } else {
+              const wt = {
+                slug: sidecar.slug,
+                path: realTarget,
+                branch: sidecar.worktreeBranch,
+              };
+              try {
+                // changeSessionCwd chains onto the prompt queue and
+                // blocks until any in-flight prompt finishes. When the
+                // session is actively running a task this would stall the
+                // HTTP response (bounded by the ~30s changeSessionCwd
+                // timeout), making the session unopenable in the Web
+                // Shell. Skip the cwd relocation in that case.
+                // Invariant: hasActivePrompt implies a live bridge entry
+                // that was relocated into the worktree cwd at creation
+                // (before any prompt could run), so relocation is
+                // unnecessary. A cold-restored session cannot have an
+                // in-flight prompt.
+                if (!session.hasActivePrompt) {
+                  await runtime.bridge.changeSessionCwd(sessionId, {
+                    path: wt.path,
+                    allowedRoots: candidateRoots,
+                  });
+                }
+                runtime.bridge.setSessionWorktree(sessionId, wt);
+                session.worktree = wt;
+              } catch (restoreErr) {
+                daemonLog?.warn('worktree restore failed on load/resume', {
+                  sessionId,
+                  worktreePath: wt.path,
+                  error:
+                    restoreErr instanceof Error
+                      ? restoreErr.message
+                      : String(restoreErr),
+                });
+              }
+            }
+          }
+        }
         res.status(200).json(session);
       } catch (err) {
         sendBridgeError(res, err, {
@@ -1083,12 +2083,122 @@ export function registerSessionRoutes(
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
 
+  app.get('/session/:id/subagents/:toolCallId', async (req, res) => {
+    const route = 'GET /session/:id/subagents/:toolCallId';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (!virtualSubagentSessions) {
+      res.status(404).json({
+        error: `No session with id "${sessionId}"`,
+        code: 'session_not_found',
+        sessionId,
+      });
+      return;
+    }
+    const toolCallId = req.params['toolCallId'];
+    if (!toolCallId || toolCallId.length > 500) {
+      res.status(400).json({
+        error: '`toolCallId` must be a non-empty tool call id',
+        code: 'invalid_tool_call_id',
+      });
+      return;
+    }
+    const runtime = requireSessionRuntime({
+      sessionId,
+      route,
+      res,
+      workspaceRegistry,
+      daemonLog,
+    });
+    if (!runtime) return;
+    try {
+      const resolved = await virtualSubagentSessions.resolve(
+        runtime,
+        sessionId,
+        toolCallId,
+      );
+      if (!resolved) {
+        res.status(404).json({
+          error: 'Subagent session not found',
+          code: 'session_not_found',
+          sessionId,
+          toolCallId,
+        });
+        return;
+      }
+      res.status(200).set('Cache-Control', 'no-store').json(resolved);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
+  app.post(
+    '/session/:id/subagents/:toolCallId/cancel',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /session/:id/subagents/:toolCallId/cancel';
+      const sessionId = requireSessionId(req, res);
+      if (!sessionId) return;
+      if (!virtualSubagentSessions) {
+        res.status(404).json({
+          error: `No session with id "${sessionId}"`,
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
+      const toolCallId = req.params['toolCallId'];
+      if (!toolCallId || toolCallId.length > 500) {
+        res.status(400).json({
+          error: '`toolCallId` must be a non-empty tool call id',
+          code: 'invalid_tool_call_id',
+        });
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      try {
+        const resolved = await virtualSubagentSessions.resolve(
+          runtime,
+          sessionId,
+          toolCallId,
+        );
+        if (!resolved) {
+          res.status(404).json({
+            error: 'Subagent session not found',
+            code: 'session_not_found',
+            sessionId,
+            toolCallId,
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.cancelSessionTask(
+              sessionId,
+              resolved.taskId,
+              'agent',
+            ),
+          );
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    },
+  );
+
   app.post(
     '/session/:id/branch',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/branch',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         let name =
           typeof body?.['name'] === 'string' ? body['name'] : undefined;
@@ -1101,22 +2211,43 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = await bridge.branchSession(
+        const result = await runtime.bridge.branchSession(
           sessionId,
           { name },
           { clientId },
         );
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (!result.attached) {
+            const killed = await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd)
+                .removeSession(result.sessionId)
+                .catch(() => {});
+            }
+          } else {
+            await runtime.bridge
+              .detachClient(result.sessionId, result.clientId)
+              .catch(() => {});
+          }
+          throw error;
+        }
         if (!res.writable) {
           if (!result.attached) {
-            bridge
+            runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })
               .catch(() => {
                 // Best-effort cleanup; channel.exited will eventually reap.
               });
           } else {
-            bridge.detachClient(result.sessionId, result.clientId).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
+            runtime.bridge
+              .detachClient(result.sessionId, result.clientId)
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
           }
           return;
         }
@@ -1128,9 +2259,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/fork',
     mutate(),
-    withMutableSession(
+    withPrimaryOnlyMutableSession(
       'POST /session/:id/fork',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const directive = body['directive'];
         if (typeof directive !== 'string' || directive.trim().length === 0) {
@@ -1142,11 +2273,21 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = await bridge.launchSessionForkAgent(
+        const result = await runtime.bridge.launchSessionForkAgent(
           sessionId,
           directive,
           clientId !== undefined ? { clientId } : undefined,
         );
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (result.launched) {
+            await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => {});
+          }
+          throw error;
+        }
         res.status(202).json(result);
       },
     ),
@@ -1155,29 +2296,34 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withMutableSession('POST /session/:id/cd', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const targetPath = body['path'];
-      if (
-        typeof targetPath !== 'string' ||
-        targetPath.length === 0 ||
-        !path.isAbsolute(targetPath)
-      ) {
-        res.status(400).json({
-          error: '`path` is required and must be an absolute path',
-          code: 'invalid_path',
-        });
-        return;
-      }
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const result = await bridge.changeSessionCwd(
-        sessionId,
-        { path: targetPath },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json(result);
-    }),
+    withPrimaryOnlyMutableSession(
+      'POST /session/:id/cd',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const targetPath = body['path'];
+        if (
+          typeof targetPath !== 'string' ||
+          targetPath.length === 0 ||
+          !path.isAbsolute(targetPath)
+        ) {
+          res.status(400).json({
+            error: '`path` is required and must be an absolute path',
+            code: 'invalid_path',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        runtime.generationGuard?.assertOpen();
+        const result = await runtime.bridge.changeSessionCwd(
+          sessionId,
+          { path: targetPath },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(result);
+      },
+    ),
   );
 
   app.get('/session/:id/status', (req, res) => {
@@ -1200,47 +2346,37 @@ export function registerSessionRoutes(
   });
 
   app.get('/session/:id/export', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const rawFormat = req.query['format'];
-    const format = parseSessionExportFormat(rawFormat);
-    if (!format) {
-      res.status(400).json({
-        error: 'Invalid export format',
-        code: 'invalid_export_format',
-        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
-        allowedFormats: sessionExportFormatValues(),
-      });
-      return;
-    }
-    try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
-          await assertSessionLoadable(boundWorkspace, sessionId);
-          return exportSessionTranscript({
-            workspaceCwd: boundWorkspace,
-            sessionId,
-            format,
-            config: { getChannel: () => 'daemon' },
-          });
-        },
-      );
-      const filename = result.filename.replace(/["\\\r\n]/g, '_');
-      res
-        .status(200)
-        .set('Cache-Control', 'no-store')
-        .set('X-Content-Type-Options', 'nosniff')
-        .set('Content-Type', result.mimeType)
-        .set('Content-Disposition', `attachment; filename="${filename}"`)
-        .send(result.content);
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/export',
-        sessionId,
-      });
-    }
+    await handleSessionExport(req, res, {
+      route: 'GET /session/:id/export',
+      workspaceCwd: boundWorkspace,
+    });
   });
+
+  app.get('/workspaces/:workspace/session/:id/export', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/export';
+    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    if (!runtime) return;
+    await handleSessionExport(req, res, {
+      route,
+      workspaceCwd: runtime.workspaceCwd,
+      workspaceQualified: true,
+    });
+  });
+
+  app.get(
+    '/workspaces/:workspace/session/:id/archive/export',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/session/:id/archive/export';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionExport(req, res, {
+        route,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceQualified: true,
+        archiveState: 'archived',
+      });
+    },
+  );
 
   app.get('/session/:id/transcript', async (req, res) => {
     const route = 'GET /session/:id/transcript';
@@ -1250,6 +2386,18 @@ export function registerSessionRoutes(
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
     if (cursor === null) return;
+    const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+      req.query['beforeRecordId'],
+      res,
+    );
+    if (beforeRecordId === null) return;
+    if (cursor !== undefined && beforeRecordId !== undefined) {
+      res.status(400).json({
+        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
 
     try {
       const result = await archiveCoordinator.runSharedMany(
@@ -1266,6 +2414,7 @@ export function registerSessionRoutes(
             sessionId,
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
+            ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           });
         },
       );
@@ -1279,8 +2428,161 @@ export function registerSessionRoutes(
     }
   });
 
+  app.get('/workspaces/:workspace/session/:id/transcript', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/transcript';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    if (!runtime.trusted && runtime.primary) {
+      sendUntrustedWorkspaceResponse(res, {
+        sessionId,
+        workspaceCwd: runtime.workspaceCwd,
+        workspaceId: runtime.workspaceId,
+      });
+      return;
+    }
+    const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+    if (limit === null) return;
+    const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
+    if (cursor === null) return;
+    const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+      req.query['beforeRecordId'],
+      res,
+    );
+    if (beforeRecordId === null) return;
+    if (cursor !== undefined && beforeRecordId !== undefined) {
+      res.status(400).json({
+        error: '`cursor` and `beforeRecordId` are mutually exclusive',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+    if (cursor !== undefined && workspaceTranscriptCursorExceedsLimit(cursor)) {
+      res.status(400).json({
+        error: '`cursor` exceeds the maximum size',
+        code: 'invalid_transcript_cursor',
+      });
+      return;
+    }
+
+    try {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const service = new SessionService(runtime.workspaceCwd);
+          if (cursor === undefined) {
+            await assertSessionLoadable(runtime.workspaceCwd, sessionId);
+          }
+          const codec = getTranscriptCursorCodec(runtime);
+          const reader = new SessionTranscriptReader(
+            runtime.workspaceCwd,
+            codec,
+          );
+          let page;
+          try {
+            page = await reader.readPage(sessionId, {
+              ...(limit !== undefined ? { limit } : {}),
+              ...(cursor !== undefined ? { cursor } : {}),
+              ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
+              maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+            });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+              throw error;
+            }
+            if (cursor !== undefined) {
+              throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+            }
+            const location = await service.getSessionLocation(sessionId);
+            if (location === 'archived') {
+              throw new SessionArchivedError(sessionId);
+            }
+            if (location === 'conflict') {
+              throw new SessionConflictError(sessionId);
+            }
+            throw new SessionNotFoundError(sessionId);
+          }
+          if (page.records.some((record) => record.sessionId !== sessionId)) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          const replay = await replayTranscriptRecordPage({
+            sessionId,
+            page,
+            encodeCursor: (state) => codec.encode(state),
+          });
+          const cursorTooLarge =
+            replay.nextCursor !== undefined &&
+            Buffer.byteLength(replay.nextCursor) >
+              WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES;
+          return {
+            v: 1 as const,
+            sessionId,
+            events: replay.updates.map((update) => ({
+              v: 1 as const,
+              type: 'session_update' as const,
+              data: update,
+            })),
+            ...(replay.nextCursor && !cursorTooLarge
+              ? { nextCursor: replay.nextCursor }
+              : {}),
+            hasMore: cursorTooLarge ? false : replay.hasMore,
+            startTime: replay.startTime,
+            lastUpdated: replay.lastUpdated,
+            ...(replay.partial || cursorTooLarge
+              ? {
+                  partial: true as const,
+                  replayError: cursorTooLarge
+                    ? TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR
+                    : replay.replayError,
+                }
+              : {}),
+          };
+        }),
+      );
+      const serialized = serializeWorkspaceTranscriptResponse(
+        result,
+        sessionId,
+      );
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serialized);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
   app.get(
     '/session/:id/context',
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'GET /session/:id/context',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      res.status(200).json({
+        v: 1,
+        sessionId,
+        workspaceCwd: runtime.workspaceCwd,
+        state: {},
+      });
+    },
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
@@ -1319,6 +2621,30 @@ export function registerSessionRoutes(
 
   app.get(
     '/session/:id/supported-commands',
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'GET /session/:id/supported-commands',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      res.status(200).json({
+        v: 1,
+        sessionId,
+        availableCommands: [],
+        availableSkills: [],
+      });
+    },
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
@@ -1390,9 +2716,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/artifacts',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/artifacts',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         if (!requireSessionArtifactClientId(clientId, res)) return;
@@ -1418,9 +2744,11 @@ export function registerSessionRoutes(
               'clientRetained'
             ] as SessionArtifactInput['clientRetained'],
           };
-          const result = await bridge.addSessionArtifact(sessionId, artifact, {
-            clientId,
-          });
+          const result = await runtime.bridge.addSessionArtifact(
+            sessionId,
+            artifact,
+            { clientId },
+          );
           res.status(200).json(result);
         } catch (err) {
           if (sendArtifactValidationError(res, err)) return;
@@ -1436,9 +2764,9 @@ export function registerSessionRoutes(
   app.delete(
     '/session/:id/artifacts/:artifactId',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'DELETE /session/:id/artifacts/:artifactId',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -1455,7 +2783,7 @@ export function registerSessionRoutes(
           return;
         }
         try {
-          const result = await bridge.removeSessionArtifact(
+          const result = await runtime.bridge.removeSessionArtifact(
             sessionId,
             artifactId,
             { clientId },
@@ -1475,9 +2803,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/tasks/:taskId/cancel',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/tasks/:taskId/cancel',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const taskId = req.params['taskId'];
         if (!taskId) {
           res.status(400).json({
@@ -1495,7 +2823,9 @@ export function registerSessionRoutes(
         }
         res
           .status(200)
-          .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
+          .json(
+            await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+          );
       },
     ),
   );
@@ -1503,10 +2833,10 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/goal/clear',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/goal/clear',
-      async (_req, res, sessionId) => {
-        res.status(200).json(await bridge.clearSessionGoal(sessionId));
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.clearSessionGoal(sessionId));
       },
     ),
   );
@@ -1514,9 +2844,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/continue',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/continue',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Forward the originator and a generated promptId so the bridge can
         // attribute and correlate the continuation turn (it now runs through the
         // prompt-admission path, same as POST /session/:id/prompt). The accepted
@@ -1525,7 +2855,7 @@ export function registerSessionRoutes(
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
         res.status(200).json(
-          await bridge.continueSession(sessionId, {
+          await runtime.bridge.continueSession(sessionId, {
             ...(clientId !== undefined ? { clientId } : {}),
             promptId,
           }),
@@ -1581,11 +2911,37 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
+        let delivery: ReturnType<typeof parseChannelDelivery> | undefined;
+        if (body['delivery'] !== undefined) {
+          try {
+            delivery = parseChannelDelivery(body['delivery']);
+          } catch (err) {
+            if (!isChannelDeliveryError(err)) throw err;
+            res.status(400).json({ error: err.message, code: err.code });
+            return;
+          }
+        }
+
         const promptId = crypto.randomUUID();
+        if (delivery && deps.channelDeliveryAuthorizations) {
+          deps.channelDeliveryAuthorizations.authorizePrompt(
+            runtime.workspaceCwd,
+            {
+              sessionId,
+              deliveryId: promptId,
+              target: delivery.target,
+            },
+          );
+        }
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
+        delete forwardedBody['delivery'];
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
+        // Epoch token paired with the cursor above: a client that seeds its
+        // SSE resume position from this 202 must also learn the bus epoch so
+        // a daemon restart in between is detected (DAEMON-001).
+        const eventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
@@ -1599,19 +2955,16 @@ export function registerSessionRoutes(
         };
         res.once('close', onResClose);
         res.once('finish', onResFinish);
+        // The effective deadline (server cap ∩ request override) is passed
+        // to the bridge, which owns the deadline race: it publishes the
+        // formal `turn_error{code:'prompt_deadline_exceeded'}` terminal,
+        // releases the per-session FIFO, and best-effort cancels the agent.
+        // A route-side timer can't do any of that — it could only abort
+        // this request's signal.
         const effectiveDeadlineMs = resolvePromptDeadlineMs(
           promptDeadlineMs,
           requestDeadlineMs,
         );
-        let deadlineTimer: NodeJS.Timeout | undefined;
-        if (effectiveDeadlineMs !== undefined) {
-          deadlineTimer = setTimeout(() => {
-            if (!abort.signal.aborted) {
-              abort.abort(new PromptDeadlineExceededError(effectiveDeadlineMs));
-            }
-          }, effectiveDeadlineMs);
-          deadlineTimer.unref();
-        }
 
         let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
         try {
@@ -1626,10 +2979,25 @@ export function registerSessionRoutes(
             {
               ...(clientId !== undefined ? { clientId } : {}),
               promptId,
+              ...(effectiveDeadlineMs !== undefined
+                ? { deadlineMs: effectiveDeadlineMs }
+                : {}),
+              ...(delivery !== undefined
+                ? {
+                    channelDelivery: {
+                      deliveryId: promptId,
+                      target: delivery.target,
+                    },
+                  }
+                : {}),
             },
           );
         } catch (err) {
-          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+          deps.channelDeliveryAuthorizations?.revokePrompt(
+            runtime.workspaceCwd,
+            sessionId,
+            promptId,
+          );
           res.off('close', onResClose);
           res.off('finish', onResFinish);
           if (daemonLog && err instanceof PromptQueueFullError) {
@@ -1678,14 +3046,115 @@ export function registerSessionRoutes(
             },
           )
           .finally(() => {
-            if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+            if (delivery && deps.channelDeliveryAuthorizations) {
+              const revokeTimer = setTimeout(() => {
+                deps.channelDeliveryAuthorizations?.revokePrompt(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  promptId,
+                );
+              }, CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS);
+              revokeTimer.unref();
+            }
           })
           .catch(() => {});
 
         if (daemonLog) {
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
-        res.status(202).json({ promptId, lastEventId });
+        res.status(202).json({ promptId, lastEventId, eventEpoch });
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/generate',
+    mutate(),
+    withOwnerReadSession(
+      'POST /session/:id/generate',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+        ) {
+          res.status(400).json({
+            error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
+            code: 'invalid_prompt',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!runtime.bridge.generateSessionContent) {
+          res.status(501).json({
+            error: 'Stateless generation is not supported by this bridge',
+            code: 'generation_not_supported',
+          });
+          return;
+        }
+
+        const abort = new AbortController();
+        let completed = false;
+        const onClose = () => {
+          if (!completed) abort.abort();
+        };
+        res.once('close', onClose);
+
+        const stream = runtime.bridge.generateSessionContent(
+          sessionId,
+          prompt,
+          abort.signal,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        let writeChain = Promise.resolve();
+        const write = (chunk: string): Promise<void> => {
+          writeChain = writeChain.then(() =>
+            writeGenerationSseChunk(res, chunk),
+          );
+          return writeChain;
+        };
+        await write(': connected\n\n');
+        const heartbeat = setInterval(() => {
+          void write(': heartbeat\n\n').catch(() => abort.abort());
+        }, GENERATION_HEARTBEAT_MS);
+        heartbeat.unref();
+
+        try {
+          for await (const event of stream) {
+            await write(formatGenerationSse(event.type, event));
+          }
+        } catch (err) {
+          if (!abort.signal.aborted && !res.destroyed) {
+            daemonLog?.error(
+              'session generation failed',
+              err instanceof Error ? err : new Error(String(err)),
+              { sessionId, clientId },
+            );
+            await write(
+              formatGenerationSse('error', {
+                type: 'error',
+                code: 'generation_failed',
+                message: 'Generation failed',
+              }),
+            ).catch(() => undefined);
+          }
+        } finally {
+          completed = true;
+          clearInterval(heartbeat);
+          res.off('close', onClose);
+          if (!res.destroyed) res.end();
+        }
       },
     ),
   );
@@ -1693,6 +3162,31 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/heartbeat',
     mutate(),
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'POST /session/:id/heartbeat',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      res.status(200).json({
+        sessionId,
+        ...(clientId ? { clientId } : {}),
+        lastSeenAt: Date.now(),
+      });
+    },
     withOwnerMutableSession(
       'POST /session/:id/heartbeat',
       (req, res, sessionId, runtime) => {
@@ -1710,6 +3204,27 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/detach',
     mutate(),
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'POST /session/:id/detach',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      res.status(204).end();
+    },
     withOwnerMutableSession(
       'POST /session/:id/detach',
       async (req, res, sessionId, runtime) => {
@@ -1765,6 +3280,7 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         ),
       );
+      clearBranchSessionEntry(sessionId);
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1792,6 +3308,9 @@ export function registerSessionRoutes(
           );
         },
       });
+      for (const removedId of result.removed) {
+        clearBranchSessionEntry(removedId);
+      }
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
@@ -1873,6 +3392,9 @@ export function registerSessionRoutes(
             );
           },
         });
+        for (const removedId of result.removed) {
+          clearBranchSessionEntry(removedId);
+        }
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route });
@@ -1944,45 +3466,61 @@ export function registerSessionRoutes(
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
-    withMutableSession('PATCH /session/:id/metadata', (req, res, sessionId) => {
-      const body = safeBody(req);
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
-      const rawDisplayName = body['displayName'];
-      if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
-        res.status(400).json({
-          error: '`displayName` must be a string',
-          code: 'invalid_metadata',
-          field: 'displayName',
-        });
-        return;
-      }
-      const displayName =
-        typeof rawDisplayName === 'string'
-          ? rawDisplayName.slice(0, 256)
-          : undefined;
-      const effective = bridge.updateSessionMetadata(
-        sessionId,
-        { displayName },
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      res.status(200).json({ sessionId, ...effective });
-    }),
+    withOwnerMutableSession(
+      'PATCH /session/:id/metadata',
+      (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const rawDisplayName = body['displayName'];
+        if (
+          rawDisplayName !== undefined &&
+          typeof rawDisplayName !== 'string'
+        ) {
+          res.status(400).json({
+            error: '`displayName` must be a string',
+            code: 'invalid_metadata',
+            field: 'displayName',
+          });
+          return;
+        }
+        const displayName =
+          typeof rawDisplayName === 'string'
+            ? rawDisplayName.slice(0, 256)
+            : undefined;
+        const effective = runtime.bridge.updateSessionMetadata(
+          sessionId,
+          { displayName },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ sessionId, ...effective });
+      },
+    ),
   );
 
-  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+  type SessionOrganizationTarget = {
+    workspaceCwd: string;
+    bridge: AcpSessionBridge;
+    route: string;
+  };
+
+  const handleSessionOrganizationUpdate = async (
+    req: Request,
+    res: Response,
+    target: SessionOrganizationTarget,
+  ): Promise<void> => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
     try {
       await archiveCoordinator.runSharedMany([sessionId], async () => {
         // Organization is workspace-scoped sidecar state, not live-session
         // metadata. It intentionally applies to persisted and archived sessions.
-        const sessionService = new SessionService(boundWorkspace);
+        const sessionService = new SessionService(target.workspaceCwd);
         let exists = await sessionService.sessionExistsInAnyState(sessionId);
         if (!exists) {
           try {
-            const summary = bridge.getSessionSummary(sessionId);
-            exists = summary.workspaceCwd === boundWorkspace;
+            const summary = target.bridge.getSessionSummary(sessionId);
+            exists = summary.workspaceCwd === target.workspaceCwd;
           } catch {
             exists = false;
           }
@@ -2023,7 +3561,7 @@ export function registerSessionRoutes(
           rawColor !== undefined &&
           rawColor !== null &&
           (typeof rawColor !== 'string' ||
-            !GROUP_COLOR_OPTIONS.includes(rawColor as SessionGroupColor))
+            !GROUP_COLOR_OPTIONS.includes(rawColor as SessionGroupPresetColor))
         ) {
           res.status(400).json({
             error: '`color` must be a supported color or null',
@@ -2034,14 +3572,14 @@ export function registerSessionRoutes(
         }
 
         const organization = await createSessionOrganizationService(
-          boundWorkspace,
+          target.workspaceCwd,
         ).updateSessionOrganization(sessionId, {
           ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
           ...(rawGroupId !== undefined
             ? { groupId: rawGroupId as string | null }
             : {}),
           ...(rawColor !== undefined
-            ? { color: rawColor as SessionGroupColor | null }
+            ? { color: rawColor as SessionGroupPresetColor | null }
             : {}),
         });
         res.status(200).json({ sessionId, ...organization });
@@ -2049,19 +3587,49 @@ export function registerSessionRoutes(
     } catch (err) {
       if (sendSessionOrganizationError(res, err)) return;
       sendBridgeError(res, err, {
-        route: 'PATCH /session/:id/organization',
+        route: target.route,
         sessionId,
+        workspaceCwd: target.workspaceCwd,
       });
     }
+  };
+
+  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+    await handleSessionOrganizationUpdate(req, res, {
+      workspaceCwd: boundWorkspace,
+      bridge,
+      route: 'PATCH /session/:id/organization',
+    });
   });
 
+  app.patch(
+    '/workspaces/:workspace/session/:id/organization',
+    mutate(),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session/:id/organization';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      await handleSessionOrganizationUpdate(req, res, {
+        workspaceCwd: runtime.workspaceCwd,
+        bridge: runtime.bridge,
+        route,
+      });
+    },
+  );
+
   app.get('/workspace/:id/session-groups', async (req, res) => {
-    const key = resolveWorkspaceParam(req, res);
-    if (key === null) return;
+    // Preserve the legacy singular-route behavior for an untrusted primary;
+    // plural catalog routes intentionally retain their trust gate.
+    const runtime = resolveRuntimeFromWorkspaceParam(req, res);
+    if (runtime === null) return;
     try {
       res
         .status(200)
-        .json(await createSessionOrganizationService(key).listGroups());
+        .json(
+          await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /workspace/:id/session-groups',
@@ -2141,15 +3709,15 @@ export function registerSessionRoutes(
 
   app.get('/workspaces/:workspace/session-groups', async (req, res) => {
     const route = 'GET /workspaces/:workspace/session-groups';
-    const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+    const runtime = resolveRuntimeForCatalogRoute(req, res, 'workspace', route);
     if (!runtime) return;
     try {
       res
         .status(200)
         .json(
-          await createSessionOrganizationService(
-            runtime.workspaceCwd,
-          ).listGroups(),
+          await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+            createSessionOrganizationService(runtime.workspaceCwd).listGroups(),
+          ),
         );
     } catch (err) {
       sendBridgeError(res, err, { route });
@@ -2229,7 +3797,7 @@ export function registerSessionRoutes(
   );
 
   const listWorkspaceSessionsHandler =
-    (paramName: string): RequestHandler =>
+    (paramName: 'id' | 'workspace'): RequestHandler =>
     async (req, res) => {
       const route =
         paramName === 'workspace'
@@ -2238,29 +3806,10 @@ export function registerSessionRoutes(
       // Express decodes URL-encoded path params automatically; clients pass
       // the absolute workspace cwd encoded (e.g.
       // GET /workspace/%2Fwork%2Fa/sessions).
-      const runtime =
-        paramName === 'workspace'
-          ? resolveWorkspaceRuntimeFromParam(
-              workspaceRegistry,
-              req,
-              res,
-              'workspace',
-            )
-          : resolveRuntimeFromWorkspaceParam(req, res, paramName);
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
       if (runtime === null) return;
-      if (
-        paramName === 'workspace'
-          ? !runtime.trusted
-          : !runtime.primary && !runtime.trusted
-      ) {
-        logSessionRoutingFailure(route, 'untrusted_workspace', {
-          workspaceId: runtime.workspaceId,
-          workspaceCwd: runtime.workspaceCwd,
-        });
-        sendUntrustedWorkspaceResponse(res);
-        return;
-      }
       const key = runtime.workspaceCwd;
+      const readOnlySecondary = isReadOnlyWorkspaceInspection(runtime);
       try {
         const cursor =
           typeof req.query['cursor'] === 'string'
@@ -2327,6 +3876,17 @@ export function registerSessionRoutes(
           }
           parentSessionId = rawParentSessionId;
         }
+        const parsedSource = parseSessionSource(
+          req.query['sourceType'],
+          req.query['sourceId'],
+        );
+        if ('error' in parsedSource) {
+          res.status(400).json({
+            error: parsedSource.error,
+            code: 'invalid_session_source',
+          });
+          return;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -2334,18 +3894,21 @@ export function registerSessionRoutes(
           ...(view !== undefined ? { view } : {}),
           ...(group !== undefined ? { group } : {}),
           ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+          ...parsedSource,
         };
         // Organized/archived views always need the persisted store: organized
         // cursors are opaque (non-numeric) and archived-only workspaces have no
         // active persisted sessions, so the live-only fallback would drop them.
-        // A parentSessionId filter joins them: it gathers the whole workspace
+        // Metadata filters gather the whole workspace
         // (persisted + live) to filter completely and paginates with an opaque
         // activity cursor, so the numeric-cursor live fallback can't serve it.
         const usePersisted =
+          readOnlySecondary ||
           runtime.primary ||
           view === 'organized' ||
           archiveState === 'archived' ||
           parentSessionId !== undefined ||
+          parsedSource.sourceType !== undefined ||
           (cursor !== undefined && cursor !== ''
             ? isNumericSessionCursor(cursor)
             : await hasActivePersistedSessions(key));
@@ -2355,14 +3918,21 @@ export function registerSessionRoutes(
         // a future option added to validation but not to that gate fails loudly.
         if (
           !usePersisted &&
-          (view !== undefined || archiveState === 'archived')
+          (view !== undefined ||
+            archiveState === 'archived' ||
+            parentSessionId !== undefined ||
+            parsedSource.sourceType !== undefined)
         ) {
           throw new Error(
             'session list live path received persisted-only options',
           );
         }
         const result = usePersisted
-          ? await listWorkspaceSessionsForResponse(runtime.bridge, key, options)
+          ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+              listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
+                mergeLive: !readOnlySecondary,
+              }),
+            )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
         res.status(200).json({
           sessions: result.sessions,
@@ -2407,12 +3977,49 @@ export function registerSessionRoutes(
     listWorkspaceSessionsHandler('workspace'),
   );
 
+  const workspaceSessionInfoHandler =
+    (paramName: 'id' | 'workspace'): RequestHandler =>
+    async (req, res) => {
+      const route =
+        paramName === 'workspace'
+          ? 'GET /workspaces/:workspace/session-info'
+          : 'GET /workspace/:id/session-info';
+      const runtime = resolveRuntimeForCatalogRoute(req, res, paramName, route);
+      if (runtime === null) return;
+      const key = runtime.workspaceCwd;
+      try {
+        // Disk-scan aggregate: do not call this from hot paths / UI polls.
+        const info = await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+          getWorkspaceSessionInfoForResponse(runtime.bridge, key, {
+            includeLive: !isReadOnlyWorkspaceInspection(runtime),
+          }),
+        );
+        res.status(200).json(info);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to read session-info for workspace ${safeLogValue(
+            key,
+          )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+        );
+        res.status(500).json({
+          error: 'Failed to read session info',
+          code: 'session_info_failed',
+        });
+      }
+    };
+
+  app.get('/workspace/:id/session-info', workspaceSessionInfoHandler('id'));
+  app.get(
+    '/workspaces/:workspace/session-info',
+    workspaceSessionInfoHandler('workspace'),
+  );
+
   app.post(
     '/session/:id/model',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/model',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const modelId = body['modelId'];
         if (typeof modelId !== 'string' || !modelId) {
@@ -2423,7 +4030,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.setSessionModel(
+        const response = await runtime.bridge.setSessionModel(
           sessionId,
           {
             ...(body as object),
@@ -2440,16 +4047,16 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/recap',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/recap',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Wraps `generateSessionRecap` so daemon clients can fetch a
         // one-sentence "where did I leave off" summary without a full
         // prompt turn. Best-effort — `recap: null` on short history or
         // transient model failure is a normal 200, not an error.
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.generateSessionRecap(
+        const response = await runtime.bridge.generateSessionRecap(
           sessionId,
           clientId !== undefined ? { clientId } : undefined,
         );
@@ -2470,53 +4077,56 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/btw',
     mutate(),
-    withMutableSession('POST /session/:id/btw', async (req, res, sessionId) => {
-      const body = safeBody(req);
-      const question = body['question'];
-      if (
-        typeof question !== 'string' ||
-        question.trim().length === 0 ||
-        question.length > BTW_MAX_INPUT_LENGTH
-      ) {
-        res.status(400).json({
-          error: `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
-        });
-        return;
-      }
-      const abort = new AbortController();
-      const onResClose = () => {
-        if (!res.writableEnded) abort.abort();
-      };
-      res.once('close', onResClose);
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) {
-        res.off('close', onResClose);
-        return;
-      }
-      try {
-        const result = await bridge.generateSessionBtw(
-          sessionId,
-          question.trim(),
-          abort.signal,
-          clientId !== undefined ? { clientId } : undefined,
-        );
-        res.status(200).json(result);
-      } catch (err) {
+    withOwnerMutableSession(
+      'POST /session/:id/btw',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const question = body['question'];
         if (
-          err instanceof DOMException &&
-          err.name === 'AbortError' &&
-          abort.signal.aborted
+          typeof question !== 'string' ||
+          question.trim().length === 0 ||
+          question.length > BTW_MAX_INPUT_LENGTH
         ) {
+          res.status(400).json({
+            error: `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
+          });
           return;
         }
-        sendBridgeError(res, err, {
-          route: 'POST /session/:id/btw',
-          sessionId,
-        });
-      } finally {
-        res.off('close', onResClose);
-      }
-    }),
+        const abort = new AbortController();
+        const onResClose = () => {
+          if (!res.writableEnded) abort.abort();
+        };
+        res.once('close', onResClose);
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) {
+          res.off('close', onResClose);
+          return;
+        }
+        try {
+          const result = await runtime.bridge.generateSessionBtw(
+            sessionId,
+            question.trim(),
+            abort.signal,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          if (
+            err instanceof DOMException &&
+            err.name === 'AbortError' &&
+            abort.signal.aborted
+          ) {
+            return;
+          }
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/btw',
+            sessionId,
+          });
+        } finally {
+          res.off('close', onResClose);
+        }
+      },
+    ),
   );
 
   // Queue a user message typed while the session's turn is still running. The
@@ -2536,9 +4146,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/mid-turn-message',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/mid-turn-message',
-      (req, res, sessionId) => {
+      (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const message = body['message'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
@@ -2563,7 +4173,7 @@ export function registerSessionRoutes(
         // originator for SSE echo routing. `null` = malformed id (already answered).
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const result = bridge.enqueueMidTurnMessage(
+        const result = runtime.bridge.enqueueMidTurnMessage(
           sessionId,
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
@@ -2627,9 +4237,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/shell',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/shell',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         if (!sessionShellCommandEnabled) {
           sendBridgeError(res, new SessionShellDisabledError(), {
             route: 'POST /session/:id/shell',
@@ -2662,7 +4272,7 @@ export function registerSessionRoutes(
         };
         res.once('close', onResClose);
         try {
-          const result = await bridge.executeShellCommand(
+          const result = await runtime.bridge.executeShellCommand(
             sessionId,
             command.trim(),
             abort.signal,
@@ -2673,6 +4283,8 @@ export function registerSessionRoutes(
               sessionId,
               clientId,
               exitCode: result.exitCode,
+              workspaceId: runtime.workspaceId,
+              workspaceCwd: runtime.workspaceCwd,
             });
           }
           res.status(200).json(result);
@@ -2695,30 +4307,31 @@ export function registerSessionRoutes(
     ),
   );
 
-  app.get('/session/:id/rewind/snapshots', async (req, res) => {
-    const sessionId = req.params['id'];
-    if (!sessionId) {
-      res
-        .status(400)
-        .json({ error: '`sessionId` route parameter is required' });
-      return;
-    }
-    try {
-      res.status(200).json(await bridge.getRewindSnapshots(sessionId));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/rewind/snapshots',
-        sessionId,
-      });
-    }
-  });
+  app.get(
+    '/session/:id/rewind/snapshots',
+    withOwnerReadSession(
+      'GET /session/:id/rewind/snapshots',
+      async (_req, res, sessionId, runtime) => {
+        const response = await runtime.bridge.getRewindSnapshots(sessionId);
+        if (daemonLog) {
+          daemonLog.info('rewind snapshots loaded', {
+            sessionId,
+            snapshotCount: response.snapshots.length,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        }
+        res.status(200).json(response);
+      },
+    ),
+  );
 
   app.post(
     '/session/:id/rewind',
     mutate({ strict: true }),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/rewind',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const promptId = body['promptId'];
         if (typeof promptId !== 'string' || promptId.length === 0) {
@@ -2728,13 +4341,33 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const rewindFiles = body['rewindFiles'];
+        if (rewindFiles !== undefined && typeof rewindFiles !== 'boolean') {
+          res.status(400).json({
+            error: '`rewindFiles` must be a boolean when provided',
+            code: 'invalid_rewind_files_flag',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.rewindSession(
+        const response = await runtime.bridge.rewindSession(
           sessionId,
-          { promptId, rewindFiles: body['rewindFiles'] !== false },
+          { promptId, rewindFiles: rewindFiles !== false },
           clientId !== undefined ? { clientId } : undefined,
         );
+        if (daemonLog) {
+          daemonLog.info('session rewind completed', {
+            sessionId,
+            promptId,
+            rewindFiles: rewindFiles !== false,
+            rewound: response.rewound,
+            filesChangedCount: response.filesChanged.length,
+            filesFailedCount: response.filesFailed.length,
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+        }
         res.status(200).json(response);
       },
     ),
@@ -2743,9 +4376,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/approval-mode',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/approval-mode',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         // Validates `mode` against `APPROVAL_MODES` and an optional
         // `persist: boolean` flag.
         const body = safeBody(req);
@@ -2771,7 +4404,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        const response = await bridge.setSessionApprovalMode(
+        const response = await runtime.bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
           { persist: persist === true },
@@ -2785,9 +4418,9 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/language',
     mutate(),
-    withMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/language',
-      async (req, res, sessionId) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const language = body['language'];
         const syncOutputLanguage = body['syncOutputLanguage'];
@@ -2820,7 +4453,7 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
-        const response = await bridge.setSessionLanguage(
+        const response = await runtime.bridge.setSessionLanguage(
           sessionId,
           {
             language,

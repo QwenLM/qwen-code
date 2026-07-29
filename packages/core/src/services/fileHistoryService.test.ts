@@ -1157,7 +1157,7 @@ describe('FileHistoryService', () => {
     });
 
     // filesOmitted should be 0 in the happy-path cases and reflected on
-    // every TurnDiff (regression: a forgetten field default would let
+    // every TurnDiff (regression: a forgotten field default would let
     // the dialog's truncation indicator stay silent under cap pressure).
     it('reports stats.filesOmitted === 0 when below the per-turn cap', async () => {
       const file = join(projectDir, 'omit-baseline.txt');

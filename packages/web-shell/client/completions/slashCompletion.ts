@@ -19,6 +19,7 @@ import {
 export interface SkillInfo {
   name: string;
   description: string;
+  argumentHint?: string;
 }
 
 export type SlashCommandCompletionKind = 'command' | 'subcommand';
@@ -230,6 +231,7 @@ const COMMAND_SECTION_KEYS: Record<CommandDisplayCategory, string> = {
   skill: 'slash.category.skill',
   system: 'slash.category.system',
 };
+const COMPLETION_ITEM_LIMIT = 50;
 
 function renderCommandSectionHeader(section: CompletionSection): HTMLElement {
   const header = document.createElement('completion-section');
@@ -455,16 +457,18 @@ export function getSlashCommandCompletionResult(
         currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
       );
     const isSkillList = cmdName === 'skills' && completedParts.length === 0;
-    const items = filteredNodes.map((node): SlashCommandCompletionItem => {
-      const command = `${prefix}${node.name}`;
-      return {
-        id: command,
-        label: node.name,
-        detail: node.description || undefined,
-        apply: `${command} `,
-        ...(isSkillList ? { type: 'skill' as const } : {}),
-      };
-    });
+    const items = filteredNodes
+      .slice(0, COMPLETION_ITEM_LIMIT)
+      .map((node): SlashCommandCompletionItem => {
+        const command = `${prefix}${node.name}`;
+        return {
+          id: command,
+          label: node.name,
+          detail: node.description || undefined,
+          apply: `${command} `,
+          ...(isSkillList ? { type: 'skill' as const } : {}),
+        };
+      });
 
     if (items.length === 0) return null;
     return {
@@ -490,27 +494,29 @@ export function getSlashCommandCompletionResult(
       )
     : fuzzyRankCommands(commands, prefix);
 
-  const items = filteredCommands.map((command): SlashCommandCompletionItem => {
-    const apply = `/${command.name} `;
-    const category = getCommandDisplayCategory(command);
-    const showCommandInfo = category === 'custom' || category === 'skill';
-    return {
-      id: command.name,
-      label: `/${command.name}`,
-      detail: command.description || undefined,
-      apply,
-      category,
-      // Section headers only make sense while browsing the category-ordered
-      // list; a relevance-ranked result set interleaves categories, so headers
-      // would appear before nearly every row. Drop them during search.
-      ...(isBrowsing
-        ? { section: translate(COMMAND_SECTION_KEYS[category]) }
-        : {}),
-      ...(showCommandInfo && command.description
-        ? { type: 'command-info' as const }
-        : {}),
-    };
-  });
+  const items = filteredCommands
+    .slice(0, COMPLETION_ITEM_LIMIT)
+    .map((command): SlashCommandCompletionItem => {
+      const apply = `/${command.name} `;
+      const category = getCommandDisplayCategory(command);
+      const showCommandInfo = category === 'custom' || category === 'skill';
+      return {
+        id: command.name,
+        label: `/${command.name}`,
+        detail: command.description || undefined,
+        apply,
+        category,
+        // Section headers only make sense while browsing the category-ordered
+        // list; a relevance-ranked result set interleaves categories, so headers
+        // would appear before nearly every row. Drop them during search.
+        ...(isBrowsing
+          ? { section: translate(COMMAND_SECTION_KEYS[category]) }
+          : {}),
+        ...(showCommandInfo && command.description
+          ? { type: 'command-info' as const }
+          : {}),
+      };
+    });
 
   if (items.length === 0) return null;
   return {

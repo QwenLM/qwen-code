@@ -215,6 +215,7 @@
 
 .iconError {
   color: var(--error-color);
+  font-size: 13px;
 }
 
 .lineName {
@@ -240,6 +241,14 @@
   margin: -2px 0;
   padding: 2px 0;
   user-select: none;
+}
+
+.lineButton {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
 }
 
 .lineExpandable * {

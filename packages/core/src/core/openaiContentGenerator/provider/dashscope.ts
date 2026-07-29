@@ -15,11 +15,23 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
+import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+
+/**
+ * Official DashScope regional API hosts (matched exactly or as a parent
+ * domain of the endpoint hostname). Shared with the WebSearch side channel's
+ * endpoint gate (tools/web-search.ts) so a new region is added in one place.
+ */
+export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
+  'dashscope.aliyuncs.com',
+  'dashscope-intl.aliyuncs.com',
+  'dashscope-us.aliyuncs.com',
+];
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -29,9 +41,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     super(contentGeneratorConfig, cliConfig);
   }
 
+  getResponseParsingOptions(): OpenAIResponseParsingOptions {
+    // ponytail: DashScope-only fallback; remove after provider output stabilizes.
+    return { contentOnlyThinkingTagLeaks: true };
+  }
+
   /**
    * Determines whether to use the DashScope-compatible provider.
-   * Covers dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com,
+   * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
    * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * and proxy matches.
@@ -62,14 +79,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       hostname = null;
     }
 
-    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com,
-    // dashscope-intl.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
+    // Matches an official regional host or any subdomain of one.
     const isDashscopeOrigin =
       hostname !== null &&
-      (hostname === 'dashscope.aliyuncs.com' ||
-        hostname === 'dashscope-intl.aliyuncs.com' ||
-        hostname.endsWith('.dashscope.aliyuncs.com') ||
-        hostname.endsWith('.dashscope-intl.aliyuncs.com'));
+      DASHSCOPE_REGIONAL_HOSTS.some(
+        (host) => hostname === host || hostname.endsWith('.' + host),
+      );
 
     const isTokenPlanOrigin =
       hostname !== null &&

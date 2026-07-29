@@ -16,6 +16,7 @@ export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
   DaemonChannelBridgeOptions,
+  DaemonChannelLoopMcpHost,
   DaemonChannelEvent,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
@@ -27,11 +28,21 @@ export type {
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
+export {
+  CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
+export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
 export type {
   ChannelBaseOptions,
+  ChannelMemoryRecallCacheStatus,
+  ChannelMemoryRecallObservation,
+  ChannelMemoryRecallResult,
   ChannelLoopController,
 } from './ChannelBase.js';
 export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
+export { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 export type {
   ChannelLoopSchedulerOptions,
   ChannelLoopRunner,
@@ -70,30 +81,50 @@ export {
   sanitizeLogText,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
+export { PollingChannelBase } from './PollingChannelBase.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigFieldDescriptor,
+  ChannelConfigFieldKind,
   ChannelIdentityConfig,
+  ChannelManagementDescriptor,
   ChannelMemoryIntentClassifier,
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelPlugin,
+  ChannelPromptOwner,
+  ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
   ChannelType,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   DmPolicy,
   Envelope,
   GroupConfig,
   GroupPolicy,
+  ObservedChannelIdentity,
+  ObservedChannelContactObservation,
+  ObservedChannelContact,
+  ObservedChannelRelatedContact,
+  ObservedChannelTopic,
+  ObservedChannelGroup,
+  ObservedChannelContactGraph,
   SanitizedToolCallEvent,
   SenderPolicy,
   SessionScope,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';

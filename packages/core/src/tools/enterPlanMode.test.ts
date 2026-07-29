@@ -9,6 +9,7 @@ import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { getPlanModeSystemReminder } from '../core/prompts.js';
 
 describe('EnterPlanModeTool', () => {
   let tool: EnterPlanModeTool;
@@ -31,6 +32,7 @@ describe('EnterPlanModeTool', () => {
       isInteractive: vi.fn(() => true),
       getExperimentalZedIntegration: vi.fn(() => false),
       getInputFormat: vi.fn(() => undefined),
+      getSdkMode: vi.fn(() => false),
     } as unknown as Config;
 
     tool = new EnterPlanModeTool(mockConfig);
@@ -67,6 +69,10 @@ describe('EnterPlanModeTool', () => {
       expect(tool.shouldDefer).toBe(false);
     });
 
+    it('should exempt the complete reminder from output truncation', () => {
+      expect(tool.maxOutputChars).toBe(Number.POSITIVE_INFINITY);
+    });
+
     it('should expose only the userRequested flag in its schema', () => {
       expect(tool.schema.parametersJsonSchema).toEqual({
         type: 'object',
@@ -98,11 +104,10 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
-      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 
     it('should switch from AUTO_EDIT to PLAN', async () => {
@@ -112,7 +117,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO_EDIT);
     });
@@ -124,7 +128,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
     });
@@ -168,11 +171,10 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
-      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 
     it('should switch from YOLO to PLAN when the user explicitly requested it', async () => {
@@ -184,15 +186,13 @@ describe('EnterPlanModeTool', () => {
       const invocation = tool.build({ userRequested: true });
       const result = await invocation.execute(new AbortController().signal);
 
-      // Still flagged as model-initiated so exit_plan_mode runs the Plan
-      // Approval Gate for the YOLO session (#5574).
+      // Preserve the YOLO mode so an approved plan exit can restore it.
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.YOLO);
-      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 
     it('should honour a user-requested YOLO entry in an ACP session', async () => {
@@ -210,10 +210,21 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
-      expect(result.llmContent).not.toContain('non-interactive');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
+    });
+
+    it('should return plan-only guidance in SDK mode', async () => {
+      (mockConfig.getSdkMode as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(true));
+      expect(result.llmContent).toContain('Present your plan directly');
+      expect(result.llmContent).not.toContain(
+        'by calling the exit_plan_mode tool',
+      );
     });
 
     it('should be idempotent: already in PLAN does not call setApprovalMode', async () => {
@@ -224,7 +235,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
-      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 
     it('should return error when setApprovalMode throws', async () => {

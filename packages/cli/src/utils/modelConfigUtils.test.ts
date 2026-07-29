@@ -631,7 +631,7 @@ describe('modelConfigUtils', () => {
           },
         });
 
-        resolveCliGenerationConfig({
+        const result = resolveCliGenerationConfig({
           argv: {},
           settings,
           selectedAuthType: AuthType.USE_OPENAI,
@@ -643,6 +643,7 @@ describe('modelConfigUtils', () => {
         expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
           expect.objectContaining({ modelProvider: ideaLab }),
         );
+        expect(result.registryBaseUrl).toBe(ideaLab.baseUrl);
       });
 
       it('falls back to the first id match when no baseUrl is persisted (backward compat)', () => {

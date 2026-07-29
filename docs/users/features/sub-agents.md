@@ -14,16 +14,25 @@ Subagents are independent AI assistants that:
 
 ## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent, which runs to completion and returns its result inline.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for a regular subagent's result inline.
+
+## Fork Context with `fork_turns`
+
+Only `subagent_type: "fork"` accepts `fork_turns`:
+
+- Omitting it or using `all` inherits the full parent conversation.
+- A positive integer string such as `"3"` inherits the most recent three real user turns.
+
+Tool responses and pure system reminders do not count as user turns. Regular named subagents and agent-team teammates do not accept `fork_turns`; they keep their separate conversation context.
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                    | Fork Subagent                                         |
-| ------------- | --------------------------------- | ----------------------------------------------------- |
-| Context       | Starts fresh, no parent history   | Inherits parent's full conversation history           |
-| System prompt | Uses its own configured prompt    | Uses parent's exact system prompt (for cache sharing) |
-| Execution     | Blocks the parent until done      | Runs in background, parent continues immediately      |
-| Use case      | Specialized tasks (testing, docs) | Parallel tasks that need the current context          |
+|               | Named Subagent                                                 | Fork Subagent                                                                           |
+| ------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                   |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                           |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                            |
 
 ### When Fork is Used
 
@@ -41,16 +50,15 @@ All forks share the parent's exact API request prefix (system prompt, tools, con
 
 Fork children cannot create further forks. This is enforced at runtime — if a fork attempts to spawn another fork, it receives an error instructing it to execute tasks directly.
 
-### Current Limitations
+### Current Limitation
 
-- **No result feedback**: Fork results are reflected in the UI progress display but are not automatically fed back into the main conversation. The parent AI sees a placeholder message and cannot act on the fork's output.
 - **No worktree isolation**: Forks share the parent's working directory. Concurrent file modifications from multiple forks may conflict.
 
 ## Key Benefits
 
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
-- **Context Inheritance**: Fork subagents inherit the full conversation for context-heavy parallel tasks
+- **Context Inheritance**: Fork subagents inherit the full conversation by default and can select a bounded number of recent parent turns
 - **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus
@@ -59,9 +67,28 @@ Fork children cannot create further forks. This is enforced at runtime — if a 
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it wants to inherit the full conversation context and discard the intermediate output
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it needs the parent conversation context
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
-4. **Results**: They return results and execution summaries back to the main conversation
+4. **Results**: Background runs send a completion notification containing the result to the main conversation; foreground regular subagents return results inline
+5. **Continuation**: The main AI can use `list_agents` to find background agents and `send_message` to continue a running, paused, or completed agent
+
+## Background Agent Continuation
+
+Top-level regular subagents run in the background by default. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
+
+- `list_agents` returns the addressable background agents in the current session, including compatible agents restored with a resumed session. Each entry includes a `task_id`, status, and whether it can receive a message.
+- `send_message` with that `task_id` queues a message for a running agent, resumes a paused agent, or continues a completed agent. Completed agents reuse their resident runtime when available and otherwise revive from their retained transcript.
+- A continued agent reports its next result through another completion notification.
+
+When a session is restored, compatible background agents are added back to the session roster. A task can be visible but not continuable when its retained state is missing or incompatible; `list_agents` reports the reason in that case.
+
+Use continuation for related follow-up work. Launch a new agent when the task is unrelated or the previous agent cannot be resumed.
+
+## Agent Working Directory
+
+For a named regular subagent, `working_dir` pins the agent to an existing git worktree in the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git and live inside the repository.
+
+A `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle. It cannot be combined with `subagent_type: "fork"` or background execution. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one.
 
 ## Getting Started
 
@@ -193,6 +220,47 @@ model under another configured auth type, such as `openai:deepseek-v4-flash`.
 When the selector resolves to another auth type, Qwen Code creates a dedicated
 runtime provider for that subagent request and sends the provider only the bare
 model ID.
+
+The built-in Explore agent inherits the main session model by default. To
+select a different model for only that built-in agent, configure
+`agents.builtin.exploreModel` in `settings.json` and restart Qwen Code:
+
+Earlier versions used `fastModel` for Explore by default. To preserve that
+behavior, set `agents.builtin.exploreModel` to `fast`.
+
+```json
+{
+  "agents": {
+    "builtin": {
+      "exploreModel": "fast"
+    }
+  }
+}
+```
+
+This setting accepts the same selectors described above. It is applied only
+when Qwen Code resolves the built-in Explore definition; a session, project,
+user, or extension agent named Explore keeps its own `model` setting.
+
+To let the model select from user-defined grades without exposing concrete
+model IDs, configure `agents.modelGrades` and optionally restrict them with
+`agents.allowedGrades`:
+
+```json
+{
+  "agents": {
+    "modelGrades": {
+      "small": "fast",
+      "high": "qwen-max"
+    },
+    "allowedGrades": ["small", "high"]
+  }
+}
+```
+
+The Agent tool then accepts `model: "small"` or `model: "high"` for regular
+subagents. Unknown, disallowed, fork, and named-teammate grade selections are
+rejected. A custom agent's explicit model still takes precedence over a grade.
 
 #### Permission Mode
 

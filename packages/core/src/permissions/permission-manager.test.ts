@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   parseRule,
   parseRules,
@@ -24,6 +26,7 @@ import {
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -88,6 +91,7 @@ describe('getSpecifierKind', () => {
 
   it('returns "path" for file read/edit tools', async () => {
     expect(getSpecifierKind('read_file')).toBe('path');
+    expect(getSpecifierKind('zoom_image')).toBe('path');
     expect(getSpecifierKind('edit')).toBe('path');
     expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
@@ -115,7 +119,8 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('edit', 'edit')).toBe(true);
   });
 
-  it('"Read" (read_file) covers grep_search, glob, list_directory', async () => {
+  it('"Read" (read_file) covers all read-only file tools', async () => {
+    expect(toolMatchesRuleToolName('read_file', 'zoom_image')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'grep_search')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'glob')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
@@ -539,6 +544,14 @@ describe('resolvePathPattern', () => {
 describe('matchesPathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project';
+  const withTempRoot = (run: (root: string) => void): void => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      run(root);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  };
 
   it('matches dotfiles (e.g. .env)', async () => {
     expect(matchesPathPattern('.env', '/project/.env', projectRoot, cwd)).toBe(
@@ -618,6 +631,203 @@ describe('matchesPathPattern', () => {
         cwd,
       ),
     ).toBe(false);
+  });
+
+  it('matches a path after resolving parent-directory traversal', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const nestedDir = path.join(root, 'workspace', 'nested');
+      fs.mkdirSync(protectedDir);
+      fs.mkdirSync(nestedDir, { recursive: true });
+
+      expect(
+        matchesPathPattern(
+          `/${path.basename(protectedDir)}/**`,
+          `${nestedDir}${path.sep}..${path.sep}..${path.sep}protected${path.sep}new.txt`,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the canonical target of a symlinked path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'existing.txt'), 'protected');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+        ),
+      ).toBe(false);
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'existing.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes through a file that causes ENOTDIR', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.writeFileSync(path.join(protectedDir, 'config.json'), '{}');
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'config.json', 'nested.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes a symlinked project root in restrictive rules', () => {
+    withTempRoot((root) => {
+      const realRoot = path.join(root, 'real');
+      const linkedRoot = path.join(root, 'linked');
+      const protectedDir = path.join(realRoot, 'protected');
+      fs.mkdirSync(protectedDir, { recursive: true });
+      fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+      fs.symlinkSync(realRoot, linkedRoot, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(protectedDir, 'file.txt'),
+          linkedRoot,
+          linkedRoot,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('canonicalizes the nearest existing ancestor for a new path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern(
+          '/protected/**',
+          path.join(link, 'new', 'file.txt'),
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('matches the target of a dangling symlink', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const target = path.join(protectedDir, 'new.txt');
+      const link = path.join(root, 'link.txt');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(target, link, 'file');
+
+      expect(
+        matchesPathPattern('/protected/**', link, root, root, 'canonical'),
+      ).toBe(true);
+    });
+  });
+
+  it('preserves traversal semantics in a dangling symlink target', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      fs.mkdirSync(projectDir);
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'safe'));
+
+      fs.symlinkSync(
+        path.join(outsideDir, 'dir'),
+        path.join(projectDir, 'inner'),
+        'dir',
+      );
+      const link = path.join(projectDir, 'link.txt');
+      fs.symlinkSync(
+        `inner${path.sep}..${path.sep}safe${path.sep}new.txt`,
+        link,
+      );
+
+      expect(
+        matchesPathPattern('/outside/safe/**', link, root, root, 'canonical'),
+      ).toBe(true);
+      expect(
+        matchesPathPattern('/project/safe/**', link, root, root, 'canonical'),
+      ).toBe(false);
+    });
+  });
+
+  it('resolves parent traversal after following a directory symlink', () => {
+    withTempRoot((root) => {
+      const projectDir = path.join(root, 'project');
+      const outsideDir = path.join(root, 'outside');
+      const outsideSafeDir = path.join(outsideDir, 'safe');
+      fs.mkdirSync(path.join(projectDir, 'safe'), { recursive: true });
+      fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
+      fs.mkdirSync(outsideSafeDir);
+      fs.writeFileSync(path.join(outsideSafeDir, 'file.txt'), 'outside');
+
+      const link = path.join(projectDir, 'link');
+      fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
+      const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
+
+      expect(
+        matchesPathPattern(
+          '/outside/safe/**',
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(true);
+      expect(
+        matchesPathPattern(
+          '/project/safe/**',
+          filePath,
+          root,
+          root,
+          'canonical',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it('preserves matching against the lexical symlink path', () => {
+    withTempRoot((root) => {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+
+      expect(
+        matchesPathPattern('/link/**', path.join(link, 'new.txt'), root, root),
+      ).toBe(true);
+    });
   });
 });
 
@@ -857,6 +1067,25 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_click')).toBe(false);
   });
 
+  it('matches a legacy dotted MCP rule against its provider-safe name', () => {
+    const legacyName = 'mcp__zybio__literature.search_pubmed';
+    const providerSafeName = normalizeToolNameForProvider(legacyName);
+
+    expect(providerSafeName).not.toBe(legacyName);
+    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+  });
+
+  it('keeps exact provider-safe MCP permission matches collision-safe', () => {
+    const dottedName = 'mcp__zybio__literature.search';
+    const slashedName = 'mcp__zybio__literature/search';
+    const dottedProviderName = normalizeToolNameForProvider(dottedName);
+    const slashedProviderName = normalizeToolNameForProvider(slashedName);
+
+    expect(dottedProviderName).not.toBe(slashedProviderName);
+    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
+    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+  });
+
   it('MCP server-level match (2-part pattern)', async () => {
     const rule = parseRule('mcp__puppeteer');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
@@ -864,10 +1093,34 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
   });
 
+  it('matches a legacy dotted MCP server rule against provider-safe names', () => {
+    const rule = parseRule('mcp__zybio.db');
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
+  });
+
   it('MCP wildcard match', async () => {
     const rule = parseRule('mcp__puppeteer__*');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
+  });
+
+  it('matches a legacy dotted MCP wildcard rule against provider-safe names', () => {
+    const rule = parseRule('mcp__zybio.db__*');
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+      ),
+    ).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
   });
 
   it('MCP intra-segment wildcard match (e.g. mcp__chrome__use_*)', async () => {
@@ -1257,6 +1510,38 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
     });
 
+    it('matches a legacy truncated MCP permission alias', async () => {
+      const rawName = `mcp__server__${'x'.repeat(80)}`;
+      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
+      const providerSafeName = normalizeToolNameForProvider(rawName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: [legacyName] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+          toolAliases: [legacyName],
+        }),
+      ).toBe('allow');
+    });
+
+    it('honors legacy MCP wildcard deny rules for provider-safe names', async () => {
+      const legacyName = 'mcp__server__literature.search_pubmed';
+      const providerSafeName = normalizeToolNameForProvider(legacyName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['mcp__server__literature.*'] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+        }),
+      ).toBe('deny');
+    });
+
     it('deny takes precedence over ask and allow', async () => {
       const pm2 = new PermissionManager(
         makeConfig({
@@ -1486,19 +1771,15 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
-    it('exact Monitor(...) allow rule matches wrapped fallback commands', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(FOO="bar baz" tail -f /var/log/app.log)'],
-        }),
-      );
+    it('asks by default for wrapped commands with environment prefixes', async () => {
+      const pm2 = new PermissionManager(makeConfig({}));
       pm2.initialize();
       expect(
         await pm2.evaluate({
           toolName: 'monitor',
           command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
         }),
-      ).toBe('allow');
+      ).toBe('ask');
     });
 
     it('Monitor(...) deny rule sees shell wrapper suffix commands', async () => {
@@ -1856,6 +2137,53 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('denies an equivalent path containing parent traversal', async () => {
+      expect(
+        await pm.evaluate({
+          toolName: 'edit',
+          filePath: '/project/work/../src/generated/code.ts',
+        }),
+      ).toBe('deny');
+    });
+
+    it('canonicalizes restrictive rules without widening allow rules', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
+        fs.symlinkSync(protectedDir, link, 'dir');
+        const filePath = path.join(link, 'file.txt');
+
+        const denyManager = new PermissionManager(
+          makeConfig({
+            permissionsDeny: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        denyManager.initialize();
+        expect(await denyManager.evaluate({ toolName: 'edit', filePath })).toBe(
+          'deny',
+        );
+
+        const allowManager = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        allowManager.initialize();
+        expect(
+          await allowManager.evaluate({ toolName: 'edit', filePath }),
+        ).toBe('default');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it('allows reading in an allowed directory', async () => {
       expect(
         await pm.evaluate({
@@ -1964,9 +2292,17 @@ describe('PermissionManager', () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('zoom_image')).toBe(false);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
       expect(await pm.isToolEnabled('edit')).toBe(false);
       expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+    });
+
+    it('coreTools allowlist: ZoomImage alias enables zoom_image', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['ZoomImage'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('zoom_image')).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
     });
 
     it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
@@ -2222,6 +2558,33 @@ describe('PermissionManager', () => {
         }),
       ).toBe(true);
     });
+
+    it('matches an ask rule through a symlinked path', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+      try {
+        const protectedDir = path.join(root, 'protected');
+        const link = path.join(root, 'link');
+        fs.mkdirSync(protectedDir);
+        fs.symlinkSync(protectedDir, link, 'dir');
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAsk: ['Edit(/protected/**)'],
+            projectRoot: root,
+            cwd: root,
+          }),
+        );
+        pm.initialize();
+
+        expect(
+          pm.hasMatchingAskRule({
+            toolName: 'edit',
+            filePath: path.join(link, 'file.txt'),
+          }),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -2230,6 +2593,7 @@ describe('PermissionManager', () => {
 describe('getRuleDisplayName', () => {
   it('maps read tools to "Read" meta-category', async () => {
     expect(getRuleDisplayName('read_file')).toBe('Read');
+    expect(getRuleDisplayName('zoom_image')).toBe('Read');
     expect(getRuleDisplayName('grep_search')).toBe('Read');
     expect(getRuleDisplayName('glob')).toBe('Read');
     expect(getRuleDisplayName('list_directory')).toBe('Read');
@@ -2269,6 +2633,14 @@ describe('buildPermissionRules', () => {
         filePath: '/Users/alice/.secrets',
       });
       // read_file is file-targeted → dirname gives /Users/alice, plus /** glob
+      expect(rules).toEqual(['Read(//Users/alice/**)']);
+    });
+
+    it('generates Read rule scoped to parent directory for zoom_image', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'zoom_image',
+        filePath: '/Users/alice/chart.png',
+      });
       expect(rules).toEqual(['Read(//Users/alice/**)']);
     });
 
@@ -2746,6 +3118,33 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     // rule.raw preserves the original rule string as written in config
     expect(result).toBe('ShellTool');
   });
+
+  it('matches a deny rule through a symlinked path', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const protectedDir = path.join(root, 'protected');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(protectedDir);
+      fs.symlinkSync(protectedDir, link, 'dir');
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Edit(/protected/**)'],
+          projectRoot: root,
+          cwd: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.findMatchingDenyRule({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe('Edit(/protected/**)');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─── AUTO mode dangerous-rule stash ────────────────────────────────────
@@ -2982,6 +3381,42 @@ describe('PermissionManager — compound shell write attribution', () => {
         cwd: '/repo',
       }),
     ).toBe(false);
+  });
+
+  it('does not treat canonical-only allow matches as relevant', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+    try {
+      const allowedDir = path.join(root, 'allowed');
+      const link = path.join(root, 'link');
+      fs.mkdirSync(allowedDir);
+      fs.writeFileSync(path.join(allowedDir, 'file.txt'), 'allowed');
+      fs.symlinkSync(allowedDir, link, 'dir');
+
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Edit(/allowed/**)'],
+          cwd: root,
+          projectRoot: root,
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'edit',
+          filePath: path.join(link, 'file.txt'),
+        }),
+      ).toBe(false);
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'run_shell_command',
+          command: `echo allowed > ${path.join(link, 'file.txt')}`,
+          cwd: root,
+        }),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {

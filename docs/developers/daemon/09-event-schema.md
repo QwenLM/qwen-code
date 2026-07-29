@@ -21,13 +21,14 @@ Grouped by domain.
 
 ### Core session
 
-| Type                       | Direction      | Trigger                                                                       | Key payload fields                                                               |
-| -------------------------- | -------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `session_update`           | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan | `sessionUpdate: string, content?: ...` (opaque ACP shape)                        |
-| `session_metadata_updated` | S->C           | `PATCH /session/:id/metadata`                                                 | `sessionId, displayName?`                                                        |
-| `session_died`             | S->C terminal  | `channel.exited`                                                              | `sessionId, reason, exitCode? \| null, signalCode? \| null`                      |
-| `session_closed`           | S->C terminal  | `DELETE /session/:id` or programmatic close                                   | `sessionId, reason: 'client_close' \| string, closedBy?`                         |
-| `session_snapshot`         | S->C synthetic | Snapshot frame after SSE attach / replay                                      | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null` |
+| Type                         | Direction      | Trigger                                                                               | Key payload fields                                                                                           |
+| ---------------------------- | -------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `session_update`             | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan         | `sessionUpdate: string, content?: ...` (opaque ACP shape)                                                    |
+| `session_metadata_updated`   | S->C           | `PATCH /session/:id/metadata`                                                         | `sessionId, displayName?`                                                                                    |
+| `session_died`               | S->C terminal  | `channel.exited`                                                                      | `sessionId, reason, exitCode? \| null, signalCode? \| null`                                                  |
+| `session_closed`             | S->C terminal  | `DELETE /session/:id` or programmatic close                                           | `sessionId, reason: 'client_close' \| string, closedBy?`                                                     |
+| `session_snapshot`           | S->C synthetic | Snapshot frame after SSE attach / replay                                              | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null, recordingDegraded: boolean` |
+| `session_recording_degraded` | S->C           | The session transcript writer permanently stopped after an asynchronous write failure | `sessionId, reason: 'write_failed'`                                                                          |
 
 ### Subscriber-level synthetic frames
 
@@ -139,7 +140,7 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 | Concern                                | Source                                         | Notes                                                                                                              |
 | -------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `EVENT_SCHEMA_VERSION = 1`             | `packages/acp-bridge/src/eventBus.ts`          | Sent on every frame.                                                                                               |
-| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 47 types.                                                                                         |
+| `DAEMON_KNOWN_EVENT_TYPE_VALUES`       | `packages/sdk-typescript/src/daemon/events.ts` | Closed list with 53 types.                                                                                         |
 | `DaemonEventEnvelope<TType, TData>`    | `events.ts`                                    | Generic envelope.                                                                                                  |
 | `DaemonKnownEventType`                 | `events.ts`                                    | `typeof DAEMON_KNOWN_EVENT_TYPE_VALUES[number]`.                                                                   |
 | Per-event payload types                | `events.ts`                                    | Most event types have a `DaemonXxxData` interface; `user_shell_*` is currently parsed ad hoc by the UI normalizer. |
@@ -155,6 +156,7 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 - `alive: boolean` - becomes `false` after a terminal frame (`session_died`, `session_closed`, `client_evicted`, `stream_error`).
 - `currentModelId?: string` - from `model_switched`.
 - `displayName?: string` - from `session_metadata_updated`.
+- `recordingDegraded: boolean` - sticky session recording state from `session_recording_degraded`; an explicit `session_snapshot.recordingDegraded` value is authoritative.
 - `pendingPermissions: Record<string, DaemonPermissionRequestData>` - open requests keyed by `requestId`; cleared by `permission_resolved` / `permission_already_resolved`.
 - `lastSessionUpdate?: DaemonSessionUpdateData` - latest `session_update`.
 - `lastModelSwitchFailure?: DaemonModelSwitchFailedData` - from `model_switch_failed`.
@@ -244,7 +246,7 @@ Events triggered by a request that carried a registered `X-Qwen-Client-Id` may s
 
 ## Tool-call `_meta` (provenance / serverId)
 
-This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/ToolCallEmitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
+This is separate from envelope `_meta`: ACP `session/update` payloads can carry their own `_meta` in `event.data._meta`. `ToolCallEmitter` (`packages/cli/src/acp-integration/session/emitters/tool-call-emitter.ts`) stamps two fields on `emitStart`, `emitResult`, and `emitError`:
 
 | Field        | Type                                      | Resolution rule                                                                                                                                                            |
 | ------------ | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -263,14 +265,15 @@ The existing `_meta.toolName` display name is preserved. UI uses these fields to
 
 While `awaitingResync = true`, the reducer **skips delta application** and only allows the closed `RESYNC_PASSTHROUGH_TYPES` set:
 
-| Passthrough type        | Why it is still applied during resync                                          |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `state_resync_required` | Rare second resync should update `lastResyncRequired` / `resyncRequiredCount`. |
-| `session_died`          | Terminal stream signal must remain visible during resync.                      |
-| `session_closed`        | Same as above.                                                                 |
-| `client_evicted`        | Same as above.                                                                 |
-| `stream_error`          | Same as above.                                                                 |
-| `session_snapshot`      | Full-state authoritative frame; safe to apply during resync.                   |
+| Passthrough type             | Why it is still applied during resync                                          |
+| ---------------------------- | ------------------------------------------------------------------------------ |
+| `state_resync_required`      | Rare second resync should update `lastResyncRequired` / `resyncRequiredCount`. |
+| `session_died`               | Terminal stream signal must remain visible during resync.                      |
+| `session_closed`             | Same as above.                                                                 |
+| `client_evicted`             | Same as above.                                                                 |
+| `stream_error`               | Same as above.                                                                 |
+| `session_snapshot`           | Full-state authoritative frame; safe to apply during resync.                   |
+| `session_recording_degraded` | Sticky safety signal independent of transcript delta state.                    |
 
 `lastEventId` still advances monotonically through `advanceLastEventId(base)` during resync. After the caller resets and clears `awaitingResync`, subsequent deltas align to the correct cursor.
 

@@ -126,6 +126,29 @@ With relative coordinates enabled:
 }
 ```
 
+Some model API routes reject requests whose textual conversation history
+contains known vendor names. Enable filtering at the mobile-mcp boundary only
+for those routes by adding `MCP_MODEL_PAYLOAD_FILTER=1`:
+
+```json
+{
+  "mcpServers": {
+    "mobile-mcp": {
+      "command": "npx",
+      "args": ["@qwen-code/mobile-mcp"],
+      "env": {
+        "MCP_MODEL_PAYLOAD_FILTER": "1"
+      }
+    }
+  }
+}
+```
+
+The filter is disabled by default. When enabled, matching text in MCP responses
+is replaced with reversible aliases and decoded when passed back to the same
+server. A filtered alias passed to a shell or another MCP server is not decoded
+there.
+
 ### Prerequisites
 
 - **Android**: [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) (`adb` on PATH)

@@ -5,10 +5,16 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  normalizeMcpToolName,
+  sanitizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -69,6 +75,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ReadFileTool: 'read_file',
   Read: 'read_file',
 
+  // Zoom Image tool — also matched by "Read" meta-category rules
+  zoom_image: 'zoom_image',
+  ZoomImage: 'zoom_image',
+  ZoomImageTool: 'zoom_image',
+
   // Grep tool — also matched by "Read" meta-category rules
   grep_search: 'grep_search',
   Grep: 'grep_search',
@@ -99,6 +110,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   web_fetch: 'web_fetch',
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
+
+  // WebSearch tool
+  web_search: 'web_search',
+  WebSearch: 'web_search',
+  WebSearchTool: 'web_search',
 
   // ReadMcpResource tool
   read_mcp_resource: 'read_mcp_resource',
@@ -160,6 +176,7 @@ export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 const READ_TOOLS = new Set([
   'read_file',
+  'zoom_image',
   'grep_search',
   'glob',
   'list_directory',
@@ -211,7 +228,8 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  * Check whether a given tool (by canonical name) is covered by a rule's tool name,
  * taking meta-categories into account.
  *
- * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
+ * "Read" → resolves to "read_file", but also covers zoom_image, grep_search,
+ * glob, and list_directory
  * "Edit" → resolves to "edit", but also covers write_file
  * "Bash" → resolves to "run_shell_command", but also covers monitor
  * "Monitor" → resolves to "monitor" only; it does not cover shell
@@ -382,13 +400,14 @@ export function parseRules(raws: string[]): PermissionRule[] {
  * permission rule strings.
  *
  * Read tools all map to "Read" (meta-category) so a single rule covers the
- * entire family (read_file, grep_search, glob, list_directory).
+ * entire family (read_file, zoom_image, grep_search, glob, list_directory).
  * Edit tools map to "Edit" (meta-category) covering edit + write_file.
  * Other tools use their individual display alias.
  */
 const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Read meta-category
   read_file: 'Read',
+  zoom_image: 'Read',
   grep_search: 'Read',
   glob: 'Read',
   list_directory: 'Read',
@@ -402,6 +421,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  web_search: 'WebSearch',
   read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
@@ -429,13 +449,14 @@ export function getRuleDisplayName(canonicalToolName: string): string {
  *
  * For these tools the minimum-scope rule uses `path.dirname()` so the rule
  * covers the containing directory rather than a single file — e.g.
- *   read_file("/Users/alice/.secrets") → `Read(//Users/alice)`
+ *   zoom_image("/Users/alice/chart.png") → `Read(//Users/alice)`
  *
  * Directory-targeted tools (list_directory, grep_search, glob) already receive
  * a directory path, so they use it as-is.
  */
 const FILE_TARGETED_TOOLS = new Set([
   'read_file',
+  'zoom_image',
   'edit',
   'write_file',
   'notebook_edit',
@@ -451,8 +472,9 @@ const FILE_TARGETED_TOOLS = new Set([
  *
  * Specifier selection by tool category:
  *   - **path** tools (Read/Edit):
- *       File-targeted tools (read_file, edit, write_file) use the **parent
- *       directory** so the rule covers the whole directory, not a single file.
+ *       File-targeted tools (read_file, zoom_image, edit, write_file) use the
+ *       **parent directory** so the rule covers the whole directory, not a
+ *       single file.
  *       Directory-targeted tools (grep, glob, ls) use the directory as-is.
  *       The `//` prefix denotes an absolute filesystem path in the rule grammar.
  *   - **domain** tools (WebFetch): `WebFetch(example.com)`
@@ -546,6 +568,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Bash: 'run commands',
   Monitor: 'monitor commands',
   WebFetch: 'fetch from',
+  WebSearch: 'search the web',
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
@@ -1009,11 +1032,15 @@ export function resolvePathPattern(
  * Uses picomatch for the actual glob matching, following gitignore semantics:
  *   - `*` matches files in a single directory (does not cross `/`)
  *   - `**` matches recursively across directories
+ * When `matchMode` is `'canonical'`, both the lexical absolute path and its
+ * canonical filesystem destination are considered. For new files, the closest
+ * existing ancestor is canonicalized.
  *
  * @param specifier - The raw specifier from the rule (e.g. "./secrets/**")
  * @param filePath - The absolute path of the file being accessed
  * @param projectRoot - The project root directory (absolute)
  * @param cwd - The current working directory (absolute)
+ * @param matchMode - Whether to also match the canonical filesystem destination
  * @returns True if the file path matches the pattern
  */
 export function matchesPathPattern(
@@ -1021,22 +1048,106 @@ export function matchesPathPattern(
   filePath: string,
   projectRoot: string,
   cwd: string,
+  matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
+  const patterns =
+    matchMode === 'canonical'
+      ? getCanonicalPatternCandidates(resolvedPattern)
+      : [resolvedPattern];
+  const matchers = patterns.map((pattern) =>
+    picomatch(pattern, {
+      dot: true,
+      nocase: false,
+    }),
+  );
+  const paths =
+    matchMode === 'canonical'
+      ? getCanonicalPathMatchCandidates(filePath, cwd)
+      : [toPosixPath(filePath)];
 
-  // Normalize filePath to forward slashes for cross-platform picomatch compatibility.
-  // On Windows, incoming paths may use backslashes; picomatch expects forward slashes.
-  const normalizedFilePath = toPosixPath(filePath);
+  return paths.some((candidate) =>
+    matchers.some((isMatch) => isMatch(candidate)),
+  );
+}
 
-  // Use picomatch for gitignore-style matching
-  const isMatch = picomatch(resolvedPattern, {
-    dot: true, // Match dotfiles (e.g. .env)
-    nocase: false, // Case-sensitive (filesystem convention)
-    // Note: do NOT set bash: true — it makes `*` match across directories.
-    // Default picomatch behavior is gitignore-style: `*` = single dir, `**` = recursive.
-  });
+function getCanonicalPatternCandidates(resolvedPattern: string): string[] {
+  const candidates = new Set([resolvedPattern]);
+  const { base } = picomatch.scan(resolvedPattern);
+  const canonicalBase = realpathNearestExisting(base);
+  if (canonicalBase !== undefined) {
+    candidates.add(
+      `${toPosixPath(canonicalBase)}${resolvedPattern.slice(base.length)}`,
+    );
+  }
+  return [...candidates];
+}
 
-  return isMatch(normalizedFilePath);
+function getCanonicalPathMatchCandidates(
+  filePath: string,
+  cwd: string,
+): string[] {
+  const candidates = new Set([toPosixPath(filePath)]);
+  const absolutePath = resolveWithoutNormalizing(cwd, filePath);
+  const canonicalPath = realpathNearestExisting(absolutePath);
+  if (canonicalPath !== undefined) {
+    candidates.add(toPosixPath(canonicalPath));
+  }
+  return [...candidates];
+}
+
+function resolveWithoutNormalizing(base: string, filePath: string): string {
+  // Preserve `..` until realpathNearestExisting resolves symlinks on disk.
+  return path.isAbsolute(filePath)
+    ? filePath
+    : `${base}${/[\\/]$/.test(base) ? '' : path.sep}${filePath}`;
+}
+
+function realpathNearestExisting(filePath: string): string | undefined {
+  let current = filePath;
+  const missingSegments: string[] = [];
+  let symlinkHops = 0;
+  const maxSymlinkHops = 40;
+
+  while (true) {
+    try {
+      // Joining deliberately normalizes traversal in the unresolved suffix.
+      return path.join(fs.realpathSync.native(current), ...missingSegments);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        if (symlinkHops++ >= maxSymlinkHops) {
+          return undefined;
+        }
+        const target = fs.readlinkSync(current);
+        const parent = fs.realpathSync.native(path.dirname(current));
+        current = resolveWithoutNormalizing(parent, target);
+        continue;
+      }
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1100,12 +1211,22 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
+  // Exact rules persisted before provider-safe MCP names were introduced
+  // should continue matching their deterministic normalized registration.
+  if (
+    !pattern.endsWith('*') &&
+    pattern.split('__').length >= 3 &&
+    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
+  ) {
+    return true;
+  }
+
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = pattern.slice(0, -1); // strip trailing "*"
-    return toolName.startsWith(prefix);
+    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
+    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -1116,7 +1237,8 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     patternParts.length === 2 &&
     toolParts.length >= 3 &&
     patternParts[0] === toolParts[0] &&
-    patternParts[1] === toolParts[1]
+    sanitizeToolNameForProvider(patternParts[1]) ===
+      sanitizeToolNameForProvider(toolParts[1])
   ) {
     return true;
   }
@@ -1163,6 +1285,7 @@ export interface PathMatchContext {
  * @param filePath - Absolute file path (for Read/Edit rules)
  * @param domain - Domain (for WebFetch rules)
  * @param pathContext - Project root and cwd for resolving relative path patterns
+ * @param pathMatchMode - Whether path rules also match canonical destinations
  */
 export function matchesRule(
   rule: PermissionRule,
@@ -1173,6 +1296,8 @@ export function matchesRule(
   pathContext?: PathMatchContext,
   specifier?: string,
   toolParams?: Record<string, unknown>,
+  toolAliases?: readonly string[],
+  pathMatchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1186,7 +1311,16 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    if (!matchesMcpPattern(rule.toolName, canonicalCtxToolName)) {
+    const matchesLegacyExactName =
+      !rule.toolName.endsWith('*') &&
+      rule.toolName.split('__').length >= 3 &&
+      (toolAliases ?? []).some(
+        (alias) => rule.toolName === resolveToolName(alias),
+      );
+    const matchesMcpName =
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
+      matchesLegacyExactName;
+    if (!matchesMcpName) {
       return false;
     }
 
@@ -1250,6 +1384,7 @@ export function matchesRule(
           filePath,
           ctx.projectRoot,
           ctx.cwd,
+          pathMatchMode,
         );
         break;
       }

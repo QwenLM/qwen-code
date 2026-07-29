@@ -28,7 +28,7 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 const MAX_PAYLOAD_DEPTH = 64;
 
 export interface ChannelWebhookRouteDeps {
-  channelsConfig: Record<string, { webhooks?: ChannelWebhookConfig }>;
+  getChannelsConfig: () => Record<string, { webhooks?: ChannelWebhookConfig }>;
   safeBody: (req: Request) => Record<string, unknown>;
   enqueueWebhookTask: (
     task: ChannelWebhookTask,
@@ -52,7 +52,7 @@ export function registerChannelWebhookRoutes(
         return;
       }
 
-      const sources = deps.channelsConfig[channelName]?.webhooks?.sources;
+      const sources = deps.getChannelsConfig()[channelName]?.webhooks?.sources;
       const sourceConfig =
         sources && Object.hasOwn(sources, source) ? sources[source] : undefined;
       if (!sourceConfig) {

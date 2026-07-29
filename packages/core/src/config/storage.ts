@@ -35,6 +35,7 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
 
 export class Storage {
   private readonly targetDir: string;
+  private readonly runtimeBaseDir: string;
 
   /**
    * Custom runtime output base directory set via settings.
@@ -45,8 +46,12 @@ export class Storage {
     string | null
   >();
 
-  constructor(targetDir: string) {
+  constructor(
+    targetDir: string,
+    runtimeBaseDir: string = Storage.getRuntimeBaseDir(),
+  ) {
     this.targetDir = targetDir;
+    this.runtimeBaseDir = path.resolve(runtimeBaseDir);
   }
 
   /**
@@ -124,6 +129,10 @@ export class Storage {
   ): T {
     const resolved = Storage.resolveRuntimeBaseDir(dir, cwd);
     return Storage.runtimeBaseDirContext.run(resolved, fn);
+  }
+
+  static hasRuntimeBaseDirContext(): boolean {
+    return Storage.runtimeBaseDirContext.getStore() !== undefined;
   }
 
   /**
@@ -310,18 +319,19 @@ export class Storage {
     return path.join(this.targetDir, QWEN_DIR);
   }
 
+  getRuntimeBaseDir(): string {
+    return this.runtimeBaseDir;
+  }
+
   getProjectDir(): string {
     const projectId = sanitizeCwd(this.getProjectRoot());
-    const projectsDir = path.join(
-      Storage.getRuntimeBaseDir(),
-      PROJECT_DIR_NAME,
-    );
+    const projectsDir = path.join(this.runtimeBaseDir, PROJECT_DIR_NAME);
     return path.join(projectsDir, projectId);
   }
 
   getProjectTempDir(): string {
     const hash = getProjectHash(this.getProjectRoot());
-    const tempDir = Storage.getGlobalTempDir();
+    const tempDir = path.join(this.runtimeBaseDir, TMP_DIR_NAME);
     const targetDir = path.join(tempDir, hash);
     return targetDir;
   }

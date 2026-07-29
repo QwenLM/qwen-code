@@ -48,6 +48,16 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 2, description: t('show stderr to model immediately') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.MessageDisplay]: [
+      {
+        code: 0,
+        description: t('fire-and-forget; exit status is ignored'),
+      },
+      {
+        code: 'Other',
+        description: t('fire-and-forget; exit status is ignored'),
+      },
+    ],
     [HookEventName.Notification]: [
       { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
@@ -171,6 +181,9 @@ export function getHookShortDescription(eventName: string): string {
       'When a slash command expands into a prompt',
     ),
     [HookEventName.SessionStart]: t('When a new session is started'),
+    [HookEventName.MessageDisplay]: t(
+      'Repeatedly, as the assistant reply streams',
+    ),
     [HookEventName.Stop]: t('Right before Qwen Code concludes its response'),
     [HookEventName.SubagentStart]: t(
       'When a subagent (Agent tool call) is started',
@@ -221,13 +234,16 @@ export function getHookDescription(eventName: string): string {
       'Input to command is JSON with file_path, memory_type, load_reason, and optional trigger_file_path and parent_file_path.',
     ),
     [HookEventName.UserPromptSubmit]: t(
-      'Input to command is JSON with original user prompt text.',
+      'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
     ),
     [HookEventName.UserPromptExpansion]: t(
       'Input to command is JSON with command_name, command_args, and expanded prompt text.',
     ),
     [HookEventName.SessionStart]: t(
       'Input to command is JSON with session start source.',
+    ),
+    [HookEventName.MessageDisplay]: t(
+      'Input to command is JSON with message_id, displayed_text (cumulative text streamed so far), and is_final. Fire-and-forget: output and exit status are ignored.',
     ),
     [HookEventName.SessionEnd]: t(
       'Input to command is JSON with session end reason.',

@@ -21,14 +21,20 @@ import fs from 'node:fs/promises';
 import os, { EOL } from 'node:os';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { tildeifyPath } from '../utils/paths.js';
 import { spawn } from 'node:child_process';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
   runRipgrep: vi.fn(),
+}));
+
+vi.mock('../telemetry/loggers.js', () => ({
+  logRipgrepRuntimeRecovery: vi.fn(),
 }));
 
 // Mock child_process for ripgrep calls
@@ -52,12 +58,14 @@ describe('RipGrepTool', () => {
     getWorkingDir: () => tempRootDir,
     getDebugMode: () => false,
     getUseBuiltinRipgrep: () => true,
+    getUsageStatisticsEnabled: () => false,
     getTruncateToolOutputThreshold: () => 25000,
     getTruncateToolOutputLines: () => 1000,
   } as unknown as Config;
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.mocked(logRipgrepRuntimeRecovery).mockReset();
     mockSpawn.mockReset();
     _resetRipGrepCachesForTest();
     Object.assign(mockConfig, {
@@ -288,18 +296,148 @@ describe('RipGrepTool', () => {
       ]);
     });
 
-    it('surfaces ripgrep system-level truncation in display metadata', async () => {
+    it('surfaces incomplete ripgrep execution without reporting display truncation', async () => {
+      const error = new Error('stdout maxBuffer length exceeded');
       (runRipgrep as Mock).mockResolvedValue({
         stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
-        truncated: true,
-        error: undefined,
+        incomplete: true,
+        error,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'max_buffer',
+        },
       });
 
       const invocation = grepTool.build({ pattern: 'hello' });
       const result = await invocation.execute(abortSignal);
 
-      expect(result.returnDisplay).toBe('Found 1 match (truncated)');
-      expect(result.llmContent).toContain('[0 lines truncated] ...');
+      expect(result.returnDisplay).toBe('Found 1 match (incomplete)');
+      expect(result.llmContent).toContain(
+        '[Search did not complete: the results above may not include all matches.]',
+      );
+      expect(result.llmContent).not.toContain('lines truncated');
+    });
+
+    it('logs runtime recovery telemetry after a successful EAGAIN retry', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        incomplete: false,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: true,
+          retrySucceeded: true,
+          failureKind: 'eagain',
+        },
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(logRipgrepRuntimeRecovery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          selection_mode: 'builtin',
+          retry_triggered: true,
+          retry_succeeded: true,
+          failure_kind: 'eagain',
+        }),
+      );
+    });
+
+    it('does not emit telemetry for a clean successful search', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        incomplete: false,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+        },
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(logRipgrepRuntimeRecovery).not.toHaveBeenCalled();
+    });
+
+    it('logs runtime recovery telemetry for a non-retry timeout failure', async () => {
+      const error = new Error('Command timed out');
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        incomplete: true,
+        error,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'timeout',
+        },
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      await invocation.execute(abortSignal);
+
+      expect(logRipgrepRuntimeRecovery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          selection_mode: 'builtin',
+          retry_triggered: false,
+          failure_kind: 'timeout',
+        }),
+      );
+    });
+
+    it('does not report incomplete unparseable output as no matches', async () => {
+      const error = new Error('ripgrep exited before JSON completed');
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '{"type":"match"',
+        incomplete: true,
+        error,
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'exit',
+        },
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Error: Search incomplete');
+      expect(result.llmContent).toContain(
+        'No valid matches were returned; do not treat this as no matches.',
+      );
+      expect(result.llmContent).not.toContain('No matches found');
+    });
+
+    it('can show display truncation and incomplete execution together', async () => {
+      Object.assign(mockConfig, {
+        getTruncateToolOutputThreshold: () => 30,
+      });
+      const error = new Error('Command timed out');
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}fileB.js${sep}1${sep}hello again${EOL}`,
+        incomplete: true,
+        error,
+        recovery: {
+          selectionMode: 'system',
+          retryTriggered: false,
+          failureKind: 'timeout',
+        },
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe(
+        'Found 2 matches (truncated, incomplete)',
+      );
+      expect(result.llmContent).toContain('line truncated');
+      expect(result.llmContent).toContain(
+        '[Search did not complete: the results above may not include all matches.]',
+      );
     });
 
     it('should preserve absolute result paths reported by ripgrep', async () => {
@@ -1458,10 +1596,9 @@ describe('RipGrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')}`,
       );
-      expect(invocation.getDescription()).toContain("app'");
     });
 
     it('should generate correct description with default search path', () => {
@@ -1479,16 +1616,27 @@ describe('RipGrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')} (filter: '*.ts')`,
       );
-      expect(invocation.getDescription()).toContain("(filter: '*.ts')");
     });
 
     it('should use path when specified in description', () => {
       const params: RipGrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
+    });
+
+    it('should keep paths outside the project absolute (never project-relative)', () => {
+      const outside = path.resolve(os.tmpdir());
+      const params: RipGrepToolParams = {
+        pattern: 'testPattern',
+        path: outside,
+      };
+      const invocation = grepTool.build(params);
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${tildeifyPath(outside)}`,
+      );
     });
   });
 

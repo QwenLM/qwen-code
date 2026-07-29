@@ -17,9 +17,11 @@ export {
   useDaemonStreamingState,
   useDaemonSession,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptHistory,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
 } from './DaemonSessionProvider.js';
+export type { DaemonTranscriptHistory } from './DaemonSessionProvider.js';
 export type {
   DaemonCommandInfo,
   DaemonConnectionState,

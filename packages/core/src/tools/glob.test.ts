@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import type { Path as GlobResultPath } from 'glob';
@@ -480,6 +481,39 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('Found 2 file(s)');
     });
 
+    it('should not scan later workspace directories after hitting the collection limit', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.git'), '');
+      const globStreamCallsBefore = vi.mocked(glob.globStream).mock.calls
+        .length;
+      const stream = mockGlobStreamResults('limit', 10_005);
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      try {
+        const invocation = new GlobTool(multiDirConfig).build({
+          pattern: '*.streamlimit',
+        });
+        const result = await invocation.execute(abortSignal);
+        const llmContent = partListUnionToString(result.llmContent);
+
+        expect(vi.mocked(glob.globStream).mock.calls.length).toBe(
+          globStreamCallsBefore + 1,
+        );
+        expect(stream.getYielded()).toBeLessThan(10_005);
+        expect(llmContent).toContain('Found at least');
+        expect(llmContent).toContain('Narrow the pattern or path');
+      } finally {
+        await fs.rm(secondDir, { recursive: true, force: true });
+      }
+    });
+
     it('should use single directory description when only one workspace dir', async () => {
       const params: GlobToolParams = { pattern: '*.txt' };
       const invocation = globTool.build(params);
@@ -921,6 +955,35 @@ describe('GlobTool', () => {
 
       // Should use plural "files" for multiple truncated files
       expect(result.llmContent).toContain('[5 files truncated] ...');
+    });
+  });
+
+  describe('getDescription', () => {
+    it('should generate correct description with pattern only', () => {
+      const params: GlobToolParams = { pattern: '*.ts' };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe("'*.ts'");
+    });
+
+    it('should show project-internal paths relative to the project root', () => {
+      const params: GlobToolParams = { pattern: '*.ts', path: 'sub' };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe("'*.ts' in sub");
+    });
+
+    it('should show . for the project root itself', () => {
+      const params: GlobToolParams = { pattern: '*.ts', path: '.' };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe("'*.ts' in .");
+    });
+
+    it('should keep paths outside the project absolute (never project-relative)', () => {
+      const outside = path.resolve(os.tmpdir());
+      const params: GlobToolParams = { pattern: '*.ts', path: outside };
+      const invocation = globTool.build(params);
+      expect(invocation.getDescription()).toBe(
+        `'*.ts' in ${tildeifyPath(outside)}`,
+      );
     });
   });
 

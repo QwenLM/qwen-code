@@ -62,6 +62,7 @@ export default {
     'Подключение к MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
   '? for shortcuts': '? — горячие клавиши',
+  'Pasting…': 'Вставка…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -467,6 +468,7 @@ export default {
   'Tool Schema Compliance': 'Соответствие Tool Schema',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
+  'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
   'Auto (detect terminal theme)': 'Авто (определить тему терминала)',
   Auto: 'Авто',
   Text: 'Текст',
@@ -604,7 +606,7 @@ export default {
     'Пожалуйста, укажите имя удаляемого расширения как позиционный аргумент.',
   'Enables an extension.': 'Включает расширение.',
   'The name of the extension to enable.': 'Имя включаемого расширения.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'Область для включения расширения. Если не задана, будет включено во всех областях.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Расширение "{{name}}" успешно включено для области "{{scope}}".',
@@ -614,7 +616,7 @@ export default {
     'Недопустимая область: {{scope}}. Пожалуйста, используйте одну из {{scopes}}.',
   'Disables an extension.': 'Отключает расширение.',
   'The name of the extension to disable.': 'Имя отключаемого расширения.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'Область для отключения расширения.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Расширение "{{name}}" успешно отключено для области "{{scope}}".',
@@ -810,8 +812,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with original user prompt text.':
-    'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
@@ -1392,6 +1394,11 @@ export default {
   reviewed: 'проверено',
   'Code Changes:': 'Изменения кода:',
   Performance: 'Производительность',
+  'Generation Metrics': 'Метрики генерации',
+  'Latest Request': 'Последний запрос',
+  'Generation Time': 'Время генерации',
+  'Average TTFT': 'Среднее TTFT',
+  'Session TPS': 'TPS сеанса',
   'Wall Time:': 'Общее время:',
   'Agent Active:': 'Активность агента:',
   'API Time:': 'Время API:',
@@ -2119,8 +2126,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Не удалось проверить обновления ({{reason}}). Проверьте сеть или настройки registry.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Проверка обновлений пропущена ({{reason}}) — выполните /update для повторной попытки.',
+  'registry did not respond within {{seconds}}s':
+    'registry не ответил за {{seconds}} с',
+  'registry unreachable': 'registry недоступен',
+  'registry error': 'ошибка registry',
   'Unable to check for updates: {{reason}}':
     'Невозможно проверить обновления: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2158,6 +2171,16 @@ export default {
     'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
   'Manual update required. Please reinstall Qwen Code.':
     'Требуется ручное обновление. Переустановите Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'В этом сеансе используется пользовательский образ песочницы {{image}}. Обновите образ и перезапустите Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Обновите Qwen Code на хосте, затем перезапустите песочницу.',
+  'The update will be installed after you exit this session.':
+    'Обновление будет установлено после выхода из этого сеанса.',
+  'Run /update to install the update on the host.':
+    'Запустите /update, чтобы установить обновление на хосте.',
+  'Run /update to install the update.':
+    'Запустите /update, чтобы установить обновление.',
 
   // ============================================================================
   // reload-plugins command
@@ -2188,4 +2211,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
 };

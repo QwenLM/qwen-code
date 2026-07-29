@@ -30,12 +30,15 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isTruthy,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
+  parseBooleanEnvFlag,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -90,6 +93,7 @@ import {
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
+import { resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -889,7 +893,7 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('max-session-turns', {
           type: 'number',
-          description: 'Maximum number of session turns',
+          description: 'Maximum number of session turns (must be an integer)',
         })
         .option('max-wall-time', {
           type: 'string',
@@ -1227,6 +1231,50 @@ function resolveModelFallbacks(
 }
 
 /**
+ * Resolve the built-in WebSearch tool settings, with env overrides taking
+ * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
+ * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
+ * selector, WEB_SEARCH_EXTRACTOR for page reading.
+ *
+ * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
+ * baseUrl for environments that cannot write settings.json; the API key
+ * comes from WEB_SEARCH_API_KEY, falling back to DASHSCOPE_API_KEY. When
+ * set, it takes precedence over modelProviders resolution in the gate.
+ */
+function resolveWebSearchSettings(
+  settings: Settings,
+): WebSearchSettings | undefined {
+  const webSearch = settings.tools?.webSearch;
+  // A set-but-empty env var is "unset", not an override: dotenv templates and
+  // CI wrappers export empty values, which must not clobber a valid
+  // settings.json config (same rule as WEB_SEARCH_BASE_URL below).
+  const envEnabled = process.env['ENABLE_WEB_SEARCH']?.trim() || undefined;
+  const enabled =
+    envEnabled !== undefined ? isTruthy(envEnabled) : webSearch?.enabled;
+  const model = process.env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
+  const envExtractor = process.env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
+  const webExtractor =
+    envExtractor !== undefined
+      ? isTruthy(envExtractor)
+      : webSearch?.webExtractor;
+  const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
+  const apiKeyEnv = baseUrl
+    ? process.env['WEB_SEARCH_API_KEY']?.trim()
+      ? 'WEB_SEARCH_API_KEY'
+      : 'DASHSCOPE_API_KEY'
+    : undefined;
+  if (
+    enabled === undefined &&
+    model === undefined &&
+    webExtractor === undefined &&
+    baseUrl === undefined
+  ) {
+    return undefined;
+  }
+  return { enabled, model, webExtractor, baseUrl, apiKeyEnv };
+}
+
+/**
  * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
  * unlimited). Order of precedence: `--max-wall-time` flag, then
  * `model.maxWallTimeSeconds` from settings, else unlimited.
@@ -1409,7 +1457,7 @@ function parseMcpConfig(
  * Builds the live-read closure for `Config.getDisabledSkillNames()`.
  *
  * The returned function reads through `loadedSettings.merged` on every
- * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * call, so `LoadedSettings` skill-setting mutations
  * are reflected without rebuilding `Config`. The closure is over the
  * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
  * distinction matters because `LoadedSettings.setValue` replaces the
@@ -1424,24 +1472,7 @@ function parseMcpConfig(
 export function buildDisabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
-  return () => {
-    // Defensive: settings.json is user-editable, so the `disabled` slot
-    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
-    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
-    // fallback only catches `null`/`undefined`, so we MUST also guard
-    // against non-array values before `.filter()` — otherwise calling
-    // `"all".filter` throws `TypeError: list.filter is not a function`
-    // and bricks every skill invocation (validateToolParams + execute
-    // both call this provider without a try/catch).
-    const raw = loadedSettings.merged.skills?.disabled;
-    const list = Array.isArray(raw) ? raw : [];
-    return new Set(
-      list
-        .filter((n): n is string => typeof n === 'string')
-        .map((n) => n.trim().toLowerCase())
-        .filter(Boolean),
-    );
-  };
+  return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
 export async function loadCliConfig(
@@ -1460,8 +1491,8 @@ export async function loadCliConfig(
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
    * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
-   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
-   * mutations within the same process.
+   * effective skill availability even after `setValue` mutations within the
+   * same process.
    *
    * Callers MUST close over the live `LoadedSettings` instance, NOT over
    * the `settings: Settings` snapshot passed as the first argument here —
@@ -1529,7 +1560,9 @@ export async function loadCliConfig(
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
   // Pass cwd so that relative paths like ".qwen" resolve per-project.
-  Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
+  if (!Storage.hasRuntimeBaseDirContext()) {
+    Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
+  }
 
   const ideMode = settings.ide?.enabled ?? false;
 
@@ -1607,8 +1640,13 @@ export async function loadCliConfig(
     approvalMode = ApprovalMode.YOLO;
   } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
-  } else {
+  } else if (bareMode || safeMode) {
+    // Restricted modes strip permissions/allowlists and are meant to be
+    // maximally restrictive, so they keep manual approval rather than the
+    // AUTO default that normal sessions now get.
     approvalMode = ApprovalMode.DEFAULT;
+  } else {
+    approvalMode = ApprovalMode.AUTO;
   }
 
   // Force approval mode to default if the folder is not trusted.
@@ -1824,7 +1862,18 @@ export async function loadCliConfig(
   if (argv.allowedMcpServerNames) {
     allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
     excludedMcpServers = undefined;
-  } else if (!bareMode) {
+  } else if (!bareMode && !safeMode) {
+    // Settings-sourced allow/exclude lists are LOCAL/ambient state, same
+    // category as settings.mcpServers itself — safe mode already drops the
+    // latter (getMcpServers()) but this branch used to read the former
+    // unconditionally (only bareMode was guarded), so a settings.json
+    // mcp.allowed narrower than the caller's own top-tier servers would
+    // silently filter them back out via getMcpServers()'s allowedMcpServers
+    // filter (added in this same PR, #7827, for the `--allowed-mcp-server-
+    // names` case) — defeating the very guarantee this PR exists to provide.
+    // The argv.allowedMcpServerNames branch above is unaffected: that's an
+    // explicit per-invocation argument, not local state, so it still applies
+    // under safe mode same as topTierMcpServers itself.
     allowedMcpServers = settings.mcp?.allowed
       ? new Set(settings.mcp.allowed.filter(Boolean))
       : undefined;
@@ -1970,10 +2019,20 @@ export async function loadCliConfig(
     sessionMcpServers || cliMcpServers
       ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
       : undefined;
+  // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
+  // ambient, file-sourced state they're meant to distrust) — but top-tier
+  // servers are an explicit, per-invocation argument from the caller (ACP
+  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
   const mcpServers =
     bareMode || safeMode
-      ? {}
+      ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  // Top-tier servers are never gated (#4615, see the comment above), so this
+  // is a no-op for them either way today. Skipped under safe mode anyway
+  // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
+  // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
+  // state at all, not even a read with no behavioral effect. Revisit if a
+  // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
@@ -2009,6 +2068,17 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    customSkillDirs:
+      bareMode || safeMode
+        ? undefined
+        : (Array.isArray(settings.skills?.directories)
+            ? settings.skills.directories
+            : []
+          )
+            .filter(
+              (d): d is string => typeof d === 'string' && d.trim().length > 0,
+            )
+            .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
@@ -2062,14 +2132,16 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
-    // Ordinary interactive TUI defers telemetry until after first paint. Auth
-    // events emitted before the deferred init are an accepted startup-latency
-    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
-    // "prompt"` must await IDE context before auto-submit, but telemetry can
-    // still initialize after render unless an initial prompt is present.
-    deferTelemetryInitialization: interactive && !isAcpMode && !question,
+    // Ordinary interactive TUI defers telemetry until after first paint; ACP
+    // defers it until after the initialize response is written. Events emitted
+    // before deferred init are an accepted startup-latency tradeoff. `qwen -i
+    // "prompt"` still initializes eagerly because it auto-submits after render.
+    deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
-    usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
+    usageStatisticsEnabled:
+      parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??
+      settings.privacy?.usageStatisticsEnabled ??
+      true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -2093,10 +2165,12 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    sessionWriterLeaseEnabled:
+      settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
     artifactHost: settings.artifact?.host
@@ -2147,6 +2221,7 @@ export async function loadCliConfig(
     providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
+    initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     warnings: resolvedCliConfig.warnings,
     bareMode,
     safeMode,
@@ -2164,6 +2239,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
+    shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
@@ -2195,14 +2272,19 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill:
-      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableAutoSkill ?? false),
     autoSkillConfirm:
       bareMode || safeMode
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     fastModel: settings.fastModel || undefined,
+    webSearch:
+      bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
+    imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(
       argv.fallbackModel,
@@ -2239,7 +2321,15 @@ export async function loadCliConfig(
     },
     agents: settings.agents
       ? {
+          builtin: settings.agents.builtin
+            ? {
+                exploreModel: settings.agents.builtin.exploreModel,
+              }
+            : undefined,
+          modelGrades: settings.agents.modelGrades,
+          allowedGrades: settings.agents.allowedGrades,
           maxParallelAgents: settings.agents.maxParallelAgents,
+          maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena
             ? {

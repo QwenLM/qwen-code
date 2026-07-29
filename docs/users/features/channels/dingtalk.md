@@ -81,6 +81,36 @@ qwen channel start
 
 Open DingTalk and send a message to the bot. You should see a 👀 emoji reaction appear while the agent processes, followed by the response.
 
+## Daemon Webhook Delivery
+
+When the channel runs under `qwen serve`, authenticated external Webhook events can trigger unattended agent tasks and deliver the final Markdown response to either a DingTalk user or group. Use the existing Webhook target fields; no separate channel type is required:
+
+```json
+{
+  "webhooks": {
+    "sources": {
+      "manual-test": {
+        "secretEnv": "QWEN_CHANNEL_DINGTALK_TEST_SECRET",
+        "targets": {
+          "operator": {
+            "chatId": "DINGTALK_USER_ID",
+            "senderId": "webhook:manual-test",
+            "isGroup": false
+          },
+          "team": {
+            "chatId": "OPEN_CONVERSATION_ID",
+            "senderId": "webhook:manual-test",
+            "isGroup": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Every target must set `isGroup` explicitly. For a direct message, `chatId` is the recipient's DingTalk user ID. For a group message, `chatId` is the group's `openConversationId`. Thread targets and incoming robot Webhook URLs are not supported for proactive delivery. See [Webhook-triggered tasks](./overview#webhook-triggered-tasks) for the complete channel configuration and request format.
+
 ## Group Chats
 
 DingTalk bots work in both DM and group conversations. To enable group support:

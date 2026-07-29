@@ -334,11 +334,19 @@ export class SourceServerBuilder {
 
 /**
  * Normalize MCP URL to standard format
- * - Removes trailing slashes
+ * - Removes trailing slashes from the path portion only
+ * - Preserves query strings and fragments unchanged
  * - Preserves the user-configured path as-is (no /mcp suffix appended)
  */
 export function normalizeMcpUrl(url: string): string {
-  return url.replace(/\/+$/, '');
+  const suffixIndex = url.search(/[?#]/);
+  if (suffixIndex === -1) {
+    return url.replace(/\/+$/, '');
+  }
+
+  return (
+    url.slice(0, suffixIndex).replace(/\/+$/, '') + url.slice(suffixIndex)
+  );
 }
 
 // Singleton instance

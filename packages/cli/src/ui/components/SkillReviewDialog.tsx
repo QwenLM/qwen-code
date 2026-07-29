@@ -123,9 +123,9 @@ export const SkillReviewDialog = ({
   // container at min(terminalWidth − 4, 100) (mainAreaWidth in AppContainer;
   // DiffDialog applies the same clamp). MaxSizedBox wraps the preview at this
   // width, and its height cap counts the WRAPPED rows — so this must never
-  // exceed the dialog's actual inner text width (container − marginLeft 1 −
-  // border 2 − paddingX 2 = container − 5), or Ink would re-wrap at render
-  // time and push rows past the cap. −6 keeps one column of slack.
+  // exceed the dialog's actual inner text width (container − border 2 −
+  // paddingX 2 = container − 4), or Ink would re-wrap at render time and
+  // push rows past the cap. −6 keeps two columns of slack.
   const previewWidth = Math.max(20, Math.min(columns - 4, 100) - 6);
 
   const current = snapshot[index];
@@ -370,7 +370,6 @@ export const SkillReviewDialog = ({
       borderColor={theme.status.warning}
       paddingX={1}
       width="100%"
-      marginLeft={1}
     >
       <Text bold color={theme.text.primary}>
         {t('Auto-generated skill — keep it?')} ({index + 1}/{snapshot.length})

@@ -8,12 +8,13 @@ import * as vscode from 'vscode';
 import { IDEServer } from './ide-server.js';
 import semver from 'semver';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
-import { createLogger } from './utils/logger.js';
+import { createLogger, logger, resetLoggerSink } from './utils/logger.js';
 import {
   detectIdeFromEnv,
   IDE_DEFINITIONS,
   type IdeInfo,
 } from '@qwen-code/qwen-code-core';
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { WebViewProvider } from './webview/providers/WebViewProvider.js';
 import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
 import { registerChatViewProviders } from './webview/providers/chatViewRegistration.js';
@@ -41,10 +42,8 @@ const HIDE_INSTALLATION_GREETING_IDES: ReadonlySet<IdeInfo['name']> = new Set([
 ]);
 
 let ideServer: IDEServer;
-let logger: vscode.OutputChannel;
+let outputChannel: vscode.OutputChannel;
 let chatProviderRegistry: ChatProviderRegistry<WebViewProvider> | null = null;
-
-let log: (message: string) => void = () => {};
 
 async function checkForUpdates(
   context: vscode.ExtensionContext,
@@ -113,11 +112,11 @@ async function checkForUpdates(
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-  logger = vscode.window.createOutputChannel('Qwen Code Companion');
-  log = createLogger(context, logger);
-  log('Extension activated');
+  outputChannel = vscode.window.createOutputChannel('Qwen Code Companion');
+  createLogger(outputChannel, redactLogCredentials);
+  logger.info('Extension activated');
 
-  checkForUpdates(context, log);
+  checkForUpdates(context, logger.info);
 
   // Create and register readonly file system provider
   // The provider registers itself as a singleton in the constructor
@@ -130,7 +129,7 @@ export async function activate(context: vscode.ExtensionContext) {
     ),
     readonlyProvider,
   );
-  log('Readonly file system provider registered');
+  logger.info('Readonly file system provider registered');
 
   chatProviderRegistry = new ChatProviderRegistry(
     () => new WebViewProvider(context, context.extensionUri),
@@ -138,7 +137,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const diffContentProvider = new DiffContentProvider();
   const diffManager = new DiffManager(
-    log,
+    logger.info,
     diffContentProvider,
     // Delay when any chat surface has a pending permission drawer
     () =>
@@ -177,18 +176,18 @@ export async function activate(context: vscode.ExtensionContext) {
         webviewPanel: vscode.WebviewPanel,
         state: unknown,
       ) {
-        console.log(
+        logger.log(
           '[Extension] Deserializing WebView panel with state:',
           state,
         );
 
         // Create a new provider for the restored panel
         const provider = createWebViewProvider();
-        console.log('[Extension] Provider created for deserialization');
+        logger.log('[Extension] Provider created for deserialization');
 
         // Restore state if available BEFORE restoring the panel
         if (state && typeof state === 'object') {
-          console.log('[Extension] Restoring state:', state);
+          logger.log('[Extension] Restoring state:', state);
           provider.restoreState(
             state as {
               conversationId: string | null;
@@ -196,13 +195,13 @@ export async function activate(context: vscode.ExtensionContext) {
             },
           );
         } else {
-          console.log('[Extension] No state to restore or invalid state');
+          logger.log('[Extension] No state to restore or invalid state');
         }
 
         await provider.restorePanel(webviewPanel);
-        console.log('[Extension] Panel restore completed');
+        logger.log('[Extension] Panel restore completed');
 
-        log('WebView panel restored from serialization');
+        logger.info('WebView panel restored from serialization');
       },
     }),
   );
@@ -210,11 +209,11 @@ export async function activate(context: vscode.ExtensionContext) {
   // Register newly added commands via commands module
   registerNewCommands(
     context,
-    log,
+    logger.info,
     diffManager,
     () => chatProviderRegistry?.getEditorProviders() ?? [],
     createWebViewProvider,
-    logger,
+    outputChannel,
   );
 
   // Register copy commands for webview context menu
@@ -263,9 +262,9 @@ export async function activate(context: vscode.ExtensionContext) {
           }
         }
       } catch (err) {
-        console.warn('[Extension] Auto-allow on diff.accept failed:', err);
+        logger.warn('[Extension] Auto-allow on diff.accept failed:', err);
       }
-      console.log('[Extension] Diff accepted');
+      logger.log('[Extension] Diff accepted');
     }),
     vscode.commands.registerCommand('qwen.diff.cancel', (uri?: vscode.Uri) => {
       const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -281,32 +280,32 @@ export async function activate(context: vscode.ExtensionContext) {
           }
         }
       } catch (err) {
-        console.warn('[Extension] Auto-reject on diff.cancel failed:', err);
+        logger.warn('[Extension] Auto-reject on diff.cancel failed:', err);
       }
-      console.log('[Extension] Diff cancelled');
+      logger.log('[Extension] Diff cancelled');
     })),
     vscode.commands.registerCommand('qwen.diff.closeAll', async () => {
       try {
         await diffManager.closeAll();
       } catch (err) {
-        console.warn('[Extension] qwen.diff.closeAll failed:', err);
+        logger.warn('[Extension] qwen.diff.closeAll failed:', err);
       }
     }),
     vscode.commands.registerCommand('qwen.diff.suppressBriefly', async () => {
       try {
         diffManager.suppressFor(1200);
       } catch (err) {
-        console.warn('[Extension] qwen.diff.suppressBriefly failed:', err);
+        logger.warn('[Extension] qwen.diff.suppressBriefly failed:', err);
       }
     }),
   );
 
-  ideServer = new IDEServer(log, diffManager);
+  ideServer = new IDEServer(logger.info, diffManager);
   try {
     await ideServer.start(context);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`Failed to start IDE server: ${message}`);
+    logger.warn(`Failed to start IDE server: ${message}`);
   }
 
   const infoMessageEnabled = !HIDE_INSTALLATION_GREETING_IDES.has(
@@ -409,7 +408,7 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export async function deactivate(): Promise<void> {
-  log('Extension deactivated');
+  logger.info('Extension deactivated');
   try {
     if (ideServer) {
       await ideServer.stop();
@@ -418,10 +417,11 @@ export async function deactivate(): Promise<void> {
     chatProviderRegistry = null;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`Failed to stop IDE server during deactivation: ${message}`);
+    logger.warn(`Failed to stop IDE server during deactivation: ${message}`);
   } finally {
-    if (logger) {
-      logger.dispose();
+    if (outputChannel) {
+      resetLoggerSink();
+      outputChannel.dispose();
     }
   }
 }

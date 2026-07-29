@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+
 export type DaemonMessageToolCallStatus =
   | 'pending'
   | 'in_progress'
@@ -79,6 +81,7 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
+  inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
 }
 

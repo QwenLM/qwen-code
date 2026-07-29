@@ -172,6 +172,23 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('reuses an unchanged category menu and limits rendered providers', () => {
+    const providers = Array.from({ length: 100 }, (_, index) => ({
+      id: `custom-${index}`,
+      label: `Custom ${index}`,
+      search: vi.fn().mockResolvedValue([]),
+    }));
+    mount({ builtinProviders: false, providers });
+    const view = makeView('@');
+
+    act(() => latest!.refreshForView(view));
+    const firstState = latest!.state;
+    act(() => latest!.refreshForView(view));
+
+    expect(latest!.state).toBe(firstState);
+    expect(latest!.state?.providers).toHaveLength(50);
+  });
+
   it('rejects custom providers that reuse built-in ids', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     mount({
@@ -274,7 +291,15 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.enterCategory(1));
     await runDebounce();
 
-    expect(latest!.state?.items[0]?.description).toBe('Reviewtxt中文');
+    expect(latest!.state?.items[0]).toMatchObject({
+      description: 'Reviewtxt中文',
+      composerTag: {
+        id: 'extension:@ext:review',
+        kind: 'extension',
+        value: 'Reviewtxt中文',
+        serialized: '@ext:review',
+      },
+    });
   });
 
   it('filters cached extension provider data while searching', async () => {
@@ -651,6 +676,31 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('searches matching files across the workspace', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn();
+    const globWorkspace = vi.fn().mockResolvedValue({
+      matches: ['packages/cli/src/config.ts', 'packages/core/src/config.ts'],
+    });
+    mount({ actions: { globWorkspace, listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@config')));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[cC][oO][nN][fF][iI][gG]*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'packages/cli/src/config.ts',
+      'packages/core/src/config.ts',
+    ]);
+  });
+
   it('preserves provider selection when accept dispatch triggers a synchronous refresh', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
@@ -691,57 +741,63 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('decorates accepted extension refs as inline composer tags', async () => {
-    vi.useFakeTimers();
-    const inlineTagEffect = StateEffect.define<{
-      from: number;
-      to: number;
-      tag: WebShellComposerTag;
-    }>();
-    const view = makeView('@');
-    mount({
-      view,
-      createInlineTagEffect: (range) => inlineTagEffect.of(range),
-      actions: {
-        loadExtensionsStatus: vi.fn().mockResolvedValue({
-          extensions: [
-            {
-              name: 'review',
-              displayName: 'Review',
-              isActive: true,
-            },
-          ],
-        }),
-      },
-    });
+  it.each([
+    ['localized displayName', 'Review', 'Review'],
+    ['extension name fallback', undefined, 'review'],
+  ])(
+    'decorates accepted extension refs using the %s',
+    async (_case, displayName, expectedValue) => {
+      vi.useFakeTimers();
+      const inlineTagEffect = StateEffect.define<{
+        from: number;
+        to: number;
+        tag: WebShellComposerTag;
+      }>();
+      const view = makeView('@');
+      mount({
+        view,
+        createInlineTagEffect: (range) => inlineTagEffect.of(range),
+        actions: {
+          loadExtensionsStatus: vi.fn().mockResolvedValue({
+            extensions: [
+              {
+                name: 'review',
+                ...(displayName ? { displayName } : {}),
+                isActive: true,
+              },
+            ],
+          }),
+        },
+      });
 
-    act(() => latest!.refreshForView(view));
-    act(() => latest!.enterCategory(1));
-    await runDebounce();
-    act(() => {
-      expect(latest!.accept()).toBe(true);
-    });
+      act(() => latest!.refreshForView(view));
+      act(() => latest!.enterCategory(1));
+      await runDebounce();
+      act(() => {
+        expect(latest!.accept()).toBe(true);
+      });
 
-    const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
-    expect(spec).toMatchObject({
-      changes: { from: 0, to: 1, insert: '@ext:review ' },
-      selection: { anchor: 12 },
-      scrollIntoView: true,
-    });
-    expect(Array.isArray(spec?.effects)).toBe(true);
-    const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
-    expect(effect?.is(inlineTagEffect)).toBe(true);
-    expect(effect?.value).toEqual({
-      from: 0,
-      to: 11,
-      tag: {
-        id: 'extension:@ext:review',
-        kind: 'extension',
-        value: 'review',
-        serialized: '@ext:review',
-      },
-    });
-  });
+      const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
+      expect(spec).toMatchObject({
+        changes: { from: 0, to: 1, insert: '@ext:review ' },
+        selection: { anchor: 12 },
+        scrollIntoView: true,
+      });
+      expect(Array.isArray(spec?.effects)).toBe(true);
+      const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
+      expect(effect?.is(inlineTagEffect)).toBe(true);
+      expect(effect?.value).toEqual({
+        from: 0,
+        to: 11,
+        tag: {
+          id: 'extension:@ext:review',
+          kind: 'extension',
+          value: expectedValue,
+          serialized: '@ext:review',
+        },
+      });
+    },
+  );
 
   it('clears a pending provider search when closing from items', async () => {
     vi.useFakeTimers();
@@ -1418,7 +1474,7 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('escapes glob metacharacters in the fallback file search', async () => {
+  it('escapes glob metacharacters in workspace file search', async () => {
     vi.useFakeTimers();
     const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
     mount({ actions: { globWorkspace } });
@@ -1428,10 +1484,29 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.updateSearch('foo*bar?'));
     await runDebounce();
 
-    expect(globWorkspace).toHaveBeenCalledWith('foo\\*bar\\?*', {
-      maxResults: 50,
-      signal: expect.any(AbortSignal),
-    });
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO]\\*[bB][aA][rR]\\?*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it('normalizes escaped paths and literalizes extglob operators', async () => {
+    vi.useFakeTimers();
+    const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
+    mount({ actions: { globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    act(() => latest!.updateSearch('./foo\\ bar+(test)'));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO] [bB][aA][rR]\\+\\([tT][eE][sS][tT]\\)*',
+      { maxResults: 50, signal: expect.any(AbortSignal) },
+    );
   });
 
   it('recovers from file provider list failures', async () => {

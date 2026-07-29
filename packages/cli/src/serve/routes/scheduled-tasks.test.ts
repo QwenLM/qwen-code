@@ -15,11 +15,18 @@ import {
   SessionService,
   Storage,
   getCronFilePath,
+  readCronTasks,
 } from '@qwen-code/qwen-code-core';
 import {
   registerScheduledTasksRoutes,
+  registerWorkspaceQualifiedScheduledTasksRoutes,
   scheduledTaskSessionName,
 } from './scheduled-tasks.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
@@ -33,6 +40,8 @@ interface StubBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
@@ -41,6 +50,7 @@ interface StubBridge {
   ): unknown;
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
+  spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
   closed: string[];
   named: Array<{ sessionId: string; displayName?: string }>;
   failNext: boolean;
@@ -51,6 +61,7 @@ function makeStubBridge(): StubBridge {
   const bridge: StubBridge = {
     spawned: [],
     spawnScopes: [],
+    spawnSources: [],
     closed: [],
     named: [],
     failNext: false,
@@ -62,6 +73,10 @@ function makeStubBridge(): StubBridge {
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
       bridge.spawnScopes.push(req.sessionScope);
+      bridge.spawnSources.push({
+        ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
+        ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+      });
       return { sessionId };
     },
     async closeSession(sessionId: string) {
@@ -81,9 +96,13 @@ interface Harness {
   scratch: string;
   workspace: string;
   bridge: StubBridge;
+  channelDeliveryAuthorizations: ChannelDeliveryAuthorizationStore;
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(
+  runtimeTrusted?: boolean,
+  generationGuard?: WorkspaceRuntime['generationGuard'],
+): Promise<Harness> {
   const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'sched-route-'));
   const workspace = path.join(scratch, 'workspace');
   await fsp.mkdir(workspace, { recursive: true });
@@ -92,6 +111,19 @@ async function makeHarness(): Promise<Harness> {
   Storage.setRuntimeBaseDir(scratch);
 
   const bridge = makeStubBridge();
+  const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
+  const getRuntime =
+    runtimeTrusted === undefined
+      ? undefined
+      : () =>
+          ({
+            workspaceId: 'primary',
+            workspaceCwd: workspace,
+            primary: true,
+            trusted: runtimeTrusted,
+            bridge,
+            generationGuard,
+          }) as unknown as WorkspaceRuntime;
   const app = express();
   app.use(express.json());
   registerScheduledTasksRoutes(app, {
@@ -100,13 +132,43 @@ async function makeHarness(): Promise<Harness> {
     mutate: () => (_req, _res, next) => next(),
     safeBody,
     bridge,
+    channelDeliveryAuthorizations,
+    ...(getRuntime ? { getRuntime } : {}),
   });
-  return { app, scratch, workspace, bridge };
+  return {
+    app,
+    scratch,
+    workspace,
+    bridge,
+    channelDeliveryAuthorizations,
+  };
 }
 
 async function teardown(h: Harness): Promise<void> {
   Storage.setRuntimeBaseDir(null);
   await fsp.rm(h.scratch, { recursive: true, force: true });
+}
+
+function closeGenerationDuringCronCommit(): WorkspaceRuntime['generationGuard'] {
+  let open = true;
+  let checks = 0;
+  return {
+    get closed() {
+      return !open;
+    },
+    assertOpen() {
+      checks += 1;
+      if (!open) {
+        throw Object.assign(new Error('generation closed'), {
+          code: 'workspace_generation_closed',
+        });
+      }
+      if (checks === 3) queueMicrotask(() => (open = false));
+    },
+    close() {
+      open = false;
+    },
+  };
 }
 
 describe('scheduled-tasks routes', () => {
@@ -118,6 +180,117 @@ describe('scheduled-tasks routes', () => {
 
   afterEach(async () => {
     await teardown(h);
+  });
+
+  it('rejects primary scheduled-task writes after trust is revoked', async () => {
+    await teardown(h);
+    h = await makeHarness(false);
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'blocked' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(h.bridge.spawned).toHaveLength(0);
+  });
+
+  it('returns 503 and removes the new session when generation closes after spawn', async () => {
+    await teardown(h);
+    let generationOpen = true;
+    h = await makeHarness(true, {
+      get closed() {
+        return !generationOpen;
+      },
+      assertOpen() {
+        if (!generationOpen) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {
+        generationOpen = false;
+      },
+    });
+    const spawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    h.bridge.spawnOrAttach = async (input) => {
+      const session = await spawn(input);
+      generationOpen = false;
+      return session;
+    };
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'stale' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridge.closed).toEqual(['sess-1']);
+    await expect(
+      fsp.readFile(getCronFilePath(h.workspace), 'utf8'),
+    ).rejects.toThrow();
+  });
+
+  it('does not spawn a session when generation closes during the cap precheck', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks === 2) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'stale' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rolls back the task and session when generation closes after commit', async () => {
+    await teardown(h);
+    let checks = 0;
+    let generationOpen = true;
+    h = await makeHarness(true, {
+      get closed() {
+        return !generationOpen;
+      },
+      assertOpen() {
+        checks += 1;
+        if (!generationOpen) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+        if (checks === 5) {
+          queueMicrotask(() => {
+            generationOpen = false;
+          });
+        }
+      },
+      close() {
+        generationOpen = false;
+      },
+    });
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'stale' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridge.closed).toEqual(['sess-1']);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   const create = (body: Record<string, unknown>) =>
@@ -150,17 +323,243 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].id).toBe(res.body.id);
   });
 
+  it('creates and persists a task with channel delivery', async () => {
+    const delivery = {
+      kind: 'channel',
+      target: {
+        channelName: 'dingtalk',
+        type: 'user' as const,
+        id: 'user-1',
+      },
+    };
+
+    const res = await create({
+      cron: '30 12 * * 1-5',
+      prompt: 'summarize the day',
+      delivery,
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.delivery).toEqual(delivery);
+    const firedAt = res.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: res.body.sessionId,
+        deliveryId: `${res.body.id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: res.body.id,
+        firedAt,
+        target: delivery.target,
+      }),
+    ).toBe(true);
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].delivery).toEqual(delivery);
+  });
+
+  it('rejects malformed delivery before creating a task session', async () => {
+    const res = await create({
+      cron: '30 12 * * 1-5',
+      prompt: 'summarize the day',
+      delivery: {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'user', id: 'user-1' },
+      },
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('channel_delivery_invalid');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('updates delivery via PATCH (sole field)', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      },
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+
+    const newDelivery = {
+      kind: 'channel',
+      target: { channelName: 'feishu', type: 'chat' as const, id: 'chat-2' },
+    };
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery: newDelivery });
+    expect(patch.status).toBe(200);
+    expect(patch.body.delivery).toEqual(newDelivery);
+
+    // The authorization store reflects the new target.
+    const firedAt = patch.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: newDelivery.target,
+      }),
+    ).toBe(true);
+    // The old target's authorization is revoked.
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('clears delivery via PATCH with null', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      },
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery: null });
+    expect(patch.status).toBe(200);
+    expect(patch.body.delivery).toBeUndefined();
+
+    // The authorization is revoked — a delivery against the old target fails.
+    const firedAt = patch.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects malformed delivery via PATCH (400, task unchanged)', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      },
+    });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery: { kind: 'channel', bad: true } });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('channel_delivery_invalid');
+
+    // The stored delivery is untouched.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].delivery).toEqual({
+      kind: 'channel',
+      target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+    });
+  });
+
+  it('adds delivery to a task that had none via PATCH', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(created.status).toBe(201);
+    expect(created.body.delivery).toBeUndefined();
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+
+    const delivery = {
+      kind: 'channel',
+      target: { channelName: 'feishu', type: 'user' as const, id: 'user-9' },
+    };
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery });
+    expect(patch.status).toBe(200);
+    expect(patch.body.delivery).toEqual(delivery);
+
+    // The authorization store now accepts deliveries for the new target.
+    const firedAt = patch.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: delivery.target,
+      }),
+    ).toBe(true);
+  });
+
   it('binds a created task to a freshly minted session', async () => {
     const res = await create({ cron: '0 9 * * *', prompt: 'p' });
     expect(res.status).toBe(201);
     // The task carries the id of the session the bridge minted for it.
     expect(h.bridge.spawned).toHaveLength(1);
     expect(res.body.sessionId).toBe(h.bridge.spawned[0]);
+    expect(h.bridge.spawnSources).toEqual([
+      { sourceType: 'scheduled_task', sourceId: res.body.id },
+    ]);
     // And it's persisted on disk, not just in the response.
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks[0].sessionId).toBe(h.bridge.spawned[0]);
     // No teardown on the happy path.
     expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('uses the bridge from the captured runtime generation', async () => {
+    const runtimeBridge = makeStubBridge();
+    const liveBridge = makeStubBridge();
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      bridge: liveBridge,
+      getRuntime: () =>
+        ({
+          workspaceId: 'primary',
+          workspaceCwd: h.workspace,
+          primary: true,
+          trusted: true,
+          bridge: runtimeBridge,
+        }) as unknown as WorkspaceRuntime,
+    });
+
+    const res = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+
+    expect(res.status).toBe(201);
+    expect(runtimeBridge.spawned).toEqual([res.body.sessionId]);
+    expect(liveBridge.spawned).toEqual([]);
   });
 
   it('creates an UNBOUND task (no session) when no bridge is provided', async () => {
@@ -314,6 +713,31 @@ describe('scheduled-tasks routes', () => {
     expect(res.body.code).toBe('task_not_found');
   });
 
+  it('preserves a missing PATCH response when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/missing1')
+      .send({ enabled: false });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
+    expect(checks).toBe(1);
+  });
+
   it('deletes a task, then 404s on repeat', async () => {
     const created = await create({ cron: '0 9 * * *', prompt: 'x' });
     const id = created.body.id as string;
@@ -328,6 +752,29 @@ describe('scheduled-tasks routes', () => {
     expect(again.status).toBe(404);
     // A no-op delete (already gone) closes nothing further.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
+  });
+
+  it('preserves a missing DELETE response when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+
+    const res = await request(h.app).delete('/scheduled-tasks/missing1');
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
+    expect(checks).toBe(1);
   });
 
   it('records a manual run: advances lastFiredAt and appends a manual run', async () => {
@@ -454,6 +901,40 @@ describe('scheduled-tasks routes', () => {
     expect(t.lastFiredAt).toBe(1_700_000_000_000);
   });
 
+  it('preserves a no-write legacy rejection when the generation closes', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    await seedTask({
+      id: 'legacy-run',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-run',
+      condition: 'only when files changed',
+    });
+
+    const res = await request(h.app).post('/scheduled-tasks/legacy-run/run');
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    expect(checks).toBe(1);
+  });
+
   it('refuses to enable a legacy guarded task via PATCH (409 task_legacy_unsupported)', async () => {
     // `toView` reports the task disabled, so the only PATCH the UI sends is the
     // Enable toggle. Accepting it (200) would read back disabled again — an
@@ -480,6 +961,42 @@ describe('scheduled-tasks routes', () => {
       (x: { id: string }) => x.id === 'legacy-enable',
     );
     expect(t.enabled).toBe(false);
+  });
+
+  it('preserves a legacy PATCH rejection when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    await seedTask({
+      id: 'legacy-enable',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      enabled: false,
+      sessionId: 'sess-legacy-enable',
+      condition: 'only when files changed',
+    });
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/legacy-enable')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    expect(checks).toBe(1);
   });
 
   it('removes a ONE-SHOT task on manual run (so the scheduler cannot fire it again)', async () => {
@@ -529,6 +1046,67 @@ describe('scheduled-tasks routes', () => {
     // a session — no orphan task session to roll back (spawned stays at 50).
     expect(h.bridge.spawned).toHaveLength(50);
     expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('preserves a concurrent max-tasks response when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 3) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const tasks = Array.from({ length: 49 }, (_, index) => ({
+      id: `task-${index}`,
+      cron: '0 9 * * *',
+      prompt: `prompt-${index}`,
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+    }));
+    await fsp.writeFile(file, JSON.stringify(tasks), 'utf8');
+    const spawnOrAttach = h.bridge.spawnOrAttach;
+    h.bridge.spawnOrAttach = async (req) => {
+      const session = await spawnOrAttach(req);
+      await fsp.writeFile(
+        file,
+        JSON.stringify([
+          ...tasks,
+          {
+            id: 'concurrent-task',
+            cron: '0 9 * * *',
+            prompt: 'concurrent prompt',
+            recurring: true,
+            createdAt: 1_700_000_000_000,
+            lastFiredAt: 1_700_000_000_000,
+            enabled: true,
+          },
+        ]),
+        'utf8',
+      );
+      return session;
+    };
+
+    const res = await create({ cron: '0 9 * * *', prompt: 'overflow' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('max_tasks_reached');
+    expect(checks).toBe(3);
+    expect(h.bridge.spawned).toEqual(['sess-1']);
+    expect(h.bridge.closed).toEqual(['sess-1']);
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(50);
+    expect(stored.at(-1)?.id).toBe('concurrent-task');
   });
 
   it('updates cron / prompt / recurring via PATCH', async () => {
@@ -714,6 +1292,56 @@ describe('scheduled-tasks routes', () => {
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(file, JSON.stringify([task]), 'utf8');
   };
+
+  const staleMutationTask = () => ({
+    id: 'stale-task',
+    cron: '0 9 * * *',
+    prompt: 'original',
+    recurring: true,
+    createdAt: 1_700_000_000_000,
+    lastFiredAt: 1_700_000_000_000,
+    enabled: true,
+    sessionId: 'stale-session',
+  });
+
+  it('rolls back a PATCH that commits while the generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness(true, closeGenerationDuringCronCommit());
+    const original = staleMutationTask();
+    await seedTask(original);
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/stale-task')
+      .send({ prompt: 'stale update' });
+
+    expect(res.status).toBe(503);
+    expect(await readCronTasks(h.workspace)).toEqual([original]);
+  });
+
+  it('rolls back a DELETE that commits while the generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness(true, closeGenerationDuringCronCommit());
+    const original = staleMutationTask();
+    await seedTask(original);
+
+    const res = await request(h.app).delete('/scheduled-tasks/stale-task');
+
+    expect(res.status).toBe(503);
+    expect(await readCronTasks(h.workspace)).toEqual([original]);
+    expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('rolls back a manual run that commits while the generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness(true, closeGenerationDuringCronCommit());
+    const original = staleMutationTask();
+    await seedTask(original);
+
+    const res = await request(h.app).post('/scheduled-tasks/stale-task/run');
+
+    expect(res.status).toBe(503);
+    expect(await readCronTasks(h.workspace)).toEqual([original]);
+  });
 
   it('normalizes a legacy task (no name/enabled) on GET', async () => {
     // Pre-fields format, as tool-created tasks were written before this PR.
@@ -1142,5 +1770,204 @@ describe('scheduledTaskSessionName', () => {
       .map((c) => String.fromCodePoint(c))
       .join('');
     expect(scheduledTaskSessionName(`m${marks}n`)).toBe('⏰ mn');
+  });
+});
+
+// ── Workspace-qualified routes ──────────────────────────────────────────────
+
+interface QualifiedRuntime {
+  workspaceId: string;
+  workspaceCwd: string;
+  trusted: boolean;
+  bridge: StubBridge;
+}
+
+interface QualifiedHarness {
+  app: express.Application;
+  scratch: string;
+  primary: QualifiedRuntime;
+  secondary: QualifiedRuntime;
+  untrusted: QualifiedRuntime;
+}
+
+/** A registry stub exposing only what the qualified route resolver touches:
+ * lookup by id, lookup by cwd, and list (for the mismatch fallback). */
+function makeStubRegistry(runtimes: QualifiedRuntime[]): WorkspaceRegistry {
+  const asRuntime = (r: QualifiedRuntime) => r as unknown as WorkspaceRuntime;
+  const entries = runtimes.map((runtime, index) => ({
+    workspaceId: runtime.workspaceId,
+    workspaceCwd: runtime.workspaceCwd,
+    primary: index === 0,
+    removable: index !== 0,
+    registrationIds: [],
+    lastGenerationId: 1,
+    state: 'active' as const,
+    current: {
+      generationId: 1,
+      policyRevision: 'test',
+      runtime: asRuntime(runtime),
+      guard: {
+        closed: false,
+        assertOpen: () => {},
+        close: () => {},
+      },
+    },
+    configuredRevision: 'test',
+    appliedRevision: 'test',
+  }));
+  return {
+    list: () => runtimes.map(asRuntime),
+    listEntries: () => entries,
+    getEntryByWorkspaceId: (id: string) =>
+      entries.find((entry) => entry.workspaceId === id),
+    getEntryByWorkspaceCwd: (cwd: string) =>
+      entries.find((entry) => entry.workspaceCwd === cwd),
+    getByWorkspaceId: (id: string) => {
+      const found = runtimes.find((r) => r.workspaceId === id);
+      return found ? asRuntime(found) : undefined;
+    },
+    getByWorkspaceCwd: (cwd: string) => {
+      const found = runtimes.find((r) => r.workspaceCwd === cwd);
+      return found ? asRuntime(found) : undefined;
+    },
+  } as unknown as WorkspaceRegistry;
+}
+
+async function makeQualifiedHarness(): Promise<QualifiedHarness> {
+  const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'sched-wsq-'));
+  Storage.setRuntimeBaseDir(scratch);
+
+  const mkRuntime = async (
+    name: string,
+    trusted: boolean,
+  ): Promise<QualifiedRuntime> => {
+    const workspaceCwd = path.join(scratch, name);
+    await fsp.mkdir(workspaceCwd, { recursive: true });
+    return {
+      workspaceId: `id-${name}`,
+      workspaceCwd,
+      trusted,
+      bridge: makeStubBridge(),
+    };
+  };
+
+  const primary = await mkRuntime('primary', true);
+  const secondary = await mkRuntime('secondary', true);
+  const untrusted = await mkRuntime('untrusted', false);
+  const runtimes = [primary, secondary, untrusted];
+
+  const app = express();
+  app.use(express.json());
+  // Both surfaces share the app, as in the real server: the primary's own
+  // cron file behind `/scheduled-tasks`, every workspace behind the qualified
+  // route. `bridge`-per-runtime comes from the registry.
+  registerScheduledTasksRoutes(app, {
+    boundWorkspace: primary.workspaceCwd,
+    mutate: () => (_req, _res, next) => next(),
+    safeBody,
+    bridge: primary.bridge,
+  });
+  registerWorkspaceQualifiedScheduledTasksRoutes(app, {
+    workspaceRegistry: makeStubRegistry(runtimes),
+    mutate: () => (_req, _res, next) => next(),
+    safeBody,
+    manageScheduledTaskSessions: true,
+  });
+  return { app, scratch, primary, secondary, untrusted };
+}
+
+describe('workspace-qualified scheduled-tasks routes', () => {
+  let h: QualifiedHarness;
+
+  beforeEach(async () => {
+    h = await makeQualifiedHarness();
+  });
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fsp.rm(h.scratch, { recursive: true, force: true });
+  });
+
+  const qualified = (id: string) => `/workspaces/${id}/scheduled-tasks`;
+
+  it('creates a task in the targeted workspace, isolated from the primary', async () => {
+    const res = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'secondary work' });
+    expect(res.status).toBe(201);
+    // The bound session was minted through the SECONDARY workspace's bridge.
+    expect(h.secondary.bridge.spawned).toHaveLength(1);
+    expect(h.primary.bridge.spawned).toHaveLength(0);
+
+    // It lands in the secondary's list, and NOT the primary's.
+    const secList = await request(h.app).get(
+      qualified(h.secondary.workspaceId),
+    );
+    expect(secList.body.tasks).toHaveLength(1);
+    expect(secList.body.tasks[0].prompt).toBe('secondary work');
+    const primaryList = await request(h.app).get('/scheduled-tasks');
+    expect(primaryList.body.tasks).toHaveLength(0);
+  });
+
+  it('writes to the targeted workspace’s own cron file on disk', async () => {
+    await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    const onDisk = JSON.parse(
+      await fsp.readFile(getCronFilePath(h.secondary.workspaceCwd), 'utf-8'),
+    );
+    expect(onDisk).toHaveLength(1);
+    // The primary's file was never created.
+    await expect(
+      fsp.readFile(getCronFilePath(h.primary.workspaceCwd), 'utf-8'),
+    ).rejects.toThrow();
+  });
+
+  it('patches / runs / deletes a task addressed by its workspace', async () => {
+    const created = await request(h.app)
+      .post(qualified(h.secondary.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p', name: 'orig' });
+    const id = created.body.id as string;
+
+    const patched = await request(h.app)
+      .patch(`${qualified(h.secondary.workspaceId)}/${id}`)
+      .send({ name: 'renamed' });
+    expect(patched.status).toBe(200);
+    expect(patched.body.name).toBe('renamed');
+
+    const ran = await request(h.app)
+      .post(`${qualified(h.secondary.workspaceId)}/${id}/run`)
+      .send();
+    expect(ran.status).toBe(200);
+    expect(ran.body.lastFiredAt).toBeGreaterThan(0);
+
+    const del = await request(h.app)
+      .delete(`${qualified(h.secondary.workspaceId)}/${id}`)
+      .send();
+    expect(del.status).toBe(200);
+    const after = await request(h.app).get(qualified(h.secondary.workspaceId));
+    expect(after.body.tasks).toHaveLength(0);
+  });
+
+  it('resolves a workspace by absolute path too', async () => {
+    const res = await request(h.app)
+      .post(qualified(encodeURIComponent(h.secondary.workspaceCwd)))
+      .send({ cron: '0 9 * * *', prompt: 'via path' });
+    expect(res.status).toBe(201);
+    expect(h.secondary.bridge.spawned).toHaveLength(1);
+  });
+
+  it('rejects an unknown workspace with 400 workspace_mismatch', async () => {
+    const res = await request(h.app).get(qualified('id-nope')).send();
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+  });
+
+  it('rejects an untrusted workspace with 403, without spawning', async () => {
+    const res = await request(h.app)
+      .post(qualified(h.untrusted.workspaceId))
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(h.untrusted.bridge.spawned).toHaveLength(0);
   });
 });

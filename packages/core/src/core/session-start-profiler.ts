@@ -20,6 +20,7 @@ export interface SessionStartProfileRecord {
   timestamp: string;
   source: SessionStartSource;
   ok: boolean;
+  sessionId?: string;
   /**
    * Wall-clock session start duration. The sum of `stages` can differ from
    * `totalMs` because some stages overlap and unmeasured code runs between
@@ -51,6 +52,7 @@ export interface SessionStartProfiler {
 
 interface SessionStartProfilerOptions {
   enabled?: boolean;
+  sessionId?: string;
   now?: () => number;
   getTimestamp?: () => Date;
   writeRecord?: (record: SessionStartProfileRecord) => void;
@@ -148,6 +150,7 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
   private readonly now: () => number;
   private readonly getTimestamp: () => Date;
   private readonly writeRecord: (record: SessionStartProfileRecord) => void;
+  private readonly sessionId: string | undefined;
   private readonly startMs: number;
   private readonly stages: Record<string, number> = {};
   private failedStage: string | undefined;
@@ -157,12 +160,14 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
     source: SessionStartSource,
     options: Required<
       Pick<SessionStartProfilerOptions, 'now' | 'getTimestamp' | 'writeRecord'>
-    >,
+    > &
+      Pick<SessionStartProfilerOptions, 'sessionId'>,
   ) {
     this.source = source;
     this.now = options.now;
     this.getTimestamp = options.getTimestamp;
     this.writeRecord = options.writeRecord;
+    this.sessionId = options.sessionId;
     this.startMs = this.now();
   }
 
@@ -201,6 +206,7 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
         timestamp: this.getTimestamp().toISOString(),
         source: this.source,
         ok: attrs.ok,
+        ...(this.sessionId !== undefined ? { sessionId: this.sessionId } : {}),
         totalMs: roundMs(this.now() - this.startMs),
         stages: { ...this.stages },
         ...(attrs.extraHistoryLength !== undefined
@@ -260,5 +266,6 @@ export function createSessionStartProfiler(
     now: options.now ?? (() => performance.now()),
     getTimestamp: options.getTimestamp ?? (() => new Date()),
     writeRecord: options.writeRecord ?? writeProfileRecord,
+    sessionId: options.sessionId,
   });
 }

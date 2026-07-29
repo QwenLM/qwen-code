@@ -12,6 +12,7 @@ import {
 import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import { promises as dns } from 'node:dns';
 
 // Mock dependencies
 vi.mock('node:fs/promises', () => ({
@@ -431,7 +432,10 @@ describe('parseInstallSource', () => {
       expect(result).toEqual(cfg);
       expect(http.get).toHaveBeenCalledWith(
         'http://example.com/marketplace.json',
-        { headers: { 'User-Agent': 'qwen-code' } },
+        {
+          headers: { 'User-Agent': 'qwen-code' },
+          signal: expect.any(AbortSignal),
+        },
         expect.any(Function),
       );
       expect(https.get).not.toHaveBeenCalled();
@@ -625,6 +629,27 @@ describe('parseInstallSource', () => {
         await vi.advanceTimersByTimeAsync(10_000 + 50);
         await expect(promise).resolves.toBeNull();
         expect(destroy).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not start a request when DNS outlives the deadline', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(fs.stat).mockRejectedValue(new Error('ENOENT'));
+        vi.spyOn(dns, 'lookup').mockImplementation(
+          () => new Promise(() => undefined),
+        );
+
+        const promise = loadMarketplaceConfigFromSource(
+          'https://packages.example/marketplace.json',
+          'public',
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        await expect(promise).resolves.toBeNull();
+        expect(https.get).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }

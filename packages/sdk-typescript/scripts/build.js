@@ -50,12 +50,40 @@ const rootDir = join(__dirname, '..');
 // plus WorkspaceDaemonClient's workspace-qualified core REST helpers (Phase 3
 // file/status/settings/agents/session APIs).
 // Bumped from 150KB to 151KB for the paged session transcript REST helper.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 151 * 1024;
+// Bumped from 151KB to 154KB for extension management v2 catalog, activation,
+// mutation, and operation-polling APIs (~2.3KB).
+// Bumped from 154KB to 155KB after merging workspace skill-toggle APIs.
+// Bumped from 155KB to 160KB to accommodate recent growth and reduce churn,
+// from repeated 1KB bumps as new daemon APIs are added.
+// Bumped from 160KB to 161KB after merging upstream main.
+// Bumped from 161KB to 167KB for the Web Shell git-diff and subagent REST helpers
+// (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
+// ChatRecord transcript projection in the default UI API.
+// Bumped from 167KB to 168KB for workspace-level streaming generation and
+// workspace trust status v2 SDK types, plus the daemon event-bus epoch token
+// fields (eventEpoch / onEpoch) and their docs across SDK transports.
+// Bumped from 168KB to 169KB for channel delivery alongside workspace-level
+// streaming generation.
+// Bumped from 169KB to 170KB after merging the event-bus and channel-delivery
+// additions.
+// Bumped from 170KB to 173KB for workspace-scoped Channel configuration,
+// lifecycle, startup, and pairing helpers on both daemon client classes.
+// Bumped from 173KB to 174KB for worktree gitCwd query parameters on the
+// workspace-qualified diff/log/commit-detail client methods.
+// Bumped from 174KB to 175KB for git branch listing/checkout/push/pull/commit
+// client methods on both daemon client classes.
+// Bumped from 175KB to 176KB for GitHub PR create + default-branch methods.
+// Bumped from 176KB to 177KB for concurrent session-cancellation coalescing in
+// DaemonSessionClient (#6930).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 177 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
 // silently bloat what browser consumers (agent-web) pull in. Current size ~29KB.
 const MAX_TRANSPORTS_BROWSER_BUNDLE_BYTES = 48 * 1024;
+// Measured with `npm run build && wc -c dist/daemon/transcript.js`.
+// Baseline for the initial projection implementation is ~66 KiB.
+const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
@@ -68,6 +96,13 @@ execSync('tsc --project tsconfig.build.json', {
 try {
   execSync(
     'npx dts-bundle-generator --project tsconfig.build.json -o dist/index.d.ts src/index.ts',
+    {
+      stdio: 'inherit',
+      cwd: rootDir,
+    },
+  );
+  execSync(
+    'npx dts-bundle-generator --project tsconfig.build.json -o dist/daemon/transcript.d.ts src/daemon/transcript.ts',
     {
       stdio: 'inherit',
       cwd: rootDir,
@@ -87,6 +122,8 @@ try {
     error.message,
   );
 }
+
+assertTranscriptDeclaration(join(rootDir, 'dist', 'daemon', 'transcript.d.ts'));
 
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'index.ts')],
@@ -182,6 +219,42 @@ await esbuild.build({
   treeShaking: true,
 });
 
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'transcript.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2022',
+  outfile: join(rootDir, 'dist', 'daemon', 'transcript.js'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
+assertTranscriptBundle(join(rootDir, 'dist', 'daemon', 'transcript.js'));
+
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon', 'transcript.ts')],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  outfile: join(rootDir, 'dist', 'daemon', 'transcript.cjs'),
+  sourcemap: false,
+  minify: true,
+  minifyWhitespace: true,
+  minifyIdentifiers: true,
+  minifySyntax: true,
+  legalComments: 'none',
+  keepNames: false,
+  treeShaking: true,
+});
+
 assertTransportsBundle(join(rootDir, 'dist', 'daemon', 'transports.js'));
 
 await esbuild.build({
@@ -246,6 +319,31 @@ function assertTransportsBundle(filePath) {
     );
   }
   assertNoNodeBuiltins(filePath, 'Browser daemon transports bundle');
+}
+
+function assertTranscriptBundle(filePath) {
+  const size = statSync(filePath).size;
+  if (size > MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES) {
+    throw new Error(
+      `Browser daemon transcript bundle is ${size} bytes; expected <= ${MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES}`,
+    );
+  }
+  assertNoNodeBuiltins(filePath, 'Browser daemon transcript bundle');
+}
+
+function assertTranscriptDeclaration(filePath) {
+  const contents = readFileSync(filePath, 'utf8');
+  const forbiddenReferences = [
+    '@qwen-code/qwen-code-core',
+    '@qwen-code/acp-bridge',
+    'reference types="node"',
+  ];
+  const found = forbiddenReferences.find((token) => contents.includes(token));
+  if (found) {
+    throw new Error(
+      `Daemon transcript declaration leaks an internal dependency: ${found}`,
+    );
+  }
 }
 
 // Node-builtin guard, shared by the budget-checked default daemon barrel and

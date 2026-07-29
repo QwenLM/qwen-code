@@ -48,6 +48,14 @@ import {
   reconcileMaxTokens,
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
+import {
+  reportAnthropicEvent,
+  reportAnthropicFollowingRequest,
+  reportAnthropicRequest,
+  reportAnthropicResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -346,11 +354,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     try {
       const anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
+      const telemetryAttempt = reportAnthropicRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
       response = (await this.client.messages.create(anthropicRequest, {
         signal: perRequestAc?.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      reportAnthropicResponse(telemetryAttempt, response);
     } catch (error) {
       throw redactProxyError(error);
     } finally {
@@ -372,6 +382,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       stream: true,
     };
     runtimeDiagnostics.recordAnthropicWireRequest(streamingRequest);
+    const telemetryAttempt = reportAnthropicRequest(streamingRequest);
 
     // Wrap the caller's signal in a per-request child so the Anthropic SDK's
     // leaked abort listener (core.mjs fetchWithTimeout registers one with no
@@ -401,6 +412,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       anthropicRequest,
       perRequestAc.signal,
       headers,
+      telemetryAttempt,
     );
     // Abort the child once the stream is fully drained or abandoned; this
     // releases the SDK request and detaches the child's listener from the
@@ -518,6 +530,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // The `prompt-caching-scope-2026-01-05` beta is meaningful only when
     // the body actually carries a `cache_control: { …, scope: 'global' }`
     // entry. The converter emits those entries on the system text block
+    // (the static-prefix block when the system prompt is split)
     // and the last tool entry when `useGlobalCacheScope` is true (gated
     // on `enableCacheControl !== false` AND (Anthropic-native baseURL OR `forceGlobalCacheScope`)).
     // Scan the assembled request body for that field rather than
@@ -654,6 +667,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    const dropUnsignedAssistantThinking =
+      !isDeepSeek &&
+      !!thinking &&
+      this.modelSupportsAdaptiveThinking() &&
+      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -678,14 +696,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
-        // Both run together: normalization fills missing signatures so the
-        // injection pass treats those blocks as already-present, and the
-        // injection adds a synthetic block on tool_use turns lacking one.
+        // DeepSeek normalization and injection run together. Proxy-hosted
+        // Claude uses the separate unsigned-thinking cleanup below because an
+        // empty string cannot replace Claude's opaque signature.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
+        dropUnsignedAssistantThinking,
         stripAssistantThinking,
         enableCacheControl,
         useGlobalCacheScope,
+        // Read per request (not latched at construction): the client
+        // re-records the prefix whenever it rebuilds the system prompt
+        // (memory refresh, model change), and the converter fails open to
+        // the single-block layout when the request's system text doesn't
+        // start with it (subagent prompts, stale prefix).
+        staticSystemPrefix: this.cliConfig.getStaticSystemPrefix(),
       },
     );
 
@@ -696,6 +721,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
         )
       : undefined;
 
+    // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
+    // tool_choice. Without this, the API defaults to tool_choice=auto and
+    // the model may legitimately skip tool calls — a problem for structured
+    // side queries (e.g. the AUTO-mode classifier's respond_in_schema) where
+    // the model must emit a tool call. Adaptive-thinking models (Claude
+    // 4.6+) compound this by consuming output budget on server-driven
+    // thinking before any tool_use, making forced tool_choice essential.
+    const toolChoice = this.resolveToolChoice(request, tools);
+
     return {
       model: this.contentGeneratorConfig.model,
       system,
@@ -704,6 +738,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ...sampling,
       ...(thinking ? { thinking } : {}),
       ...(outputConfig ? { output_config: outputConfig } : {}),
+      ...(toolChoice ? { tool_choice: toolChoice } : {}),
     };
   }
 
@@ -1013,6 +1048,31 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return { effort: effectiveEffort };
   }
 
+  /**
+   * Translate the Gemini-style `toolConfig.functionCallingConfig.mode` on
+   * the request into an Anthropic `tool_choice` value.
+   *
+   * Mapping:
+   *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
+   *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
+   *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
+   *     should omit `tools` entirely)
+   *
+   * Only emitted when `tools` is non-empty — Anthropic rejects requests
+   * that carry `tool_choice` without a `tools` array.
+   */
+  private resolveToolChoice(
+    request: GenerateContentParameters,
+    tools: Anthropic.Tool[] | undefined,
+  ): NonNullable<MessageCreateParamsNonStreaming['tool_choice']> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+    const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
+    if (mode === 'ANY') {
+      return { type: 'any' };
+    }
+    return undefined;
+  }
+
   private async *redactStreamErrors(
     stream: AsyncIterable<RawMessageStreamEvent>,
   ): AsyncGenerator<RawMessageStreamEvent> {
@@ -1027,46 +1087,83 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private async *processStream(
     stream: AsyncIterable<RawMessageStreamEvent>,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     let messageId: string | undefined;
-    let model = this.contentGeneratorConfig.model;
+    let model: string | undefined;
     let cachedTokens = 0;
     let cacheCreationTokens = 0;
+    let cachedTokensReported = false;
+    let cacheCreationTokensReported = false;
     let promptTokens = 0;
+    let promptTokensReported = false;
     let completionTokens = 0;
+    let completionTokensReported = false;
     let finishReason: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const collectedResponses: GenerateContentResponse[] = [];
+    let messageStartUsagePending = false;
+    const takePendingMessageStartUsage = () => {
+      if (!messageStartUsagePending) return undefined;
+      messageStartUsagePending = false;
+      return buildAnthropicUsageMetadata({
+        inputTokens: promptTokens,
+        cacheReadTokens: cachedTokens,
+        cacheCreationTokens,
+        outputTokens: completionTokensReported ? completionTokens : undefined,
+        cacheReadTokensReported: cachedTokensReported,
+        cacheCreationTokensReported,
+      });
+    };
 
     for await (const event of stream) {
+      reportAnthropicEvent(telemetryAttempt, event);
       switch (event.type) {
         case 'message_start': {
           messageId = event.message.id ?? messageId;
           model = event.message.model ?? model;
+          promptTokensReported ||=
+            typeof event.message.usage?.input_tokens === 'number';
+          completionTokensReported ||=
+            typeof event.message.usage?.output_tokens === 'number';
+          cachedTokensReported ||=
+            typeof event.message.usage?.cache_read_input_tokens === 'number';
+          cacheCreationTokensReported ||=
+            typeof event.message.usage?.cache_creation_input_tokens ===
+            'number';
           cachedTokens =
             event.message.usage?.cache_read_input_tokens ?? cachedTokens;
           cacheCreationTokens =
             event.message.usage?.cache_creation_input_tokens ??
             cacheCreationTokens;
           promptTokens = event.message.usage?.input_tokens ?? promptTokens;
+          completionTokens =
+            event.message.usage?.output_tokens ?? completionTokens;
+          messageStartUsagePending =
+            promptTokensReported ||
+            completionTokensReported ||
+            cachedTokensReported ||
+            cacheCreationTokensReported;
           break;
         }
         case 'content_block_start': {
           const index = event.index ?? 0;
           const type = String(event.content_block.type || 'text');
+          const id =
+            'id' in event.content_block ? event.content_block.id : undefined;
+          const name =
+            'name' in event.content_block
+              ? event.content_block.name
+              : undefined;
           const initialInput =
             type === 'tool_use' && 'input' in event.content_block
               ? JSON.stringify(event.content_block.input)
               : '';
           blocks.set(index, {
             type,
-            id:
-              'id' in event.content_block ? event.content_block.id : undefined,
-            name:
-              'name' in event.content_block
-                ? event.content_block.name
-                : undefined,
+            id,
+            name,
             inputJson: initialInput !== '{}' ? initialInput : '',
             signature:
               type === 'thinking' &&
@@ -1075,6 +1172,24 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 ? event.content_block.signature
                 : '',
           });
+          if (
+            type === 'tool_use' &&
+            typeof id === 'string' &&
+            id.length > 0 &&
+            typeof name === 'string' &&
+            name.length > 0
+          ) {
+            const chunk = this.buildGeminiChunk(
+              undefined,
+              messageId,
+              model,
+              undefined,
+              takePendingMessageStartUsage(),
+            );
+            setToolCallPreparations(chunk, [{ callId: id, toolName: name }]);
+            collectedResponses.push(chunk);
+            yield chunk;
+          }
           break;
         }
         case 'content_block_delta': {
@@ -1085,7 +1200,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
           if (deltaType === 'text_delta') {
             const text = 'text' in event.delta ? event.delta.text : '';
             if (text) {
-              const chunk = this.buildGeminiChunk({ text }, messageId, model);
+              const chunk = this.buildGeminiChunk(
+                { text },
+                messageId,
+                model,
+                undefined,
+                takePendingMessageStartUsage(),
+              );
               collectedResponses.push(chunk);
               yield chunk;
             }
@@ -1097,6 +1218,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 { text: thinking, thought: true },
                 messageId,
                 model,
+                undefined,
+                takePendingMessageStartUsage(),
               );
               collectedResponses.push(chunk);
               yield chunk;
@@ -1110,6 +1233,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 { thought: true, thoughtSignature: signature },
                 messageId,
                 model,
+                undefined,
+                takePendingMessageStartUsage(),
               );
               collectedResponses.push(chunk);
               yield chunk;
@@ -1138,6 +1263,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
               },
               messageId,
               model,
+              undefined,
+              takePendingMessageStartUsage(),
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1162,27 +1289,32 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
           if (event.usage?.output_tokens !== undefined) {
             completionTokens = event.usage.output_tokens;
+            completionTokensReported = true;
           }
           if (usageRecord?.['input_tokens'] !== undefined) {
             const inputTokens = usageRecord['input_tokens'];
             if (typeof inputTokens === 'number') {
               promptTokens = inputTokens;
+              promptTokensReported = true;
             }
           }
           if (usageRecord?.['cache_read_input_tokens'] !== undefined) {
             const cacheRead = usageRecord['cache_read_input_tokens'];
             if (typeof cacheRead === 'number') {
               cachedTokens = cacheRead;
+              cachedTokensReported = true;
             }
           }
           if (usageRecord?.['cache_creation_input_tokens'] !== undefined) {
             const cacheCreate = usageRecord['cache_creation_input_tokens'];
             if (typeof cacheCreate === 'number') {
               cacheCreationTokens = cacheCreate;
+              cacheCreationTokensReported = true;
             }
           }
 
           if (finishReason || event.usage) {
+            messageStartUsagePending = false;
             const chunk = this.buildGeminiChunk(
               undefined,
               messageId,
@@ -1192,7 +1324,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 inputTokens: promptTokens,
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
-                outputTokens: completionTokens,
+                outputTokens: completionTokensReported
+                  ? completionTokens
+                  : undefined,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1201,7 +1337,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
           break;
         }
         case 'message_stop': {
-          if (promptTokens || completionTokens) {
+          if (
+            promptTokensReported ||
+            completionTokensReported ||
+            cachedTokensReported ||
+            cacheCreationTokensReported
+          ) {
+            messageStartUsagePending = false;
             const chunk = this.buildGeminiChunk(
               undefined,
               messageId,
@@ -1211,7 +1353,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 inputTokens: promptTokens,
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
-                outputTokens: completionTokens,
+                outputTokens: completionTokensReported
+                  ? completionTokens
+                  : undefined,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1235,11 +1381,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     fallbackRequest: MessageCreateParamsWithThinking,
     abortSignal: AbortSignal | undefined,
     headers: Record<string, string> | undefined,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     let hasAssistantPayload = false;
     let hasFinishReason = false;
 
-    for await (const chunk of this.processStream(stream)) {
+    for await (const chunk of this.processStream(stream, telemetryAttempt)) {
       const candidates = chunk.candidates ?? [];
       hasFinishReason ||= candidates.some(
         (candidate) => candidate.finishReason !== undefined,
@@ -1268,10 +1415,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let response: Message;
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
+      const fallbackAttempt = reportAnthropicFollowingRequest(
+        fallbackRequest,
+        telemetryAttempt,
+      );
       response = (await this.client.messages.create(fallbackRequest, {
         signal: abortSignal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      reportAnthropicResponse(fallbackAttempt, response);
       yield this.converter.convertAnthropicResponseToGemini(response);
     } catch (error) {
       throw redactProxyError(error);
@@ -1293,7 +1445,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
     response.createTime = Date.now().toString();
-    response.modelVersion = model || this.contentGeneratorConfig.model;
+    response.modelVersion = model || undefined;
     response.promptFeedback = { safetyRatings: [] };
 
     const candidateParts = part ? [part as unknown as Part] : [];

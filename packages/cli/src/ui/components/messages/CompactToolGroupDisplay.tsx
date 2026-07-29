@@ -6,19 +6,28 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
+import wrapAnsi from 'wrap-ansi';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
-import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import {
+  STATUS_INDICATOR_WIDTH,
+  ToolStatusIndicator,
+} from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { formatDuration } from '../../utils/formatters.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
   contentWidth: number;
 }
+
+const ELAPSED_TIME_MARGIN_LEFT = 1;
+const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
 
 // Priority: Confirming > Executing > Error > Canceled > Pending > Success
 export function getOverallStatus(
@@ -60,6 +69,32 @@ function getShellTimeoutMs(
     return (display as AnsiOutputDisplay).timeoutMs;
   }
   return undefined;
+}
+
+function isToolGroupActive(status: ToolCallStatus): boolean {
+  return (
+    status === ToolCallStatus.Executing ||
+    status === ToolCallStatus.Pending ||
+    status === ToolCallStatus.Confirming
+  );
+}
+
+function getElapsedTimeReservedWidth(
+  tool: IndividualToolCallDisplay,
+  status: ToolCallStatus,
+): number {
+  if (status !== ToolCallStatus.Executing) return 0;
+
+  const timeoutMs = getShellTimeoutMs(tool);
+  let label = EXECUTING_ELAPSED_TIME_RESERVED_LABEL;
+  if (timeoutMs != null && timeoutMs > 0) {
+    const maxElapsedStr = formatDuration(timeoutMs, {
+      hideTrailingZeros: true,
+    });
+    label = `(${maxElapsedStr} · timeout ${maxElapsedStr})`;
+  }
+
+  return ELAPSED_TIME_MARGIN_LEFT + stringWidth(label);
 }
 
 type ToolCategory =
@@ -240,23 +275,96 @@ function safeDescription(raw: string | undefined): string | undefined {
   const cleaned = stripped.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
   /* eslint-enable no-control-regex */
 
-  // Reject JSON-looking blobs (error fallback from args)
-  if (cleaned.startsWith('{') || cleaned.startsWith('[')) return undefined;
+  // Reject JSON blobs (error fallback from args) without rejecting legitimate
+  // paths such as "[id].tsx" or "{draft}.md".
+  if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(cleaned) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) return undefined;
+    } catch {
+      // The description only resembles JSON, so keep it.
+    }
+  }
 
   return cleaned || undefined;
 }
+
+/**
+ * Whether all tools in the given category have usable descriptions and the
+ * count is within the inline limit — meaning the summary already shows each
+ * description individually, so a separate hint line would be redundant.
+ */
+function categoryShowsDescriptionsInline(
+  toolCalls: IndividualToolCallDisplay[],
+  category: ToolCategory,
+): boolean {
+  const sameCategory = toolCalls.filter(
+    (tc) => getToolCategory(tc.name) === category,
+  );
+  if (sameCategory.length > DESCRIPTION_INLINE_LIMIT) return false;
+  return sameCategory.every(
+    (tc) => safeDescription(tc.description) !== undefined,
+  );
+}
+
+function getActiveToolHint(
+  toolCalls: IndividualToolCallDisplay[],
+): string | undefined {
+  if (toolCalls.length < 2) return undefined;
+
+  const statuses = [
+    ToolCallStatus.Confirming,
+    ToolCallStatus.Executing,
+    ToolCallStatus.Pending,
+  ];
+  for (const status of statuses) {
+    for (let index = toolCalls.length - 1; index >= 0; index--) {
+      const tool = toolCalls[index];
+      if (tool.status === status) {
+        const category = getToolCategory(tool.name);
+        const hasCategoryPeers = toolCalls.some(
+          (candidate, candidateIndex) =>
+            candidateIndex !== index &&
+            getToolCategory(candidate.name) === category,
+        );
+        if (!hasCategoryPeers) return undefined;
+        // Summary already shows descriptions inline → no hint needed.
+        if (categoryShowsDescriptionsInline(toolCalls, category))
+          return undefined;
+        return safeDescription(tool.description);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Maximum number of tools within one category whose individual descriptions
+ * are shown inline. Beyond this, the first `DESCRIPTION_PREVIEW_COUNT` are
+ * shown followed by "...and N more".
+ */
+const DESCRIPTION_INLINE_LIMIT = 3;
+
+/**
+ * Number of descriptions shown as a preview when the category exceeds
+ * `DESCRIPTION_INLINE_LIMIT`.
+ */
+const DESCRIPTION_PREVIEW_COUNT = 2;
 
 /**
  * Build a semantic summary line from a batch of tool calls.
  *
  * Single tool (with description) → "Read a.ts" / "Ran ls -la"
  * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
- * Multi  same                    → "Read 3 files"
- * Multi mixed                    → "Read a.ts, ran npm test, edited b.ts"
+ * Multi ≤ 3 (with descriptions)  → "Read a.ts, b.ts, c.ts"
+ * Multi ≤ 3 (no descriptions)    → "Read 3 files"
+ * Multi > 3                      → "Read a.ts, b.ts, ... and 3 more"
+ * Multi mixed                    → "Read 2 files, ran npm test"
  *
  * Uses past tense when all tools are done, present progressive when active.
- * Falls back to count format when description is empty, contains control
- * characters, or looks like a JSON blob (e.g. error fallback from args).
+ * Falls back to count format when description is missing, cleans to empty,
+ * or parses as a JSON object or array (e.g. error args).
  */
 export function buildToolSummary(
   toolCalls: IndividualToolCallDisplay[],
@@ -280,6 +388,7 @@ export function buildToolSummary(
     if (!tools || tools.length === 0) continue;
 
     const template = CATEGORY_TEMPLATES[cat];
+    const verb = isActive ? template.activeVerb : template.pastVerb;
     let part: string;
     if (tools.length === 1) {
       const safeDesc = safeDescription(tools[0].description);
@@ -287,7 +396,6 @@ export function buildToolSummary(
         // Single tool with a concrete description: show it ("Read a.ts").
         // Verb is English (see CategoryTemplate note) but the description is
         // language-neutral, so the line reads correctly in every locale.
-        const verb = isActive ? template.activeVerb : template.pastVerb;
         part = `${verb} ${safeDesc}`;
       } else {
         // No usable description → localized count phrase ("Read 1 file").
@@ -295,10 +403,35 @@ export function buildToolSummary(
           count: '1',
         });
       }
+    } else if (tools.length <= DESCRIPTION_INLINE_LIMIT) {
+      // ≤ 3 tools: show all descriptions if available.
+      const descriptions = tools
+        .map((tc) => safeDescription(tc.description))
+        .filter((d): d is string => d !== undefined);
+      if (descriptions.length === tools.length) {
+        part = `${verb} ${descriptions.join(', ')}`;
+      } else {
+        // Not all tools have usable descriptions → count phrase.
+        const forms = isActive ? template.active : template.past;
+        part = t(forms.many, { count: String(tools.length) });
+      }
     } else {
-      // Multiple tools of one category → localized plural count phrase.
-      const forms = isActive ? template.active : template.past;
-      part = t(forms.many, { count: String(tools.length) });
+      // > 3 tools: show first N descriptions + "...and M more".
+      const previewDescs = tools
+        .slice(0, DESCRIPTION_PREVIEW_COUNT)
+        .map((tc) => safeDescription(tc.description))
+        .filter((d): d is string => d !== undefined);
+      if (previewDescs.length === DESCRIPTION_PREVIEW_COUNT) {
+        const remaining = tools.length - DESCRIPTION_PREVIEW_COUNT;
+        const morePhrase = t('... and {{count}} more', {
+          count: String(remaining),
+        });
+        part = `${verb} ${previewDescs.join(', ')}, ${morePhrase}`;
+      } else {
+        // Not enough preview descriptions → count phrase.
+        const forms = isActive ? template.active : template.past;
+        part = t(forms.many, { count: String(tools.length) });
+      }
     }
     // Lowercase the leading character for every part after the first ("Read 3
     // files, edited 2 files"). Operating on the first char only keeps already-
@@ -312,6 +445,31 @@ export function buildToolSummary(
   return parts.join(', ');
 }
 
+export function estimateCompactToolGroupHeight(
+  toolCalls: IndividualToolCallDisplay[],
+  contentWidth: number,
+): number {
+  if (toolCalls.length === 0) return 0;
+
+  const overallStatus = getOverallStatus(toolCalls);
+  const activeTool = getActiveTool(toolCalls);
+  const isActive = isToolGroupActive(overallStatus);
+  const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
+  const hint = getActiveToolHint(toolCalls);
+  const summaryWidth = Math.max(
+    1,
+    contentWidth -
+      STATUS_INDICATOR_WIDTH -
+      getElapsedTimeReservedWidth(activeTool, overallStatus),
+  );
+  const wrappedSummary = wrapAnsi(summary, summaryWidth, {
+    hard: true,
+    trim: false,
+  });
+
+  return Math.max(1, wrappedSummary.split('\n').length) + (hint ? 1 : 0);
+}
+
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
 > = ({ toolCalls, contentWidth }) => {
@@ -319,17 +477,15 @@ export const CompactToolGroupDisplay: React.FC<
 
   const overallStatus = getOverallStatus(toolCalls);
   const activeTool = getActiveTool(toolCalls);
-  const isActive =
-    overallStatus === ToolCallStatus.Executing ||
-    overallStatus === ToolCallStatus.Pending ||
-    overallStatus === ToolCallStatus.Confirming;
+  const isActive = isToolGroupActive(overallStatus);
+  const hint = getActiveToolHint(toolCalls);
 
   return (
-    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
+    <Box flexDirection="column" width={contentWidth} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
-          <Text wrap="truncate-end" bold>
+          <Text wrap="wrap" bold>
             {buildToolSummary(toolCalls, isActive)}
             {isActive && <Text key="ellipsis">…</Text>}
           </Text>
@@ -340,6 +496,13 @@ export const CompactToolGroupDisplay: React.FC<
           timeoutMs={getShellTimeoutMs(activeTool)}
         />
       </Box>
+      {hint && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <Text dimColor wrap="truncate-end">
+            ⎿ {hint}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };

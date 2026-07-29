@@ -10,13 +10,13 @@ It does not change session behavior, public protocol fields, SDK behavior, CLI f
 
 The profiler is enabled only when `QWEN_CODE_PROFILE_SESSION_START=1`.
 
-When enabled, core writes JSONL records under `Storage.getRuntimeBaseDir()/session-start-perf/`. Daily JSONL filenames use the UTC date from the record timestamp. Each record includes a timestamp, `SessionStartSource`, success flag, total duration, bounded stage durations, and small aggregate counts such as history length and rendered snapshot count.
+When enabled, core writes JSONL records under `Storage.getRuntimeBaseDir()/session-start-perf/`. Daily JSONL filenames use the UTC date from the record timestamp. Each record includes a timestamp, `SessionStartSource`, success flag, total duration, bounded stage durations, and small aggregate counts such as history length and rendered snapshot count. The #4748 daemon profiling follow-up adds an optional opaque Session ID when the caller supplies one so this detail record can be joined to the cross-process trace.
 
 The measured stages follow the existing `startChat()` sequence: tool registry warm, resumed deferred-tool reveal scan, deferred reminder setup, initial chat history build, skill reminder dedup seeding, agent reminder dedup seeding, system instruction build, `GeminiChat` construction, orphan tool-use repair, SessionStart hook, optional SessionStart context apply, and `setTools()`.
 
 ## Safety Boundaries
 
-The output intentionally excludes session IDs, prompts, model responses, hook output, tool names, file paths, and working directories. Stage names are static code-owned strings.
+The output intentionally excludes prompts, model responses, hook output, tool names, file paths, and working directories. Its only optional identifier is the opaque Session ID used to correlate an opt-in record with daemon telemetry; it does not add user, tenant, or workspace identity. Stage names are static code-owned strings.
 
 All profiler writes are best-effort. File-system failures are swallowed so profiling cannot break or slow a session through error handling.
 

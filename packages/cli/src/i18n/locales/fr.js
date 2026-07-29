@@ -73,6 +73,7 @@ export default {
   'Type your message or @path/to/file':
     'Tapez votre message ou @chemin/vers/fichier',
   '? for shortcuts': '? pour les raccourcis',
+  'Pasting…': 'Collage…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Appuyez sur 'i' pour le mode INSERTION et 'Esc' pour le mode NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -523,6 +524,7 @@ export default {
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
   Text: 'Texte',
   JSON: 'JSON',
@@ -661,7 +663,7 @@ export default {
     "Veuillez inclure le nom de l'extension à désinstaller comme argument positionnel.",
   'Enables an extension.': 'Active une extension.',
   'The name of the extension to enable.': "Le nom de l'extension à activer.",
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     "La portée dans laquelle activer l'extension. Si non définie, sera activée dans toutes les portées.",
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" activée avec succès pour la portée "{{scope}}".',
@@ -672,7 +674,7 @@ export default {
   'Disables an extension.': 'Désactive une extension.',
   'The name of the extension to disable.':
     "Le nom de l'extension à désactiver.",
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     "La portée dans laquelle désactiver l'extension.",
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" désactivée avec succès pour la portée "{{scope}}".',
@@ -866,8 +868,8 @@ export default {
     "L'entrée de la commande est du JSON avec tool_name, tool_input, tool_use_id, error, error_type, is_interrupt et is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrée de la commande est du JSON avec le message et le type de notification.",
-  'Input to command is JSON with original user prompt text.':
-    "L'entrée de la commande est du JSON avec le texte d'invite original de l'utilisateur.",
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'L’entrée de la commande est un JSON avec "prompt" (l’invite actuelle liée au modèle) et, facultativement, "submitted_prompt" (la projection textuelle de l’interface TUI interactive prise en charge).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrée de la commande est du JSON avec command_name, command_args et le texte d'invite développé.",
   'Input to command is JSON with session start source.':
@@ -1513,6 +1515,11 @@ export default {
   reviewed: 'révisé',
   'Code Changes:': 'Modifications du code :',
   Performance: 'Performance',
+  'Generation Metrics': 'Métriques de génération',
+  'Latest Request': 'Dernière requête',
+  'Generation Time': 'Temps de génération',
+  'Average TTFT': 'TTFT moyen',
+  'Session TPS': 'TPS de la session',
   'Wall Time:': 'Temps réel :',
   'Agent Active:': 'Agent actif :',
   'API Time:': 'Temps API :',
@@ -2147,8 +2154,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Une nouvelle version de Qwen Code est disponible ! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Échec de la vérification des mises à jour. Vérifiez votre réseau ou la configuration du registre.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Échec de la vérification des mises à jour ({{reason}}). Vérifiez votre réseau ou la configuration du registre.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Vérification des mises à jour ignorée ({{reason}}) — exécutez /update pour réessayer.',
+  'registry did not respond within {{seconds}}s':
+    "le registre n'a pas répondu en {{seconds}}s",
+  'registry unreachable': 'registre inaccessible',
+  'registry error': 'erreur du registre',
   'Unable to check for updates: {{reason}}':
     'Impossible de vérifier les mises à jour : {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2187,6 +2200,16 @@ export default {
     'Impossible de mettre à jour automatiquement cette installation autonome. Veuillez réinstaller depuis :',
   'Manual update required. Please reinstall Qwen Code.':
     'Mise à jour manuelle requise. Veuillez réinstaller Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Cette session utilise l’image de bac à sable personnalisée {{image}}. Mettez à jour l’image et redémarrez Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Mettez à jour Qwen Code sur l’hôte, puis redémarrez le bac à sable.',
+  'The update will be installed after you exit this session.':
+    'La mise à jour sera installée après la fermeture de cette session.',
+  'Run /update to install the update on the host.':
+    'Exécutez /update pour installer la mise à jour sur l’hôte.',
+  'Run /update to install the update.':
+    'Exécutez /update pour installer la mise à jour.',
 
   // ============================================================================
   // reload-plugins command
@@ -2217,4 +2240,8 @@ export default {
     'Failed to refresh extension content. Run /reload-plugins to apply updates.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
     'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis démarrez une nouvelle session pour reprendre l'enregistrement. Consultez le journal de débogage pour plus de détails.",
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis exécutez `/clear` pour démarrer une nouvelle session enregistrée. Consultez le journal de débogage pour plus de détails.",
 };

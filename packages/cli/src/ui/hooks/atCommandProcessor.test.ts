@@ -6,7 +6,10 @@
 
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  extractAtPathCommands,
+  handleAtCommand,
+} from './atCommandProcessor.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   FileDiscoveryService,
@@ -20,6 +23,16 @@ import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+
+describe('extractAtPathCommands', () => {
+  it('extracts only non-empty @path commands', () => {
+    expect(extractAtPathCommands('')).toEqual([]);
+    expect(extractAtPathCommands('@')).toEqual([]);
+    expect(extractAtPathCommands('hello')).toEqual([]);
+    expect(extractAtPathCommands('@foo')).toEqual(['foo']);
+    expect(extractAtPathCommands('@foo @bar')).toEqual(['foo', 'bar']);
+  });
+});
 
 describe('handleAtCommand', () => {
   let testRootDir: string;
@@ -154,6 +167,7 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays).toBeDefined();
     expect(result.toolDisplays).toHaveLength(1);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    expect(result.toolDisplays![0].description).toBe('@file.txt');
   });
 
   it('should attach a truncated text file larger than 10MB', async () => {
@@ -299,6 +313,9 @@ describe('handleAtCommand', () => {
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       `Path ${dirPath} resolved to directory.`,
     );
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].description).toBe('@to');
   });
 
   it('should inject MCP server context for @mcp mentions', async () => {
@@ -1309,7 +1326,7 @@ describe('handleAtCommand', () => {
 
       expect(result.toolDisplays).toBeDefined();
       expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
-      expect(result.toolDisplays![0].description).toContain('file.txt');
+      expect(result.toolDisplays![0].description).toBe('@specific-file.txt');
     });
 
     it('should mark per-file failures as Error status, not Success', async () => {

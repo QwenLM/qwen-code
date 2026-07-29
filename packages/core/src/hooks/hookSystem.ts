@@ -153,10 +153,12 @@ export class HookSystem {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
+      submittedPrompt,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
@@ -216,6 +218,23 @@ export class HookSystem {
       stopHookActive,
       lastAssistantMessage,
       contextUsage,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a MessageDisplay event - called repeatedly as the assistant's reply streams
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireMessageDisplayEvent(
+      messageId,
+      displayedText,
+      isFinal,
       signal,
     );
   }

@@ -176,6 +176,17 @@ describe('Daemon Metrics', () => {
       });
       expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, {
         route: 'POST /session/:id/prompt',
+        runtime_path: 'none',
+      });
+    });
+
+    it('adds the deferred runtime path to the duration histogram', () => {
+      initializeDaemonMetrics();
+      recordDaemonHttpRequest(42, 'POST /session', 201, 'started_on_request');
+
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, {
+        route: 'POST /session',
+        runtime_path: 'started_on_request',
       });
     });
 

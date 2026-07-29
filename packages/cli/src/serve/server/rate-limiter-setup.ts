@@ -25,8 +25,7 @@ export function installRateLimiter(
       read: { windowMs, max: opts.rateLimitRead ?? 120 },
     },
     hostname: opts.hostname,
-    workspaceQualifiedAcpEnabled:
-      options.workspaceQualifiedAcpEnabled === true,
+    workspaceQualifiedAcpEnabled: options.workspaceQualifiedAcpEnabled === true,
     onLimitReached: daemonLog
       ? (tier, key, suppressed) => {
           daemonLog.warn(

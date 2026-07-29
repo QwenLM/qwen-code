@@ -15,6 +15,11 @@ import { isSupportedArchiveUrl, parseGitHubRepoForReleases } from './github.js';
 import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
+import { resolveNetworkTarget } from './network-policy.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage } from '../utils/errors.js';
+
+const debugLogger = createDebugLogger('EXT_MARKETPLACE');
 
 export interface MarketplaceInstallOptions {
   marketplaceUrl: string;
@@ -137,34 +142,59 @@ const MARKETPLACE_MAX_BODY_BYTES = 10 * 1024 * 1024;
  * oversized body so a slow/unreachable/hostile marketplace can never hang
  * discovery indefinitely or exhaust process memory.
  */
-function fetchUrl(
+async function fetchUrl(
   url: string,
   headers: Record<string, string>,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<string | null> {
+  const deadlineController = new AbortController();
+  let req: ClientRequest | undefined;
+  let finish: ((value: string | null) => void) | undefined;
+  // `req.setTimeout` only fires on socket inactivity and resets on every
+  // chunk, so the absolute deadline must start before DNS resolution.
+  const hardDeadline = setTimeout(() => {
+    deadlineController.abort(
+      new Error(
+        `Marketplace request timed out after ${MARKETPLACE_FETCH_TIMEOUT_MS}ms`,
+      ),
+    );
+    req?.destroy();
+    finish?.(null);
+  }, MARKETPLACE_FETCH_TIMEOUT_MS);
+  hardDeadline.unref();
+  let target;
+  try {
+    target = await resolveNetworkTarget(
+      url,
+      networkPolicy,
+      deadlineController.signal,
+    );
+    deadlineController.signal.throwIfAborted();
+  } catch (error) {
+    clearTimeout(hardDeadline);
+    debugLogger.debug(
+      `Failed to resolve marketplace network target: ${redactUrlCredentials(getErrorMessage(error))}`,
+    );
+    return null;
+  }
   return new Promise((resolve) => {
     let client: ReturnType<typeof clientForUrl>;
     try {
-      client = clientForUrl(url);
+      client = clientForUrl(target.url.toString());
     } catch {
+      clearTimeout(hardDeadline);
       resolve(null);
       return;
     }
 
     let settled = false;
-    let req: ClientRequest | undefined;
     const done = (value: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(hardDeadline);
       resolve(value);
     };
-    // `req.setTimeout` only fires on socket inactivity and resets on every
-    // chunk, so a server trickling bytes can keep the request alive forever.
-    // Pair it with an absolute wall-clock deadline.
-    const hardDeadline = setTimeout(() => {
-      req?.destroy();
-      done(null);
-    }, MARKETPLACE_FETCH_TIMEOUT_MS);
+    finish = done;
 
     const onResponse = (res: IncomingMessage) => {
       if (res.statusCode !== 200) {
@@ -188,7 +218,17 @@ function fetchUrl(
     };
 
     try {
-      req = client.get(url, { headers }, onResponse);
+      req = client.get(
+        url,
+        {
+          headers,
+          signal: deadlineController.signal,
+          ...(target.lookup
+            ? { lookup: target.lookup, agent: false as const }
+            : {}),
+        },
+        onResponse,
+      );
     } catch {
       done(null);
       return;
@@ -209,6 +249,7 @@ function fetchUrl(
 async function fetchGitHubMarketplaceConfig(
   owner: string,
   repo: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<ClaudeMarketplaceConfig | null> {
   const token = process.env['GITHUB_TOKEN'];
 
@@ -222,7 +263,7 @@ async function fetchGitHubMarketplaceConfig(
     apiHeaders['Authorization'] = `token ${token}`;
   }
 
-  let content = await fetchUrl(apiUrl, apiHeaders);
+  let content = await fetchUrl(apiUrl, apiHeaders, networkPolicy);
 
   // Fallback: raw.githubusercontent.com (no rate limit, public repos only)
   if (!content) {
@@ -230,7 +271,7 @@ async function fetchGitHubMarketplaceConfig(
     const rawHeaders: Record<string, string> = {
       'User-Agent': 'qwen-code',
     };
-    content = await fetchUrl(rawUrl, rawHeaders);
+    content = await fetchUrl(rawUrl, rawHeaders, networkPolicy);
   }
 
   if (!content) {
@@ -278,6 +319,7 @@ async function readLocalMarketplaceConfig(
  */
 export async function loadMarketplaceConfigFromSource(
   source: string,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<ClaudeMarketplaceConfig | null> {
   const trimmed = source.trim();
   const lowerTrimmed = trimmed.toLowerCase();
@@ -308,14 +350,22 @@ export async function loadMarketplaceConfigFromSource(
   ) {
     try {
       const { owner, repo } = parseGitHubRepoForReleases(trimmed);
-      const ghConfig = await fetchGitHubMarketplaceConfig(owner, repo);
+      const ghConfig = await fetchGitHubMarketplaceConfig(
+        owner,
+        repo,
+        networkPolicy,
+      );
       if (ghConfig) {
         return ghConfig;
       }
     } catch {
       // Not a github.com repo URL — fall through to direct-JSON fetch.
     }
-    const content = await fetchUrl(trimmed, { 'User-Agent': 'qwen-code' });
+    const content = await fetchUrl(
+      trimmed,
+      { 'User-Agent': 'qwen-code' },
+      networkPolicy,
+    );
     if (!content) {
       return null;
     }
@@ -334,11 +384,15 @@ export async function loadMarketplaceConfigFromSource(
       /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i,
     );
     if (sshMatch) {
-      return fetchGitHubMarketplaceConfig(sshMatch[1], sshMatch[2]);
+      return fetchGitHubMarketplaceConfig(
+        sshMatch[1],
+        sshMatch[2],
+        networkPolicy,
+      );
     }
     try {
       const { owner, repo } = parseGitHubRepoForReleases(trimmed);
-      return await fetchGitHubMarketplaceConfig(owner, repo);
+      return await fetchGitHubMarketplaceConfig(owner, repo, networkPolicy);
     } catch {
       return null;
     }
@@ -347,7 +401,7 @@ export async function loadMarketplaceConfigFromSource(
   // Priority 4: owner/repo shorthand.
   if (isOwnerRepoFormat(trimmed)) {
     const [owner, repo] = trimmed.split('/');
-    return await fetchGitHubMarketplaceConfig(owner, repo);
+    return await fetchGitHubMarketplaceConfig(owner, repo, networkPolicy);
   }
 
   return null;
@@ -355,6 +409,9 @@ export async function loadMarketplaceConfigFromSource(
 
 export async function parseInstallSource(
   source: string,
+  options: {
+    networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+  } = {},
 ): Promise<ExtensionInstallMetadata> {
   // Step 1: Parse source into repo and optional pluginName
   const { repo, pluginName } = parseSourceAndPluginName(source);
@@ -400,7 +457,11 @@ export async function parseInstallSource(
     // Try to fetch marketplace config from GitHub
     try {
       const { owner, repo: repoName } = parseGitHubRepoForReleases(repoSource);
-      marketplaceConfig = await fetchGitHubMarketplaceConfig(owner, repoName);
+      marketplaceConfig = await fetchGitHubMarketplaceConfig(
+        owner,
+        repoName,
+        options.networkPolicy,
+      );
     } catch {
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
@@ -423,7 +484,11 @@ export async function parseInstallSource(
     // Try to fetch marketplace config from GitHub
     try {
       const [owner, repoName] = repo.split('/');
-      marketplaceConfig = await fetchGitHubMarketplaceConfig(owner, repoName);
+      marketplaceConfig = await fetchGitHubMarketplaceConfig(
+        owner,
+        repoName,
+        options.networkPolicy,
+      );
     } catch {
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
@@ -436,6 +501,10 @@ export async function parseInstallSource(
   if (marketplaceConfig) {
     installMetadata.marketplaceConfig = marketplaceConfig;
     installMetadata.originSource = 'Claude';
+  }
+
+  if (options.networkPolicy) {
+    installMetadata.networkPolicy = options.networkPolicy;
   }
 
   return installMetadata;

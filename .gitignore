@@ -42,6 +42,9 @@ package-lock.json
 # reserved for auto-generated skills — do not hand-author a project skill with
 # this prefix, or its directory will be ignored here.
 .qwen/skills/auto-skill-*/
+# Re-ignore learned skills (created by the /learn command with the mandatory
+# `learned-skill-` directory prefix). Same rationale as auto-skill-*/.
+.qwen/skills/learned-skill-*/
 # Staging area for auto-skills awaiting confirmation (memory.autoSkillConfirm).
 # Already covered by `.qwen/*` above since it's never re-included, but listed
 # explicitly alongside auto-skill-*/ so the intent is obvious.
@@ -78,6 +81,8 @@ junit.xml
 packages/*/coverage/
 packages/web-shell/client/e2e/playwright-report/
 packages/web-shell/client/e2e/test-results/
+packages/web-shell/client/e2e/visuals/output/
+packages/web-shell/client/e2e/visuals/.playwright/
 
 # PR body draft
 pr_body.md

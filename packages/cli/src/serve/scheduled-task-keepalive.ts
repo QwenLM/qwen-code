@@ -80,10 +80,14 @@ export interface KeepaliveBridge {
     sessionId: string;
     workspaceCwd: string;
     historyReplay?: 'stream' | 'response';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<unknown>;
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
@@ -145,6 +149,8 @@ async function bindAndNameSessions(
       const rawSpawn = bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread',
+        sourceType: 'scheduled_task',
+        sourceId: task.id,
       });
       // spawnOrAttach is not abortable — if the timeout fires first, the
       // raw promise may still resolve later with a live session. Attach a
@@ -257,6 +263,7 @@ export interface StartScheduledTaskKeepaliveOptions {
   reviveTimeoutMs?: number;
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }
 
 export function startScheduledTaskKeepalive(
@@ -299,6 +306,11 @@ export function startScheduledTaskKeepalive(
       log.debug('keepalive: readCronTasks failed, skipping this pass', err);
       return;
     }
+    try {
+      opts.onTasksRead?.(tasks);
+    } catch (err) {
+      log.debug('keepalive: onTasksRead failed', err);
+    }
     for (const sessionId of collectBoundSessionIds(tasks)) {
       try {
         bridge.recordHeartbeat(sessionId);
@@ -316,12 +328,16 @@ export function startScheduledTaskKeepalive(
           continue; // still backing off from prior revive failures
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
+        reviving.add(sessionId);
+        const metadata = await new SessionService(
+          boundWorkspace,
+        ).readCreationMetadata(sessionId);
         const load = bridge.loadSession({
           sessionId,
           workspaceCwd: boundWorkspace,
           historyReplay: 'response',
+          ...metadata,
         });
-        reviving.add(sessionId);
         // Clear the in-flight guard on the load's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
         void load
@@ -444,6 +460,8 @@ export interface RehydrateBridge {
     sessionId: string;
     workspaceCwd: string;
     historyReplay?: 'stream' | 'response';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<unknown>;
 }
 
@@ -476,6 +494,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
   loadTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
   const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
@@ -486,6 +505,11 @@ export async function rehydrateScheduledTaskSessions(deps: {
     log.debug('rehydrate: readCronTasks failed', err);
     return { loaded: [], failed: [] };
   }
+  try {
+    deps.onTasksRead?.(tasks);
+  } catch (err) {
+    log.debug('rehydrate: onTasksRead failed', err);
+  }
 
   // Distinct sessions of enabled bound tasks — same filter the heartbeat uses.
   const sessionIds = collectBoundSessionIds(tasks);
@@ -493,10 +517,14 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const loaded: string[] = [];
   const failed: string[] = [];
   const loadOne = async (sessionId: string) => {
+    const metadata = await new SessionService(
+      boundWorkspace,
+    ).readCreationMetadata(sessionId);
     const load = bridge.loadSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       historyReplay: 'response',
+      ...metadata,
     });
     // loadSession isn't abortable, so a timed-out load keeps forking/replaying
     // in the background. Swallow its eventual settlement up front so it can't

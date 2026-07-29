@@ -18,9 +18,24 @@ const request: PermissionRequest = {
   id: 'req-1',
   content: [],
   options: [
-    { id: 'proceed', label: 'Proceed', kind: 'proceed_once' },
+    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
     { id: 'reject', label: 'Reject', kind: 'reject_once' },
   ],
+};
+
+const execRequest: PermissionRequest = {
+  id: 'req-exec',
+  content: [],
+  toolName: 'run_shell_command',
+  title: 'run_shell_command',
+  options: [
+    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+    { id: 'reject', label: 'Reject', kind: 'reject_once' },
+  ],
+  rawInput: {
+    command: 'rm -rf /tmp/data',
+    description: 'Delete temporary data',
+  },
 };
 
 let root: Root | null = null;
@@ -28,7 +43,6 @@ let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
-  vi.useFakeTimers();
   onConfirm = vi.fn();
 });
 
@@ -37,48 +51,219 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
-  vi.useRealTimers();
 });
 
-function render(keyboardActive?: boolean): void {
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
+function rerender(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
         <ToolApproval
-          request={request}
+          request={req}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
         />
       </I18nProvider>,
     ),
   );
-  // The keydown listener is armed after a 250ms delay.
+}
+
+function render(
+  keyboardActive?: boolean,
+  req: PermissionRequest = request,
+): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  rerender(keyboardActive, req);
+}
+
+function optionButtons(): HTMLButtonElement[] {
+  return Array.from(
+    container!.querySelectorAll<HTMLButtonElement>(
+      '[data-web-shell-permission-option]',
+    ),
+  );
+}
+
+function pressKey(target: Element, key: string): void {
   act(() => {
-    vi.advanceTimersByTime(300);
+    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
   });
 }
 
-function pressDigitOne(): void {
-  act(() => {
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: '1' }));
-  });
-}
-
-describe('ToolApproval keyboard gate', () => {
-  it('confirms via a global shortcut when keyboardActive (the default)', () => {
+describe('ToolApproval accessibility', () => {
+  it('exposes an alertdialog of real, focusable buttons', () => {
     render(undefined);
-    pressDigitOne();
-    expect(onConfirm).toHaveBeenCalledTimes(1);
+    const panel = container!.querySelector('[data-web-shell-permission-panel]');
+    expect(panel?.getAttribute('role')).toBe('alertdialog');
+
+    const opts = optionButtons();
+    expect(opts).toHaveLength(2);
+    expect(opts.every((o) => o.tagName === 'BUTTON')).toBe(true);
+    // Exactly one option is in the tab order (roving tabindex).
+    expect(opts.filter((o) => o.tabIndex === 0)).toHaveLength(1);
   });
 
-  it('ignores global shortcuts when keyboardActive is false', () => {
-    // Split-view panes pass keyboardActive={false} so a keypress can't confirm
-    // the wrong (or an off-screen) session's approval.
+  it('exposes the options as radios in a radiogroup (single-select)', () => {
+    render(undefined);
+    const panel = container!.querySelector(
+      '[data-web-shell-permission-panel]',
+    )!;
+    expect(panel.querySelector('[role="radiogroup"]')).not.toBeNull();
+
+    const opts = optionButtons();
+    // The safe default (reject, index 0) is the checked radio.
+    expect(opts[0]!.getAttribute('role')).toBe('radio');
+    expect(opts[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(opts[1]!.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('exposes the command and description to assistive tech', () => {
+    render(undefined, execRequest);
+    const panel = container!.querySelector(
+      '[data-web-shell-permission-panel]',
+    )!;
+    const describedby = panel.getAttribute('aria-describedby');
+    expect(describedby).toBeTruthy();
+
+    // SR users must hear WHAT will run, not just the question — the referenced
+    // elements include the command and the description.
+    const texts = describedby!
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '');
+    expect(texts.some((t) => t.includes('rm -rf /tmp/data'))).toBe(true);
+    expect(texts.some((t) => t.includes('Delete temporary data'))).toBe(true);
+  });
+
+  it('emits no dangling aria-describedby references', () => {
+    // Basic approval: no command, no description. describedby must reference
+    // only elements that actually render — a dangling IDREF is an axe-core
+    // aria-valid-attr-value violation.
+    render(undefined);
+    const panel = container!.querySelector(
+      '[data-web-shell-permission-panel]',
+    )!;
+    const ids = panel.getAttribute('aria-describedby')!.split(' ');
+    expect(ids.length).toBeGreaterThan(0);
+    ids.forEach((id) => expect(document.getElementById(id)).not.toBeNull());
+  });
+
+  it('focuses the safe-default option when keyboardActive (the default)', () => {
+    render(undefined);
+    // Reject sorts first and is the safe default.
+    const opts = optionButtons();
+    expect(opts[0]?.getAttribute('data-option-id')).toBe('reject');
+    expect(document.activeElement).toBe(opts[0]);
+  });
+
+  it('does not steal focus when keyboardActive is false (split-view panes)', () => {
     render(false);
-    pressDigitOne();
-    expect(onConfirm).not.toHaveBeenCalled();
+    expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+      false,
+    );
+  });
+
+  it('confirms the clicked option', () => {
+    render(undefined);
+    act(() => {
+      optionButtons()[1]!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+  });
+
+  it('confirms by digit shortcut, scoped to the panel', () => {
+    render(undefined);
+    // '2' picks the second ordered option (proceed). Dispatched on a button so
+    // it bubbles to the panel's onKeyDown — a window-level keypress would not.
+    pressKey(optionButtons()[0]!, '2');
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+  });
+
+  it('rejects on Escape', () => {
+    render(undefined);
+    pressKey(optionButtons()[0]!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'reject');
+  });
+
+  it('moves focus between options with arrow keys (roving tabindex)', () => {
+    render(undefined);
+    const opts = optionButtons();
+    expect(document.activeElement).toBe(opts[0]);
+
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+    expect(opts[1]!.tabIndex).toBe(0);
+    expect(opts[0]!.tabIndex).toBe(-1);
+
+    pressKey(opts[1]!, 'ArrowUp');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('jumps to first/last option with Home/End', () => {
+    render(undefined);
+    const opts = optionButtons();
+    expect(document.activeElement).toBe(opts[0]);
+
+    pressKey(opts[0]!, 'End');
+    expect(document.activeElement).toBe(opts[1]);
+    expect(opts[1]!.tabIndex).toBe(0);
+
+    pressKey(opts[1]!, 'Home');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
+  it('restores the selected option when re-activated, not the safe default', () => {
+    render(undefined); // keyboardActive=true (topmost)
+    const opts = optionButtons();
+    // User moves off the default (Reject) to Proceed.
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+
+    // A covering panel opens (keyboardActive=false) then closes (true).
+    rerender(false);
+    rerender(true);
+
+    // Focus returns to the user's selection — it must not snap back to Reject
+    // (which would silently change what Enter confirms).
+    expect(document.activeElement).toBe(opts[1]);
+  });
+
+  it('focuses the safe default when a new request arrives while active', () => {
+    render(undefined); // keyboardActive=true (topmost)
+    const opts = optionButtons();
+    // User moves off the safe default (Reject) to Proceed.
+    pressKey(opts[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(opts[1]);
+
+    // A NEW request (different id) arrives while still active: focus must go to
+    // the new request's safe default, not the stale option index the user was on
+    // (which could map to a more permissive option in the new request).
+    rerender(true, { ...request, id: 'req-2' });
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
+  it('leaves Enter to native button activation (no double-press guard)', () => {
+    render(undefined);
+    const opts = optionButtons();
+    opts[1]!.focus();
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      opts[1]!.dispatchEvent(event);
+    });
+    // handleKeyDown must not intercept Enter: the focused button activates
+    // natively on Enter, so a single press confirms. The old interactedRef
+    // double-press guard preventDefault'd the first Enter — assert that no such
+    // interception exists. (jsdom doesn't synthesize the native Enter->click, so
+    // we assert the handler leaves the event un-cancelled instead.)
+    expect(event.defaultPrevented).toBe(false);
   });
 });

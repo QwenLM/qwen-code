@@ -11,7 +11,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                                                                                                                                                                                                       |
 | `Ctrl+L`                       | Clear the screen.                                                                                                                                                                                                                                                                                         |
 | `Ctrl+O`                       | Open/close the full-detail transcript view (a scrollable, frozen snapshot showing every tool's complete output and full thinking). Press again, or `Esc`/`q`, to close.                                                                                                                                   |
-| `Ctrl+S`                       | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output.                                                                                                                                                                                     |
+| `Ctrl+S`                       | Stashes non-empty input for the current project and restores it on the next launch. With empty input, allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output.                                                                               |
 | `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                                                                                                                                                                                                                  |
 | `Ctrl+B`                       | While a foreground shell command is running: promote it to a background task. The child keeps running, the agent's turn unblocks, and the shell appears in `/tasks` + the Background tasks dialog. No-op when no shell is executing — Ctrl+B then falls through to its prompt-area binding (cursor-left). |
 | `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                                                                               |
@@ -69,7 +69,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## History scrollback
 
-Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History). In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
+Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History), screen reader mode is off, and Qwen Code is running in a compatible interactive terminal (`stdout` is a TTY, CI is inactive, and `TERM` is not `dumb`), which is the default for ordinary non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
 
 | Shortcut        | Description                                          |
 | --------------- | ---------------------------------------------------- |
@@ -81,13 +81,13 @@ Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtuali
 | `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow). |
 | **Mouse wheel** | Scroll history (3 lines per tick).                   |
 
-When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, **native click-and-drag text selection is consumed by the program** — hold `Shift` (or `Option` on macOS Terminal / iTerm) while dragging to bypass mouse capture and select text the usual way.
+When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging.
 
 ### tmux trackpad scrolling
 
 Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.
 
-If trackpad scrolling changes the prompt history in tmux, enable `ui.useTerminalBuffer`; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Integration
 

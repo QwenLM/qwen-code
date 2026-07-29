@@ -1,4 +1,8 @@
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonSessionMonitorTaskStatus,
+} from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../../adapters/types';
 import {
   useWorkspaceActions,
   type DaemonWorkspaceActions,
@@ -18,7 +22,7 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
-import { isSafeHref } from '../messages/Markdown';
+import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
   buildCron,
   describeCron,
@@ -36,14 +40,16 @@ import {
 } from './artifactUtils';
 import {
   displayPath,
+  isRenderedFilePath,
   type TurnOutputFileChange,
   type TurnOutputFileDiff,
   type TurnOutputScheduledTask,
 } from './TurnOutputs';
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
+import { SubagentDetail } from './SubagentDetail';
+import { MonitorTaskDetail } from '../messages/TasksStatusMessage';
 
-const MIN_PANEL_WIDTH_FOR_DEFAULT_TREE = 740;
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
   'daily',
@@ -60,6 +66,16 @@ export type ArtifactPanelTab =
       id: string;
       kind: 'review';
       title: string;
+      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
+      kind: 'file';
+      title: string;
+      workspacePath: string;
+      workspaceActions?: DaemonWorkspaceActions;
+      previewContent?: string;
     }
   | {
       id: string;
@@ -75,6 +91,21 @@ export type ArtifactPanelTab =
       title: string;
       task: TurnOutputScheduledTask;
       workspaceActions?: DaemonWorkspaceActions;
+    }
+  | {
+      id: string;
+      kind: 'subagent';
+      title: string;
+      sessionId: string;
+      rootToolCallId: string;
+      rootTool: ACPToolCall;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
+      kind: 'monitor';
+      title: string;
+      task: DaemonSessionMonitorTaskStatus;
     };
 
 interface ArtifactPanelProps {
@@ -89,7 +120,13 @@ interface ArtifactPanelProps {
   error?: string | null;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
+  onOpenFilePreview: (
+    change: TurnOutputFileChange,
+    workspaceActions: DaemonWorkspaceActions,
+    workspaceCwd?: string,
+  ) => void;
   onClose: () => void;
+  variant?: 'docked' | 'drawer';
 }
 
 export function ArtifactPanel({
@@ -104,20 +141,24 @@ export function ArtifactPanel({
   error,
   onSelectTab,
   onCloseTab,
+  onOpenFilePreview,
   onClose,
+  variant = 'docked',
 }: ArtifactPanelProps) {
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const defaultWorkspaceActions = useWorkspaceActions();
   const activeWorkspaceActions =
-    activeTab?.kind === 'artifact' || activeTab?.kind === 'scheduled_task'
+    activeTab && 'workspaceActions' in activeTab
       ? (activeTab.workspaceActions ?? defaultWorkspaceActions)
       : defaultWorkspaceActions;
 
   return (
     <aside
-      className={styles.panel}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
       style={
-        panelWidth ? { flexBasis: panelWidth, width: panelWidth } : undefined
+        variant === 'docked' && panelWidth
+          ? { flexBasis: panelWidth, width: panelWidth }
+          : undefined
       }
       aria-label="Right panel"
     >
@@ -144,13 +185,17 @@ export function ArtifactPanel({
                 <span className={styles.tabIcon} aria-hidden="true">
                   {tab.kind === 'review' ? (
                     <TabReviewIcon />
-                  ) : tab.kind === 'artifact' ? (
+                  ) : tab.kind === 'artifact' || tab.kind === 'file' ? (
                     <TabArtifactIcon />
+                  ) : tab.kind === 'subagent' ? (
+                    <TabSubagentIcon />
+                  ) : tab.kind === 'monitor' ? (
+                    <TabMonitorIcon />
                   ) : (
                     <TabScheduledTaskIcon />
                   )}
                 </span>
-                {tab.title}
+                <span className={styles.tabTitle}>{tab.title}</span>
               </button>
               <button
                 type="button"
@@ -181,11 +226,25 @@ export function ArtifactPanel({
           <ReviewChanges
             changes={reviewChanges}
             selectedPath={selectedReviewPath}
-            panelWidth={panelWidth}
-            workspaceCwd={workspaceCwd}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+            onOpenFilePreview={(change) =>
+              onOpenFilePreview(
+                change,
+                activeWorkspaceActions,
+                activeTab.workspaceCwd ?? workspaceCwd,
+              )
+            }
+          />
+        ) : activeTab.kind === 'file' ? (
+          <WorkspaceFilePreview
+            key={activeTab.id}
+            workspacePath={activeTab.workspacePath}
+            workspaceActions={activeWorkspaceActions}
+            previewContent={activeTab.previewContent}
           />
         ) : activeTab.kind === 'artifact' ? (
           <ArtifactDetailTab
+            key={activeTab.id}
             artifacts={artifacts}
             artifactId={activeTab.artifactId}
             workspaceActions={activeWorkspaceActions}
@@ -193,6 +252,15 @@ export function ArtifactPanel({
             loading={loading}
             error={error}
           />
+        ) : activeTab.kind === 'subagent' ? (
+          <SubagentDetail
+            sessionId={activeTab.sessionId}
+            rootToolCallId={activeTab.rootToolCallId}
+            initialRootTool={activeTab.rootTool}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+          />
+        ) : activeTab.kind === 'monitor' ? (
+          <MonitorTaskDetail key={activeTab.id} task={activeTab.task} />
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
@@ -202,6 +270,46 @@ export function ArtifactPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function TabMonitorIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 12h3l2-5 4 10 2-5h5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TabSubagentIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="8" r="3" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M6.5 19c.7-3.1 2.5-4.7 5.5-4.7s4.8 1.6 5.5 4.7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
@@ -837,18 +945,16 @@ function ScheduledTaskDetail({
 function ReviewChanges({
   changes,
   selectedPath,
-  panelWidth,
   workspaceCwd,
+  onOpenFilePreview,
 }: {
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
-  panelWidth?: number;
   workspaceCwd?: string;
+  onOpenFilePreview: (change: TurnOutputFileChange) => void;
 }) {
   const { t } = useI18n();
-  const [isTreeOpen, setIsTreeOpen] = useState(
-    () => !panelWidth || panelWidth >= MIN_PANEL_WIDTH_FOR_DEFAULT_TREE,
-  );
+  const [isTreeOpen, setIsTreeOpen] = useState(false);
   const [isFileListOpen, setIsFileListOpen] = useState(true);
   const [isReviewStacked, setIsReviewStacked] = useState(false);
   const [reviewListWidth, setReviewListWidth] = useState(520);
@@ -1034,6 +1140,7 @@ function ReviewChanges({
           >
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
+              const canOpenPreview = isRenderedFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -1044,19 +1151,36 @@ function ReviewChanges({
                     .filter(Boolean)
                     .join(' ')}
                 >
-                  <button
-                    type="button"
+                  <div
                     className={styles.reviewRow}
                     data-selected={change.path === selectedPath || undefined}
-                    onClick={() => toggleDiff(change.path)}
                   >
+                    <button
+                      type="button"
+                      className={styles.reviewRowToggle}
+                      onClick={() => toggleDiff(change.path)}
+                      aria-label={change.path}
+                      aria-expanded={isExpanded}
+                    />
                     <span className={styles.fileIcon}>
                       {fileExtensionLabel(change.path)}
                     </span>
-                    <PathText
-                      path={displayPath(change.path, workspaceCwd)}
-                      title={change.path}
-                    />
+                    <span className={styles.reviewFileName}>
+                      <PathText
+                        path={displayPath(change.path, workspaceCwd)}
+                        title={change.path}
+                      />
+                      {canOpenPreview && (
+                        <button
+                          type="button"
+                          className={styles.reviewOpenButton}
+                          onClick={() => onOpenFilePreview(change)}
+                          title={`${t('turnOutputs.preview')} ${change.path}`}
+                        >
+                          {t('turnOutputs.preview')}
+                        </button>
+                      )}
+                    </span>
                     <LineStats
                       additions={change.additions}
                       deletions={change.deletions}
@@ -1075,7 +1199,7 @@ function ReviewChanges({
                     >
                       <ChevronIcon />
                     </span>
-                  </button>
+                  </div>
                   {isExpanded && <DiffPreview change={change} />}
                 </div>
               );
@@ -1571,28 +1695,21 @@ function ArtifactDetail({
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
   const canPreviewWorkspaceFile =
     artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
-  const canPreviewHtml =
-    canPreviewWorkspaceFile &&
-    artifact.workspacePath &&
-    isHtmlArtifact(artifact);
 
-  if (canPreviewHtml && artifact.workspacePath) {
+  if (canPreviewWorkspaceFile && artifact.workspacePath) {
     return (
-      <HtmlArtifactPreview
+      <WorkspaceFilePreview
         workspacePath={artifact.workspacePath}
         artifactVersion={artifact.updatedAt}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
-      />
-    );
-  }
-
-  if (canPreviewWorkspaceFile && artifact.workspacePath) {
-    return (
-      <FileArtifactPreview
-        workspacePath={artifact.workspacePath}
-        artifactVersion={artifact.updatedAt}
-        workspaceActions={workspaceActions}
+        previewKind={
+          isHtmlArtifact(artifact)
+            ? 'html'
+            : isMarkdownArtifact(artifact)
+              ? 'markdown'
+              : 'source'
+        }
       />
     );
   }
@@ -1664,9 +1781,115 @@ function ArtifactDetail({
 
 function isHtmlArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
   return (
-    artifact.kind === 'html' || path.endsWith('.html') || path.endsWith('.htm')
+    artifact.kind === 'html' ||
+    path.endsWith('.html') ||
+    path.endsWith('.htm') ||
+    mimeType === 'text/html'
   );
+}
+
+function isMarkdownArtifact(artifact: DaemonSessionArtifact) {
+  const path = artifact.workspacePath?.toLowerCase() ?? '';
+  return (
+    path.endsWith('.md') ||
+    path.endsWith('.markdown') ||
+    artifact.mimeType?.toLowerCase() === 'text/markdown'
+  );
+}
+
+function WorkspaceFilePreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  previewKind = workspacePath.toLowerCase().endsWith('.html') ||
+  workspacePath.toLowerCase().endsWith('.htm')
+    ? 'html'
+    : workspacePath.toLowerCase().endsWith('.md') ||
+        workspacePath.toLowerCase().endsWith('.markdown')
+      ? 'markdown'
+      : 'source',
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  previewContent?: string;
+  previewKind?: 'html' | 'markdown' | 'source';
+}) {
+  if (previewKind === 'html') {
+    return (
+      <HtmlArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+      />
+    );
+  }
+  if (previewKind === 'markdown') {
+    return (
+      <MarkdownArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        previewContent={previewContent}
+      />
+    );
+  }
+  return (
+    <FileArtifactPreview
+      workspacePath={workspacePath}
+      artifactVersion={artifactVersion}
+      workspaceActions={workspaceActions}
+    />
+  );
+}
+
+function useWorkspaceFileContent({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+  truncatedMessage,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  previewContent?: string;
+  truncatedMessage: string;
+}) {
+  const [content, setContent] = useState<string | null>(previewContent ?? null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setContent(previewContent ?? null);
+    setError(null);
+    workspaceActions
+      .readWorkspaceFile(workspacePath)
+      .then((file) => {
+        if (cancelled) return;
+        setContent(file.content);
+        if (file.truncated) setError(truncatedMessage);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    artifactVersion,
+    previewContent,
+    truncatedMessage,
+    workspaceActions,
+    workspacePath,
+  ]);
+
+  return { content, error };
 }
 
 function HtmlArtifactPreview({
@@ -1680,41 +1903,24 @@ function HtmlArtifactPreview({
   workspaceActions: DaemonWorkspaceActions;
   previewContent?: string;
 }) {
-  const [html, setHtml] = useState<string | null>(previewContent ?? null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setHtml(previewContent ?? null);
-    setError(null);
-    workspaceActions
-      .readWorkspaceFile(workspacePath)
-      .then((file) => {
-        if (cancelled) return;
-        setHtml(file.content);
-        if (file.truncated) {
-          setError('Preview is truncated because the file is too large.');
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [artifactVersion, previewContent, workspaceActions, workspacePath]);
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    truncatedMessage: 'Preview is truncated because the file is too large.',
+  });
 
   return (
     <div className={styles.htmlPreviewWrap}>
-      {html === null ? (
+      {content === null ? (
         <div className={styles.empty}>Loading preview...</div>
       ) : (
         <iframe
           className={styles.htmlPreview}
           referrerPolicy="no-referrer"
           sandbox=""
-          srcDoc={withArtifactPreviewCsp(html)}
+          srcDoc={withArtifactPreviewCsp(content)}
           title={`Preview ${workspacePath}`}
         />
       )}
@@ -1733,35 +1939,19 @@ function FileArtifactPreview({
   workspaceActions: DaemonWorkspaceActions;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const [content, setContent] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setContent(null);
-    setError(null);
-    workspaceActions
-      .readWorkspaceFile(workspacePath)
-      .then((file) => {
-        if (cancelled) return;
-        setContent(file.content);
-        if (file.truncated) {
-          setError('File is truncated because it is too large.');
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [artifactVersion, workspaceActions, workspacePath]);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    truncatedMessage: 'File is truncated because it is too large.',
+  });
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host || content === null) return;
     host.replaceChildren();
+    setRenderError(null);
     let view: EditorView;
     try {
       view = new EditorView({
@@ -1775,7 +1965,7 @@ function FileArtifactPreview({
         parent: host,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setRenderError(err instanceof Error ? err.message : String(err));
       return undefined;
     }
     return () => view.destroy();
@@ -1787,6 +1977,39 @@ function FileArtifactPreview({
         <div className={styles.empty}>Loading file...</div>
       ) : (
         <div ref={hostRef} className={styles.codeMirrorFile} />
+      )}
+      {(error || renderError) && (
+        <div className={styles.previewError}>{error || renderError}</div>
+      )}
+    </div>
+  );
+}
+
+function MarkdownArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  previewContent,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  previewContent?: string;
+}) {
+  const { content, error } = useWorkspaceFileContent({
+    workspacePath,
+    artifactVersion,
+    workspaceActions,
+    previewContent,
+    truncatedMessage: 'Preview is truncated because the file is too large.',
+  });
+
+  return (
+    <div className={styles.markdownPreviewWrap}>
+      {content === null ? (
+        <div className={styles.empty}>Loading preview...</div>
+      ) : (
+        <Markdown content={content} />
       )}
       {error && <div className={styles.previewError}>{error}</div>}
     </div>

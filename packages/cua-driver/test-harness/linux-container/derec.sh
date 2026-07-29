@@ -72,7 +72,7 @@ case "$1" in
  env) echo "lane=$([ -n "$WAYLAND" ] && echo wayland || echo x11) DISPLAY=${DISPLAY:-<unset>} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>} XAUTHORITY=$XAUTHORITY dbus=${DBUS_SESSION_BUS_ADDRESS:+set} CUA=$CUA APP=$APP DE_PID=$DE_PID";;
  setup)
   pkill -f 'cua-driver serve' 2>/dev/null; pkill -f "$APP" 2>/dev/null; sleep 2
-  rm -f ~/.cache/cua-driver/cua-driver.sock
+  rm -f ~/.cache/qwen-cua-driver/qwen-cua-driver.sock
   (setsid "$CUA" serve >$W/cuad.log 2>&1 &); sleep 2
   "$CUA" call launch_app "{\"name\":\"$APP\"}" >$W/launch.json 2>&1; sleep 4
   PID=$(resolve_pid); echo "$PID" >$W/pid

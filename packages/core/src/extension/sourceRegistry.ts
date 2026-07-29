@@ -12,6 +12,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
 import { quarantineCorruptFile } from './corruptFile.js';
+import type { ExtensionInstallMetadata } from '../config/config.js';
 import type {
   ClaudeMarketplaceConfig,
   ClaudeMarketplacePluginConfig,
@@ -324,12 +325,14 @@ export class SourceRegistryStore {
 export async function discoverPlugins(
   sources: readonly ExtensionSource[],
   installedNames: ReadonlySet<string>,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<DiscoveredPlugin[]> {
   const results = await Promise.all(
     sources.map(async (marketplace) => {
       try {
         const config = await loadMarketplaceConfigFromSource(
           marketplace.source,
+          networkPolicy,
         );
         if (!config) {
           debugLogger.debug(

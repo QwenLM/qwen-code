@@ -13,8 +13,8 @@
 //!   {"ok":false,"error":"...","exit_code":1}
 //!
 //! The socket file is at:
-//!   macOS  — ~/Library/Caches/cua-driver/cua-driver.sock
-//!   Linux  — ~/.cache/cua-driver/cua-driver.sock
+//!   macOS  — ~/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock
+//!   Linux  — ~/.cache/qwen-cua-driver/qwen-cua-driver.sock
 //!   Windows — \\.\pipe\cua-driver  (TODO: use named pipe; stubs only for now)
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 /// `CUA_DRIVER_RS_RECORDING_IDLE_TTL_SECS` env var (used by the #1764 verify
 /// harness to exercise the backstop quickly).
 const RECORDING_IDLE_TTL_SECS_DEFAULT: u64 = 300;
+const TOOL_CALL_TIMEOUT_SECS_DEFAULT: u64 = 90;
 
 /// Wall-clock seconds since the Unix epoch. Same idiom `recording.rs` uses for
 /// `now_ms`.
@@ -83,6 +84,54 @@ fn apply_session_identity(
 /// would be wrongly rejected if the guard gated them on an already-ended id.
 fn is_session_lifecycle_tool(tool_name: &str) -> bool {
     matches!(tool_name, "start_session" | "end_session")
+}
+
+fn tool_call_timeout_secs() -> u64 {
+    std::env::var("CUA_DRIVER_RS_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0 && *value < 120)
+        .unwrap_or(TOOL_CALL_TIMEOUT_SECS_DEFAULT)
+}
+
+async fn invoke_with_deadline(
+    registry: &cua_driver_core::tool::ToolRegistry,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> cua_driver_core::protocol::ToolResult {
+    let timeout_secs = tool_call_timeout_secs();
+    invoke_with_timeout(
+        registry,
+        tool_name,
+        args,
+        std::time::Duration::from_secs(timeout_secs),
+        timeout_secs,
+    )
+    .await
+}
+
+async fn invoke_with_timeout(
+    registry: &cua_driver_core::tool::ToolRegistry,
+    tool_name: &str,
+    args: serde_json::Value,
+    timeout: std::time::Duration,
+    timeout_secs: u64,
+) -> cua_driver_core::protocol::ToolResult {
+    match tokio::time::timeout(timeout, registry.invoke(tool_name, args))
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => cua_driver_core::protocol::ToolResult::error(format!(
+            "tool '{tool_name}' exceeded the daemon response deadline after {timeout_secs}s; \
+             returning before the 120s MCP transport deadline. Any underlying \
+             blocking OS work remains governed by its native deadline"
+        ))
+        .with_structured(serde_json::json!({
+            "code": "tool_timeout",
+            "tool": tool_name,
+            "timeout_seconds": timeout_secs,
+        })),
+    }
 }
 
 /// Resolve the recording idle TTL, honoring the env override.
@@ -151,7 +200,7 @@ fn spawn_recording_idle_backstop(
 /// isn't touched (no tool call carrying its `session`) for this long is reclaimed
 /// by [`spawn_session_idle_sweep`] — its cursor removed, recording stopped,
 /// config cleared. Overridable via `CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS`.
-const SESSION_IDLE_TTL_SECS_DEFAULT: u64 = 300;
+const SESSION_IDLE_TTL_SECS_DEFAULT: u64 = 1800;
 
 fn session_idle_ttl_secs() -> u64 {
     std::env::var("CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS")
@@ -214,12 +263,12 @@ pub fn default_socket_path() -> String {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{home}/Library/Caches/cua-driver/cua-driver.sock")
+        format!("{home}/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock")
     }
     #[cfg(target_os = "linux")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{home}/.cache/cua-driver/cua-driver.sock")
+        format!("{home}/.cache/qwen-cua-driver/qwen-cua-driver.sock")
     }
     #[cfg(target_os = "windows")]
     {
@@ -249,12 +298,12 @@ pub fn default_pid_file_path() -> String {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{home}/Library/Caches/cua-driver/cua-driver.pid")
+        format!("{home}/Library/Caches/qwen-cua-driver/qwen-cua-driver.pid")
     }
     #[cfg(target_os = "linux")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        format!("{home}/.cache/cua-driver/cua-driver.pid")
+        format!("{home}/.cache/qwen-cua-driver/qwen-cua-driver.pid")
     }
     #[cfg(target_os = "windows")]
     {
@@ -297,14 +346,25 @@ pub struct DaemonResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_data: Option<serde_json::Value>,
 }
 
 impl DaemonResponse {
     pub fn ok(result: serde_json::Value) -> Self {
-        Self { ok: true, result: Some(result), error: None, exit_code: None }
+        Self { ok: true, result: Some(result), error: None, exit_code: None, error_data: None }
     }
     pub fn err(msg: impl Into<String>, code: i32) -> Self {
-        Self { ok: false, result: None, error: Some(msg.into()), exit_code: Some(code) }
+        Self { ok: false, result: None, error: Some(msg.into()), exit_code: Some(code), error_data: None }
+    }
+    pub fn err_with_data(msg: impl Into<String>, code: i32, error_data: serde_json::Value) -> Self {
+        Self {
+            ok: false,
+            result: None,
+            error: Some(msg.into()),
+            exit_code: Some(code),
+            error_data: Some(error_data),
+        }
     }
 }
 
@@ -683,13 +743,21 @@ pub async fn run_serve(
                                     if !is_session_lifecycle_tool(&tool_name)
                                         && cua_driver_core::session::is_session_ended(sid)
                                     {
-                                        let resp = DaemonResponse::err(
+                                        let reason = cua_driver_core::session::session_end_reason(sid)
+                                            .map(|reason| reason.as_str())
+                                            .unwrap_or("unknown");
+                                        let resp = DaemonResponse::err_with_data(
                                             format!(
-                                                "session '{sid}' has ended; tool call '{tool_name}' was \
+                                                "session '{sid}' has ended (reason={reason}); tool call '{tool_name}' was \
                                                  rejected. Call start_session with this id to revive it \
                                                  before issuing further actions, or use a new session id."
                                             ),
                                             1,
+                                            serde_json::json!({
+                                                "code": "session_ended",
+                                                "reason": reason,
+                                                "session": sid,
+                                            }),
                                         );
                                         let _ = writer.write_all(
                                             (serde_json::to_string(&resp).unwrap() + "\n").as_bytes()
@@ -706,8 +774,9 @@ pub async fn run_serve(
                                     ).await;
                                     continue;
                                 }
-                                let result = reg.invoke(&tool_name, args).await;
+                                let result = invoke_with_deadline(&reg, &tool_name, args).await;
                                 let is_err = result.is_error.unwrap_or(false);
+                                let error_data = result.structured_content.clone();
                                 let content: Vec<serde_json::Value> = result.content.iter().map(|c| {
                                     match c {
                                         cua_driver_core::protocol::Content::Text { text, .. } =>
@@ -724,13 +793,15 @@ pub async fn run_serve(
                                     result_obj["structuredContent"] = sc;
                                 }
                                 let resp = if is_err {
-                                    DaemonResponse::err(
+                                    let message =
                                         result.content.iter()
                                             .filter_map(|c| if let cua_driver_core::protocol::Content::Text { text, .. } = c { Some(text.as_str()) } else { None })
                                             .collect::<Vec<_>>()
-                                            .join("\n"),
-                                        1
-                                    )
+                                            .join("\n");
+                                    match error_data {
+                                        Some(data) => DaemonResponse::err_with_data(message, 1, data),
+                                        None => DaemonResponse::err(message, 1),
+                                    }
                                 } else {
                                     DaemonResponse::ok(result_obj)
                                 };
@@ -776,7 +847,10 @@ pub async fn run_serve(
                                     // fire_session_end, after the mark). stop_owner does
                                     // not consult is_session_ended, so reaping after the
                                     // mark is safe.
-                                    cua_driver_core::session::fire_session_end(sid);
+                                    cua_driver_core::session::fire_session_end_with_reason(
+                                        sid,
+                                        cua_driver_core::session::SessionEndReason::ConnectionClosed,
+                                    );
                                     let reg2 = reg.clone();
                                     let sid_for_stop = sid.to_owned();
                                     let _ = tokio::task::spawn_blocking(move || {
@@ -822,7 +896,10 @@ pub async fn run_serve(
                         // sees ended=true and bails (mark-before-reap; the cursor/config
                         // hooks already reap inside fire_session_end after the mark).
                         // stop_owner ignores is_session_ended, so reaping after is safe.
-                        cua_driver_core::session::fire_session_end(&sid);
+                        cua_driver_core::session::fire_session_end_with_reason(
+                            &sid,
+                            cua_driver_core::session::SessionEndReason::ConnectionClosed,
+                        );
                         let reg2 = reg.clone();
                         let sid_for_stop = sid.clone();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -1214,13 +1291,21 @@ pub async fn run_serve(
                                     if !is_session_lifecycle_tool(&tool_name)
                                         && cua_driver_core::session::is_session_ended(sid)
                                     {
-                                        let resp = DaemonResponse::err(
+                                        let reason = cua_driver_core::session::session_end_reason(sid)
+                                            .map(|reason| reason.as_str())
+                                            .unwrap_or("unknown");
+                                        let resp = DaemonResponse::err_with_data(
                                             format!(
-                                                "session '{sid}' has ended; tool call '{tool_name}' was \
+                                                "session '{sid}' has ended (reason={reason}); tool call '{tool_name}' was \
                                                  rejected. Call start_session with this id to revive it \
                                                  before issuing further actions, or use a new session id."
                                             ),
                                             1,
+                                            serde_json::json!({
+                                                "code": "session_ended",
+                                                "reason": reason,
+                                                "session": sid,
+                                            }),
                                         );
                                         let _ = writer.write_all(
                                             (serde_json::to_string(&resp).unwrap() + "\n").as_bytes()
@@ -1235,8 +1320,9 @@ pub async fn run_serve(
                                     ).await;
                                     continue;
                                 }
-                                let result = reg.invoke(&tool_name, args).await;
+                                let result = invoke_with_deadline(&reg, &tool_name, args).await;
                                 let is_err = result.is_error.unwrap_or(false);
+                                let error_data = result.structured_content.clone();
                                 let content: Vec<serde_json::Value> = result.content.iter().map(|c| match c {
                                     cua_driver_core::protocol::Content::Text { text, .. } =>
                                         serde_json::json!({"type":"text","text":text}),
@@ -1248,12 +1334,14 @@ pub async fn run_serve(
                                     result_obj["structuredContent"] = sc;
                                 }
                                 let resp = if is_err {
-                                    DaemonResponse::err(
+                                    let message =
                                         result.content.iter()
                                             .filter_map(|c| if let cua_driver_core::protocol::Content::Text { text, .. } = c { Some(text.as_str()) } else { None })
-                                            .collect::<Vec<_>>().join("\n"),
-                                        1
-                                    )
+                                            .collect::<Vec<_>>().join("\n");
+                                    match error_data {
+                                        Some(data) => DaemonResponse::err_with_data(message, 1, data),
+                                        None => DaemonResponse::err(message, 1),
+                                    }
                                 } else {
                                     DaemonResponse::ok(result_obj)
                                 };
@@ -1292,7 +1380,10 @@ pub async fn run_serve(
                                     // fire_session_end, after the mark). stop_owner does
                                     // not consult is_session_ended, so reaping after the
                                     // mark is safe.
-                                    cua_driver_core::session::fire_session_end(sid);
+                                    cua_driver_core::session::fire_session_end_with_reason(
+                                        sid,
+                                        cua_driver_core::session::SessionEndReason::ConnectionClosed,
+                                    );
                                     let reg2 = reg.clone();
                                     let sid_for_stop = sid.to_owned();
                                     let _ = tokio::task::spawn_blocking(move || {
@@ -1329,7 +1420,10 @@ pub async fn run_serve(
                         // sees ended=true and bails (mark-before-reap; the cursor/config
                         // hooks already reap inside fire_session_end after the mark).
                         // stop_owner ignores is_session_ended, so reaping after is safe.
-                        cua_driver_core::session::fire_session_end(&sid);
+                        cua_driver_core::session::fire_session_end_with_reason(
+                            &sid,
+                            cua_driver_core::session::SessionEndReason::ConnectionClosed,
+                        );
                         let reg2 = reg.clone();
                         let sid_for_stop = sid.clone();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -1480,6 +1574,61 @@ pub fn run_status_cmd(socket_path: &str, pid_file_path: &str) {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::invoke_with_timeout;
+    use async_trait::async_trait;
+    use cua_driver_core::{
+        protocol::ToolResult,
+        tool::{Tool, ToolDef, ToolRegistry},
+    };
+    use serde_json::Value;
+
+    struct SlowTool {
+        def: ToolDef,
+    }
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn def(&self) -> &ToolDef { &self.def }
+
+        async fn invoke(&self, _args: Value) -> ToolResult {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            ToolResult::text("finished")
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_deadline_returns_structured_tool_error() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(SlowTool {
+            def: ToolDef {
+                name: "slow".into(),
+                description: "test".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            },
+        }));
+
+        let result = invoke_with_timeout(
+            &registry,
+            "slow",
+            serde_json::json!({}),
+            std::time::Duration::from_millis(10),
+            90,
+        )
+        .await;
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured timeout");
+        assert_eq!(structured["code"], "tool_timeout");
+        assert_eq!(structured["tool"], "slow");
+        assert_eq!(structured["timeout_seconds"], 90);
+    }
+}
 
 #[cfg(all(test, unix))]
 mod gate_tests {

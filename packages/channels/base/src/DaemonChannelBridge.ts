@@ -7,9 +7,15 @@ import type {
   AvailableCommand,
   BridgeSessionInfo,
   ChannelAgentBridge,
+  ChannelAgentBridgeSessionOptions,
+  ChannelLoopToolHandler,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
+import {
+  ChannelLoopMcpServer,
+  type JsonRpcMessage,
+} from './ChannelLoopTools.js';
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
@@ -37,6 +43,7 @@ export interface DaemonChannelSessionClient {
     lastEventId?: number;
     resume?: boolean;
   }): AsyncGenerator<DaemonChannelEvent>;
+  detach?(): Promise<void>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<Record<string, unknown>>;
   respondToPermission(
@@ -55,17 +62,28 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
+  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  sourceId?: string;
 }
 
 export type DaemonChannelSessionFactory = (
   req: DaemonChannelSessionFactoryRequest,
 ) => Promise<DaemonChannelSessionClient>;
 
+export interface DaemonChannelLoopMcpHost {
+  register(
+    sessionId: string,
+    handler: (message: JsonRpcMessage) => Promise<JsonRpcMessage | undefined>,
+  ): Promise<void>;
+  unregister(sessionId: string): Promise<void>;
+}
+
 export interface DaemonChannelBridgeOptions {
   cwd: string;
   sessionFactory: DaemonChannelSessionFactory;
   modelServiceId?: string;
   sessionScope?: SessionScope;
+  channelLoopMcpHost?: DaemonChannelLoopMcpHost;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -188,6 +206,7 @@ export class DaemonChannelBridge
 {
   private readonly options: DaemonChannelBridgeOptions;
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
+  private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private readonly eventControllers = new Map<string, AbortController>();
   private readonly requestToSession = new Map<string, string>();
   private readonly respondedRequestToSession = new Map<string, string>();
@@ -201,7 +220,15 @@ export class DaemonChannelBridge
     AvailableCommand[]
   >();
   private readonly turnBarriers = new Map<string, () => void>();
+  private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly registeredChannelLoopMcpSessions = new Set<string>();
+  private readonly channelLoopMcpRegistrations = new Map<
+    string,
+    Promise<void>
+  >();
+  private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private connected = false;
+  private lifecycleGeneration = 0;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
 
@@ -250,23 +277,32 @@ export class DaemonChannelBridge
 
   async newSession(
     cwd: string,
-    options?: { approvalMode?: string },
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
   ): Promise<string> {
+    const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
-    this.attachSession(session);
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
+    }
+    this.attachSession(session, bindingToken);
+    await this.registerChannelLoopMcpForSession(session.sessionId);
     return session.sessionId;
   }
 
   async loadSession(
     sessionId: string,
     cwd: string,
-    options?: { approvalMode?: string },
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
   ): Promise<string> {
+    const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
@@ -274,13 +310,37 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
     });
+    if (lifecycleGeneration !== this.lifecycleGeneration) {
+      await this.rejectStaleSession(session);
+    }
     if (session.sessionId !== sessionId) {
+      void this.releaseSessionClient(session).catch((error: unknown) => {
+        this.lastError = error;
+      });
       throw new Error(
         `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
       );
     }
-    this.attachSession(session);
+    this.attachSession(session, bindingToken);
+    await this.registerChannelLoopMcpForSession(session.sessionId);
     return session.sessionId;
+  }
+
+  registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
+    if (!this.channelLoopToolHandlers.includes(handler)) {
+      this.channelLoopToolHandlers.push(handler);
+    }
+    this.channelLoopMcpServer ??= new ChannelLoopMcpServer({
+      create: (sessionId, input) =>
+        this.resolveChannelLoopToolHandler(sessionId).create(sessionId, input),
+      list: (sessionId) =>
+        this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
+      cancel: (sessionId, id) =>
+        this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
+    });
+    for (const sessionId of this.sessions.keys()) {
+      void this.registerChannelLoopMcpForSession(sessionId);
+    }
   }
 
   async prompt(
@@ -305,14 +365,21 @@ export class DaemonChannelBridge
     controllers.add(controller);
 
     const chunks: string[] = [];
+    let slashCommandOutput = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         chunks.push(chunk);
       }
     };
+    const onSlashCommandOutput = (sid: string, chunk: string) => {
+      if (sid === sessionId) {
+        slashCommandOutput = chunk;
+      }
+    };
     const clearChunks = (sid: string) => {
       if (sid === sessionId) {
         chunks.length = 0;
+        slashCommandOutput = '';
       }
     };
     const onSessionDied = (info: { sessionId: string }) => {
@@ -321,6 +388,7 @@ export class DaemonChannelBridge
       }
     };
     this.on('textChunk', onChunk);
+    this.on('slashCommandOutput', onSlashCommandOutput);
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
@@ -344,7 +412,7 @@ export class DaemonChannelBridge
         turnBarrier,
         new Promise<void>((resolve) => setTimeout(resolve, 0)),
       ]);
-      const textResult = chunks.join('');
+      const textResult = chunks.join('') || slashCommandOutput;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -354,6 +422,7 @@ export class DaemonChannelBridge
     } finally {
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
+      this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
@@ -384,6 +453,35 @@ export class DaemonChannelBridge
     this.resolveTurnBarrier(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
+    await session.cancel();
+  }
+
+  async discardSession(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void> {
+    if (
+      expectedBindingToken !== undefined &&
+      this.sessionBindingTokens.get(sessionId) !== expectedBindingToken
+    ) {
+      return;
+    }
+    const session = this.removeSessionBinding(sessionId);
+    if (!session) return;
+    await this.releaseSessionClient(session);
+  }
+
+  private async releaseSessionClient(
+    session: DaemonChannelSessionClient,
+  ): Promise<void> {
+    if (session.detach) {
+      try {
+        await session.detach();
+        return;
+      } catch {
+        // Fall back to cancellation for clients that cannot detach cleanly.
+      }
+    }
     await session.cancel();
   }
 
@@ -425,6 +523,7 @@ export class DaemonChannelBridge
   }
 
   stop(): void {
+    this.lifecycleGeneration++;
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
@@ -432,7 +531,7 @@ export class DaemonChannelBridge
           this.lastError = error;
         });
       }
-      this.dropSession(sessionId, 'bridge_stopped');
+      this.dropSession(sessionId, 'bridge_stopped', false);
     }
     this.latestAvailableCommandsSessionId = undefined;
     this.connected = false;
@@ -442,15 +541,37 @@ export class DaemonChannelBridge
     return this.connected;
   }
 
-  private attachSession(session: DaemonChannelSessionClient): void {
-    if (this.sessions.has(session.sessionId)) {
-      this.dropSession(session.sessionId, 'session_replaced');
+  private attachSession(
+    session: DaemonChannelSessionClient,
+    bindingToken?: object,
+  ): void {
+    const replacedSession = this.removeSessionBinding(session.sessionId, false);
+    if (replacedSession) {
+      void this.releaseSessionClient(replacedSession).catch(
+        (error: unknown) => {
+          this.lastError = error;
+        },
+      );
+      this.emit('sessionDied', {
+        sessionId: session.sessionId,
+        reason: 'session_replaced',
+      });
     }
 
     this.sessions.set(session.sessionId, session);
+    this.sessionBindingTokens.set(session.sessionId, bindingToken);
     const controller = new AbortController();
     this.eventControllers.set(session.sessionId, controller);
     void this.pumpEvents(session, controller.signal);
+  }
+
+  private async rejectStaleSession(
+    session: DaemonChannelSessionClient,
+  ): Promise<void> {
+    void this.releaseSessionClient(session).catch((error: unknown) => {
+      this.lastError = error;
+    });
+    throw new Error('Daemon channel bridge stopped during session creation');
   }
 
   private ensureSession(sessionId: string): DaemonChannelSessionClient {
@@ -506,6 +627,13 @@ export class DaemonChannelBridge
   ): void {
     switch (event.type) {
       case 'session_update':
+        if (
+          isRecord(event.data) &&
+          typeof event.data['sessionId'] === 'string' &&
+          event.data['sessionId'] !== session.sessionId
+        ) {
+          break;
+        }
         this.handleSessionUpdate(session.sessionId, event.data);
         break;
       case 'permission_request':
@@ -565,8 +693,24 @@ export class DaemonChannelBridge
           break;
         }
         const text = getTextContent(update['content']);
+        if (meta?.['qwenDiscreteMessage'] === true) {
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            text
+          ) {
+            this.emit('backgroundResponse', sessionId, text);
+          }
+          break;
+        }
         if (text) {
-          this.emit('textChunk', sessionId, text);
+          this.emit(
+            meta?.['source'] === 'slash_command'
+              ? 'slashCommandOutput'
+              : 'textChunk',
+            sessionId,
+            text,
+          );
         }
         break;
       }
@@ -581,6 +725,22 @@ export class DaemonChannelBridge
       case 'tool_call_update': {
         const toolCallId = getString(update['toolCallId']);
         const kind = getString(update['kind']);
+        const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+        if (
+          !kind &&
+          toolCallId &&
+          getString(update['status']) === 'in_progress' &&
+          meta?.['shellProgress'] !== undefined
+        ) {
+          // Silent-shell liveness heartbeat: a kind-less in_progress frame
+          // carrying only the id, status, and _meta.shellProgress stats.
+          // Channels have no use for it — drop it without flagging the
+          // session as malformed. Gate on shellProgress (matching the
+          // qwen-agent and web-shell normalizer guards) so a genuinely
+          // malformed kind-less tool_call still reaches emitProtocolError
+          // below instead of being silently swallowed.
+          break;
+        }
         if (!toolCallId || !kind) {
           this.emitProtocolError(`Malformed daemon ${type} event`, update);
           break;
@@ -742,14 +902,32 @@ export class DaemonChannelBridge
     );
   }
 
-  private dropSession(sessionId: string, reason: string): void {
-    if (!this.sessions.has(sessionId)) {
-      return;
+  private dropSession(
+    sessionId: string,
+    reason: string,
+    releaseClient = true,
+  ): void {
+    const session = this.removeSessionBinding(sessionId);
+    if (!session) return;
+    if (releaseClient) {
+      void this.releaseSessionClient(session).catch((error: unknown) => {
+        this.lastError = error;
+      });
     }
+    this.emit('sessionDied', { sessionId, reason });
+  }
+
+  private removeSessionBinding(
+    sessionId: string,
+    unregisterChannelLoopMcp = true,
+  ): DaemonChannelSessionClient | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
     this.resolveTurnBarrier(sessionId);
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
+    this.sessionBindingTokens.delete(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
     this.availableCommandsBySession.delete(sessionId);
@@ -768,7 +946,71 @@ export class DaemonChannelBridge
         this.respondedRequestToSession.delete(requestId);
       }
     }
-    this.emit('sessionDied', { sessionId, reason });
+    if (unregisterChannelLoopMcp) {
+      this.unregisterChannelLoopMcpForSession(sessionId);
+    }
+    return session;
+  }
+
+  private async registerChannelLoopMcpForSession(
+    sessionId: string,
+  ): Promise<void> {
+    const host = this.options.channelLoopMcpHost;
+    const server = this.channelLoopMcpServer;
+    if (
+      !host ||
+      !server ||
+      this.registeredChannelLoopMcpSessions.has(sessionId)
+    ) {
+      return;
+    }
+    const pending = this.channelLoopMcpRegistrations.get(sessionId);
+    if (pending) {
+      await pending;
+      return;
+    }
+    const registration = host
+      .register(sessionId, (message) =>
+        server.handleMessage(message, { sessionId }),
+      )
+      .then(async () => {
+        if (this.sessions.has(sessionId)) {
+          this.registeredChannelLoopMcpSessions.add(sessionId);
+        } else {
+          await host.unregister(sessionId);
+        }
+      })
+      .catch((error: unknown) => {
+        this.lastError = error;
+      })
+      .finally(() => {
+        if (this.channelLoopMcpRegistrations.get(sessionId) === registration) {
+          this.channelLoopMcpRegistrations.delete(sessionId);
+        }
+      });
+    this.channelLoopMcpRegistrations.set(sessionId, registration);
+    await registration;
+  }
+
+  private unregisterChannelLoopMcpForSession(sessionId: string): void {
+    if (!this.registeredChannelLoopMcpSessions.delete(sessionId)) return;
+    void this.options.channelLoopMcpHost
+      ?.unregister(sessionId)
+      .catch((error: unknown) => {
+        this.lastError = error;
+      });
+  }
+
+  private resolveChannelLoopToolHandler(
+    sessionId: string,
+  ): ChannelLoopToolHandler {
+    const handler = this.channelLoopToolHandlers.find(
+      (candidate) =>
+        candidate.canHandle?.(sessionId) === true ||
+        (this.channelLoopToolHandlers.length === 1 && !candidate.canHandle),
+    );
+    if (handler) return handler;
+    throw new Error(`No channel loop handler matched session ${sessionId}.`);
   }
 
   private getStringField(

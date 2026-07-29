@@ -5,6 +5,7 @@
  */
 
 import { getCachedStringWidth } from './textUtils.js';
+import { readInlineMathSpanAt } from './inline-math.js';
 
 /**
  * Shared rendered-height accounting for bounding the live (pending) markdown
@@ -38,15 +39,8 @@ export const TABLE_SEPARATOR_RE =
 /** A fenced code block delimiter. Group 1 is the fence (``` or ~~~ run). */
 export const CODE_FENCE_RE = /^ *(`{3,}|~{3,}) *([^`]*)$/;
 
-const INLINE_MATH_MAX_CHARS = 1024;
-const TABLE_INLINE_MATH_SPAN_RE = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
-  'y',
-);
-
 function readTableInlineMathSpan(row: string, index: number): string | null {
-  TABLE_INLINE_MATH_SPAN_RE.lastIndex = index;
-  return TABLE_INLINE_MATH_SPAN_RE.exec(row)?.[0] ?? null;
+  return readInlineMathSpanAt(row, index);
 }
 
 /**

@@ -10,6 +10,7 @@ import {
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import { ThemeProvider } from '../../themeContext';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import {
   MAX_HIGHLIGHT_LINE_CHARS,
@@ -191,6 +192,33 @@ describe('qwen-session:// links', () => {
     c.remove();
   });
 
+  it('renders qwen session references as inert text in readonly mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'readonly' },
+          createElement(Markdown, {
+            content: '[child](qwen-session://child-session)',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('a')).toBeNull();
+    expect(container.querySelector('span')?.textContent).toBe('child');
+    expect(handler).not.toHaveBeenCalled();
+
+    window.removeEventListener('qwen:open-session', handler);
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('still sanitizes dangerous schemes', () => {
     const c = renderMd('[x](javascript:alert(1))');
     const a = c.querySelector('a')!;
@@ -220,9 +248,10 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Quick copy');
-    expect(container.textContent).toContain('Details');
-    expect(container.querySelector('button[aria-label*="table"]')).toBeNull();
+    expect(container.textContent).toContain('Copy table');
+    expect(
+      container.querySelector('button[aria-label="View details for row 1"]'),
+    ).not.toBeNull();
 
     act(() => root.unmount());
     container.remove();
@@ -265,7 +294,7 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
     expect(container.querySelector('[data-custom-table="true"]')).toBeNull();
 
     act(() => root.unmount());
@@ -291,7 +320,7 @@ describe('Markdown enhanced tables', () => {
     });
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
 
     act(() => root.unmount());
     container.remove();
@@ -329,7 +358,7 @@ describe('Markdown enhanced tables', () => {
     expect(table).not.toBeNull();
     expect(table?.textContent).toContain('A');
     expect(table?.textContent).toContain('1');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
     expect(consoleError).toHaveBeenCalledWith(
       '[web-shell] enhanced markdown table failed:',
       expect.any(Error),
@@ -460,6 +489,7 @@ describe('Markdown custom code block rendering', () => {
       className: 'language-echarts-fulldata',
       code: 'const option = {};',
       isStreaming: true,
+      isIncomplete: false,
       source: 'assistant',
       theme: 'dark',
     });
@@ -468,6 +498,41 @@ describe('Markdown custom code block rendering', () => {
       'assistant:true:const option = {};',
     );
     expect(container.querySelector('pre code')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('marks only the unterminated tail fence as incomplete', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() =>
+      createElement('div', { 'data-custom-code': 'true' }),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content:
+              '```first-chart\n{"value":1}\n```\n\ntext\n\n```second-chart\n{"value":',
+            source: 'assistant',
+            isStreaming: true,
+          }),
+        ),
+      );
+    });
+
+    const infos = renderCodeBlock.mock.calls.map(
+      ([info]) => info as WebShellCodeBlockRenderInfo,
+    );
+    expect(infos.map((info) => info.isStreaming)).toEqual([true, true]);
+    expect(infos.map((info) => info.isIncomplete)).toEqual([false, true]);
 
     await act(async () => {
       root.unmount();
@@ -1284,13 +1349,11 @@ describe('Markdown code highlighting while streaming', () => {
     container.remove();
   });
 
-  it('highlights the block as it streams, and the appended chunk too', async () => {
+  it('keeps a growing block plain and highlights it once settled', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
 
-    // First streamed chunk: gets highlighted (async grammar load, then the
-    // synchronous re-highlight).
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -1299,19 +1362,25 @@ describe('Markdown code highlighting while streaming', () => {
         }),
       );
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    });
-    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const a = 1;');
 
-    // Appended chunk (still streaming): the new line is re-highlighted
-    // synchronously — content never lags out of the DOM.
     await act(async () => {
       root.render(
         createElement(Markdown, {
           content: '```ts\nconst a = 1;\nconst b = 2;\n```',
           isStreaming: true,
+        }),
+      );
+    });
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.textContent).toContain('const b = 2;');
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst a = 1;\nconst b = 2;\n```',
+          isStreaming: false,
         }),
       );
     });
@@ -1373,11 +1442,8 @@ describe('Markdown code highlighting while streaming', () => {
     });
     expect(container.textContent).toContain('const aaa');
 
-    // Replace the content while streaming. `ts` is already warm, so the
-    // synchronous re-highlight produces the new block's HTML immediately; the
-    // stale highlight (of `const aaa`) must NOT be shown — `const zzz` is.
-    // (The cold-language variant of this — where the new grammar is still
-    // loading — is covered deterministically in Markdown.coldHighlight.test.tsx.)
+    // Replaced streaming content is shown as current plain text, never as the
+    // stale highlight from the previous settled response.
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -1386,11 +1452,11 @@ describe('Markdown code highlighting while streaming', () => {
         }),
       );
     });
+    expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const zzz');
     expect(container.textContent).not.toContain('const aaa');
 
-    // Positive case: once the regenerated content settles, it is actually
-    // highlighted (re-highlighted synchronously — not stuck on plain text).
+    // Once regenerated content settles, it is highlighted.
     await act(async () => {
       root.render(
         createElement(Markdown, {

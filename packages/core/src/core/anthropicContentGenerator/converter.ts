@@ -26,6 +26,7 @@ import {
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -55,6 +56,13 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * Gemini-Part round trip.
    */
   normalizeAssistantThinkingSignature?: boolean;
+  /**
+   * Remove assistant thinking blocks whose opaque signature is missing or
+   * empty. Completed turns can safely omit thinking during replay. The active
+   * tool loop fails instead because Claude requires all of its thinking blocks
+   * to be passed back complete and unmodified.
+   */
+  dropUnsignedAssistantThinking?: boolean;
   /**
    * On assistant turns containing `tool_use` but lacking any thinking block,
    * prepend a synthetic empty thinking block. Required by DeepSeek's
@@ -103,19 +111,28 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * cross-session caching support don't see an unrecognized scope field.
    */
   useGlobalCacheScope?: boolean;
+  /**
+   * The cross-session-stable prefix of the system prompt (everything the
+   * client assembles before appending volatile tails like git status or
+   * session-start context). When it exactly matches the beginning of the
+   * request's system text and a suffix follows, the system prompt is split
+   * into two text blocks with one cache breakpoint each, making the stable
+   * prefix independently cacheable. No match (subagent prompts, stale
+   * prefix) falls back to the single-block layout — fail-open, never worse
+   * than before. Only meaningful when `enableCacheControl` is on.
+   */
+  staticSystemPrefix?: string;
 }
 
 export class AnthropicContentConverter {
-  private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
 
   constructor(
-    model: string,
+    _model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
     enableCacheControl: boolean = true,
   ) {
-    this.model = model;
     this.schemaCompliance = schemaCompliance;
     this.enableCacheControl = enableCacheControl;
   }
@@ -159,6 +176,9 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveAssistantMessages(messages);
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
+    if (options.dropUnsignedAssistantThinking) {
+      messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
+    }
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
     }
@@ -177,7 +197,11 @@ export class AnthropicContentConverter {
       options.enableCacheControl ?? this.enableCacheControl;
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     const system = enableCacheControl
-      ? this.buildSystemWithCacheControl(systemText, useGlobalCacheScope)
+      ? this.buildSystemWithCacheControl(
+          systemText,
+          useGlobalCacheScope,
+          options.staticSystemPrefix,
+        )
       : systemText;
     if (enableCacheControl) {
       this.addCacheControlToMessages(messages);
@@ -342,7 +366,7 @@ export class AnthropicContentConverter {
     geminiResponse.candidates = [candidate];
     geminiResponse.responseId = response.id;
     geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || this.model;
+    geminiResponse.modelVersion = response.model || undefined;
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
@@ -351,6 +375,10 @@ export class AnthropicContentConverter {
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
         outputTokens: response.usage.output_tokens || 0,
+        cacheReadTokensReported:
+          typeof response.usage.cache_read_input_tokens === 'number',
+        cacheCreationTokensReported:
+          typeof response.usage.cache_creation_input_tokens === 'number',
       });
     }
 
@@ -425,7 +453,7 @@ export class AnthropicContentConverter {
           contentBlocks.push({
             type: 'tool_use',
             id: part.functionCall.id || `tool_${toolCallIndex}`,
-            name: part.functionCall.name || '',
+            name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
           toolCallIndex += 1;
@@ -478,6 +506,10 @@ export class AnthropicContentConverter {
       type: 'tool_result',
       tool_use_id: response.id || '',
       content,
+      ...(response.response &&
+      Object.prototype.hasOwnProperty.call(response.response, 'error')
+        ? { is_error: true }
+        : {}),
     };
   }
 
@@ -671,22 +703,60 @@ export class AnthropicContentConverter {
    * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
    * per-session shape so non-Anthropic baseURLs aren't sent a scope
    * extension they may not recognize.
+   *
+   * When `staticSystemPrefix` matches the beginning of the system text and
+   * a suffix follows (git status, session-start context — the volatile
+   * tails the client appends after the stable prompt), the text is split
+   * into two blocks carrying one breakpoint each:
+   *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
+   *      sessions reuse it even though their suffix differs;
+   *   2. the end of the full system prompt — always the per-session
+   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      so a global-scope entry here would churn cache for zero hits
+   *      (same reasoning as `addCacheControlToMessages`). Within a session
+   *      it still caches the suffix, and when the suffix changes mid-session
+   *      (/cd refreshes git status, session-start context lands) the prefix
+   *      breakpoint keeps the big block from re-billing.
+   * The split only shapes the outgoing request; stored history and
+   * non-Anthropic transports keep seeing a single system string.
    */
   private buildSystemWithCacheControl(
     systemText: string,
     useGlobalCacheScope: boolean,
+    staticSystemPrefix?: string,
   ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
+    }
+
+    const scopedCacheControl: AnthropicCacheControl = useGlobalCacheScope
+      ? { type: 'ephemeral', scope: 'global' }
+      : { type: 'ephemeral' };
+
+    if (
+      staticSystemPrefix &&
+      systemText.length > staticSystemPrefix.length &&
+      systemText.startsWith(staticSystemPrefix)
+    ) {
+      return [
+        {
+          type: 'text',
+          text: staticSystemPrefix,
+          cache_control: scopedCacheControl,
+        },
+        {
+          type: 'text',
+          text: systemText.slice(staticSystemPrefix.length),
+          cache_control: { type: 'ephemeral' },
+        },
+      ];
     }
 
     return [
       {
         type: 'text',
         text: systemText,
-        cache_control: useGlobalCacheScope
-          ? { type: 'ephemeral', scope: 'global' }
-          : { type: 'ephemeral' },
+        cache_control: scopedCacheControl,
       },
     ];
   }
@@ -761,6 +831,77 @@ export class AnthropicContentConverter {
     }
   }
 
+  private dropUnsignedThinkingFromAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): AnthropicMessageParam[] {
+    const cleaned: AnthropicMessageParam[] = [];
+    const isUnsignedThinking = (block: AnthropicContentBlockParam) => {
+      const value = block as { type?: string; signature?: unknown };
+      return (
+        value.type === 'thinking' &&
+        (typeof value.signature !== 'string' || value.signature.length === 0)
+      );
+    };
+    const hasBlockType = (
+      message: AnthropicMessageParam,
+      type: 'tool_use' | 'tool_result',
+    ) =>
+      Array.isArray(message.content) &&
+      message.content.some(
+        (block) => (block as { type?: string }).type === type,
+      );
+    const activeToolUseTurns = new Set<number>();
+    let cursor = messages.length - 1;
+    while (cursor >= 0) {
+      let hasToolResult = false;
+      while (cursor >= 0 && messages[cursor]?.role === 'user') {
+        hasToolResult ||= hasBlockType(messages[cursor], 'tool_result');
+        cursor--;
+      }
+      const assistant = messages[cursor];
+      if (
+        !hasToolResult ||
+        !assistant ||
+        assistant.role !== 'assistant' ||
+        !hasBlockType(assistant, 'tool_use')
+      ) {
+        break;
+      }
+      activeToolUseTurns.add(cursor);
+      cursor--;
+    }
+
+    for (const [index, message] of messages.entries()) {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) {
+        cleaned.push(message);
+        continue;
+      }
+
+      if (!message.content.some(isUnsignedThinking)) {
+        cleaned.push(message);
+        continue;
+      }
+
+      if (activeToolUseTurns.has(index)) {
+        throw new Error(
+          'Anthropic-compatible proxy omitted the thinking signature for a ' +
+            'tool-use turn that is still in progress. Configure the proxy to ' +
+            'preserve thinking signatures, or start a new session with ' +
+            'reasoning disabled.',
+        );
+      }
+
+      const filtered = message.content.filter(
+        (block) => !isUnsignedThinking(block),
+      );
+      if (filtered.length > 0) {
+        cleaned.push({ ...message, content: filtered });
+      }
+    }
+
+    return cleaned;
+  }
+
   /**
    * DeepSeek's anthropic-compatible API rejects follow-up requests when an
    * assistant turn carrying `tool_use` omits a thinking block while thinking
@@ -822,8 +963,8 @@ export class AnthropicContentConverter {
    * no `scope: 'global'`. The last user message changes every turn (it's
    * the live prompt and any tool_result blocks from the immediately prior
    * round), so cross-session reuse here has effectively zero hit rate and
-   * paying the global-scope overhead would just churn cache. System text
-   * and tool prefixes (which DO repeat across sessions) carry
+   * paying the global-scope overhead would just churn cache. The static
+   * system prefix and tool prefixes (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {

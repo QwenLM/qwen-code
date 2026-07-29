@@ -211,7 +211,10 @@ export const renameCommand: SlashCommand = {
     // Record the custom title in the current session's JSONL file
     const chatRecordingService = config.getChatRecordingService();
     if (chatRecordingService) {
-      const ok = chatRecordingService.recordCustomTitle(name, titleSource);
+      const ok = await chatRecordingService.recordCustomTitle(
+        name,
+        titleSource,
+      );
       if (!ok) {
         return {
           type: 'message',

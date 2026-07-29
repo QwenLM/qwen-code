@@ -19,6 +19,7 @@ import {
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 
 function task(over: Partial<DurableCronTask>): DurableCronTask {
   return {
@@ -70,8 +71,20 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('heartbeats each distinct bound session, skipping unbound tasks', async () => {
+    const onTasksRead = vi.fn();
     await updateCronTasks(workspace, () => [
-      task({ id: 'a', sessionId: 'sess-1' }),
+      task({
+        id: 'a',
+        sessionId: 'sess-1',
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            type: 'user',
+            id: 'user-1',
+          },
+        },
+      }),
       task({ id: 'b', sessionId: 'sess-2' }),
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound — no session to keep alive
@@ -80,11 +93,17 @@ describe('scheduled-task keepalive', () => {
       bridge,
       boundWorkspace: workspace,
       intervalMs: 60_000,
+      onTasksRead,
     });
     await ka.tick();
     ka.stop();
     // Deduped to the distinct bound sessions; the unbound task is skipped.
     expect(beats.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(onTasksRead).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'a', sessionId: 'sess-1' }),
+      ]),
+    );
   });
 
   it('skips heartbeat and revive for disabled tasks (keeps them reap-able)', async () => {
@@ -251,6 +270,13 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'a', sessionId: 'sess-1' }),
       task({ id: 'b', sessionId: 'sess-2' }),
     ]);
+    const readMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({
+        sourceType: 'scheduled_task',
+        sourceId: 'a',
+      });
+    const loadRequests: unknown[] = [];
     const reviving = {
       recordHeartbeat: (id: string) => {
         if (id === 'sess-1') throw new Error('not resident');
@@ -258,6 +284,7 @@ describe('scheduled-task keepalive', () => {
       },
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
+        loadRequests.push(req);
       },
       spawnOrAttach: async () => {
         throw new Error('not mocked');
@@ -278,6 +305,16 @@ describe('scheduled-task keepalive', () => {
     // scheduler; sess-2 was resident and still got its heartbeat.
     expect(loads).toEqual(['sess-1']);
     expect(beats).toEqual(['sess-2']);
+    expect(loadRequests).toEqual([
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: workspace,
+        historyReplay: 'response',
+        sourceType: 'scheduled_task',
+        sourceId: 'a',
+      },
+    ]);
+    readMetadata.mockRestore();
   });
 
   it('a failed revive is swallowed and does not block siblings', async () => {
@@ -399,18 +436,42 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound
     ]);
-    const loaded: string[] = [];
+    const readMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockImplementation(async (sessionId) => ({
+        sourceType: 'scheduled_task',
+        sourceId: `task-for-${sessionId}`,
+      }));
+    const loaded: Array<{
+      sessionId: string;
+      sourceType?: string;
+      sourceId?: string;
+    }> = [];
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
         loadSession: async (req) => {
-          loaded.push(req.sessionId);
+          loaded.push(req);
         },
       },
       boundWorkspace: workspace,
     });
-    expect(loaded.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(loaded).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'sess-1',
+          sourceType: 'scheduled_task',
+          sourceId: 'task-for-sess-1',
+        }),
+        expect.objectContaining({
+          sessionId: 'sess-2',
+          sourceType: 'scheduled_task',
+          sourceId: 'task-for-sess-2',
+        }),
+      ]),
+    );
     expect(res.loaded.sort()).toEqual(['sess-1', 'sess-2']);
     expect(res.failed).toEqual([]);
+    readMetadata.mockRestore();
   });
 
   it('rehydrate records a gone session as failed but keeps loading siblings', async () => {
@@ -527,6 +588,8 @@ describe('scheduled-task keepalive', () => {
     expect(spawns[0]).toEqual({
       workspaceCwd: workspace,
       sessionScope: 'thread',
+      sourceType: 'scheduled_task',
+      sourceId: 'unbound-1',
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
@@ -712,5 +775,54 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     // Clean up the hung spawn.
     releaseSpawn?.();
+  });
+
+  it('rehydration onTasksRead populates the authorization store for delivery-enabled tasks', async () => {
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'del-1',
+        sessionId: 'sess-del',
+        recurring: true,
+        lastFiredAt: 1_700_000_000_000,
+        delivery: {
+          kind: 'channel',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
+      }),
+      task({ id: 'no-del', sessionId: 'sess-plain' }),
+    ]);
+
+    const result = await rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace: workspace,
+      onTasksRead: (tasks) => {
+        for (const t of tasks) {
+          if (!t.delivery || !t.sessionId) continue;
+          authorizations.registerScheduledTask(workspace, {
+            sessionId: t.sessionId,
+            taskId: t.id,
+            target: t.delivery.target,
+            recurring: t.recurring,
+            ...(typeof t.lastFiredAt === 'number'
+              ? { lastFiredAt: t.lastFiredAt }
+              : {}),
+          });
+        }
+      },
+    });
+
+    expect(result.loaded).toContain('sess-del');
+    const firedAt = 1_700_000_000_000 + 60_000;
+    expect(
+      authorizations.consume(workspace, {
+        sessionId: 'sess-del',
+        deliveryId: `del-1:${firedAt}`,
+        source: 'scheduled',
+        taskId: 'del-1',
+        firedAt,
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      }),
+    ).toBe(true);
   });
 });

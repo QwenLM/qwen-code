@@ -136,14 +136,14 @@ describe('Channel Plugin (Mock WebSocket E2E)', () => {
       const opts = { chatId };
 
       const r1 = await server.sendMessage(
-        'My secret word is "pineapple". Remember it.',
+        'My favorite fruit is "pineapple". Remember it.',
         opts,
       );
       expect(r1).toBeTruthy();
       console.log(`[mock-e2e] Memory set response: "${r1}"`);
 
       const r2 = await server.sendMessage(
-        'What is my secret word? Reply with ONLY the word, nothing else.',
+        'What is my favorite fruit? Reply with ONLY the fruit, nothing else.',
         opts,
       );
       expect(r2).toBeTruthy();

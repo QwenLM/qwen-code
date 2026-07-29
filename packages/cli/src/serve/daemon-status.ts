@@ -7,7 +7,12 @@
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
-import type { DaemonLogger } from './daemon-logger.js';
+import type {
+  DaemonLogger,
+  DaemonLogHealth,
+  DaemonLogIssue,
+  DaemonLogMode,
+} from './daemon-logger.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
@@ -16,6 +21,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
   DaemonWorkspaceService,
@@ -75,7 +81,8 @@ export interface DaemonStatusIssue {
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
-    | 'daemon_runtime_failed';
+    | 'daemon_runtime_failed'
+    | 'daemon_log_degraded';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -104,6 +111,7 @@ export interface BuildDaemonStatusOptions {
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
@@ -154,6 +162,8 @@ interface DaemonStatusLimits {
   listenerMaxConnections: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
+  maxJournalEvents: number;
+  maxJournalBytes: number;
   promptDeadlineMs: number | null;
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
@@ -171,6 +181,12 @@ interface DaemonStatusRuntime {
   };
   channel: { live: boolean };
   channelWorker: ChannelWorkerSnapshot;
+  /**
+   * Per-workspace channel workers on a multi-workspace daemon. Additive to
+   * `channelWorker` (which stays as the primary workspace snapshot). Absent on
+   * single-workspace daemons.
+   */
+  channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
     acp: {
@@ -241,12 +257,19 @@ export interface DaemonStatusResponse {
     uptimeMs: number;
     mode: ServeOptions['mode'];
     workspaceCwd: string;
+    runId?: string;
+    logMode?: DaemonLogMode;
+    logHealth?: DaemonLogHealth;
+    logIssues?: readonly DaemonLogIssue[];
+    logDroppedRecords?: number;
+    logDroppedBytes?: number;
   };
   security: DaemonStatusSecurity;
   limits: DaemonStatusLimits;
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
   }>;
@@ -282,6 +305,7 @@ export async function buildDaemonStatusResponse(
   detail: DaemonStatusDetail,
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
+  const daemonLogStatus = input.daemonLog?.getStatus();
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const lastActivity = input.bridge.lastActivityAt ?? null;
   const workspaceRuntimes = input.workspaceRegistry?.list();
@@ -360,6 +384,12 @@ export async function buildDaemonStatusResponse(
     state: 'disabled',
     channels: [],
   };
+  // Per-workspace worker list is multi-workspace only; single-workspace status
+  // keeps the byte-identical `channelWorker` shape.
+  const channelWorkers =
+    (workspaceRuntimes?.length ?? 1) > 1
+      ? input.getChannelWorkerSnapshots?.()
+      : undefined;
   const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
@@ -371,9 +401,18 @@ export async function buildDaemonStatusResponse(
     rateLimitHits,
     input,
     channelWorker,
+    channelWorkers,
     totalAdmissionSnapshot,
     workspaceSnapshots,
   );
+  if (daemonLogStatus?.health === 'degraded') {
+    issues.push({
+      code: 'daemon_log_degraded',
+      severity: 'warning',
+      message:
+        'Daemon file logging is degraded; inspect full status for details.',
+    });
+  }
 
   if (detail === 'full') {
     full = await buildFullStatus(
@@ -402,8 +441,22 @@ export async function buildDaemonStatusResponse(
       ...(input.daemonLog?.getDaemonId()
         ? { daemonId: input.daemonLog.getDaemonId() }
         : {}),
+      ...(daemonLogStatus
+        ? {
+            runId: daemonLogStatus.runId,
+            logMode: daemonLogStatus.mode,
+            logHealth: daemonLogStatus.health,
+          }
+        : {}),
       ...(detail === 'full' && input.daemonLog?.getLogPath()
         ? { logPath: input.daemonLog.getLogPath() }
+        : {}),
+      ...(detail === 'full' && daemonLogStatus
+        ? {
+            logIssues: daemonLogStatus.issues,
+            logDroppedRecords: daemonLogStatus.droppedRecords,
+            logDroppedBytes: daemonLogStatus.droppedBytes,
+          }
         : {}),
     },
     security: {
@@ -424,6 +477,8 @@ export async function buildDaemonStatusResponse(
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
+      maxJournalEvents: bridgeSnapshot.limits.maxJournalEvents,
+      maxJournalBytes: bridgeSnapshot.limits.maxJournalBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
@@ -435,6 +490,9 @@ export async function buildDaemonStatusResponse(
           workspaces: workspaceRuntimes.map((runtime) => ({
             id: runtime.workspaceId,
             cwd: runtime.workspaceCwd,
+            ...(runtime.displayName !== undefined
+              ? { displayName: runtime.displayName }
+              : {}),
             primary: runtime.primary,
             trusted: runtime.trusted,
           })),
@@ -457,6 +515,9 @@ export async function buildDaemonStatusResponse(
       },
       channel: { live: aggregatedChannelLive },
       channelWorker,
+      ...(channelWorkers && channelWorkers.length > 0
+        ? { channelWorkers }
+        : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
         acp: {
@@ -634,6 +695,7 @@ function pushRuntimeIssues(
   rateLimitHits: Record<RateLimitTier, number>,
   input: BuildDaemonStatusOptions,
   channelWorker: ChannelWorkerSnapshot,
+  channelWorkers: readonly ChannelWorkerGroupSnapshot[] | undefined,
   totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
   workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
@@ -728,6 +790,25 @@ function pushRuntimeIssues(
     });
   }
 
+  const groupedWorkers =
+    channelWorkers && channelWorkers.length > 0 ? channelWorkers : undefined;
+  const workers = groupedWorkers ?? [channelWorker];
+  for (const worker of workers) {
+    pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+}
+
+function pushChannelWorkerIssues(
+  issues: DaemonStatusIssue[],
+  channelWorker: ChannelWorkerSnapshot | ChannelWorkerGroupSnapshot,
+  grouped: boolean,
+): void {
+  const workspace =
+    'workspaceCwd' in channelWorker
+      ? ` for workspace ${channelWorker.workspaceCwd}`
+      : '';
+  const section = grouped ? 'runtime.channelWorkers' : 'runtime.channelWorker';
+
   if (
     channelWorker.enabled &&
     (channelWorker.state === 'exited' || channelWorker.state === 'failed')
@@ -765,8 +846,8 @@ function pushRuntimeIssues(
     issues.push({
       code: 'channel_worker_exited',
       severity: isPermanentFailure ? 'error' : 'warning',
-      message: `Channel worker is ${channelWorker.state}${details}${error}.`,
-      section: 'runtime.channelWorker',
+      message: `Channel worker${workspace} is ${channelWorker.state}${details}${error}.`,
+      section,
     });
   }
 
@@ -784,9 +865,9 @@ function pushRuntimeIssues(
         code: 'channel_worker_partial_connect',
         severity: 'warning',
         message:
-          `Channel worker connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
+          `Channel worker${workspace} connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
           `Failed: ${failed.join(', ')}.`,
-        section: 'runtime.channelWorker',
+        section,
       });
     }
   }

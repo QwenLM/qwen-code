@@ -9,6 +9,7 @@ import type {
 import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './McpStatusMessage.module.css';
 const ACTIVE_EVENT = 'web-shell:mcp-panel-active';
@@ -23,6 +24,7 @@ type McpPanelStep = 'servers' | 'server' | 'oauth' | 'tools' | 'tool';
 type McpServerAction = {
   id:
     | 'view-tools'
+    | 'approve'
     | 'reconnect'
     | 'enable'
     | 'disable'
@@ -81,6 +83,20 @@ function statusDisplay(
       className: styles.error,
     };
   }
+  if (server.approvalState === 'pending') {
+    return {
+      icon: '!',
+      text: t('mcp.status.needsApproval'),
+      className: styles.warning,
+    };
+  }
+  if (server.approvalState === 'rejected') {
+    return {
+      icon: '✗',
+      text: t('mcp.status.rejected'),
+      className: styles.warning,
+    };
+  }
   switch (server.mcpStatus) {
     case 'connected':
       return {
@@ -135,8 +151,21 @@ function sourceLabel(
   server: DaemonWorkspaceMcpServerStatus,
   t: ReturnType<typeof useI18n>['t'],
 ): string {
-  if (server.source === 'project') return t('mcp.source.project');
-  if (server.source === 'extension' || server.extensionName) {
+  const legacySource = (server as { source?: string }).source;
+  if (
+    server.configOrigin === 'project_mcp_json' ||
+    (legacySource === 'project' && server.removable === false)
+  ) {
+    return t('mcp.source.project');
+  }
+  if (
+    server.configOrigin === 'workspace_settings' ||
+    legacySource === 'workspace' ||
+    legacySource === 'project'
+  ) {
+    return t('mcp.source.workspace');
+  }
+  if (server.configOrigin === 'extension' || server.extensionName) {
     return t('mcp.source.extension');
   }
   return t('mcp.source.user');
@@ -175,23 +204,6 @@ function dispatchActive(id: string, active: boolean): void {
   window.dispatchEvent(
     new CustomEvent(ACTIVE_EVENT, { detail: { id, active } }),
   );
-}
-
-function extractErrorDetail(err: unknown): string {
-  if (err && typeof err === 'object') {
-    const body = (err as { body?: unknown }).body;
-    if (body && typeof body === 'object') {
-      const data = (body as { data?: unknown }).data;
-      if (data && typeof data === 'object') {
-        const details = (data as { details?: unknown }).details;
-        if (typeof details === 'string' && details) return details;
-      }
-      const error = (body as { error?: unknown }).error;
-      if (typeof error === 'string' && error) return error;
-    }
-    if (err instanceof Error && err.message) return err.message;
-  }
-  return String(err);
 }
 
 function oauthAuthMessage(
@@ -347,22 +359,37 @@ export function McpStatusMessage({
   const serverActions = useMemo<McpServerAction[]>(() => {
     if (!selectedServer) return [];
     const actions: McpServerAction[] = [];
-    if (!selectedServer.disabled && selectedTools.length > 0) {
+    const awaitingApproval = Boolean(selectedServer.approvalState);
+    if (
+      !selectedServer.disabled &&
+      !awaitingApproval &&
+      selectedTools.length > 0
+    ) {
       actions.push({ id: 'view-tools', label: t('mcp.action.tools') });
     }
     if (
       !selectedServer.disabled &&
+      !awaitingApproval &&
       selectedServer.mcpStatus === 'disconnected'
     ) {
       actions.push({ id: 'reconnect', label: t('mcp.action.reconnect') });
     }
-    actions.push({
-      id: selectedServer.disabled ? 'enable' : 'disable',
-      label: selectedServer.disabled
-        ? t('mcp.action.enable')
-        : t('mcp.action.disable'),
-    });
-    if (!selectedServer.disabled) {
+    if (!selectedServer.disabled && awaitingApproval) {
+      actions.push({ id: 'approve', label: t('mcp.action.approve') });
+    }
+    const extensionManaged =
+      selectedServer.configOrigin === 'extension' ||
+      selectedServer.source === 'extension' ||
+      Boolean(selectedServer.extensionName);
+    if (!extensionManaged || selectedServer.disabled) {
+      actions.push({
+        id: selectedServer.disabled ? 'enable' : 'disable',
+        label: selectedServer.disabled
+          ? t('mcp.action.enable')
+          : t('mcp.action.disable'),
+      });
+    }
+    if (!selectedServer.disabled && !awaitingApproval) {
       actions.push({
         id: 'authenticate',
         label: selectedServer.hasOAuthTokens
@@ -388,6 +415,7 @@ export function McpStatusMessage({
           (server) => server.name === selectedServer?.name,
         ) ?? null;
       if (nextServer) {
+        if (nextServer.approvalState) return;
         const nextTools = await mcp.loadTools(nextServer.name);
         setLocalToolsByServer((current) => ({
           ...current,
@@ -418,7 +446,27 @@ export function McpStatusMessage({
       try {
         let nextActionMessage: string | null = null;
         if (action.id === 'reconnect') {
-          await mcp.restartServer(selectedServer.name);
+          const result = await mcp.restartServer(selectedServer.name);
+          if ('restarted' in result && !result.restarted) {
+            throw new Error(
+              t('mcp.reconnect.skipped', { reason: result.reason }),
+            );
+          }
+          if (
+            'entries' in result &&
+            (result.entries.length === 0 ||
+              result.entries.every((entry) => !entry.restarted))
+          ) {
+            throw new Error(
+              t('mcp.reconnect.skipped', {
+                reason:
+                  result.entries
+                    .map((entry) => entry.reason)
+                    .filter(Boolean)
+                    .join(', ') || 'not connected',
+              }),
+            );
+          }
         } else {
           const result = await mcp.manageServer(selectedServer.name, action.id);
           const details = [

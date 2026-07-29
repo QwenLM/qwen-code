@@ -624,6 +624,12 @@ function createApprovalModeConfigOverride(
   };
 
   override.approvalMode = initialMode;
+  override.manualPlanExitNoticeEventState = {
+    ...(override.manualPlanExitNoticeEventState ?? {
+      version: 0,
+      kind: 'clear',
+    }),
+  };
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
     initialMode === ApprovalMode.PLAN
@@ -631,14 +637,7 @@ function createApprovalModeConfigOverride(
         ? base.getPrePlanMode()
         : baseApprovalMode
       : undefined;
-  const basePlanGateState =
-    initialMode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
-  override.planGateState = basePlanGateState
-    ? {
-        ...basePlanGateState,
-        lastFindings: [...basePlanGateState.lastFindings],
-      }
-    : undefined;
+  override.approvalModeRevision = 0;
 
   override.setApprovalMode = (
     nextMode: ApprovalMode,
@@ -675,7 +674,6 @@ function createApprovalModeConfigOverride(
       releaseAutoOverride();
     }
   };
-  override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
   override.autoModeDenialState = createDenialState();
 
   const cleanup = () => {

@@ -95,6 +95,24 @@ describe('DaemonMetricsRing', () => {
     expect(nb.pipeOutBytes).toBe(0);
   });
 
+  it('sums model API errors + automatic retries per window and resets them', () => {
+    const ring = new DaemonMetricsRing({ capacity: 10 });
+    ring.recordApiActivity(1, 1); // a transient error that was retried
+    ring.recordApiActivity(2, 0); // two errors in a later round, no retry
+    ring.recordApiActivity(0, 3); // three retries in another round
+    // Malformed / non-positive increments are ignored, never poison the total.
+    ring.recordApiActivity(Number.NaN, -5);
+    ring.sample(1000, GAUGES);
+    const [b] = ring.snapshot();
+    expect(b.llmApiErrors).toBe(3);
+    expect(b.llmApiRetries).toBe(4);
+    // Window aggregates reset on the next seal (idle window reads clean zero).
+    ring.sample(2000, GAUGES);
+    const nb = ring.snapshot()[1];
+    expect(nb.llmApiErrors).toBe(0);
+    expect(nb.llmApiRetries).toBe(0);
+  });
+
   it('resets accumulators after each seal (idle window reads clean zero)', () => {
     const ring = new DaemonMetricsRing({ capacity: 10 });
     ring.recordRequest(10, 200);

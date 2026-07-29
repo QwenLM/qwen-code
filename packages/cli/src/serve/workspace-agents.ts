@@ -5,6 +5,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   APPROVAL_MODES,
@@ -16,6 +17,11 @@ import {
   type SubagentConfig,
   type SubagentLevel,
 } from '@qwen-code/qwen-code-core';
+import {
+  redactMcpServersSetting,
+  restoreRedactedMcpServersSetting,
+} from '../config/mcp-server-secrets.js';
+import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
 import {
@@ -26,6 +32,7 @@ import { safeLogValue } from './server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from './workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
@@ -74,6 +81,27 @@ const MAX_DESCRIPTION_BYTES = 256 * 1024;
 const MAX_SYSTEM_PROMPT_BYTES = 256 * 1024;
 const MAX_TOOLS_ENTRIES = 256;
 const MAX_TOOL_ID_LENGTH = 256;
+const MAX_RECORD_ENTRIES = 128;
+const SUBAGENT_APPROVAL_MODES = [...APPROVAL_MODES, 'bubble'] as const;
+const SUBAGENT_PERMISSION_MODES = [
+  'acceptEdits',
+  'auto',
+  'bypassPermissions',
+  'default',
+  'dontAsk',
+  'plan',
+] as const;
+const SUBAGENT_COLORS = [
+  'auto',
+  'red',
+  'blue',
+  'green',
+  'yellow',
+  'purple',
+  'orange',
+  'pink',
+  'cyan',
+] as const;
 import {
   STATUS_SCHEMA_VERSION,
   type ServeWorkspaceAgentDetail,
@@ -94,11 +122,10 @@ import {
  *
  * The daemon doesn't have a full `Config` instance, so we instantiate
  * `SubagentManager` against a CRUD-scoped `Config` stub that
- * implements only `getSdkMode / getProjectRoot / getActiveExtensions`
- * — the methods the manager's CRUD paths actually touch (verified
- * against `subagent-manager.ts:365,932,954,958`). A `Proxy` makes any
- * future use of an unimplemented method throw immediately so a
- * silent dependency creep can't ship as a 500.
+ * implements only `getSdkMode / getProjectRoot / getActiveExtensions /
+ * isSafeMode / getAgentsSettings` — the methods the manager's CRUD paths
+ * actually touch. A `Proxy` makes any future use of an unimplemented method
+ * throw immediately so a silent dependency creep can't ship as a 500.
  */
 
 export interface WorkspaceAgentsRouteDeps {
@@ -107,6 +134,8 @@ export interface WorkspaceAgentsRouteDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 export interface WorkspaceQualifiedAgentsRouteDeps {
@@ -116,6 +145,32 @@ export interface WorkspaceQualifiedAgentsRouteDeps {
   safeBody: (req: Request) => Record<string, unknown>;
 }
 
+function captureTrustedGeneration(
+  deps: WorkspaceAgentsRouteDeps,
+  res: Response,
+): (() => void) | null {
+  const assertGenerationOpen =
+    deps.captureGenerationAssertion?.() ?? (() => {});
+  try {
+    assertGenerationOpen();
+  } catch {
+    res.set('Retry-After', '1');
+    res.status(503).json({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+    });
+    return null;
+  }
+  if (deps.isWorkspaceTrusted?.() === false) {
+    res.status(403).json({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
+    });
+    return null;
+  }
+  return assertGenerationOpen;
+}
+
 export function mountWorkspaceAgentsRoutes(
   app: Application,
   deps: WorkspaceAgentsRouteDeps,
@@ -123,6 +178,8 @@ export function mountWorkspaceAgentsRoutes(
   const manager = createDaemonSubagentManager(deps.boundWorkspace);
 
   app.get('/workspace/agents', async (_req, res) => {
+    const assertGenerationOpen = captureTrustedGeneration(deps, res);
+    if (!assertGenerationOpen) return;
     try {
       // `force: true` re-walks `.qwen/agents/` on every call so out-of-
       // band edits (a developer editing an agent file in their IDE
@@ -151,6 +208,7 @@ export function mountWorkspaceAgentsRoutes(
       //     bearer auth on non-loopback, not at the route layer.
       // Revisit if profiling shows the LIST route is on the hot path.
       const agents = await manager.listSubagents({ force: true });
+      assertGenerationOpen();
       const status: ServeWorkspaceAgentsStatus = {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: deps.boundWorkspace,
@@ -158,6 +216,7 @@ export function mountWorkspaceAgentsRoutes(
       };
       res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/agents failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -174,6 +233,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const body = deps.safeBody(req);
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
@@ -189,7 +250,11 @@ export function mountWorkspaceAgentsRoutes(
       }
       const level: SubagentLevel = scope === 'workspace' ? 'project' : 'user';
 
-      const config = parseAgentConfig(body, level, res);
+      const config = parseAgentConfig(
+        restoreAgentMcpServerSecrets(body, deps.boundWorkspace, level),
+        level,
+        res,
+      );
       if (!config) return;
 
       // `manager.createSubagent` only checks whether the default
@@ -210,8 +275,14 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       try {
-        await manager.createSubagent(config, { level });
+        assertGenerationOpen();
+        await manager.createSubagent(config, {
+          level,
+          assertCanCommit: assertGenerationOpen,
+        });
+        assertGenerationOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.ALREADY_EXISTS) {
             res.status(409).json({
@@ -269,6 +340,12 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       const created = await manager.loadSubagent(config.name, level);
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!created) {
         // Race window: createSubagent already wrote the file to disk,
         // but the subsequent loadSubagent walked the cache and found
@@ -307,6 +384,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/generate',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const body = deps.safeBody(req);
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
@@ -331,8 +410,10 @@ export function mountWorkspaceAgentsRoutes(
           description.trim(),
           originatorClientId,
         );
+        assertGenerationOpen();
         res.status(200).json(generated);
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
           `qwen serve: POST /workspace/agents/generate failed: ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -347,10 +428,15 @@ export function mountWorkspaceAgentsRoutes(
   );
 
   app.get('/workspace/agents/:agentType', async (req, res) => {
+    const assertGenerationOpen = captureTrustedGeneration(deps, res);
+    if (!assertGenerationOpen) return;
     const agentType = validateAgentType(req, res);
     if (agentType === null) return;
     try {
-      const config = await manager.loadSubagent(agentType);
+      const scopedLevel = parseScopeQuery(req, res);
+      if (scopedLevel === null) return;
+      const config = await manager.loadSubagent(agentType, scopedLevel);
+      assertGenerationOpen();
       if (!config) {
         res.status(404).json({
           error: `Subagent "${agentType}" not found`,
@@ -361,6 +447,7 @@ export function mountWorkspaceAgentsRoutes(
       }
       res.status(200).json(toDetail(config));
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/agents/${safeLogValue(agentType)} failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -377,15 +464,13 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/:agentType',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const agentType = validateAgentType(req, res);
       if (agentType === null) return;
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
       const originatorClientId = clientIdResult;
-
-      const body = deps.safeBody(req);
-      const updates = parseAgentUpdates(body, res);
-      if (!updates) return;
 
       const preferredLevel = parseScopeQuery(req, res);
       if (preferredLevel === null) return;
@@ -402,6 +487,14 @@ export function mountWorkspaceAgentsRoutes(
       if (assertMutableLevel(existing, agentType, res)) {
         return;
       }
+      const body = restoreAgentMcpServerSecrets(
+        deps.safeBody(req),
+        deps.boundWorkspace,
+        existing.level,
+        existing.mcpServers,
+      );
+      const updates = parseAgentUpdates(body, res);
+      if (!updates) return;
 
       // Empty / no-op update detection. An empty body or a body whose
       // recognized fields all match `existing` would otherwise rewrite
@@ -430,8 +523,13 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       try {
-        await manager.updateSubagent(agentType, updates, existing.level);
+        assertGenerationOpen();
+        await manager.updateSubagent(agentType, updates, existing.level, {
+          assertCanCommit: assertGenerationOpen,
+        });
+        assertGenerationOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.NOT_FOUND) {
             res.status(404).json({
@@ -490,6 +588,12 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       const updated = await manager.loadSubagent(agentType, existing.level);
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!updated) {
         // Symmetric to the create-reload-failure branch above. The
         // disk write succeeded but the cache lookup raced; emit a
@@ -526,6 +630,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/:agentType',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureTrustedGeneration(deps, res);
+      if (!assertGenerationOpen) return;
       const agentType = validateAgentType(req, res);
       if (agentType === null) return;
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
@@ -554,8 +660,13 @@ export function mountWorkspaceAgentsRoutes(
       }
 
       try {
-        await manager.deleteSubagent(agentType, scopedLevel);
+        assertGenerationOpen();
+        await manager.deleteSubagent(agentType, scopedLevel, undefined, {
+          assertCanCommit: assertGenerationOpen,
+        });
+        assertGenerationOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.NOT_FOUND) {
             res.status(404).json({
@@ -615,6 +726,13 @@ export function mountWorkspaceAgentsRoutes(
           // gone — count as successfully removed.
           removed.push(found);
         }
+      }
+
+      try {
+        assertGenerationOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
       }
 
       if (remaining.length > 0) {
@@ -707,6 +825,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
     const manager = createDaemonSubagentManager(runtime.workspaceCwd);
     try {
       const agents = await manager.listSubagents({ force: true });
+      runtime.generationGuard?.assertOpen();
       const status: ServeWorkspaceAgentsStatus = {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: runtime.workspaceCwd,
@@ -716,6 +835,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       };
       res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/agents failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -743,7 +863,11 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       const level = parseWorkspaceOnlyAgentBodyScope(body, res);
       if (level === null) return;
       const manager = createDaemonSubagentManager(runtime.workspaceCwd);
-      const config = parseAgentConfig(body, level, res);
+      const config = parseAgentConfig(
+        restoreAgentMcpServerSecrets(body, runtime.workspaceCwd, level),
+        level,
+        res,
+      );
       if (!config) return;
 
       const collision = await manager.loadSubagent(config.name, level);
@@ -758,8 +882,14 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       try {
-        await manager.createSubagent(config, { level });
+        runtime.generationGuard?.assertOpen();
+        await manager.createSubagent(config, {
+          level,
+          assertCanCommit: () => runtime.generationGuard?.assertOpen(),
+        });
+        runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (sendCreateAgentError(res, err, config.name)) return;
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/agents failed: ${
@@ -774,6 +904,12 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       const created = await manager.loadSubagent(config.name, level);
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!created) {
         writeStderrLine(
           `qwen serve: agent_create_reload_failed (name=${safeLogValue(config.name)} ` +
@@ -807,6 +943,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
     const manager = createDaemonSubagentManager(runtime.workspaceCwd);
     try {
       const config = await manager.loadSubagent(agentType, scopedLevel);
+      runtime.generationGuard?.assertOpen();
       if (!config) {
         res.status(404).json({
           error: `Subagent "${agentType}" not found`,
@@ -817,6 +954,7 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
       res.status(200).json(toDetail(config));
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -844,9 +982,6 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       if (clientIdResult === null) return;
       const originatorClientId = clientIdResult;
 
-      const body = deps.safeBody(req);
-      const updates = parseAgentUpdates(body, res);
-      if (!updates) return;
       const manager = createDaemonSubagentManager(runtime.workspaceCwd);
       const existing = await manager.loadSubagent(agentType, scopedLevel);
       if (!existing) {
@@ -858,6 +993,14 @@ export function mountWorkspaceQualifiedAgentsRoutes(
         return;
       }
       if (assertMutableLevel(existing, agentType, res)) return;
+      const body = restoreAgentMcpServerSecrets(
+        deps.safeBody(req),
+        runtime.workspaceCwd,
+        existing.level,
+        existing.mcpServers,
+      );
+      const updates = parseAgentUpdates(body, res);
+      if (!updates) return;
 
       if (Object.keys(updates).length === 0) {
         res.status(400).json({
@@ -878,8 +1021,13 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       try {
-        await manager.updateSubagent(agentType, updates, existing.level);
+        runtime.generationGuard?.assertOpen();
+        await manager.updateSubagent(agentType, updates, existing.level, {
+          assertCanCommit: () => runtime.generationGuard?.assertOpen(),
+        });
+        runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (sendUpdateAgentError(res, err, agentType)) return;
         writeStderrLine(
           `qwen serve: POST /workspaces/:workspace/agents/${safeLogValue(agentType)} failed: ${
@@ -894,6 +1042,12 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       }
 
       const updated = await manager.loadSubagent(agentType, existing.level);
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
+      }
       if (!updated) {
         writeStderrLine(
           `qwen serve: agent_update_reload_failed (name=${safeLogValue(agentType)} ` +
@@ -939,8 +1093,13 @@ export function mountWorkspaceQualifiedAgentsRoutes(
       if (existing && assertMutableLevel(existing, agentType, res)) return;
 
       try {
-        await manager.deleteSubagent(agentType, scopedLevel);
+        runtime.generationGuard?.assertOpen();
+        await manager.deleteSubagent(agentType, scopedLevel, undefined, {
+          assertCanCommit: () => runtime.generationGuard?.assertOpen(),
+        });
+        runtime.generationGuard?.assertOpen();
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         if (err instanceof SubagentError) {
           if (err.code === SubagentErrorCode.NOT_FOUND) {
             res.status(404).json({
@@ -991,6 +1150,13 @@ export function mountWorkspaceQualifiedAgentsRoutes(
         } catch {
           // Access failure means the project-level file is gone.
         }
+      }
+
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        sendGenerationClosedError(res, err);
+        return;
       }
 
       runtime.bridge.publishWorkspaceEvent({
@@ -1195,6 +1361,34 @@ function rejectWorkspaceQualifiedAgentScope(
     code: 'invalid_scope',
   });
   return null;
+}
+
+function restoreAgentMcpServerSecrets(
+  body: Record<string, unknown>,
+  workspace: string,
+  level: SubagentLevel,
+  currentAgentServers?: Record<string, unknown>,
+): Record<string, unknown> {
+  const incoming = body['mcpServers'];
+  if (
+    typeof incoming !== 'object' ||
+    incoming === null ||
+    Array.isArray(incoming)
+  ) {
+    return body;
+  }
+  const settings = loadSettings(workspace);
+  const configuredServers =
+    level === 'user'
+      ? (settings.user.settings.mcpServers ?? {})
+      : (settings.merged.mcpServers ?? {});
+  return {
+    ...body,
+    mcpServers: restoreRedactedMcpServersSetting(incoming, {
+      ...configuredServers,
+      ...currentAgentServers,
+    }),
+  };
 }
 
 function sendCreateAgentError(
@@ -1402,23 +1596,79 @@ function parseAgentConfig(
   // 201 with no `model` field on the file (masking client-serialization
   // bugs).
   if (rejectIfPresentWrongType(body, 'model', 'string', res)) return undefined;
-  if (typeof body['model'] === 'string') config.model = body['model'];
+  if (typeof body['model'] === 'string') {
+    if (!body['model'].trim()) {
+      return sendInvalidConfig(res, '`model` must not be empty when provided');
+    }
+    config.model = body['model'].trim();
+  }
 
   if (rejectIfPresentWrongType(body, 'color', 'string', res)) return undefined;
-  if (typeof body['color'] === 'string') config.color = body['color'];
+  if (typeof body['color'] === 'string') {
+    if (!SUBAGENT_COLORS.includes(body['color'] as never)) {
+      return sendInvalidConfig(
+        res,
+        `\`color\` must be one of ${JSON.stringify(SUBAGENT_COLORS)}`,
+      );
+    }
+    config.color = body['color'];
+  }
 
   if (rejectIfPresentWrongType(body, 'approvalMode', 'string', res)) {
     return undefined;
   }
   if (typeof body['approvalMode'] === 'string') {
-    if (!APPROVAL_MODES.includes(body['approvalMode'] as never)) {
-      res.status(422).json({
-        error: `\`approvalMode\` must be one of ${JSON.stringify(APPROVAL_MODES)}`,
-        code: 'invalid_config',
-      });
-      return undefined;
+    if (!SUBAGENT_APPROVAL_MODES.includes(body['approvalMode'] as never)) {
+      return sendInvalidConfig(
+        res,
+        `\`approvalMode\` must be one of ${JSON.stringify(SUBAGENT_APPROVAL_MODES)}`,
+      );
     }
     config.approvalMode = body['approvalMode'];
+  }
+
+  if (rejectIfPresentWrongType(body, 'permissionMode', 'string', res)) {
+    return undefined;
+  }
+  if (typeof body['permissionMode'] === 'string') {
+    if (!SUBAGENT_PERMISSION_MODES.includes(body['permissionMode'] as never)) {
+      return sendInvalidConfig(
+        res,
+        `\`permissionMode\` must be one of ${JSON.stringify(SUBAGENT_PERMISSION_MODES)}`,
+      );
+    }
+    config.permissionMode = body['permissionMode'];
+  }
+
+  if ('maxTurns' in body) {
+    const maxTurns = parseMaxTurns(body['maxTurns'], res);
+    if (maxTurns === null) return undefined;
+    config.maxTurns = maxTurns;
+  }
+
+  if ('mcpServers' in body) {
+    const mcpServers = parseRecordField(
+      body['mcpServers'],
+      'mcpServers',
+      (value) =>
+        typeof value === 'object' && value !== null && !Array.isArray(value),
+      'an object of server names to server configuration objects',
+      res,
+    );
+    if (mcpServers === null) return undefined;
+    if (Object.keys(mcpServers).length > 0) config.mcpServers = mcpServers;
+  }
+
+  if ('hooks' in body) {
+    const hooks = parseRecordField(
+      body['hooks'],
+      'hooks',
+      Array.isArray,
+      'an object of hook event names to matcher arrays',
+      res,
+    );
+    if (hooks === null) return undefined;
+    if (Object.keys(hooks).length > 0) config.hooks = hooks;
   }
 
   if (rejectIfPresentWrongType(body, 'background', 'boolean', res)) {
@@ -1508,24 +1758,92 @@ function parseAgentUpdates(
   // Optional scalar fields. Match the create-side fail-closed posture
   // so a typo like `model: 123` returns 422 instead of silently
   // succeeding with no model change.
-  if (rejectIfPresentWrongType(body, 'model', 'string', res)) return undefined;
-  if (typeof body['model'] === 'string') updates.model = body['model'];
-
-  if (rejectIfPresentWrongType(body, 'color', 'string', res)) return undefined;
-  if (typeof body['color'] === 'string') updates.color = body['color'];
-
-  if (rejectIfPresentWrongType(body, 'approvalMode', 'string', res)) {
+  if (body['model'] === null) {
+    updates.model = undefined;
+  } else if (rejectIfPresentWrongType(body, 'model', 'string', res)) {
     return undefined;
+  } else if (typeof body['model'] === 'string') {
+    if (!body['model'].trim()) {
+      return sendInvalidConfig(res, '`model` must not be empty when provided');
+    }
+    updates.model = body['model'].trim();
   }
-  if (typeof body['approvalMode'] === 'string') {
-    if (!APPROVAL_MODES.includes(body['approvalMode'] as never)) {
-      res.status(422).json({
-        error: `\`approvalMode\` must be one of ${JSON.stringify(APPROVAL_MODES)}`,
-        code: 'invalid_config',
-      });
-      return undefined;
+
+  if (body['color'] === null) {
+    updates.color = undefined;
+  } else if (rejectIfPresentWrongType(body, 'color', 'string', res)) {
+    return undefined;
+  } else if (typeof body['color'] === 'string') {
+    if (!SUBAGENT_COLORS.includes(body['color'] as never)) {
+      return sendInvalidConfig(
+        res,
+        `\`color\` must be one of ${JSON.stringify(SUBAGENT_COLORS)}`,
+      );
+    }
+    updates.color = body['color'];
+  }
+
+  if (body['approvalMode'] === null) {
+    updates.approvalMode = undefined;
+  } else if (rejectIfPresentWrongType(body, 'approvalMode', 'string', res)) {
+    return undefined;
+  } else if (typeof body['approvalMode'] === 'string') {
+    if (!SUBAGENT_APPROVAL_MODES.includes(body['approvalMode'] as never)) {
+      return sendInvalidConfig(
+        res,
+        `\`approvalMode\` must be one of ${JSON.stringify(SUBAGENT_APPROVAL_MODES)}`,
+      );
     }
     updates.approvalMode = body['approvalMode'];
+  }
+
+  if (body['permissionMode'] === null) {
+    updates.permissionMode = undefined;
+  } else if (rejectIfPresentWrongType(body, 'permissionMode', 'string', res)) {
+    return undefined;
+  } else if (typeof body['permissionMode'] === 'string') {
+    if (!SUBAGENT_PERMISSION_MODES.includes(body['permissionMode'] as never)) {
+      return sendInvalidConfig(
+        res,
+        `\`permissionMode\` must be one of ${JSON.stringify(SUBAGENT_PERMISSION_MODES)}`,
+      );
+    }
+    updates.permissionMode = body['permissionMode'];
+  }
+
+  if ('maxTurns' in body) {
+    if (body['maxTurns'] === null) {
+      updates.maxTurns = undefined;
+    } else {
+      const maxTurns = parseMaxTurns(body['maxTurns'], res);
+      if (maxTurns === null) return undefined;
+      updates.maxTurns = maxTurns;
+    }
+  }
+
+  if ('mcpServers' in body) {
+    const mcpServers = parseRecordField(
+      body['mcpServers'],
+      'mcpServers',
+      (value) =>
+        typeof value === 'object' && value !== null && !Array.isArray(value),
+      'an object of server names to server configuration objects',
+      res,
+    );
+    if (mcpServers === null) return undefined;
+    updates.mcpServers = mcpServers;
+  }
+
+  if ('hooks' in body) {
+    const hooks = parseRecordField(
+      body['hooks'],
+      'hooks',
+      Array.isArray,
+      'an object of hook event names to matcher arrays',
+      res,
+    );
+    if (hooks === null) return undefined;
+    updates.hooks = hooks;
   }
 
   if (rejectIfPresentWrongType(body, 'background', 'boolean', res)) {
@@ -1571,6 +1889,61 @@ function parseStringArray(
     return null;
   }
   return value as string[];
+}
+
+function sendInvalidConfig(res: Response, error: string): undefined {
+  res.status(422).json({ error, code: 'invalid_config' });
+  return undefined;
+}
+
+function parseMaxTurns(value: unknown, res: Response): number | null {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value <= 0
+  ) {
+    sendInvalidConfig(res, '`maxTurns` must be a positive integer');
+    return null;
+  }
+  return value;
+}
+
+function parseRecordField(
+  value: unknown,
+  field: string,
+  isValidEntry: (value: unknown) => boolean,
+  expected: string,
+  res: Response,
+): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    sendInvalidConfig(res, `\`${field}\` must be ${expected}`);
+    return null;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_RECORD_ENTRIES) {
+    sendInvalidConfig(
+      res,
+      `\`${field}\` exceeds the ${MAX_RECORD_ENTRIES}-entry limit`,
+    );
+    return null;
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of entries) {
+    if (
+      !key ||
+      key.length > MAX_TOOL_ID_LENGTH ||
+      key === '__proto__' ||
+      key === 'constructor' ||
+      key === 'prototype' ||
+      !isValidEntry(entry)
+    ) {
+      sendInvalidConfig(res, `\`${field}\` must be ${expected}`);
+      return null;
+    }
+    output[key] = entry;
+  }
+  return output;
 }
 
 /**
@@ -1631,15 +2004,42 @@ function isNoOpUpdate(
   ) {
     return false;
   }
-  if (updates.model !== undefined && updates.model !== existing.model) {
+  if ('model' in updates && updates.model !== existing.model) {
     return false;
   }
-  if (updates.color !== undefined && updates.color !== existing.color) {
+  if ('color' in updates && updates.color !== existing.color) {
     return false;
   }
   if (
-    updates.approvalMode !== undefined &&
+    'approvalMode' in updates &&
     updates.approvalMode !== existing.approvalMode
+  ) {
+    return false;
+  }
+  if (
+    'permissionMode' in updates &&
+    updates.permissionMode !== existing.permissionMode
+  ) {
+    return false;
+  }
+  if ('maxTurns' in updates && updates.maxTurns !== existing.maxTurns) {
+    return false;
+  }
+  if (
+    updates.mcpServers !== undefined &&
+    !isDeepStrictEqual(
+      normalizedRecord(updates.mcpServers),
+      normalizedRecord(existing.mcpServers),
+    )
+  ) {
+    return false;
+  }
+  if (
+    updates.hooks !== undefined &&
+    !isDeepStrictEqual(
+      normalizedRecord(updates.hooks),
+      normalizedRecord(existing.hooks),
+    )
   ) {
     return false;
   }
@@ -1668,6 +2068,23 @@ function isNoOpUpdate(
     }
   }
   return true;
+}
+
+function normalizedRecord(
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!value || Object.keys(value).length === 0) return undefined;
+  return normalizeRecordValue(value) as Record<string, unknown>;
+}
+
+function normalizeRecordValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeRecordValue);
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([key, entry]) => [key, normalizeRecordValue(entry)]),
+  );
 }
 
 function shallowArrayEqual(
@@ -1749,10 +2166,30 @@ export function toSummary(config: SubagentConfig): ServeWorkspaceAgentSummary {
     isBuiltin: config.isBuiltin === true || config.level === 'builtin',
     hasTools: Array.isArray(config.tools) && config.tools.length > 0,
   };
+  if (config.tools) summary.tools = [...config.tools];
+  if (config.disallowedTools) {
+    summary.disallowedTools = [...config.disallowedTools];
+  }
   if (config.model) summary.model = config.model;
   if (config.color) summary.color = config.color;
   if (config.background !== undefined) summary.background = config.background;
   if (config.approvalMode) summary.approvalMode = config.approvalMode;
+  if (config.permissionMode) summary.permissionMode = config.permissionMode;
+  if (config.maxTurns !== undefined) summary.maxTurns = config.maxTurns;
+  if (config.mcpServers) {
+    summary.mcpServerNames = Object.keys(config.mcpServers);
+  }
+  if (config.hooks) summary.hookEvents = Object.keys(config.hooks);
+  if (config.runConfig) {
+    const runConfig: NonNullable<ServeWorkspaceAgentSummary['runConfig']> = {};
+    if (typeof config.runConfig.max_time_minutes === 'number') {
+      runConfig.max_time_minutes = config.runConfig.max_time_minutes;
+    }
+    if (typeof config.runConfig.max_turns === 'number') {
+      runConfig.max_turns = config.runConfig.max_turns;
+    }
+    summary.runConfig = runConfig;
+  }
   if (config.extensionName) summary.extensionName = config.extensionName;
   if (config.filePath) summary.filePath = config.filePath;
   return summary;
@@ -1763,36 +2200,24 @@ export function toDetail(config: SubagentConfig): ServeWorkspaceAgentDetail {
     ...toSummary(config),
     systemPrompt: config.systemPrompt,
   };
-  if (config.tools) detail.tools = [...config.tools];
-  if (config.disallowedTools) {
-    detail.disallowedTools = [...config.disallowedTools];
+  if (config.mcpServers) {
+    detail.mcpServers = redactMcpServersSetting(config.mcpServers) as Record<
+      string,
+      unknown
+    >;
   }
-  if (config.runConfig) {
-    // Explicit field pick rather than spread-with-cast. If
-    // `SubagentConfig.runConfig` gains new fields in core, the
-    // spread-then-cast pattern would silently leak them through the
-    // HTTP response without a compile error. Picking `max_time_minutes`
-    // and `max_turns` by name forces a deliberate schema bump if a
-    // future core field needs to surface on the daemon route.
-    const runConfig: ServeWorkspaceAgentDetail['runConfig'] = {};
-    if (typeof config.runConfig.max_time_minutes === 'number') {
-      runConfig.max_time_minutes = config.runConfig.max_time_minutes;
-    }
-    if (typeof config.runConfig.max_turns === 'number') {
-      runConfig.max_turns = config.runConfig.max_turns;
-    }
-    detail.runConfig = runConfig;
-  }
+  if (config.hooks) detail.hooks = config.hooks;
   return detail;
 }
 
 /**
  * Build a CRUD-scoped `SubagentManager` for the daemon. The
- * underlying manager only touches four `Config` methods on its
+ * underlying manager only touches five `Config` methods on its
  * read/write paths (`getSdkMode`, `getProjectRoot`,
- * `getActiveExtensions`, `isSafeMode`); a `Proxy` makes any future expansion of
- * that surface throw immediately rather than silently produce
- * incorrect data.
+ * `getActiveExtensions`, `isSafeMode`, `getAgentsSettings`); a `Proxy` makes
+ * any future expansion of that surface throw immediately rather than silently
+ * produce incorrect data. The CRUD catalog has no session settings context,
+ * so built-in agents use their registry defaults here.
  */
 export function createDaemonSubagentManager(
   boundWorkspace: string,
@@ -1803,6 +2228,7 @@ export function createDaemonSubagentManager(
     getProjectRoot: () => boundWorkspace,
     getActiveExtensions: () => [],
     isSafeMode: () => safeMode,
+    getAgentsSettings: () => ({}),
   } as unknown as Record<string | symbol, unknown>;
   const guarded = new Proxy(stub, {
     get(target, prop) {

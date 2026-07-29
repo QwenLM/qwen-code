@@ -94,6 +94,8 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
         "generationConfig": {
           "timeout": 60000,
           "maxRetries": 3,
+          "retryInitialDelayMs": 3000,
+          "retryMaxDelayMs": 30000,
           "enableCacheControl": true,
           "contextWindowSize": 128000,
           "modalities": {
@@ -236,6 +238,17 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
   }
 }
 ```
+
+For a vision model that can also follow the normal Qwen Code agent policy and use tools, opt in to full-turn image routing with both capabilities:
+
+```json
+"capabilities": {
+  "vision": true,
+  "agent": true
+}
+```
+
+When a text-only primary uses that model as its configured vision fallback, the complete image-bearing turn stays on that exact provider, model, and endpoint across tool calls and retries. The next independent turn returns to the primary, and each model request receives only media modalities supported by its target. Omit `agent` (or set it to `false`) to keep the safer Vision Bridge transcription flow.
 
 ### Local Self-Hosted Models (via OpenAI-compatible API)
 

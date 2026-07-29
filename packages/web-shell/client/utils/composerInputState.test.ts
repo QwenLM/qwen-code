@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getComposerPlaceholderKey,
+  getComposerPlaceholderState,
   shouldBlockComposerSubmit,
   shouldDisableComposerInput,
 } from './composerInputState';
@@ -72,6 +73,30 @@ describe('composer input state', () => {
     ).toBe('editor.processing');
   });
 
+  it('exposes the semantic placeholder state independently of i18n keys', () => {
+    expect(
+      getComposerPlaceholderState({
+        catchingUp: false,
+        isPreparingPrompt: false,
+        isStreaming: false,
+      }),
+    ).toBe('idle');
+    expect(
+      getComposerPlaceholderState({
+        catchingUp: true,
+        isPreparingPrompt: true,
+        isStreaming: true,
+      }),
+    ).toBe('loading');
+    expect(
+      getComposerPlaceholderState({
+        catchingUp: false,
+        isPreparingPrompt: true,
+        isStreaming: true,
+      }),
+    ).toBe('processing');
+  });
+
   it('still disables editing for pending approvals', () => {
     expect(
       shouldDisableComposerInput({
@@ -86,22 +111,47 @@ describe('composer input state', () => {
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'disconnected',
+        hasSession: true,
+        restartSseOnPrompt: false,
       }),
     ).toBe(true);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'error',
+        hasSession: true,
+        restartSseOnPrompt: true,
       }),
     ).toBe(true);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'connecting',
+        hasSession: false,
+        restartSseOnPrompt: false,
       }),
     ).toBe(false);
     expect(
       shouldBlockComposerSubmit({
         connectionStatus: 'connected',
+        hasSession: false,
+        restartSseOnPrompt: false,
       }),
     ).toBe(false);
+  });
+
+  it('allows a disconnected session to submit when prompt SSE restart is enabled', () => {
+    expect(
+      shouldBlockComposerSubmit({
+        connectionStatus: 'disconnected',
+        hasSession: true,
+        restartSseOnPrompt: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldBlockComposerSubmit({
+        connectionStatus: 'disconnected',
+        hasSession: false,
+        restartSseOnPrompt: true,
+      }),
+    ).toBe(true);
   });
 });

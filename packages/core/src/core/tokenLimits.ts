@@ -120,6 +120,22 @@ export function normalize(model: string): string {
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
+
+  // A colon can sit on either side of the model name. `authType:model` and
+  // `family:model` put it on the left, and the split below keeps the right
+  // half. But OpenRouter variant suffixes and Ollama / LM Studio tags put it
+  // on the RIGHT — `qwen3-coder:free`, `gemini-2.5-pro:online`,
+  // `qwen2.5-coder:32b` — and there the right half is a tag, not a model, so
+  // keeping it discards the model name entirely and every such id silently
+  // falls through to the default limit. Those tags are a closed enough set to
+  // recognise, so they are removed first and the split below then sees a bare
+  // model name. `modelId.ts` documents the same collision from the other side
+  // ("Model IDs can legitimately contain colons").
+  s = s.replace(
+    /:(?:free|beta|extended|thinking|online|nitro|floor|latest|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
+    '',
+  );
+
   s = s.split(':').pop() ?? s;
 
   // collapse whitespace to single hyphen
@@ -175,6 +191,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
+  [/^claude-opus-4-(?:6|7|8)/, LIMITS['1m']], // Opus 4.6-4.8: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -220,6 +237,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
+  [/^kimi-k3/, LIMITS['1m']], // Kimi K3: 1M
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K
 
   // -------------------
@@ -244,7 +262,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-6/, LIMITS['128k']], // Opus 4.6: 128K
+  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
@@ -267,6 +285,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^minimax-m2\.5/i, LIMITS['64k']],
 
   // Kimi
+  [/^kimi-k3/, LIMITS['128k']], // Kimi K3: 128K default max output (up to 1M configurable)
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 
@@ -338,7 +357,11 @@ export function tokenLimit(
  * so a model advertising >64K output is clamped consistently everywhere.
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
-  return Math.min(tokenLimit(model, 'output'), OUTPUT_TOKEN_CEILING);
+  const outputLimit = tokenLimit(model, 'output');
+  if (/^claude-opus-4-(?:6|7|8)/.test(normalize(model))) {
+    return outputLimit;
+  }
+  return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);
 }
 
 /**

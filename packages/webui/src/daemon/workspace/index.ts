@@ -16,11 +16,15 @@ export type {
   DaemonFileStat,
   DaemonGlobOptions,
   DaemonGlobResult,
+  DaemonGoal,
+  DaemonGoalList,
   DaemonScheduledTask,
   DaemonScheduledTaskRun,
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,
   DaemonResourceOptions,
+  DaemonChannelPairingActions,
+  DaemonChannelsResource,
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -31,6 +35,7 @@ export type {
 export {
   useDaemonAgents,
   useDaemonAuth,
+  useDaemonChannels,
   useDaemonDiagnostics,
   useDaemonFiles,
   useDaemonGlob,
@@ -43,6 +48,7 @@ export {
   useDaemonUsageDashboard,
   useDaemonTools,
   useDaemonSettings,
+  useDaemonProviders,
 } from './hooks/index.js';
 export type { DaemonStatusReportOptions } from './hooks/index.js';
 export type { DaemonUsageDashboardOptions } from './hooks/index.js';

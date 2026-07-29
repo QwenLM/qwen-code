@@ -18,11 +18,15 @@ import {
 } from './fs/index.js';
 import type { ServeOptions } from './types.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import {
+  WorkspaceSkillNotFoundError,
+  type DaemonWorkspaceService,
+} from './workspace-service/types.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -67,6 +71,8 @@ function makeBridge(): AcpSessionBridge {
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
+        maxJournalEvents: 10_000,
+        maxJournalBytes: 8 * 1024 * 1024,
         channelIdleTimeoutMs: 0,
         sessionIdleTimeoutMs: 1_800_000,
       },
@@ -120,6 +126,14 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
     setWorkspaceToolEnabled: vi.fn(async (_ctx, toolName, enabled) => ({
       toolName,
       enabled,
+    })),
+    setWorkspaceSkillEnabled: vi.fn(async (_ctx, skillName, enabled) => ({
+      skillName,
+      enabled,
+      changed: true,
+      activation: 'deferred' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
     })),
     initWorkspace: vi.fn(async (ctx) => ({
       path: `${ctx.workspaceCwd}/QWEN.md`,
@@ -201,6 +215,8 @@ async function makeHarness(opts?: {
     emit: () => {},
   });
 
+  const primaryWorkspaceService = makeWorkspaceService('primary');
+  const secondaryWorkspaceService = makeWorkspaceService('secondary');
   const primary: WorkspaceRuntime = {
     workspaceId: 'same-as-path',
     workspaceCwd: primaryCwd,
@@ -208,9 +224,10 @@ async function makeHarness(opts?: {
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: makeBridge(),
-    workspaceService: makeWorkspaceService('primary'),
+    workspaceService: primaryWorkspaceService,
     routeFileSystemFactory: primaryFsFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+    generationGuard: createWorkspaceGenerationGuard(),
   };
   const secondary: WorkspaceRuntime = {
     workspaceId: hashDaemonWorkspace(secondaryCwd),
@@ -219,20 +236,22 @@ async function makeHarness(opts?: {
     trusted: opts?.secondaryTrusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: makeBridge(),
-    workspaceService: makeWorkspaceService('secondary'),
+    workspaceService: secondaryWorkspaceService,
     routeFileSystemFactory:
       opts?.secondaryTrusted === false
         ? untrustedFsFactory
         : secondaryFsFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+    generationGuard: createWorkspaceGenerationGuard(),
   };
 
   const persistSetting = vi.fn(async () => {});
+  const workspaceRegistry = createWorkspaceRegistry([primary, secondary]);
   const app = createServeApp(
     { ...baseOpts, workspace: primaryCwd, token: opts?.token },
     undefined,
     {
-      workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+      workspaceRegistry,
       ...(opts?.persistSetting === false ? {} : { persistSetting }),
     },
   );
@@ -243,7 +262,9 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    secondaryWorkspaceService,
     persistSetting,
+    workspaceRegistry,
   };
 }
 
@@ -464,7 +485,7 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('allows untrusted workspace file reads but rejects other core reads', async () => {
+  it('allows untrusted workspace file reads but rejects non-catalog core reads', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
     try {
       const file = await request(h.app)
@@ -474,14 +495,28 @@ describe('workspace-qualified core REST', () => {
       expect(file.status).toBe(200);
       expect(file.body.content).toBe('secondary');
 
-      const mcp = await request(h.app)
-        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/mcp`)
-        .set('Host', host());
-      expect(mcp.status).toBe(403);
-      expect(mcp.body.code).toBe('untrusted_workspace');
-      expect(mcp.body.error).toBe('Workspace is not trusted.');
-      expect(mcp.body).not.toHaveProperty('workspaceCwd');
-      expect(mcp.body).not.toHaveProperty('workspaceId');
+      for (const route of [
+        'mcp',
+        'skills',
+        'providers',
+        'env',
+        'preflight',
+        'hooks',
+        'tools',
+        'settings',
+        'permissions',
+        'memory',
+        'agents',
+      ]) {
+        const res = await request(h.app)
+          .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/${route}`)
+          .set('Host', host());
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('untrusted_workspace');
+        expect(res.body.error).toBe('Workspace is not trusted.');
+        expect(res.body).not.toHaveProperty('workspaceCwd');
+        expect(res.body).not.toHaveProperty('workspaceId');
+      }
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -553,6 +588,7 @@ describe('workspace-qualified core REST', () => {
         expect.any(String),
         'general.cleanupPeriodDays',
         30,
+        expect.any(Function),
       );
 
       const badScope = await request(h.app)
@@ -588,6 +624,34 @@ describe('workspace-qualified core REST', () => {
       expect(res.body).not.toHaveProperty('workspaceId');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not publish qualified settings from a closed generation', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const entry = h.workspaceRegistry.getEntryByWorkspaceId(h.secondaryId)!;
+      h.persistSetting.mockImplementationOnce(async () => {
+        entry.current!.guard.close();
+      });
+
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          key: 'general.cleanupPeriodDays',
+          value: 30,
+        });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(
+        entry.current!.runtime.bridge.publishWorkspaceEvent,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
 
@@ -850,6 +914,73 @@ describe('workspace-qualified core REST', () => {
       const res = await request(untrusted.app)
         .post(
           `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/tools/Bash/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes workspace-qualified skill toggles and trust-gates writes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const res = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/review/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        skillName: 'review',
+        enabled: false,
+        changed: true,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+
+      vi.mocked(
+        h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
+      ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
+      const missing = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/missing/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('skill_not_found');
+
+      const invalidClient = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/review/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .set('Host', host())
+        .send({ enabled: false });
+      expect(invalidClient.status).toBe(400);
+      expect(invalidClient.body.code).toBe('invalid_client_id');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/skills/review/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())

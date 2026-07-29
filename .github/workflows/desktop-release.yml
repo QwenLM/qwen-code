@@ -578,16 +578,15 @@ jobs:
             create_args=(
               "$RELEASE_TAG"
               "${assets[@]}"
-              --generate-notes
               --target "$RELEASE_TARGET"
               --title "$title"
             )
             if [ -n "$previous_tag" ]; then
-              echo "Using $previous_tag as the release notes start tag."
-              create_args+=(--notes-start-tag "$previous_tag")
+              release_notes="[Full changelog](https://github.com/${GH_REPO}/compare/${previous_tag}...${RELEASE_TAG})"
             else
-              echo "No previous published stable release found for release notes."
+              release_notes="Desktop release ${RELEASE_TAG}."
             fi
+            create_args+=(--notes "$release_notes")
             if [ "$RELEASE_DRAFT" = "true" ]; then
               create_args+=(--draft)
             fi

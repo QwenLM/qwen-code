@@ -21,6 +21,8 @@ export const EVENT_EXTENSION_UNINSTALL = 'qwen-code.extension_uninstall';
 export const EVENT_EXTENSION_UPDATE = 'qwen-code.extension_update';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
 export const EVENT_RIPGREP_FALLBACK = 'qwen-code.ripgrep_fallback';
+export const EVENT_RIPGREP_RUNTIME_RECOVERY =
+  'qwen-code.ripgrep_runtime_recovery';
 export const EVENT_NEXT_SPEAKER_CHECK = 'qwen-code.next_speaker_check';
 export const EVENT_SLASH_COMMAND = 'qwen-code.slash_command';
 export const EVENT_IDE_CONNECTION = 'qwen-code.ide_connection';
@@ -29,6 +31,8 @@ export const EVENT_INVALID_CHUNK = 'qwen-code.chat.invalid_chunk';
 export const EVENT_CONTENT_RETRY = 'qwen-code.chat.content_retry';
 export const EVENT_CONTENT_RETRY_FAILURE =
   'qwen-code.chat.content_retry_failure';
+export const EVENT_PROTOCOL_TAG_SANITIZED =
+  'qwen-code.chat.protocol_tag_sanitized';
 // Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
 // 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
 // which is fired by geminiChat for InvalidStreamError retries on a separate
@@ -79,6 +83,7 @@ export const EVENT_PERFORMANCE_REGRESSION = 'qwen-code.performance.regression';
 export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
 export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
 export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
+export const EVENT_MEMORY_RECALL_DELIVERY = 'qwen-code.memory.recall.delivery';
 
 // Session Tracing Span Names
 export const SPAN_INTERACTION = 'qwen-code.interaction';

@@ -13,6 +13,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
+import {
+  writeSkillArgs,
+  clearSkillArgs,
+  staleArgsWarning,
+  skillArgsNote,
+  skillArgsPath,
+} from './skill-args-file.js';
 import type {
   SlashCommand,
   SlashCommandActionReturn,
@@ -132,9 +139,27 @@ export class SkillCommandLoader implements ICommandLoader {
               skill.body,
             );
 
-            const content = context.invocation?.args
-              ? appendToLastTextPart([{ text: body }], context.invocation.raw)
-              : [{ text: body }];
+            // See BundledSkillLoader: the arguments are written down for the
+            // skill to read, rather than transcribed by the model, and a bare
+            // invocation erases any prior record so its authority is not reused.
+            const rawArgs = context.invocation?.args ?? '';
+            let content;
+            if (rawArgs) {
+              content = appendToLastTextPart(
+                [{ text: body }],
+                context.invocation!.raw +
+                  (writeSkillArgs(skill.name, rawArgs)
+                    ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                    : ''),
+              );
+            } else {
+              // See BundledSkillLoader: a failed revocation leaves the earlier
+              // run's posting authority on disk, and the skill must be told.
+              content = [{ text: body }];
+              if (!clearSkillArgs(skill.name)) {
+                content = appendToLastTextPart(content, staleArgsWarning());
+              }
+            }
 
             return {
               type: 'submit_prompt',

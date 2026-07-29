@@ -69,9 +69,66 @@ describe('qwen-asr-realtime-session', () => {
     );
   });
 
+  it('aborts an upstream connection while it is opening', async () => {
+    const socket = new FakeSocket();
+    const controller = new AbortController();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      {
+        createWebSocket: () => socket,
+        abortSignal: controller.signal,
+      },
+    );
+
+    controller.abort();
+
+    await expect(sessionPromise).rejects.toThrow(
+      'Voice stream opening was aborted.',
+    );
+    expect(socket.readyState).toBe(3);
+  });
+
+  it('aborts an established upstream connection', async () => {
+    const socket = new FakeSocket();
+    const controller = new AbortController();
+    const sessionPromise = openQwenAsrRealtimeStream(
+      {
+        baseUrl: 'https://dashscope.example/v1',
+        model: 'qwen3-asr-flash-realtime',
+      },
+      {},
+      {
+        createWebSocket: () => socket,
+        abortSignal: controller.signal,
+      },
+    );
+    socket.emit(
+      'message',
+      JSON.stringify({ type: 'session.updated', event_id: 'updated' }),
+      false,
+    );
+    const session = await sessionPromise;
+
+    controller.abort();
+
+    expect(socket.readyState).toBe(3);
+    await expect(session.finish()).rejects.toThrow(
+      'Voice stream opening was aborted.',
+    );
+  });
+
   it('streams PCM chunks as base64 events and resolves the completed transcript', async () => {
     const socket = new FakeSocket();
     const createWebSocket = vi.fn(() => socket);
+    const controller = new AbortController();
+    const removeAbortListener = vi.spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
     const interim = vi.fn();
     const sessionPromise = openQwenAsrRealtimeStream(
       {
@@ -82,7 +139,7 @@ describe('qwen-asr-realtime-session', () => {
         keytermsContext: 'grep regex OAuth',
       },
       { onInterim: interim },
-      { createWebSocket },
+      { createWebSocket, abortSignal: controller.signal },
     );
 
     expect(createWebSocket).toHaveBeenCalledWith(
@@ -155,6 +212,10 @@ describe('qwen-asr-realtime-session', () => {
     );
 
     await expect(transcriptPromise).resolves.toBe('hello world');
+    expect(removeAbortListener).toHaveBeenCalledWith(
+      'abort',
+      expect.any(Function),
+    );
   });
 
   it('drops realtime audio chunks when the socket buffer is backed up', async () => {

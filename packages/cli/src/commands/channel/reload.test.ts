@@ -112,4 +112,53 @@ describe('channel reload command', () => {
     expect(line).toContain('no channel worker');
     expect(process.exit).toHaveBeenCalledWith(1);
   });
+
+  it('prints partial startup failures from a successful reload', async () => {
+    mockReloadChannelWorker.mockResolvedValue({
+      reloaded: true,
+      worker: {
+        enabled: true,
+        state: 'running',
+        channels: ['telegram'],
+        startupFailures: [
+          {
+            channel: 'feishu',
+            phase: 'connect',
+            message: 'connection refused',
+          },
+        ],
+      },
+    });
+
+    await runHandler({});
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Startup failure (channel=feishu, phase=connect): connection refused',
+    );
+  });
+
+  it('prints structured startup failures from a failed reload body', async () => {
+    mockReloadChannelWorker.mockRejectedValue(
+      Object.assign(new Error('reload failed'), {
+        body: {
+          code: 'channel_worker_start_failed',
+          startupFailures: [
+            {
+              workspaceCwd: '/work',
+              channel: 'telegram',
+              phase: 'connect',
+              code: 'ECONNREFUSED',
+              message: 'connection refused',
+            },
+          ],
+        },
+      }),
+    );
+
+    await runHandler({});
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] Startup failure (workspace=/work, channel=telegram, phase=connect, code=ECONNREFUSED): connection refused',
+    );
+  });
 });

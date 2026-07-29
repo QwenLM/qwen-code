@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { wasmLoader } from 'esbuild-plugin-wasm';
+import { isStubbedSdkNodeExporterImport } from './scripts/sdk-node-exporter-stub.js';
 
 let esbuild;
 try {
@@ -55,6 +56,92 @@ const wasmBinaryPlugin = {
   },
 };
 
+// `@opentelemetry/sdk-node` eagerly require()s every exporter package to
+// support `OTEL_*_EXPORTER` env-based auto-configuration, which would drag
+// both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
+// and defeat the per-protocol dynamic imports in
+// `packages/core/src/telemetry/sdk-{impl,exporters-grpc,exporters-http}.ts`
+// (issue #7264). qwen-code always passes explicit `spanProcessors` /
+// `logRecordProcessors` to NodeSDK, so those env code paths are unreachable
+// for traces and logs. Stub the exporter packages ONLY when imported by
+// sdk-node itself — our own protocol modules keep resolving the real ones.
+// The stubbed constructors throw so an unexpectedly reached env path (e.g.
+// `OTEL_METRICS_EXPORTER=otlp`) fails loudly instead of exporting nowhere;
+// NodeSDK.start() is wrapped in try/catch in `sdk.ts`. The resolve decision
+// lives in scripts/sdk-node-exporter-stub.js so it stays unit-testable.
+const sdkNodeExporterStubPlugin = {
+  name: 'sdk-node-exporter-stub',
+  setup(build) {
+    build.onResolve({ filter: /^@opentelemetry\/exporter-/ }, (args) => {
+      if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
+        return null;
+      }
+      return { path: args.path, namespace: 'sdk-node-exporter-stub' };
+    });
+    build.onLoad(
+      { filter: /.*/, namespace: 'sdk-node-exporter-stub' },
+      (args) => ({
+        contents: `
+          const throwStubbed = (name) => {
+            throw new Error(
+              'qwen-code bundles @opentelemetry/sdk-node without ' +
+                ${JSON.stringify(args.path)} + ' (env-based exporter ' +
+                'selection is unsupported; configure telemetry via ' +
+                'qwen-code settings instead). Attempted to construct: ' + name,
+            );
+          };
+          const handler = {
+            // Module interop and thenable probes must see a plain, non-callable
+            // namespace: a bundler or await import() reads then and __esModule
+            // (Symbol.* keys are already covered by the typeof check), and
+            // constructing those as "exporters" would throw a confusing error.
+            get: (_t, prop) => {
+              if (
+                typeof prop !== 'string' ||
+                prop === 'then' ||
+                prop === '__esModule'
+              ) {
+                return undefined;
+              }
+              return function stubbedExporter() {
+                throwStubbed(prop);
+              };
+            },
+          };
+          module.exports = new Proxy({}, handler);
+        `,
+        loader: 'js',
+      }),
+    );
+  },
+};
+
+const syncFileEncodingTreeShakePlugin = {
+  name: 'sync-file-encoding-tree-shake',
+  setup(build) {
+    build.onResolve(
+      { filter: /^\.\/utils\/sync-file-encoding\.js$/ },
+      (args) => {
+        if (
+          !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(
+            args.importer,
+          )
+        ) {
+          return null;
+        }
+        const sourceExtension = args.importer.endsWith('.ts') ? '.ts' : '.js';
+        return {
+          path: path.resolve(
+            args.resolveDir,
+            args.path.replace(/\.js$/, sourceExtension),
+          ),
+          sideEffects: false,
+        };
+      },
+    );
+  },
+};
+
 const external = [
   '@lydell/node-pty',
   'node-pty',
@@ -71,6 +158,7 @@ const external = [
   '@teddyzhu/clipboard-linux-arm64-gnu',
   '@teddyzhu/clipboard-win32-x64-msvc',
   '@teddyzhu/clipboard-win32-arm64-msvc',
+  'sharp',
 ];
 
 // Name of the directory under `dist/` that esbuild emits shared chunks into.
@@ -100,6 +188,7 @@ const mainBuild = esbuild.build({
   },
   alias: {
     'is-in-ci': path.resolve(__dirname, 'packages/cli/src/patches/is-in-ci.ts'),
+    'jsonc-parser': require.resolve('jsonc-parser/lib/esm/main.js'),
     '@qwen-code/web-templates': path.resolve(
       __dirname,
       'packages/web-templates/src/index.ts',
@@ -141,7 +230,12 @@ const mainBuild = esbuild.build({
     __filename: '__qwen_filename',
   },
   loader: { '.node': 'file' },
-  plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
+  plugins: [
+    sdkNodeExporterStubPlugin,
+    syncFileEncodingTreeShakePlugin,
+    wasmBinaryPlugin,
+    wasmLoader({ mode: 'embedded' }),
+  ],
   metafile: true,
   write: true,
   keepNames: true,

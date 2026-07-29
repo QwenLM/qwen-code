@@ -3,12 +3,19 @@ import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
   type DaemonCapabilities,
+  type DaemonChannelsSnapshot,
+  type DaemonChannelPairingRequest,
+  type DaemonChannelTypeCatalog,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionGroup,
+  type DaemonSessionGroupCatalog,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonGitHubPullRequestList,
+  type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
   type DaemonWorkspaceMcpToolsStatus,
@@ -17,6 +24,8 @@ import {
   type DaemonWorkspaceSkillsStatus,
   type DaemonWorkspaceToolsStatus,
   type DaemonWorkspaceVoiceStatus,
+  type ExtensionActiveOperations,
+  type ExtensionUpdateCheckResponse,
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
@@ -40,9 +49,35 @@ export interface WebShellDaemonScenario {
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
+  voice: DaemonWorkspaceVoiceStatus;
+  extensions: DaemonWorkspaceExtensionsStatus;
+  extensionOperations: ExtensionActiveOperations;
+  extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  channelTypes: DaemonChannelTypeCatalog;
+  channels: DaemonChannelsSnapshot;
+  pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   sessions: DaemonSessionSummary[];
+  sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /**
+   * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
+   * (non-git workspace), matching the real daemon's graceful degradation.
+   */
+  gitStatus?: DaemonWorkspaceGitStatus;
+  /**
+   * Response for `GET /workspaces/:cwd/github/prs`. Defaults to an available,
+   * empty pull-request list.
+   */
+  gitHubPrs?: DaemonGitHubPullRequestList;
+  /** Response for `GET /workspaces/:cwd/git/branches`. */
+  gitBranches?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/diff`. */
+  gitDiff?: unknown;
+  /** Response for `GET /workspaces/:cwd/git/log`. */
+  gitLog?: unknown;
+  /** Response for `POST /session/:id/btw`. */
+  btwAnswer?: string;
 }
 
 export interface MockDaemonController {
@@ -59,14 +94,35 @@ export interface MockDaemonController {
 type ScenarioOverrides = Partial<
   Omit<
     WebShellDaemonScenario,
-    'capabilities' | 'providers' | 'skills' | 'settings' | 'sessions' | 'state'
+    | 'capabilities'
+    | 'providers'
+    | 'skills'
+    | 'settings'
+    | 'voice'
+    | 'extensions'
+    | 'extensionOperations'
+    | 'extensionUpdateCheck'
+    | 'channelTypes'
+    | 'channels'
+    | 'pairingRequests'
+    | 'sessions'
+    | 'sessionGroups'
+    | 'state'
   >
 > & {
   capabilities?: Partial<DaemonCapabilities>;
   providers?: Partial<DaemonWorkspaceProvidersStatus>;
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
+  voice?: Partial<DaemonWorkspaceVoiceStatus>;
+  extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
+  extensionOperations?: Partial<ExtensionActiveOperations>;
+  extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  channelTypes?: DaemonChannelTypeCatalog;
+  channels?: DaemonChannelsSnapshot;
+  pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   sessions?: DaemonSessionSummary[];
+  sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
 };
 
@@ -144,6 +200,7 @@ export function createWebShellDaemonScenario(
       'permission_vote',
       'session_permission_vote',
       'session_scope_override',
+      'session_source_metadata',
       'workspace_settings',
       'workspace_voice',
     ],
@@ -208,6 +265,37 @@ export function createWebShellDaemonScenario(
     ...(overrides.settings ?? {}),
   };
 
+  const voice: DaemonWorkspaceVoiceStatus = {
+    v: 1,
+    workspaceCwd,
+    enabled: false,
+    mode: 'hold',
+    language: 'en',
+    voiceModel: null,
+    availableVoiceModels: [],
+    ...(overrides.voice ?? {}),
+  };
+
+  const extensions: DaemonWorkspaceExtensionsStatus = {
+    v: 1,
+    workspaceCwd,
+    initialized: true,
+    extensions: [],
+    errors: [],
+    ...(overrides.extensions ?? {}),
+  };
+
+  const extensionOperations: ExtensionActiveOperations = {
+    v: 1,
+    operations: [],
+    ...(overrides.extensionOperations ?? {}),
+  };
+
+  const extensionUpdateCheck: ExtensionUpdateCheckResponse = {
+    states: {},
+    ...(overrides.extensionUpdateCheck ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -240,9 +328,23 @@ export function createWebShellDaemonScenario(
     providers,
     skills,
     settings,
+    voice,
+    extensions,
+    extensionOperations,
+    extensionUpdateCheck,
+    channelTypes: overrides.channelTypes ?? [],
+    channels: overrides.channels ?? { revision: '1', instances: {} },
+    pairingRequests: overrides.pairingRequests ?? {},
     sessions,
+    sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
+    gitStatus: overrides.gitStatus,
+    gitHubPrs: overrides.gitHubPrs,
+    gitBranches: overrides.gitBranches,
+    gitDiff: overrides.gitDiff,
+    gitLog: overrides.gitLog,
+    btwAnswer: overrides.btwAnswer,
   };
 }
 
@@ -285,7 +387,14 @@ export async function installMockDaemon(
       return;
     }
 
-    await handleDaemonRoute(route, method, path, scenario, body);
+    await handleDaemonRoute(
+      route,
+      method,
+      path,
+      scenario,
+      body,
+      url.searchParams,
+    );
   });
 
   return {
@@ -424,15 +533,35 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/skills' ||
     path === '/workspace/tools' ||
     path === '/workspace/extensions' ||
+    path === '/workspace/extensions/operations' ||
+    path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    ) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
+    /^\/workspace\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+      path,
+    ) ||
+    /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
+    /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -452,8 +581,26 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
   if (method === 'GET' && path === '/workspace/extensions') return true;
+  if (method === 'GET' && path === '/workspace/extensions/operations') {
+    return true;
+  }
+  if (method === 'POST' && path === '/workspace/extensions/check-updates') {
+    return true;
+  }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/settings\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(voice|providers)\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -466,6 +613,65 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
     return true;
   }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/channels\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    (method === 'PUT' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspace\/git\/(branches|diff|log)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspace\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+  )
+    return true;
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/.+\/github\/default-branch\/?$/.test(path)
+  )
+    return true;
+  if (method === 'GET' && /^\/workspace\/github\/default-branch\/?$/.test(path))
+    return true;
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/github\/prs\/create\/?$/.test(path)
+  )
+    return true;
+  if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
+    return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -475,6 +681,12 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/events\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
     return true;
   }
   if (
@@ -497,6 +709,7 @@ async function handleDaemonRoute(
   path: string,
   scenario: WebShellDaemonScenario,
   body: unknown,
+  searchParams: URLSearchParams = new URLSearchParams(),
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
@@ -521,10 +734,14 @@ async function handleDaemonRoute(
   if (method === 'POST' && path === '/workspace/settings') {
     await json(route, {
       key: getRecordValue(body, 'key') ?? 'unknown',
-      scope: 'workspace',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
       value: getRecordValue(body, 'value'),
       requiresRestart: false,
     });
+    return;
+  }
+  if (method === 'DELETE' && path === '/workspace/models') {
+    await json(route, { removed: true, clearedActiveModel: false });
     return;
   }
   if (method === 'GET' && path === '/workspace/tools') {
@@ -532,7 +749,20 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/extensions') {
-    await json(route, workspaceExtensions(scenario));
+    await json(route, scenario.extensions);
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/extensions/operations') {
+    // The manager polls in-flight operations on mount. Defaults to an idle
+    // (empty) list so the capture has no error banner; a scenario can seed
+    // `extensionOperations` to preview an in-progress install/update.
+    await json(route, scenario.extensionOperations);
+    return;
+  }
+  if (method === 'POST' && path === '/workspace/extensions/check-updates') {
+    // The manager kicks off an update check on mount. Defaults to "no updates
+    // available", overridable via the scenario's `extensionUpdateCheck`.
+    await json(route, scenario.extensionUpdateCheck);
     return;
   }
   if (method === 'GET' && path === '/workspace/mcp') {
@@ -541,6 +771,27 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/workspace/voice') {
     await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
+    await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
+    await json(route, scenario.providers);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, scenario.settings);
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, {
+      key: getRecordValue(body, 'key') ?? 'unknown',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
+      value: getRecordValue(body, 'value'),
+      requiresRestart: false,
+    });
     return;
   }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
@@ -557,7 +808,315 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    await json(route, { sessions: scenario.sessions });
+    // Mirror production query modes: `group=pinned` is the pinned bucket;
+    // `group=all` (and missing group) returns the full active list. The UI
+    // excludes pinned rows from organized sections via `excludePinned`.
+    const group = searchParams.get('group');
+    const sessions =
+      group === 'pinned'
+        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
+        : scenario.sessions;
+    await json(route, { sessions });
+    return;
+  }
+  if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
+    const catalog: DaemonSessionGroupCatalog = {
+      groups: scenario.sessionGroups,
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    await json(route, catalog);
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path)
+  ) {
+    await json(route, scenario.channelTypes);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/channels\/?$/.test(path)) {
+    await json(route, scenario.channels);
+    return;
+  }
+  const pairingMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/pairing-requests(\/approve)?\/?$/,
+  );
+  if (pairingMatch) {
+    const name = decodeURIComponent(pairingMatch[1]);
+    const requests = scenario.pairingRequests[name] ?? [];
+    if (method === 'GET' && !pairingMatch[2]) {
+      await json(route, { requests });
+      return;
+    }
+    if (method === 'POST' && pairingMatch[2]) {
+      const code = String(getRecordValue(body, 'code') ?? '').toUpperCase();
+      const approved = requests.find((request) => request.code === code);
+      if (!approved) {
+        await json(route, { error: 'Pairing request not found.' }, 404);
+        return;
+      }
+      const remaining = requests.filter((request) => request.code !== code);
+      scenario.pairingRequests = {
+        ...scenario.pairingRequests,
+        [name]: remaining,
+      };
+      await json(route, { approved, requests: remaining });
+      return;
+    }
+  }
+  const channelMutationMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/?$/,
+  );
+  if (channelMutationMatch && (method === 'PUT' || method === 'DELETE')) {
+    const name = decodeURIComponent(channelMutationMatch[1]);
+    if (
+      !isRecord(body) ||
+      body['expectedRevision'] !== scenario.channels.revision
+    ) {
+      await json(route, { error: 'Channel settings changed.' }, 409);
+      return;
+    }
+    const revision = nextRevision(scenario.channels.revision);
+    if (method === 'DELETE') {
+      const instances = { ...scenario.channels.instances };
+      delete instances[name];
+      scenario.channels = { revision, instances };
+      await json(route, {
+        snapshot: scenario.channels,
+        instance: {
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      });
+      return;
+    }
+    if (!isRecord(body['config'])) {
+      await badRequest(route, 'Invalid Channel configuration.');
+      return;
+    }
+    const previous = scenario.channels.instances[name];
+    const secrets = { ...(previous?.secrets ?? {}) };
+    if (isRecord(body['secrets'])) {
+      for (const [key, update] of Object.entries(body['secrets'])) {
+        if (!isRecord(update)) continue;
+        if (update['operation'] === 'clear') {
+          delete secrets[key];
+        } else if (update['operation'] === 'replace') {
+          secrets[key] = { present: true, source: 'literal' };
+        }
+      }
+    }
+    const instance = {
+      name,
+      config: body['config'],
+      secrets,
+      startsWithServe: previous?.startsWithServe ?? false,
+      runtime: previous?.runtime ?? ({ state: 'stopped' } as const),
+    };
+    scenario.channels = {
+      revision,
+      instances: { ...scenario.channels.instances, [name]: instance },
+    };
+    await json(route, { snapshot: scenario.channels, instance });
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitStatus ?? {
+        v: 2,
+        workspaceCwd: scenario.workspaceCwd,
+        branch: null,
+      },
+    );
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitHubPrs ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        pullRequests: [],
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/branches\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitBranches ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        local: [
+          {
+            name: 'main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'feat/demo',
+            isHead: true,
+            ahead: 3,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        remote: [
+          {
+            name: 'origin/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'origin/develop',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+          {
+            name: 'upstream/main',
+            isHead: false,
+            ahead: 0,
+            behind: 0,
+            commitDate: 0,
+            commitSubject: '',
+          },
+        ],
+        tags: [{ name: 'v1.0.0', date: 0, subject: 'Release 1.0' }],
+        recent: ['main', 'develop'],
+        head: 'feat/demo',
+        detached: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/diff\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitDiff ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        files: [
+          {
+            path: 'src/foo.ts',
+            added: 10,
+            removed: 3,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+          },
+          {
+            path: 'src/bar.ts',
+            added: 5,
+            removed: 0,
+            isBinary: false,
+            isUntracked: true,
+            isDeleted: false,
+          },
+        ],
+      },
+    );
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/log\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      scenario.gitLog ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        entries: [
+          {
+            sha: 'abc1234',
+            shortSha: 'abc1234',
+            subject: 'feat: add branch picker',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            refs: 'HEAD -> feat/demo',
+            parents: [],
+          },
+          {
+            sha: 'def5678',
+            shortSha: 'def5678',
+            subject: 'fix: resolve session per workspace',
+            authorName: 'dev',
+            authorEmail: 'dev@example.com',
+            authorDate: 0,
+            parents: [],
+          },
+        ],
+        hasMore: false,
+      },
+    );
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?git\/(checkout|branch|push|pull|commit)\/?$/.test(
+      path,
+    )
+  ) {
+    const action = path.replace(/\/$/, '').split('/').pop();
+    if (action === 'commit') {
+      await json(route, { sha: 'abc1234', subject: 'test commit' });
+    } else if (action === 'checkout' || action === 'branch') {
+      await json(route, { branch: 'feat/demo', detached: false });
+    } else {
+      await json(route, { success: true, output: '' });
+    }
+    return;
+  }
+  if (
+    method === 'GET' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/default-branch\/?$/.test(path)
+  ) {
+    await json(route, { branch: 'origin/main' });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/(workspaces\/.+\/|workspace\/)?github\/prs\/create\/?$/.test(path)
+  ) {
+    await json(
+      route,
+      { url: 'https://github.com/example/repo/pull/42', number: 42 },
+      201,
+    );
+    return;
+  }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
+    await json(route, {
+      sessionId: path.split('/')[2],
+      answer:
+        scenario.btwAnswer ??
+        'feat(web-shell): add git branch picker and commit dialog\n\n## What this PR does\nAdds branch picker, commit dialog, and create PR flow to the web shell.\n\n## Why it is needed\nCompletes the git workflow in the browser.',
+    });
     return;
   }
   if (method === 'POST' && path === '/session') {
@@ -759,6 +1318,13 @@ function readStringField(body: unknown, key: string): string | undefined {
     : undefined;
 }
 
+function nextRevision(revision: string): string {
+  const numeric = Number(revision);
+  return Number.isSafeInteger(numeric) && numeric >= 0
+    ? String(numeric + 1)
+    : `${revision}-next`;
+}
+
 function isApprovalMode(mode: string): mode is DaemonApprovalMode {
   const modes: readonly string[] = DAEMON_APPROVAL_MODES;
   return modes.includes(mode);
@@ -832,30 +1398,10 @@ function workspaceTools(
   };
 }
 
-function workspaceExtensions(
-  scenario: WebShellDaemonScenario,
-): DaemonWorkspaceExtensionsStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    initialized: true,
-    extensions: [],
-    errors: [],
-  };
-}
-
 function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    enabled: false,
-    mode: 'hold',
-    language: 'en',
-    voiceModel: null,
-    availableVoiceModels: [],
-  };
+  return scenario.voice;
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {

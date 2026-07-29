@@ -36,7 +36,7 @@ describe('Interactive file system', () => {
       const { ptyProcess } = rig.runInteractive();
 
       // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message', 15000);
+      const isReady = await rig.waitForText('Type your message');
       expect(
         isReady,
         'CLI did not start up in interactive mode correctly',
@@ -47,10 +47,10 @@ describe('Interactive file system', () => {
       await type(ptyProcess, readPrompt);
       await type(ptyProcess, '\r');
 
-      const readCall = await rig.waitForToolCall('read_file', 30000);
+      const readCall = await rig.waitForToolCall('read_file');
       expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
-      const containsExpectedVersion = await rig.waitForText('1.0.0', 15000);
+      const containsExpectedVersion = await rig.waitForText('1.0.0');
       expect(
         containsExpectedVersion,
         'Expected to see version "1.0.0" in output',
@@ -61,10 +61,7 @@ describe('Interactive file system', () => {
       await type(ptyProcess, writePrompt);
       await type(ptyProcess, '\r');
 
-      const toolCall = await rig.waitForAnyToolCall(
-        ['write_file', 'edit'],
-        30000,
-      );
+      const toolCall = await rig.waitForAnyToolCall(['write_file', 'edit']);
 
       if (!toolCall) {
         printDebugInfo(rig, rig._interactiveOutput, {
@@ -76,8 +73,20 @@ describe('Interactive file system', () => {
         true,
       );
 
-      const newFileContent = rig.readFile(fileName);
-      expect(newFileContent).toBe('1.0.1');
+      // The tool call is logged once the model issues it, but the turn may
+      // still be settling (a failed edit can be retried) and the model may
+      // write more than just '1.0.1'. Poll the file until it contains the new
+      // version, matching the lenient assertion used by the non-interactive
+      // sibling test (file-system.test.ts uses .toContain('1.0.1')).
+      const updated = await rig.poll(
+        () => rig.readFile(fileName).includes('1.0.1'),
+        rig.getDefaultTimeout(),
+        200,
+      );
+      if (!updated) {
+        printDebugInfo(rig, rig._interactiveOutput, { toolCall });
+      }
+      expect(updated, 'Expected file content to contain 1.0.1').toBe(true);
     },
   );
 });

@@ -37,8 +37,13 @@ export function registerCapabilitiesRoutes(
   deps: RegisterCapabilitiesRoutesDeps,
 ): void {
   app.get('/capabilities', (_req, res) => {
-    const runtimes = deps.workspaceRegistry.list();
-    const multiWorkspace = runtimes.length > 1;
+    const entries = deps.workspaceRegistry.listEntries();
+    const activePrimary = entries.find(
+      (entry) => entry.primary && entry.state === 'active',
+    )?.current?.runtime;
+    const multiWorkspace = entries.length > 1;
+    const features = deps.currentServeFeatures();
+    const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
@@ -46,7 +51,7 @@ export function registerCapabilitiesRoutes(
         ? { qwenCodeVersion: deps.qwenCodeVersion }
         : {}),
       mode: deps.mode,
-      features: deps.currentServeFeatures(),
+      features,
       modelServices: [],
       // Surface the primary workspace so clients can omit `cwd` on
       // `POST /session`; multi-workspace clients use `workspaces[]`.
@@ -55,7 +60,10 @@ export function registerCapabilitiesRoutes(
       // auto-negotiate the best available transport via negotiateTransport().
       transports: ['rest'],
       // Active mediation policy under the `policy` namespace.
-      policy: { permission: deps.permissionPolicy },
+      policy: {
+        permission:
+          activePrimary?.bridge.permissionPolicy ?? deps.permissionPolicy,
+      },
       limits: {
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
@@ -74,16 +82,17 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      ...(multiWorkspace
-        ? {
-            workspaces: runtimes.map((runtime) => ({
-              id: runtime.workspaceId,
-              cwd: runtime.workspaceCwd,
-              primary: runtime.primary,
-              trusted: runtime.trusted,
-            })),
-          }
-        : {}),
+      workspaces: entries.map((entry) => ({
+        id: entry.workspaceId,
+        cwd: entry.workspaceCwd,
+        ...(entry.displayName !== undefined
+          ? { displayName: entry.displayName }
+          : {}),
+        primary: entry.primary,
+        trusted:
+          entry.state === 'active' && entry.current?.runtime.trusted === true,
+        ...(runtimeRemoval ? { removable: entry.removable } : {}),
+      })),
       supportedLanguages: deps.languageCodes,
     };
     res.status(200).json(envelope);

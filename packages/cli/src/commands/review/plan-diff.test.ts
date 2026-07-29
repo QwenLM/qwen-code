@@ -10,8 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
+import { seedParseArgs } from './lib/test-utils.js';
 
 let dir: string;
+let cwd: string;
 const run = (diffPath: string, out: string, maxChunkLines = 400) =>
   (planDiffCommand.handler as (a: unknown) => void)({
     diff_path: diffPath,
@@ -21,8 +23,11 @@ const run = (diffPath: string, out: string, maxChunkLines = 400) =>
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'plan-diff-'));
+  cwd = process.cwd();
+  process.chdir(dir);
 });
 afterEach(() => {
+  process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -67,6 +72,82 @@ describe('plan-diff', () => {
     expect(plan.srcDiffLines).toBe(plan.diffLines);
     expect(plan.files[0].path).toBe('src/a.ts');
     expect(plan.files[0].kind).toBe('source');
+  });
+
+  it('carries the PR identity when told to — the roster requires Agent 0 from it', () => {
+    // A lightweight cross-repo review has a PR but no worktree. Without these
+    // fields the plan classifies as diff-only, the roster omits issue fidelity,
+    // and check-coverage blesses the omission — the skill's own lightweight path
+    // says Agent 0 runs whenever pr-context succeeded. Presence of the pair IS
+    // the context-availability signal: the skill passes the flags only then.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      pr: 6998,
+      repo: 'QwenLM/qwen-code',
+    });
+
+    const plan = JSON.parse(readFileSync(out, 'utf8'));
+    expect(plan.prNumber).toBe('6998');
+    expect(plan.ownerRepo).toBe('QwenLM/qwen-code');
+    // And no worktree appears — the identity does not fake a tree.
+    expect(plan.worktreePath).toBeUndefined();
+  });
+
+  it('records the effort the caller passed, so the roster reads it from the plan', () => {
+    // The effort belongs IN the plan, not in a flag to `requiredAgents`: the
+    // roster, check-coverage and compose-review then all read one value and
+    // cannot disagree, and no caller can shrink the roster by omitting a flag.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      effort: 'medium',
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
+  });
+
+  it('recovers the effort from the parse-args report when --effort is not re-threaded', () => {
+    seedParseArgs(dir, 'medium');
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    run(diffPath, out); // note: no effort passed
+
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
+  });
+
+  it('omits effort when none is passed — the roster then keeps the full set', () => {
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBeUndefined();
+  });
+
+  it('refuses half a PR identity — a roster cannot require an agent nobody can build', () => {
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    expect(() =>
+      (planDiffCommand.handler as (a: unknown) => void)({
+        diff_path: diffPath,
+        out,
+        maxChunkLines: 400,
+        pr: 6998,
+      }),
+    ).toThrow(/--pr and --repo go together/);
   });
 
   it('cannot decide heaviness without a tree, and says so by omission', () => {

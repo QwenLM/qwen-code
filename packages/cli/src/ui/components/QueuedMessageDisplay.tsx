@@ -63,7 +63,7 @@ export const QueuedMessageDisplay = ({
       {showHint && (
         <Box paddingLeft={2}>
           <Text dimColor italic>
-            {t('Press ↑ to edit queued messages')}
+            {t('Ctrl+Q to queue · ↑ to edit queued messages')}
           </Text>
         </Box>
       )}

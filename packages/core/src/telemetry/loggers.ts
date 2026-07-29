@@ -30,9 +30,11 @@ import {
   EVENT_CHAT_COMPRESSION,
   EVENT_CONTENT_RETRY,
   EVENT_CONTENT_RETRY_FAILURE,
+  EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_API_RETRY,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_RIPGREP_RUNTIME_RECOVERY,
   EVENT_EXTENSION_INSTALL,
   EVENT_MODEL_SLASH_COMMAND,
   EVENT_EXTENSION_DISABLE,
@@ -53,6 +55,7 @@ import {
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
+  EVENT_MEMORY_RECALL_DELIVERY,
   EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
@@ -74,6 +77,7 @@ import {
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
+  recordMemoryRecallDeliveryMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -98,8 +102,10 @@ import type {
   ChatCompressionEvent,
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ProtocolTagSanitizedEvent,
   ApiRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   ToolOutputTruncatedEvent,
   ExtensionDisableEvent,
   ExtensionEnableEvent,
@@ -123,10 +129,12 @@ import type {
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
+import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
@@ -408,6 +416,30 @@ export function logRipgrepFallback(
   logger.emit(logRecord);
 }
 
+export function logRipgrepRuntimeRecovery(
+  config: Config,
+  event: RipgrepRuntimeRecoveryEvent,
+): void {
+  // Runtime recovery is separate from startup fallback; it describes a selected
+  // ripgrep binary that started but did not complete normally.
+  QwenLogger.getInstance(config)?.logRipgrepRuntimeRecoveryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_RIPGREP_RUNTIME_RECOVERY,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Ripgrep runtime recovery: ${event.failure_kind}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
 export function logApiError(config: Config, event: ApiErrorEvent): void {
   const uiEvent = {
     ...event,
@@ -415,6 +447,9 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
+  // Feed the daemon-status model-API-health charts: one model API error per
+  // failed attempt, drained per live model round by the ACP MessageEmitter.
+  apiActivityTracker.recordError();
   if (!isInternalPromptId(event.prompt_id)) {
     recordUiTelemetryEventToChat(config, uiEvent);
   }
@@ -758,6 +793,25 @@ export function logContentRetry(
   recordContentRetry(config);
 }
 
+export function logProtocolTagSanitized(
+  config: Config,
+  event: ProtocolTagSanitizedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logProtocolTagSanitizedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_PROTOCOL_TAG_SANITIZED,
+  };
+
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Suppressed a standalone closing ${event.tag_name} tag and preserved ${event.tool_call_count} tool call(s).`,
+    attributes,
+  });
+}
+
 export function logContentRetryFailure(
   config: Config,
   event: ContentRetryFailureEvent,
@@ -785,7 +839,10 @@ export function logContentRetryFailure(
  * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
  * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
  *
- * Three-sink fan-out, matching the `logContentRetry` shape exactly:
+ * Fan-out (sink 0 fires first, before the SDK guard, so retries are counted
+ * even with telemetry off; sinks 1–3 match the `logContentRetry` shape):
+ *   0. `apiActivityTracker` increment — daemon-status model-API-health charts
+ *      (drained per live model round by the ACP MessageEmitter).
  *   1. QwenLogger RUM ingestion (Aliyun internal stats)
  *   2. OTel log signal via `logger.emit()` — picked up by LogToSpanProcessor
  *      and bridged to a span sibling under the caller's active span (typically
@@ -794,6 +851,7 @@ export function logContentRetryFailure(
  *   3. `recordApiRetry` Counter increment for per-model retry-rate dashboards.
  */
 export function logApiRetry(config: Config, event: ApiRetryEvent): void {
+  apiActivityTracker.recordRetry(); // sink 0 — see fan-out above
   QwenLogger.getInstance(config)?.logApiRetryEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -1351,5 +1409,38 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+  });
+}
+
+export function logMemoryRecallDelivery(
+  config: Config,
+  event: MemoryRecallDeliveryEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_RECALL_DELIVERY,
+    'event.timestamp': event['event.timestamp'],
+    phase: event.phase,
+    delivery_point: event.delivery_point,
+    strategy: event.strategy,
+    docs_selected: event.docs_selected,
+    latency_ms: event.latency_ms,
+  };
+  if (event.discard_reason) {
+    attributes['discard_reason'] = event.discard_reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory recall delivery: phase=${event.phase}. delivery_point=${event.delivery_point}. Selected ${event.docs_selected} doc(s).`,
+    attributes,
+  });
+  recordMemoryRecallDeliveryMetrics(config, event.latency_ms, {
+    phase: event.phase,
+    delivery_point: event.delivery_point,
+    ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
+    strategy: event.strategy,
   });
 }

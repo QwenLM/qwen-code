@@ -109,10 +109,16 @@ export class AcpWsTransport implements DaemonTransport {
 
   readonly type = 'acp-ws' as const;
   readonly supportsReplay = false;
+  readonly restFetch: typeof globalThis.fetch | undefined;
 
-  constructor(wsUrl: string, token?: string) {
+  constructor(
+    wsUrl: string,
+    token?: string,
+    restFetch?: typeof globalThis.fetch,
+  ) {
     this.wsUrl = wsUrl;
     this.token = token;
+    this.restFetch = restFetch;
   }
 
   get connected(): boolean {
@@ -232,6 +238,14 @@ export class AcpWsTransport implements DaemonTransport {
     opts: DaemonTransportSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     if (this._disposed) throw new DaemonTransportClosedError();
+
+    // NOTE: `opts.epoch` / `opts.onEpoch` do NOT apply to this transport.
+    // The WS stream has no `Last-Event-ID` resume mechanism (it filters a
+    // live shared notification stream, never replays), so there is no
+    // stale-cursor problem for the epoch token to solve and no HTTP
+    // response headers to learn the epoch from. Intentionally ignored
+    // rather than silently mis-applied — same policy as `maxQueued`, which
+    // is likewise REST-only and unused here.
 
     await this.ensureConnected();
 

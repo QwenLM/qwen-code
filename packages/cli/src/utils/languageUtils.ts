@@ -13,16 +13,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
-import {
-  detectSystemLanguage,
-  getLanguageNameFromLocale,
-} from '../i18n/index.js';
+import { getLanguageNameFromLocale } from '../i18n/index.js';
 import { SUPPORTED_LANGUAGES } from '../i18n/languages.js';
 
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
 const LLM_OUTPUT_LANGUAGE_MARKER_PREFIX = 'qwen-code:llm-output-language:';
 
-/** Special value meaning "detect from system settings" */
+/** Special value meaning "follow the user's input language" */
 export const OUTPUT_LANGUAGE_AUTO = 'auto';
 
 /**
@@ -69,16 +66,27 @@ export function normalizeOutputLanguage(language: string): string {
 }
 
 /**
- * Resolves the output language, converting 'auto' to the detected system language.
+ * Resolves an explicit output language to its canonical form.
  */
-export function resolveOutputLanguage(
+export function resolveOutputLanguage(value: string): string {
+  if (isAutoLanguage(value)) {
+    throw new Error(
+      'resolveOutputLanguage does not accept auto; use resolveOutputLanguageOrPreserveAuto instead.',
+    );
+  }
+  return normalizeOutputLanguage(value);
+}
+
+/**
+ * Preserves 'auto' as the dynamic same-language mode, otherwise resolves an
+ * explicit language to its canonical form.
+ */
+export function resolveOutputLanguageOrPreserveAuto(
   value: string | undefined | null,
 ): string {
-  if (isAutoLanguage(value)) {
-    const detectedLocale = detectSystemLanguage();
-    return getLanguageNameFromLocale(detectedLocale);
-  }
-  return normalizeOutputLanguage(value!);
+  return isAutoLanguage(value)
+    ? OUTPUT_LANGUAGE_AUTO
+    : resolveOutputLanguage(value!);
 }
 
 /**
@@ -107,6 +115,29 @@ function sanitizeForMarker(language: string): string {
  */
 function generateOutputLanguageFileContent(language: string): string {
   const safeLanguage = sanitizeForMarker(language);
+  if (isAutoLanguage(language)) {
+    return `# Output language preference: ${OUTPUT_LANGUAGE_AUTO}
+<!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${OUTPUT_LANGUAGE_AUTO} -->
+
+## Rule
+Respond in the same language as the user's input.
+
+## Exception
+If the user **explicitly** requests a response in a specific language (e.g., "please reply in English"), switch to the user's requested language for the remainder of the conversation.
+
+## Mixed-language input
+If the user mixes languages, use the language that best matches the user's main request.
+
+## Keep technical artifacts unchanged
+Do **not** translate or rewrite:
+- Code blocks, CLI commands, file paths, stack traces, logs, JSON keys, identifiers
+- Exact quoted text from the user (keep quotes verbatim)
+
+## Tool / system outputs
+Raw tool/system outputs may contain fixed-format English. Preserve them verbatim, and if needed, add a short explanation in the user's language below.
+`;
+  }
+
   return `# Output language preference: ${language}
 <!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${safeLanguage} -->
 
@@ -154,20 +185,40 @@ function parseOutputLanguageFromContent(content: string): string | null {
 }
 
 /**
- * Reads the current output language from the rule file.
- * Returns null if the file doesn't exist or can't be parsed.
+ * Reads the current output-language file content.
  */
-function readOutputLanguageFromFile(): string | null {
+function readOutputLanguageFileContent(): string | null {
   const filePath = getOutputLanguageFilePath();
   if (!fs.existsSync(filePath)) {
     return null;
   }
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return parseOutputLanguageFromContent(content);
+    return fs.readFileSync(filePath, 'utf-8');
   } catch {
     return null;
   }
+}
+
+function isGeneratedFixedOutputLanguageFileContent(
+  content: string,
+  language: string,
+): boolean {
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+  const headings = normalizedContent.match(/^#{1,2}\s+.+$/gm) ?? [];
+
+  return (
+    normalizedContent.includes(
+      `<!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${sanitizeForMarker(language)} -->`,
+    ) &&
+    headings.length === 5 &&
+    headings[0] === `# Output language preference: ${language}` &&
+    headings.includes('## Rule') &&
+    headings.includes('## Exception') &&
+    headings.includes('## Keep technical artifacts unchanged') &&
+    headings.includes('## Tool / system outputs') &&
+    normalizedContent.includes(`**${language}**`) &&
+    normalizedContent.includes('You MUST always respond')
+  );
 }
 
 /**
@@ -190,7 +241,8 @@ export function writeOutputLanguageFile(
 
 /**
  * Updates the LLM output language rule file based on the setting value.
- * Resolves 'auto' to the detected system language before writing.
+ * Preserves 'auto' as a dynamic same-language rule, and resolves explicit
+ * languages before writing.
  *
  * @param targetPath - Forwarded to {@link writeOutputLanguageFile}.
  */
@@ -198,7 +250,7 @@ export function updateOutputLanguageFile(
   settingValue: string,
   targetPath?: string,
 ): void {
-  const resolved = resolveOutputLanguage(settingValue);
+  const resolved = resolveOutputLanguageOrPreserveAuto(settingValue);
   writeOutputLanguageFile(resolved, targetPath);
 }
 
@@ -232,18 +284,40 @@ export function writeOutputLanguageAndRegisterPath(
  *
  * Behavior:
  * - If the rule file already exists and contains a valid language setting, do nothing (preserve user modifications)
- * - If the rule file doesn't exist, create it with the resolved language ('auto' -> detected system language, or use as-is)
+ * - If the setting resolves to 'auto' but the rule file contains a generated fixed-language rule from the old auto behavior, migrate it to the same-language rule
+ * - If the rule file doesn't exist, create it with the configured rule ('auto' -> same-language rule, explicit language -> fixed-language rule)
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
   // Check if the file already exists and has valid content
-  const currentFileLanguage = readOutputLanguageFromFile();
+  const currentFileContent = readOutputLanguageFileContent();
+  const currentFileLanguage =
+    currentFileContent === null
+      ? null
+      : parseOutputLanguageFromContent(currentFileContent);
+  const shouldMigrateFixedFileToAuto =
+    isAutoLanguage(outputLanguage) &&
+    currentFileLanguage !== null &&
+    !isAutoLanguage(currentFileLanguage) &&
+    currentFileContent !== null &&
+    isGeneratedFixedOutputLanguageFileContent(
+      currentFileContent,
+      currentFileLanguage,
+    );
 
-  // If file exists with valid language, preserve user's setting - do nothing
+  // If file exists with valid language, preserve it unless auto needs migration.
   if (currentFileLanguage) {
+    if (shouldMigrateFixedFileToAuto) {
+      try {
+        const resolved = resolveOutputLanguageOrPreserveAuto(outputLanguage);
+        writeOutputLanguageFile(resolved);
+      } catch {
+        // Migration is best-effort: the existing rule file is still valid.
+      }
+    }
     return;
   }
 
-  // File doesn't exist or has invalid content, create it with resolved language
-  const resolved = resolveOutputLanguage(outputLanguage);
+  // File doesn't exist or has invalid content, create it with configured language behavior
+  const resolved = resolveOutputLanguageOrPreserveAuto(outputLanguage);
   writeOutputLanguageFile(resolved);
 }

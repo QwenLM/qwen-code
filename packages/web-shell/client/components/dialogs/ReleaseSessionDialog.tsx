@@ -2,18 +2,19 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import {
   useConnection,
-  useSessions,
   type DaemonSessionSummary,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
+import { useScopedSessions } from '../../hooks/useScopedSessions';
 
 interface ReleaseSessionDialogProps {
   onReleased: (sessionId: string) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
+  workspaceCwd?: string;
 }
 
 const LIST_ID = 'release-session-list';
@@ -23,6 +24,7 @@ export function ReleaseSessionDialog({
   onReleased,
   onError,
   onClose,
+  workspaceCwd,
 }: ReleaseSessionDialogProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -31,7 +33,7 @@ export function ReleaseSessionDialog({
     loading,
     error: sessionsError,
     releaseSession,
-  } = useSessions({ autoLoad: true });
+  } = useScopedSessions(workspaceCwd, { autoLoad: true });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
   // -1 = no highlight; see ResumeDialog for the rationale.

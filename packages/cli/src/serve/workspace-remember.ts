@@ -15,6 +15,7 @@ import type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import {
   createWorkspaceMemoryExtractionErrorLogger,
   shouldSuppressRememberErrorDetails,
@@ -82,6 +83,37 @@ export interface WorkspaceRememberRouteDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
+}
+
+function requireTrustedWorkspace(
+  deps: WorkspaceRememberRouteDeps,
+  res: Response,
+): boolean {
+  if (deps.isWorkspaceTrusted?.() !== false) return true;
+  res.status(403).json({
+    error: 'Workspace is not trusted.',
+    code: 'untrusted_workspace',
+  });
+  return false;
+}
+
+function requireOpenGeneration(
+  assertGenerationOpen: (() => void) | undefined,
+  res: Response,
+): boolean {
+  try {
+    assertGenerationOpen?.();
+    return true;
+  } catch {
+    res.set('Retry-After', '1');
+    res.status(503).json({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+    });
+    return false;
+  }
 }
 
 function nowIso(): string {
@@ -169,6 +201,9 @@ export function publicErrorMessage(
       ? 'Workspace memory remember queue is full.'
       : 'Workspace memory task queue is full.';
   }
+  if (code === 'workspace_draining') {
+    return 'Workspace runtime is being removed.';
+  }
   if (
     code === 'remember_timeout' ||
     code === 'forget_timeout' ||
@@ -180,6 +215,7 @@ export function publicErrorMessage(
 }
 
 export function publicErrorStatus(code: string): number {
+  if (code === 'workspace_draining') return 503;
   if (code === 'remember_queue_full') return 429;
   if (code === 'managed_memory_unavailable') return 409;
   return 500;
@@ -216,8 +252,53 @@ export class WorkspaceRememberTaskLane {
   );
   private readonly tasks = new Map<string, WorkspaceMemoryTaskRecord>();
   private tail: Promise<void> = Promise.resolve();
+  private draining = false;
+  private disposed = false;
 
-  constructor(private readonly bridge: AcpSessionBridge) {}
+  constructor(
+    private readonly bridge: AcpSessionBridge,
+    private readonly workspaceCwd = 'workspace',
+  ) {}
+
+  beginDrain(): void {
+    this.draining = true;
+  }
+
+  cancelDrain(): void {
+    if (!this.disposed) this.draining = false;
+  }
+
+  pendingCount(): number {
+    return this.pendingCounts().total;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.draining = true;
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'queued') continue;
+      task.status = 'failed';
+      task.updatedAt = nowIso();
+      task.error = createTaskError(
+        'workspace_removed',
+        task.kind,
+        'Workspace runtime was removed before the task started.',
+      );
+    }
+  }
+
+  private failRunningTaskAfterRemoval(task: WorkspaceMemoryTaskRecord): void {
+    if (!this.disposed || task.status === 'completed') return;
+    task.status = 'failed';
+    delete task.result;
+    task.updatedAt = nowIso();
+    task.error = createTaskError(
+      'workspace_removed',
+      task.kind,
+      'Workspace runtime was removed while the task was running.',
+    );
+  }
 
   private pendingCounts(): { total: number; nonRemember: number } {
     let total = 0;
@@ -260,6 +341,9 @@ export class WorkspaceRememberTaskLane {
   }
 
   private assertCapacity(kind: WorkspaceMemoryTaskRecord['kind']): void {
+    if (this.draining || this.disposed) {
+      throw new WorkspaceDrainingError(this.workspaceCwd);
+    }
     const pending = this.pendingCounts();
     if (pending.total >= WorkspaceRememberTaskLane.MAX_PENDING) {
       throw Object.assign(new Error('Workspace memory task queue is full'), {
@@ -288,7 +372,11 @@ export class WorkspaceRememberTaskLane {
     this.tasks.set(task.taskId, task);
     this.evictTerminalTasks();
 
-    this.tail = this.tail.then(run, run);
+    const runIfQueued = async () => {
+      if (task.status !== 'queued') return;
+      await run();
+    };
+    this.tail = this.tail.then(runIfQueued, runIfQueued);
     void this.tail.catch((err: unknown) => {
       debugLogger.error('Unhandled task lane error:', err);
     });
@@ -324,6 +412,7 @@ export class WorkspaceRememberTaskLane {
     content: string;
     contextMode: BridgeWorkspaceMemoryRememberContextMode;
     originatorClientId?: string;
+    assertGenerationOpen?: () => void;
   }): WorkspaceMemoryRememberTaskSnapshot {
     this.assertCapacity('remember');
     const task: WorkspaceMemoryTaskRecord = {
@@ -341,20 +430,24 @@ export class WorkspaceRememberTaskLane {
       task.status = 'running';
       task.updatedAt = nowIso();
       try {
+        params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryRemember({
           content: params.content,
           contextMode: params.contextMode,
         });
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.filesTouched.length > 0
-              ? 'Memory update completed.'
-              : 'No memory files updated.',
-          filesTouched: result.filesTouched,
-          touchedScopes: result.touchedScopes,
-        };
-        task.updatedAt = nowIso();
+        params.assertGenerationOpen?.();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.filesTouched.length > 0
+                ? 'Memory update completed.'
+                : 'No memory files updated.',
+            filesTouched: result.filesTouched,
+            touchedScopes: result.touchedScopes,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -375,6 +468,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -397,6 +491,7 @@ export class WorkspaceRememberTaskLane {
   enqueueForget(params: {
     query: string;
     originatorClientId?: string;
+    assertGenerationOpen?: () => void;
   }): WorkspaceMemoryForgetTaskSnapshot {
     this.assertCapacity('forget');
     const task: WorkspaceMemoryTaskRecord = {
@@ -414,19 +509,23 @@ export class WorkspaceRememberTaskLane {
       task.status = 'running';
       task.updatedAt = nowIso();
       try {
+        params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryForget({
           query: params.query,
         });
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.summary ??
-            formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
-          removedEntries: result.removedEntries,
-          touchedTopics: result.touchedTopics,
-          touchedScopes: result.touchedScopes,
-        };
-        task.updatedAt = nowIso();
+        params.assertGenerationOpen?.();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.summary ??
+              formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
+            removedEntries: result.removedEntries,
+            touchedTopics: result.touchedTopics,
+            touchedScopes: result.touchedScopes,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -447,6 +546,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -468,6 +568,7 @@ export class WorkspaceRememberTaskLane {
 
   enqueueDream(params: {
     originatorClientId?: string;
+    assertGenerationOpen?: () => void;
   }): WorkspaceMemoryDreamTaskSnapshot {
     this.assertCapacity('dream');
     const task: WorkspaceMemoryTaskRecord = {
@@ -485,16 +586,20 @@ export class WorkspaceRememberTaskLane {
       task.status = 'running';
       task.updatedAt = nowIso();
       try {
+        params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryDream();
-        task.status = 'completed';
-        task.result = {
-          summary:
-            result.summary ??
-            formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
-          touchedTopics: result.touchedTopics,
-          dedupedEntries: result.dedupedEntries,
-        };
-        task.updatedAt = nowIso();
+        params.assertGenerationOpen?.();
+        if (!this.disposed) {
+          task.status = 'completed';
+          task.result = {
+            summary:
+              result.summary ??
+              formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
+            touchedTopics: result.touchedTopics,
+            dedupedEntries: result.dedupedEntries,
+          };
+          task.updatedAt = nowIso();
+        }
       } catch (err) {
         const code = workspaceMemoryFailureCode(
           err,
@@ -515,6 +620,7 @@ export class WorkspaceRememberTaskLane {
         task.error = createTaskError(code, task.kind, diagnostics.details);
         task.updatedAt = nowIso();
       }
+      this.failRunningTaskAfterRemoval(task);
       try {
         if (task.status === 'completed' && task.result) {
           this.publishManagedMemoryChanged({
@@ -579,6 +685,7 @@ async function validateManagedMemoryAvailable(
   deps: WorkspaceRememberRouteDeps,
   res: Response,
   kind: WorkspaceMemoryTaskKind,
+  assertGenerationOpen?: () => void,
 ): Promise<boolean> {
   try {
     const available = await deps.bridge.isWorkspaceMemoryRememberAvailable();
@@ -591,6 +698,7 @@ async function validateManagedMemoryAvailable(
     }
     return true;
   } catch (err) {
+    if (!requireOpenGeneration(assertGenerationOpen, res)) return false;
     debugLogger.error('Availability check failed:', err);
     const code = `${kind}_failed`;
     res.status(500).json({
@@ -609,6 +717,9 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/remember',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const body = deps.safeBody(req);
       const content = body['content'];
       const trimmedContent = typeof content === 'string' ? content.trim() : '';
@@ -641,9 +752,17 @@ export function mountWorkspaceMemoryRememberRoutes(
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
 
-      if (!(await validateManagedMemoryAvailable(deps, res, 'remember'))) {
+      if (
+        !(await validateManagedMemoryAvailable(
+          deps,
+          res,
+          'remember',
+          assertGenerationOpen,
+        ))
+      ) {
         return;
       }
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
 
       let task: WorkspaceMemoryRememberTaskSnapshot;
       try {
@@ -651,6 +770,7 @@ export function mountWorkspaceMemoryRememberRoutes(
           content: trimmedContent,
           contextMode: contextModeRaw,
           ...(originatorClientId ? { originatorClientId } : {}),
+          ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
         });
       } catch (err) {
         const code = workspaceMemoryFailureCode(
@@ -672,6 +792,9 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/remember/:taskId',
     deps.mutate({ strict: true }),
     (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const requesterClientId = validateOriginatorClientId(deps, req, res);
       if (requesterClientId === null) return;
       const task = deps.lane.get(
@@ -694,6 +817,9 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/forget',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const body = deps.safeBody(req);
       const query = body['query'];
       const trimmedQuery = typeof query === 'string' ? query.trim() : '';
@@ -716,12 +842,22 @@ export function mountWorkspaceMemoryRememberRoutes(
 
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
-      if (!(await validateManagedMemoryAvailable(deps, res, 'forget'))) return;
+      if (
+        !(await validateManagedMemoryAvailable(
+          deps,
+          res,
+          'forget',
+          assertGenerationOpen,
+        ))
+      )
+        return;
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
 
       try {
         const task = deps.lane.enqueueForget({
           query: trimmedQuery,
           ...(originatorClientId ? { originatorClientId } : {}),
+          ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
         });
         res.status(202).json(task);
       } catch (err) {
@@ -742,6 +878,9 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/forget/:taskId',
     deps.mutate({ strict: true }),
     (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const requesterClientId = validateOriginatorClientId(deps, req, res);
       if (requesterClientId === null) return;
       const task = deps.lane.get(
@@ -764,13 +903,26 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/dream',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
-      if (!(await validateManagedMemoryAvailable(deps, res, 'dream'))) return;
+      if (
+        !(await validateManagedMemoryAvailable(
+          deps,
+          res,
+          'dream',
+          assertGenerationOpen,
+        ))
+      )
+        return;
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
 
       try {
         const task = deps.lane.enqueueDream({
           ...(originatorClientId ? { originatorClientId } : {}),
+          ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
         });
         res.status(202).json(task);
       } catch (err) {
@@ -791,6 +943,9 @@ export function mountWorkspaceMemoryRememberRoutes(
     '/workspace/memory/dream/:taskId',
     deps.mutate({ strict: true }),
     (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      if (!requireOpenGeneration(assertGenerationOpen, res)) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const requesterClientId = validateOriginatorClientId(deps, req, res);
       if (requesterClientId === null) return;
       const task = deps.lane.get(

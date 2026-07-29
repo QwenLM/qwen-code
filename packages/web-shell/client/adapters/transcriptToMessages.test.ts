@@ -140,7 +140,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('hides background task notifications by metadata', () => {
+  it('preserves user input annotations metadata', () => {
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 14,
+        text: '@dataset:users',
+        reference: {
+          id: 'dataset:users',
+          kind: 'dataset',
+          label: 'Dataset',
+          value: 'users',
+          serialized: '@dataset:users',
+        },
+      },
+    ];
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', '@dataset:users', 1, false, {
+        meta: { inputAnnotations },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: '@dataset:users',
+      inputAnnotations,
+    });
+  });
+
+  it('renders live background task notifications as system messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
         'bg-1',
@@ -161,11 +191,135 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages).toEqual([
       {
+        id: 'bg-1',
+        role: 'system',
+        content:
+          'Background agent "general-purpose: 查询百度云活动信息" completed.',
+        variant: 'info',
+        source: 'background_notification',
+        data: { taskId: 'task-1', status: 'completed' },
+        timestamp: 1,
+      },
+      {
         id: 'assistant-1',
         role: 'assistant',
         content: '正常回复',
         isStreaming: false,
         timestamp: 2,
+      },
+    ]);
+  });
+
+  it.each([
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['cancelled', 'completed'],
+  ] as const)(
+    'projects a background agent %s notification onto its tool',
+    (notificationStatus, expectedStatus) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-block', 'agent-call', 'completed', 1, {
+          toolName: 'agent',
+          rawInput: { run_in_background: true },
+          rawOutput: { type: 'task_execution', status: 'background' },
+        }),
+        textBlock(
+          'agent-terminal',
+          'assistant',
+          'background agent finished',
+          2,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                status: notificationStatus,
+                taskId: 'agent-task',
+                toolUseId: 'agent-call',
+              },
+            },
+          },
+        ),
+      ]);
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-call', status: expectedStatus, endTime: 2 }],
+      });
+      expect(messages[1]).toMatchObject({
+        role: 'system',
+        source: 'background_notification',
+        data: {
+          kind: 'agent',
+          status: notificationStatus,
+          taskId: 'agent-task',
+          toolUseId: 'agent-call',
+        },
+      });
+      if (notificationStatus === 'cancelled') {
+        expect(
+          messages[0]?.role === 'tool_group'
+            ? messages[0].tools[0]?.rawOutput
+            : undefined,
+        ).toMatchObject({ status: 'cancelled' });
+      }
+    },
+  );
+
+  it('does not apply a non-agent background notification to an agent tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 1, {
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      textBlock('shell-terminal', 'assistant', 'shell completed', 2, false, {
+        meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            kind: 'shell',
+            status: 'completed',
+            toolUseId: 'agent-call',
+          },
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'pending' }] },
+      {
+        role: 'system',
+        source: 'background_notification',
+        data: {
+          kind: 'shell',
+          status: 'completed',
+          toolUseId: 'agent-call',
+        },
+      },
+    ]);
+  });
+
+  it('renders replayed background notifications without task metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('bg-replay', 'user', 'Monitor completed.', 1, false, {
+        meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'bg-replay',
+        role: 'system',
+        content: 'Monitor completed.',
+        variant: 'info',
+        source: 'background_notification',
+        timestamp: 1,
       },
     ]);
   });

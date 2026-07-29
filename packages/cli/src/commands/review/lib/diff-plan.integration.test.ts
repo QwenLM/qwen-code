@@ -21,23 +21,14 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDiffPlan, chunksCoverDiff, parseDiff } from './diff-plan.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './diff-flags.js';
 
-/** Config `fetch-pr` pins with `-c`, because no command-line flag exists. */
-const PINNED_CONFIG = ['-c', 'diff.suppressBlankEmpty=false'];
-
-/** The exact flags `fetch-pr` pins on its capture. */
-const CAPTURE_FLAGS = [
-  '--no-ext-diff',
-  '--no-textconv',
-  '--no-color',
-  '--unified=3',
-  '--src-prefix=a/',
-  '--dst-prefix=b/',
-  '--find-renames',
-  '--no-relative',
-  '--ignore-submodules=none',
-  '--submodule=short',
-];
+// Driven from the production constants, not a copy of them. Hand-maintained
+// duplicates of the flag list let a flag be deleted from the capture paths while
+// this test — the only thing that proves the flags survive a hostile config —
+// stays green against its own private copy.
+const PINNED_CONFIG = [...PINNED_DIFF_CONFIG];
+const CAPTURE_FLAGS = [...PINNED_DIFF_FLAGS];
 
 /** Config a user may legitimately have set, all of which corrupts the output. */
 const HOSTILE_CONFIG = [

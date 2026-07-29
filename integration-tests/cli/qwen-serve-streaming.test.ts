@@ -21,10 +21,13 @@
  *   3. SSE consumer disconnects after seeing N events; reconnect with
  *      `Last-Event-ID: N` resumes the stream from id N+1 via the bus's
  *      replay ring.
+ *   4. An admitted prompt keeps running with no SSE subscriber while the Todo
+ *      Stop Guard performs its bounded continuations; a later subscriber
+ *      replays each discrete status event.
  *
  */
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +87,27 @@ beforeAll(async () => {
     const hasToolResult =
       messages.includes('"role":"tool"') || messages.includes('"tool_call_id"');
 
+    const guardMarker = messages.match(/todo-guard-e2e-\d+/g)?.at(-1);
+    if (guardMarker) {
+      const guardTodoId = `${guardMarker}-item`;
+      if (!messages.includes(guardTodoId)) {
+        return {
+          toolCalls: [
+            fakeToolCall('todo_write', {
+              todos: [
+                {
+                  id: guardTodoId,
+                  content: 'Keep this item unfinished for the guard test',
+                  status: 'pending',
+                },
+              ],
+            }),
+          ],
+        };
+      }
+      return { content: 'The test Todo remains unfinished.' };
+    }
+
     if (pendingWritePath && messages.includes('fan-out') && !hasToolResult) {
       return {
         toolCalls: [
@@ -98,6 +122,15 @@ beforeAll(async () => {
     return { content: 'fake response complete' };
   });
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-home-'));
+  const qwenHome = path.join(homeDir, '.qwen');
+  mkdirSync(qwenHome, { recursive: true });
+  writeFileSync(
+    path.join(qwenHome, 'settings.json'),
+    JSON.stringify({
+      experimental: { todoStopGuard: true },
+      ui: { enableFollowupSuggestions: false },
+    }),
+  );
   daemon = spawn(
     process.execPath,
     [
@@ -455,5 +488,65 @@ describePOSIX('qwen serve — Last-Event-ID resume', () => {
     expect(resumedFirst).toBeDefined();
     expect(resumedFirst!.id).toBeDefined();
     expect(resumedFirst!.id!).toBeGreaterThan(lastId);
+  }, 60_000);
+});
+
+describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
+  it('continues after prompt admission without an SSE client and replays the bounded attempts', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+    });
+    const requestStart = fakeServer.requests.length;
+    const guardMarker = `todo-guard-e2e-${requestStart}`;
+    const accepted = await client.promptNonBlocking(session.sessionId, {
+      prompt: [{ type: 'text', text: guardMarker }],
+    });
+    expect('promptId' in accepted).toBe(true);
+    if (!('promptId' in accepted)) return;
+
+    await expect
+      .poll(
+        () =>
+          fakeServer.requests
+            .slice(requestStart)
+            .filter((request) =>
+              JSON.stringify(request.body['messages'] ?? []).includes(
+                guardMarker,
+              ),
+            ).length,
+        { timeout: 30_000 },
+      )
+      .toBe(4);
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    for await (const event of sseFrames(session.sessionId, {
+      lastEventId: accepted.lastEventId,
+      signal: ac.signal,
+    })) {
+      events.push(event);
+      if (event.type === 'turn_complete') break;
+    }
+    ac.abort();
+
+    const guardUpdates = events.filter((event) => {
+      if (event.type !== 'session_update') return false;
+      const update = (event.data as { update?: Record<string, unknown> })
+        .update;
+      const meta = update?.['_meta'] as Record<string, unknown> | undefined;
+      return meta?.['source'] === 'todo_stop_guard';
+    });
+    expect(guardUpdates).toHaveLength(3);
+    expect(
+      guardUpdates.map((event) => {
+        const update = (event.data as { update: Record<string, unknown> })
+          .update;
+        return (update['_meta'] as Record<string, unknown>)['attempt'];
+      }),
+    ).toEqual([1, 2, 2]);
+    expect(events.some((event) => event.type === 'turn_complete')).toBe(true);
+    expect(JSON.stringify(guardUpdates)).not.toContain(
+      'Keep this item unfinished for the guard test',
+    );
   }, 60_000);
 });

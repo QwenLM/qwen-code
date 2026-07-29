@@ -51,6 +51,7 @@ export {
   logExtensionDisable,
   logExtensionUpdateEvent,
   logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
@@ -62,6 +63,7 @@ export {
   logMemoryExtract,
   logMemoryDream,
   logMemoryRecall,
+  logMemoryRecallDelivery,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
@@ -80,6 +82,7 @@ export {
   KittySequenceOverflowEvent,
   ToolOutputTruncatedEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   NextSpeakerCheckEvent,
   AuthEvent,
   SkillLaunchEvent,
@@ -91,6 +94,7 @@ export {
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {
@@ -104,6 +108,7 @@ export type { TelemetryEvent } from './types.js';
 export { SpanStatusCode, ValueType } from '@opentelemetry/api';
 export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 export * from './uiTelemetry.js';
+export * from './api-activity-tracker.js';
 export {
   // Core metrics functions
   recordToolCallMetrics,
@@ -135,6 +140,8 @@ export {
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
+  recordChannelMemoryRecallMetrics,
+  recordMemoryRecallDeliveryMetrics,
   // Performance monitoring types
   PerformanceMetricType,
   MemoryMetricType,
@@ -167,6 +174,7 @@ export {
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,
+  StartLLMRequestSpanOptions,
   EndInteractionOptions,
   InteractionSpanResultStatus,
   LLMRequestMetadata,
@@ -233,6 +241,8 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';

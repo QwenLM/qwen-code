@@ -27,8 +27,30 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
+import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
+import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import {
+  reportOpenAiChunk,
+  reportOpenAiRequest,
+  reportOpenAiResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+
+function isRequiredThinkingError(error: unknown): boolean {
+  if (getErrorStatus(error) !== 400) return false;
+  const providerMessage = getRateLimitErrorDetails(error).providerMessage;
+  const message = `${getErrorMessage(error)} ${providerMessage ?? ''}`;
+  return (
+    message.includes('enable_thinking') &&
+    /(?:restricted to|must be) true\b/i.test(message)
+  );
+}
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -277,6 +299,7 @@ export type { PipelineConfig } from './types.js';
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  private readonly requiredThinkingModels = new Set<string>();
   // Resolved once (config field > env > default) so the env read + any
   // invalid-value warning happen per pipeline, not per streaming request.
   private readonly streamIdleTimeoutMs: number;
@@ -297,7 +320,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       false,
-      async (openaiRequest, context) => {
+      async (openaiRequest, context, telemetryAttempt) => {
         // Wrap in a per-request child so the OpenAI SDK's leaked abort
         // listener (client.mjs fetchWithTimeout — no {once:true}, no
         // removeEventListener) stays on a short-lived signal instead of
@@ -313,6 +336,7 @@ export class ContentGenerationPipeline {
               signal: perRequestAc?.signal,
             },
           )) as OpenAI.Chat.ChatCompletion;
+          reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
           const geminiResponse =
             OpenAIContentConverter.convertOpenAIResponseToGemini(
@@ -336,7 +360,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       true,
-      async (openaiRequest, context) => {
+      async (openaiRequest, context, telemetryAttempt) => {
         // Always use a per-request controller so the inactivity watchdog can
         // abort the SDK request even when the caller did not provide a signal.
         const parentSignal = request.config?.abortSignal;
@@ -440,6 +464,8 @@ export class ContentGenerationPipeline {
           guarded,
           context,
           request,
+          userPromptId,
+          telemetryAttempt,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -459,16 +485,15 @@ export class ContentGenerationPipeline {
    * 1. Convert OpenAI chunks to Gemini format while preserving original chunks
    * 2. Filter empty responses
    * 3. Handle chunk merging for providers that send finishReason and usageMetadata separately
-   * 4. Collect both formats for logging
-   * 5. Handle success/error logging
+   * 4. Handle success/error logging
    */
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
     request: GenerateContentParameters,
+    userPromptId: string,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
-    const collectedGeminiResponses: GenerateContentResponse[] = [];
-
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
     // a subsequent usage-metadata chunk before yielding.
@@ -478,10 +503,37 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    let pendingFinishProtocolTagSanitized:
+      | NonNullable<RequestContext['protocolTagSanitized']>
+      | undefined;
+    const logPendingProtocolTagSanitized = (
+      response: GenerateContentResponse,
+      sanitization:
+        | NonNullable<RequestContext['protocolTagSanitized']>
+        | undefined,
+    ) => {
+      if (!sanitization) return;
+      const event = new ProtocolTagSanitizedEvent({
+        model: context.model,
+        promptId: userPromptId,
+        responseId: response.responseId,
+        tagName: sanitization.tagName,
+        toolCallCount: sanitization.toolCallCount,
+      });
+      debugLogger.warn('Sanitized a model protocol tag', {
+        model: event.model,
+        promptId: event.prompt_id,
+        responseId: event.response_id,
+        tagName: event.tag_name,
+        toolCallCount: event.tool_call_count,
+      });
+      logProtocolTagSanitized(this.config.cliConfig, event);
+    };
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        reportOpenAiChunk(telemetryAttempt, chunk);
         // Detect API errors returned as stream content.
         // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
         // with finish_reason="error_finish" and the error in delta.content,
@@ -498,13 +550,34 @@ export class ContentGenerationPipeline {
           context,
         );
 
+        const sanitization = context.protocolTagSanitized;
+        if (sanitization) {
+          context.protocolTagSanitized = undefined;
+        }
+
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
-          response.candidates?.[0]?.content?.parts?.length === 0 &&
+          (response.candidates?.[0]?.content?.parts?.length ?? 0) === 0 &&
           !response.candidates?.[0]?.finishReason &&
-          !response.usageMetadata
+          !response.usageMetadata &&
+          // Preparation-only responses must reach ACP before arguments complete.
+          getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (
+          pendingFinishProtocolTagSanitized &&
+          pendingFinishResponse &&
+          !response.candidates?.[0]?.finishReason &&
+          response.candidates?.some(
+            (candidate) => (candidate.content?.parts?.length ?? 0) > 0,
+          )
+        ) {
+          throw new InvalidStreamError(
+            'Model response continued after a finish reason.',
+            'PROTOCOL_TAG_LEAK',
+          );
         }
 
         // Stage 2c: Handle chunk merging for providers that send
@@ -526,13 +599,20 @@ export class ContentGenerationPipeline {
               pending.usageMetadata = response.usageMetadata;
             }
           }
-          collectedGeminiResponses.push(response);
           continue;
+        }
+
+        if (
+          !pendingFinishResponse &&
+          response.candidates?.[0]?.finishReason &&
+          sanitization
+        ) {
+          pendingFinishProtocolTagSanitized = sanitization;
         }
 
         const shouldYield = this.handleChunkMerging(
           response,
-          collectedGeminiResponses,
+          pendingFinishResponse,
           (mergedResponse) => {
             pendingFinishResponse = mergedResponse;
           },
@@ -541,26 +621,76 @@ export class ContentGenerationPipeline {
         if (shouldYield) {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
+            logPendingProtocolTagSanitized(
+              pendingFinishResponse,
+              pendingFinishProtocolTagSanitized,
+            );
             yield pendingFinishResponse;
             finishYielded = true;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
         }
       }
 
+      if (
+        context.pendingThinkingTagCandidate &&
+        !context.pendingThinkingTagCandidate.closingTagName &&
+        !/\S/.test(context.pendingThinkingTagCandidate.text)
+      ) {
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        if (pendingParts?.length) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: pendingParts, role: 'model' },
+              index: 0,
+            },
+          ];
+          yield response;
+        }
+      } else if (context.pendingThinkingTagCandidate) {
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
         yield pendingFinishResponse;
       }
     } catch (error) {
+      if (error instanceof InvalidStreamError) {
+        throw error;
+      }
+
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
         throw redactProxyError(error);
+      }
+
+      if (
+        context.pendingThinkingTagCandidate?.closingTagName &&
+        request.config?.abortSignal?.aborted !== true
+      ) {
+        context.pendingThinkingTagCandidate = undefined;
+        context.pendingUntrustedResponseParts = undefined;
+        throw new InvalidStreamError(
+          'Model response leaked thinking tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
       }
 
       // Bypass handleError: it strips `code` from timeout errors, which would
@@ -587,74 +717,64 @@ export class ContentGenerationPipeline {
    * finishReason and the most up-to-date usage information from any provider pattern.
    *
    * @param response Current Gemini response
-   * @param collectedGeminiResponses Array to collect responses for logging
+   * @param pendingFinishResponse Finish response currently held for merging
    * @param setPendingFinish Callback to set pending finish response
    * @returns true if the response should be yielded, false if it should be held for merging
    */
   private handleChunkMerging(
     response: GenerateContentResponse,
-    collectedGeminiResponses: GenerateContentResponse[],
+    pendingFinishResponse: GenerateContentResponse | null,
     setPendingFinish: (response: GenerateContentResponse) => void,
   ): boolean {
     const isFinishChunk = response.candidates?.[0]?.finishReason;
 
-    // Check if we have a pending finish response from previous chunks
-    const hasPendingFinish =
-      collectedGeminiResponses.length > 0 &&
-      collectedGeminiResponses[collectedGeminiResponses.length - 1]
-        .candidates?.[0]?.finishReason;
-
     if (isFinishChunk) {
-      if (hasPendingFinish) {
+      if (pendingFinishResponse) {
         // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
-        const lastResponse =
-          collectedGeminiResponses[collectedGeminiResponses.length - 1];
+        // finish_reason chunks for tool calls). The first finish response owns
+        // the candidates, including functionCall parts. Merge only usageMetadata
+        // from later finish chunks.
         if (response.usageMetadata) {
-          lastResponse.usageMetadata = response.usageMetadata;
+          pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
-        setPendingFinish(lastResponse);
+        if (response.modelVersion) {
+          pendingFinishResponse.modelVersion = response.modelVersion;
+        }
+        setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
-        collectedGeminiResponses.push(response);
         setPendingFinish(response);
       }
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
-    } else if (hasPendingFinish) {
+    } else if (pendingFinishResponse) {
       // We have a pending finish chunk, merge this chunk's data into it
-      const lastResponse =
-        collectedGeminiResponses[collectedGeminiResponses.length - 1];
       const mergedResponse = new GenerateContentResponse();
 
       // Keep the finish reason from the previous chunk
-      mergedResponse.candidates = lastResponse.candidates;
+      mergedResponse.candidates = pendingFinishResponse.candidates;
 
       // Merge usage metadata if this chunk has it
       if (response.usageMetadata) {
         mergedResponse.usageMetadata = response.usageMetadata;
       } else {
-        mergedResponse.usageMetadata = lastResponse.usageMetadata;
+        mergedResponse.usageMetadata = pendingFinishResponse.usageMetadata;
       }
 
       // Copy other essential properties from the current response
-      mergedResponse.responseId = response.responseId;
-      mergedResponse.createTime = response.createTime;
-      mergedResponse.modelVersion = response.modelVersion;
-      mergedResponse.promptFeedback = response.promptFeedback;
-
-      // Update the collected responses with the merged response
-      collectedGeminiResponses[collectedGeminiResponses.length - 1] =
-        mergedResponse;
+      mergedResponse.responseId =
+        response.responseId || pendingFinishResponse.responseId;
+      mergedResponse.createTime =
+        response.createTime || pendingFinishResponse.createTime;
+      mergedResponse.modelVersion =
+        response.modelVersion || pendingFinishResponse.modelVersion;
+      mergedResponse.promptFeedback =
+        response.promptFeedback || pendingFinishResponse.promptFeedback;
 
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
     }
 
-    // Normal chunk - collect and yield
-    collectedGeminiResponses.push(response);
+    // Normal chunk
     return true;
   }
 
@@ -696,6 +816,20 @@ export class ContentGenerationPipeline {
           request.config.tools,
           this.contentGeneratorConfig.schemaCompliance ?? 'auto',
         );
+
+      // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
+      // tool_choice so structured side queries (e.g. the AUTO-mode
+      // classifier's respond_in_schema) can force the model to emit a tool
+      // call instead of free-texting. Without this, thinking-heavy models
+      // may consume the tiny output budget on reasoning and skip the tool.
+      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
+      if (fcMode === 'ANY') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'required';
+      } else if (fcMode === 'NONE') {
+        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+          'none';
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
@@ -711,6 +845,18 @@ export class ContentGenerationPipeline {
     // not just remove the effort knob — otherwise providers whose default
     // is "thinking enabled" (DeepSeek V4+, qwen3) keep paying thinking
     // latency/cost.
+    //
+    // Exception: `thinkingMandatory` marks models that reject
+    // `enable_thinking: false` with a 400 (e.g. qwen3.8-max-preview on
+    // DashScope Token Plan gateways — set by the preset, or by users via
+    // model generation config). For these, never emit the disable on the
+    // wire: a "disabled" shape is a guaranteed request failure, so the flag
+    // also overrides the config-level `reasoning: false` opt-out.
+    const model = (context.model ?? '').toLowerCase();
+    const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+      this.contentGeneratorConfig,
+    );
+    const thinkingMandatory = this.requiresThinking(model);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -736,13 +882,11 @@ export class ContentGenerationPipeline {
       // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
-      const model = (context.model ?? '').toLowerCase();
-      if (model.startsWith('qwen') || model === 'coder-model') {
-        if (
-          DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-            this.contentGeneratorConfig,
-          )
-        ) {
+      if (
+        !thinkingMandatory &&
+        (model.startsWith('qwen') || model === 'coder-model')
+      ) {
+        if (isDashScope) {
           typed['enable_thinking'] = false;
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
@@ -780,7 +924,7 @@ export class ContentGenerationPipeline {
       if ('reasoning' in typed) {
         delete typed['reasoning'];
       }
-      if ('reasoning_effort' in typed) {
+      if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
@@ -794,7 +938,46 @@ export class ContentGenerationPipeline {
       }
     }
 
+    if (thinkingMandatory) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      if (typed['enable_thinking'] === false) {
+        delete typed['enable_thinking'];
+      }
+      const chatTemplateKwargs = typed['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (chatTemplateKwargs?.['enable_thinking'] === false) {
+        const remaining = { ...chatTemplateKwargs };
+        delete remaining['enable_thinking'];
+        if (Object.keys(remaining).length > 0) {
+          typed['chat_template_kwargs'] = remaining;
+        } else {
+          delete typed['chat_template_kwargs'];
+        }
+      }
+    }
+
+    const typed = providerRequest as unknown as Record<string, unknown>;
+    // DashScope rejects forced tool selection while thinking is enabled.
+    if (
+      isDashScope &&
+      typed['tool_choice'] === 'required' &&
+      (thinkingMandatory || typed['enable_thinking'] === true)
+    ) {
+      delete typed['tool_choice'];
+    }
+
     return providerRequest;
+  }
+
+  private requiresThinking(model: string): boolean {
+    const normalizedModel = model.toLowerCase();
+    return (
+      this.requiredThinkingModels.has(normalizedModel) ||
+      (this.contentGeneratorConfig.thinkingMandatory === true &&
+        normalizedModel ===
+          (this.contentGeneratorConfig.model ?? '').toLowerCase())
+    );
   }
 
   private buildGenerateContentConfig(
@@ -935,12 +1118,13 @@ export class ContentGenerationPipeline {
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
+      telemetryAttempt: GenAiAttemptHandle | undefined,
     ) => Promise<T>,
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
-
-    try {
-      const openaiRequest = await this.buildRequest(
+    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    const executeAttempt = async () => {
+      openaiRequest = await this.buildRequest(
         request,
         userPromptId,
         context,
@@ -952,10 +1136,36 @@ export class ContentGenerationPipeline {
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      const result = await executor(openaiRequest, context);
-      return result;
+      return executor(openaiRequest, context, telemetryAttempt);
+    };
+
+    try {
+      return await executeAttempt();
     } catch (error) {
+      const model = context.model.toLowerCase();
+      const wireRequest = openaiRequest as Record<string, unknown> | undefined;
+      const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        (wireRequest?.['enable_thinking'] === false ||
+          chatTemplateKwargs?.['enable_thinking'] === false) &&
+        request.config?.abortSignal?.aborted !== true &&
+        isRequiredThinkingError(error)
+      ) {
+        this.requiredThinkingModels.add(model);
+        debugLogger.warn('Retrying with required thinking enabled', {
+          model,
+          originalError: getErrorMessage(error),
+        });
+        try {
+          return await executeAttempt();
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }

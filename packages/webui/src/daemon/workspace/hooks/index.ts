@@ -6,6 +6,7 @@
 
 export { useDaemonAgents } from './useDaemonAgents.js';
 export { useDaemonAuth } from './useDaemonAuth.js';
+export { useDaemonChannels } from './useDaemonChannels.js';
 export { useDaemonDiagnostics } from './useDaemonDiagnostics.js';
 export { useDaemonFiles } from './useDaemonFiles.js';
 export { useDaemonGlob } from './useDaemonGlob.js';
@@ -24,3 +25,4 @@ export {
 } from './useDaemonUsageDashboard.js';
 export { useDaemonTools } from './useDaemonTools.js';
 export { useDaemonSettings } from './useDaemonSettings.js';
+export { useDaemonProviders } from './useDaemonProviders.js';

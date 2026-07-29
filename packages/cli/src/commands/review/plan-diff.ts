@@ -12,13 +12,15 @@
 // in lightweight mode, therefore routed into a topology it had no chunk list
 // for — no receipts, no tiling guarantee, and the orchestrator left to improvise
 // line ranges. Those two paths now capture their diff to a file (redirection
-// bypasses the 30 000-char shell cap) and run this.
+// bypasses Shell model-output truncation) and run this.
 
 import type { CommandModule } from 'yargs';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
+import { planEffortField } from './lib/effort.js';
+import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -36,12 +38,23 @@ interface PlanDiffArgs {
   out: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
+  /** The PR this diff came from — passed ONLY after `pr-context` succeeded. */
+  pr?: number;
+  repo?: string;
+  effort?: ReviewEffort;
 }
 
-/** A plan for a diff nobody fetched: no worktree, no PR metadata. */
+/** A plan for a diff nobody fetched: no worktree — and PR identity only when
+ *  the caller resolved one (--pr/--repo, lightweight cross-repo mode). Declared
+ *  here so a refactor away from the conditional spread cannot silently drop the
+ *  fields the roster's Agent-0 requirement reads. */
 type PlanDiffResult = PlanReport & {
   diffPath: string;
   diffPathAbsolute: string;
+  prNumber?: string;
+  ownerRepo?: string;
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: ReviewEffort;
 };
 
 function runPlanDiff(args: PlanDiffArgs): void {
@@ -56,14 +69,33 @@ function runPlanDiff(args: PlanDiffArgs): void {
     );
   }
 
+  // Exactly one of the pair is a call error: the roster requires Agent 0 only
+  // when the plan carries both, and a plan with half an identity would silently
+  // drop the requirement the caller meant to add.
+  if ((args.pr === undefined) !== (args.repo === undefined)) {
+    throw new Error(
+      'plan-diff: --pr and --repo go together — the roster requires the ' +
+        'issue-fidelity agent only when the plan carries the full PR identity.',
+    );
+  }
+
   const plan = buildDiffPlan(diffText, args.maxChunkLines);
   const result: PlanDiffResult = {
     diffPath,
     diffPathAbsolute: resolve(diffPath),
+    // The PR identity, when the caller resolved one. This is what lets the
+    // roster require Agent 0 on a lightweight cross-repo review — a diff-only
+    // plan without it cannot demand an agent nobody could build. Passed only
+    // when `pr-context` succeeded, so its presence doubles as the
+    // context-availability signal.
+    ...(args.pr !== undefined && args.repo !== undefined
+      ? { prNumber: String(args.pr), ownerRepo: args.repo }
+      : {}),
     // No `git show` is possible here — there is no ref to resolve a path
     // against — so per-file line counts and heaviness are unavailable. Chunk
     // coverage, which is what Step 3B needs, is not.
     ...buildPlanReport(plan, null),
+    ...planEffortField(args.effort),
   };
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
@@ -103,11 +135,31 @@ export const planDiffCommand: CommandModule = {
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
       })
+      .option('pr', {
+        type: 'number',
+        describe:
+          'The PR number this diff came from (lightweight cross-repo mode). ' +
+          'Pass together with --repo, and ONLY after pr-context succeeded — ' +
+          'it makes the roster require the issue-fidelity agent.',
+      })
+      .option('repo', {
+        type: 'string',
+        describe: 'owner/repo of the PR, together with --pr',
+      })
       .option('max-chunk-lines', {
         type: 'number',
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: (argv) => {
     runPlanDiff(argv as unknown as PlanDiffArgs);

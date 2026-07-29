@@ -10,6 +10,7 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
@@ -257,6 +258,30 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'git_branch_changed': {
+      const data = getRecord(event.data);
+      const workspaceCwd = getString(data, 'workspaceCwd');
+      const branch = getString(data, 'branch');
+      setConnection((current) =>
+        workspaceCwd && workspaceCwd !== current.workspaceCwd
+          ? current
+          : { ...current, gitBranch: branch },
+      );
+      break;
+    }
+    case 'git_status_changed': {
+      const data = getRecord(event.data);
+      const workspaceCwd = getString(data, 'workspaceCwd');
+      setConnection((current) =>
+        workspaceCwd && workspaceCwd !== current.workspaceCwd
+          ? current
+          : {
+              ...current,
+              gitStatus: data as unknown as DaemonWorkspaceGitStatus,
+            },
+      );
+      break;
+    }
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {

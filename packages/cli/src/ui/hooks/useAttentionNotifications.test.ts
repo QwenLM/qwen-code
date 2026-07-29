@@ -47,6 +47,37 @@ const mockSettingsDisabled: LoadedSettings = {
   },
 } as LoadedSettings;
 
+// Approval notifications suppressed; task-completion notifications preserved.
+const mockSettingsTaskCompleteOnly: LoadedSettings = {
+  merged: {
+    general: {
+      terminalBell: true,
+      notificationMode: 'task-complete',
+    },
+  },
+} as LoadedSettings;
+
+// Explicit 'all' — same behavior as an unset notificationMode.
+const mockSettingsAllMode: LoadedSettings = {
+  merged: {
+    general: {
+      terminalBell: true,
+      notificationMode: 'all',
+    },
+  },
+} as LoadedSettings;
+
+// Unknown value must fall back to 'all' rather than silently disabling
+// approval notifications (defensive parse in the hook).
+const mockSettingsUnknownMode: LoadedSettings = {
+  merged: {
+    general: {
+      terminalBell: true,
+      notificationMode: 'garbage-value',
+    },
+  },
+} as unknown as LoadedSettings;
+
 describe('useAttentionNotifications', () => {
   beforeEach(() => {
     vi.mocked(mockedSendNotification).mockReset();
@@ -283,5 +314,100 @@ describe('useAttentionNotifications', () => {
     });
 
     expect(mockedSendNotification).not.toHaveBeenCalled();
+  });
+
+  describe('notificationMode (#6898)', () => {
+    it('suppresses approval notification when mode is task-complete', () => {
+      // The whole point of the task-complete mode: users driving many tool
+      // approvals in a single task no longer get an OS notification for every
+      // one. The WaitingForConfirmation transition must NOT fire sendNotification.
+      const { rerender } = render({ settings: mockSettingsTaskCompleteOnly });
+
+      rerender({
+        hookProps: {
+          isFocused: false,
+          streamingState: StreamingState.WaitingForConfirmation,
+          elapsedTime: 0,
+          settings: mockSettingsTaskCompleteOnly,
+          terminal: mockTerminal,
+        },
+      });
+
+      expect(mockedSendNotification).not.toHaveBeenCalled();
+    });
+
+    it('still fires task-completion notification when mode is task-complete', () => {
+      // task-complete only silences approvals — the long-task idle notification
+      // is the one the user WANTS to keep. Guards against widening the gate.
+      const { rerender } = render({ settings: mockSettingsTaskCompleteOnly });
+
+      // Simulate a long streaming task followed by return to Idle while
+      // unfocused, matching the LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS path.
+      rerender({
+        hookProps: {
+          isFocused: false,
+          streamingState: StreamingState.Responding,
+          elapsedTime: LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS + 1,
+          settings: mockSettingsTaskCompleteOnly,
+          terminal: mockTerminal,
+        },
+      });
+      rerender({
+        hookProps: {
+          isFocused: false,
+          streamingState: StreamingState.Idle,
+          elapsedTime: LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS + 1,
+          settings: mockSettingsTaskCompleteOnly,
+          terminal: mockTerminal,
+        },
+      });
+
+      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+      expect(mockedSendNotification).toHaveBeenCalledWith(
+        {
+          message: 'Qwen Code is waiting for your input',
+          title: 'Qwen Code',
+        },
+        mockTerminal,
+        true,
+      );
+    });
+
+    it('preserves current behavior when mode is explicitly "all"', () => {
+      // Setting notificationMode: 'all' must be a no-op compared to leaving
+      // it unset — same firing pattern as the pre-#6898 default.
+      const { rerender } = render({ settings: mockSettingsAllMode });
+
+      rerender({
+        hookProps: {
+          isFocused: false,
+          streamingState: StreamingState.WaitingForConfirmation,
+          elapsedTime: 0,
+          settings: mockSettingsAllMode,
+          terminal: mockTerminal,
+        },
+      });
+
+      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to "all" when notificationMode is an unrecognized value', () => {
+      // A legacy settings file with a typo or a future value we don't know
+      // yet must not silently disable approval notifications — the user's
+      // intent is unclear, so we preserve the visible (louder) behavior.
+      const { rerender } = render({ settings: mockSettingsUnknownMode });
+
+      rerender({
+        hookProps: {
+          isFocused: false,
+          streamingState: StreamingState.WaitingForConfirmation,
+          elapsedTime: 0,
+          settings: mockSettingsUnknownMode,
+          terminal: mockTerminal,
+        },
+      });
+
+      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+    });
   });
 });

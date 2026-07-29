@@ -89,6 +89,78 @@ describe('fake OpenAI server', () => {
     expect(server.requests).toHaveLength(2);
   });
 
+  it('can close response connections for isolated latency measurements', async () => {
+    server = await startFakeOpenAIServer(
+      () => ({ content: 'no connection reuse' }),
+      { keepAlive: false },
+    );
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
+  it('closes non-streaming response connections when keepAlive is disabled', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'no reuse' }), {
+      keepAlive: false,
+    });
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
+  it('preserves a caller-requested close for default non-streaming responses', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'closed' }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        connection: 'close',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('connection')).toBe('close');
+    await response.text();
+  });
+
+  it('closes idempotently', async () => {
+    server = await startFakeOpenAIServer(() => ({ content: 'unused' }));
+
+    const firstClose = server.close();
+    const secondClose = server.close();
+
+    expect(secondClose).toBe(firstClose);
+    await Promise.all([firstClose, secondClose]);
+  });
+
   it('serves non-streaming tool calls with null content', async () => {
     server = await startFakeOpenAIServer(() => ({
       toolCalls: [

@@ -1,0 +1,156 @@
+name: 'Serve A/B'
+
+# For PRs that touch the `qwen serve` daemon's response surface, build the CLI
+# from BOTH the PR base (`main`) and the PR head, drive a fixed set of endpoints
+# against each daemon, and diff the JSON responses into a before/after field
+# table posted on the PR. A PR with no response change → "no change". This is
+# the daemon analog of the web-shell visual before/after preview.
+#
+# Security model: this workflow BUILDS AND RUNS untrusted PR code, so it runs on
+# the `pull_request` trigger (fork PRs get a read-only token and NO secrets), on
+# an ephemeral runner, with `contents: read`. It produces only JSON captures +
+# a markdown body as an artifact. The privileged step that needs a write token —
+# posting the comment — lives in the separate workflow_run publisher, which
+# never checks out PR code. The daemon is driven with dummy OpenAI creds, so no
+# model is contacted and the responses are deterministic + safe to diff.
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'release/**'
+    # The daemon's HTTP response surface lives entirely under serve/. `core` has
+    # no serve/health subtree, and firing on all ~1100 packages/core/src files
+    # (tools, prompts, models, …) would trigger the expensive 2x-build A/B on
+    # most core PRs for nothing — a rare core-only response change is an
+    # acceptable best-effort miss. Doc/UI-only PRs don't need an A/B either.
+    paths:
+      - 'packages/cli/src/serve/**'
+      - '.github/workflows/serve-ab.yml'
+      - '.github/scripts/serve-ab-diff.mjs'
+      - '.github/scripts/serve-ab-drive.mjs'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number }}'
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  ab:
+    name: 'Serve A/B (ubuntu-latest, Node 22.x)'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    steps:
+      - name: 'Checkout PR head'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.pull_request.head.sha }}'
+          path: 'head'
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Diff against the MERGE-BASE, not the base-branch tip: a PR branch behind
+      # `main` would otherwise show others' already-landed daemon changes,
+      # reversed, as this PR's diff. Best-effort — a base failure degrades the
+      # diff to after-only (every field reads as added).
+      - name: 'Resolve the merge-base'
+        id: 'mergebase'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BASE_SHA: '${{ github.event.pull_request.base.sha }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          set -euo pipefail
+          # Retry, then emit an EMPTY sha and skip the before build (after-only)
+          # rather than falling back to the base-branch tip — the tip would show
+          # already-landed changes reversed, the exact bug the merge-base avoids.
+          MB=''
+          for attempt in 1 2 3; do
+            MB="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.merge_base_commit.sha' 2>/dev/null || true)"
+            [ -n "${MB}" ] && break
+            sleep 2
+          done
+          echo "sha=${MB}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${MB}" ]; then
+            echo "before (merge-base) = ${MB}"
+          else
+            echo "::warning::could not resolve the merge-base; skipping the before build (after-only)."
+          fi
+
+      - name: 'Checkout the merge-base'
+        id: 'base_checkout'
+        if: "${{ steps.mergebase.outputs.sha != '' }}"
+        continue-on-error: true
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ steps.mergebase.outputs.sha }}'
+          path: 'base'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'head/package-lock.json'
+
+      - name: 'Build + drive the PR head'
+        working-directory: 'head'
+        run: |-
+          set -euo pipefail
+          npm ci --prefer-offline --no-audit --progress=false
+          npm run build
+          node .github/scripts/serve-ab-drive.mjs \
+            packages/cli/dist/index.js "${RUNNER_TEMP}/after"
+
+      # Best-effort: if the base fails to build/drive, the diff treats every
+      # after-field as new rather than sinking the whole preview.
+      - name: 'Build + drive the PR base'
+        if: "${{ steps.base_checkout.outcome == 'success' }}"
+        continue-on-error: true
+        working-directory: 'base'
+        run: |-
+          set -euo pipefail
+          npm ci --prefer-offline --no-audit --progress=false
+          npm run build
+          node ../head/.github/scripts/serve-ab-drive.mjs \
+            packages/cli/dist/index.js "${RUNNER_TEMP}/before"
+
+      - name: 'Diff before/after → comment body'
+        env:
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          SHORT_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/serve-ab"
+          mkdir -p "${OUT}"
+          node head/.github/scripts/serve-ab-diff.mjs comment \
+            "${RUNNER_TEMP}/before" "${RUNNER_TEMP}/after" \
+            "${SHORT_SHA:0:7}" "${OUT}/body.md"
+          # PR number for the workflow_run publisher (which validates it). The
+          # head SHA is NOT shipped — the publisher binds to the authenticated
+          # workflow_run.head_sha.
+          printf '%s\n' "${PR_NUMBER}" > "${OUT}/pr.txt"
+          # Bound the untrusted body the privileged publisher will post.
+          if [ "$(wc -c < "${OUT}/body.md")" -gt 65536 ]; then
+            echo "::warning::serve-ab body exceeds 64KB; truncating."
+            head -c 65536 "${OUT}/body.md" > "${OUT}/body.trunc" && mv "${OUT}/body.trunc" "${OUT}/body.md"
+          fi
+          echo "Comment body: $(wc -l < "${OUT}/body.md") lines."
+
+      - name: 'Upload serve-ab artifact (published)'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'serve-ab'
+          path: |-
+            ${{ runner.temp }}/serve-ab/body.md
+            ${{ runner.temp }}/serve-ab/pr.txt
+          if-no-files-found: 'warn'
+          retention-days: 7

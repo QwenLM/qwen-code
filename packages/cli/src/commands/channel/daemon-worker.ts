@@ -1,21 +1,32 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
+  listChannelMemoryEntries,
+  nextFireTime,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
+  ChannelLoopScheduler,
+  ChannelLoopStore,
   DaemonChannelBridge,
+  isChannelProactiveDeliveryError,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelLoopRunner,
   ChannelWebhookRunOptions,
   ChannelWebhookTask,
+  DaemonChannelLoopMcpHost,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
@@ -34,14 +45,36 @@ import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
 } from '../../serve/channel-webhook-ipc.js';
+import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
+  isChannelDeliveryMessage,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
+  type ChannelDeliveryErrorCode,
+  type ChannelDeliveryRequest,
+} from '../../serve/channel-delivery-ipc.js';
+import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
+import {
+  isChannelStartupReportAckMessage,
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelStartupReportMessage,
+} from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
+import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonChannelLoopPath,
+  daemonObservedContactsPath,
+  daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
@@ -49,14 +82,29 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import { ObservedChannelContactStore } from './observed-contact-store.js';
+import {
+  createChannelLoopController,
+  isChannelCronEnabled,
+} from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
-const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
+const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
   features: string[];
   workspaceCwd?: string;
+  /**
+   * Registered runtimes advertised by a multi-workspace daemon.
+   * Absent on legacy single-workspace daemons, where `workspaceCwd` is used.
+   */
+  workspaces?: Array<{
+    cwd: string;
+    id: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
 }
 
 interface DaemonClientLike {
@@ -71,6 +119,8 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -103,6 +153,7 @@ interface ChannelDaemonWorkerReady {
 
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
+  deliverChannelMessage(request: ChannelDeliveryRequest): Promise<void>;
   validateWebhookTask(task: ChannelWebhookTask): void;
   runWebhookTask(
     task: ChannelWebhookTask,
@@ -118,7 +169,9 @@ export interface RunChannelDaemonWorkerOptions {
   selection: ServeChannelSelection;
   loadDaemonSdk?: () => Promise<DaemonSdkLike>;
   sendReady?: (ready: ChannelDaemonWorkerReady) => void;
+  reportStartup?: (message: ChannelStartupReportMessage) => Promise<void>;
   startupSignal?: AbortSignal;
+  channelLoopMcpHost?: DaemonChannelLoopMcpHost;
 }
 
 export function createDaemonSessionFactory({
@@ -152,7 +205,16 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      daemonReq,
+      {
+        ...daemonReq,
+        sourceType: 'channel',
+        // sourceId = channel instance name (e.g. feishu-main): distinguishes
+        // channel instances on the daemon data plane; the channel kind
+        // (dingtalk/feishu) is derivable from the name via the channel config.
+        // The load branch above deliberately omits it: loading never re-stamps
+        // creation attribution.
+        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
+      },
       clientId,
     );
   };
@@ -178,6 +240,10 @@ export function createDaemonChannelBridgeFacade(
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
   }
 
+  if (bridge.discardSession) {
+    facade.discardSession = bridge.discardSession.bind(bridge);
+  }
+
   if (bridge.getAvailableCommands) {
     facade.getAvailableCommands = bridge.getAvailableCommands.bind(bridge);
   }
@@ -188,6 +254,11 @@ export function createDaemonChannelBridgeFacade(
 
   if (bridge.listSessions) {
     facade.listSessions = bridge.listSessions.bind(bridge);
+  }
+
+  if (bridge.registerChannelLoopToolHandler) {
+    facade.registerChannelLoopToolHandler =
+      bridge.registerChannelLoopToolHandler.bind(bridge);
   }
 
   return facade;
@@ -268,6 +339,50 @@ function throwIfStartupAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function readConnectErrorMessage(error: unknown): string {
+  if (
+    (typeof error === 'object' && error !== null) ||
+    typeof error === 'function'
+  ) {
+    try {
+      const message = Reflect.get(error, 'message');
+      if (typeof message === 'string' && message.length > 0) {
+        return message;
+      }
+    } catch {
+      return 'Channel connection failed.';
+    }
+  }
+  try {
+    const message = String(error);
+    return message.length > 0 ? message : 'Channel connection failed.';
+  } catch {
+    return 'Channel connection failed.';
+  }
+}
+
+function readConnectErrorCode(error: unknown): string | undefined {
+  if (
+    !(
+      (typeof error === 'object' && error !== null) ||
+      typeof error === 'function'
+    )
+  ) {
+    return undefined;
+  }
+  try {
+    const code = Reflect.get(error, 'code');
+    if (typeof code === 'string') {
+      return code.trim().length > 0 ? code : undefined;
+    }
+    return typeof code === 'number' && Number.isFinite(code)
+      ? String(code)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runChannelDaemonWorker(
   opts: RunChannelDaemonWorkerOptions,
 ): Promise<ChannelDaemonWorkerHandle> {
@@ -285,14 +400,37 @@ export async function runChannelDaemonWorker(
     client.capabilities(),
     startupSignal,
   );
-  const daemonWorkspace = canonicalizeWorkspace(
-    capabilities.workspaceCwd ?? opts.workspace,
-  );
   const requestedWorkspace = canonicalizeWorkspace(opts.workspace);
-  if (requestedWorkspace !== daemonWorkspace) {
-    throw new Error(
-      `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+  let daemonWorkspace: string;
+  if (capabilities.workspaces && capabilities.workspaces.length > 1) {
+    // Multi-workspace daemon: the worker must target one of the registered
+    // workspaces (matched on canonical cwd), and that workspace must be trusted
+    // before it can create sessions.
+    const match = capabilities.workspaces.find(
+      (workspace) =>
+        canonicalizeWorkspace(workspace.cwd) === requestedWorkspace,
     );
+    if (!match) {
+      throw new Error(
+        `Worker workspace "${requestedWorkspace}" is not registered on the daemon.`,
+      );
+    }
+    if (!match.trusted) {
+      throw new Error(
+        `Worker workspace "${requestedWorkspace}" is not trusted; channels cannot run there.`,
+      );
+    }
+    daemonWorkspace = requestedWorkspace;
+  } else {
+    // Legacy single-workspace daemon: validate against the primary workspace.
+    daemonWorkspace = canonicalizeWorkspace(
+      capabilities.workspaceCwd ?? opts.workspace,
+    );
+    if (requestedWorkspace !== daemonWorkspace) {
+      throw new Error(
+        `Daemon workspace "${daemonWorkspace}" does not match worker workspace "${requestedWorkspace}".`,
+      );
+    }
   }
 
   await abortableStartup(loadChannelsFromExtensions(), startupSignal);
@@ -314,6 +452,17 @@ export async function runChannelDaemonWorker(
   );
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = selectFirstModel(parsed, 'Daemon worker');
+  const observedContacts = new ObservedChannelContactStore(
+    daemonObservedContactsPath(daemonWorkspace),
+  );
+  const loopStore = isChannelCronEnabled(settings)
+    ? new ChannelLoopStore({
+        filePath: daemonChannelLoopPath(daemonWorkspace),
+      })
+    : undefined;
+  const loopController = loopStore
+    ? createChannelLoopController(loopStore)
+    : undefined;
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -323,10 +472,19 @@ export async function runChannelDaemonWorker(
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
     ...(modelServiceId ? { modelServiceId } : {}),
+    ...(opts.channelLoopMcpHost
+      ? { channelLoopMcpHost: opts.channelLoopMcpHost }
+      : {}),
   });
 
   const channels = new Map<string, ChannelBase>();
   const connected: string[] = [];
+  let scheduler: ChannelLoopScheduler | undefined;
+  let connectFailureCount = 0;
+  const diagnosticRedaction = {
+    ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+    workerEnv: process.env,
+  };
   const disconnectAll = () => {
     for (const channel of channels.values()) {
       try {
@@ -349,7 +507,8 @@ export async function runChannelDaemonWorker(
       bridgeFacade,
       daemonWorkspace,
       'user',
-      undefined,
+      daemonSessionRoutesPath(daemonWorkspace),
+      { recoveryMode: 'lazy' },
     );
     router = createdRouter;
     for (const { name, config } of parsed) {
@@ -358,6 +517,13 @@ export async function runChannelDaemonWorker(
         createdRouter.setChannelApprovalMode(name, config.approvalMode);
       }
     }
+    const restoredRoutes = createdRouter.restoreRoutes();
+    writeStdoutLine(
+      `[Channel] Restored ${restoredRoutes.restored} dormant route(s)` +
+        (restoredRoutes.dropped > 0
+          ? `; dropped ${restoredRoutes.dropped} invalid route(s)`
+          : ''),
+    );
 
     for (const { name, config } of parsed) {
       throwIfStartupAborted(startupSignal);
@@ -369,19 +535,31 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
-              appendChannelMemory,
+              getChannelMemoryRevision,
+              listChannelMemoryEntries,
+              addChannelMemoryEntries,
+              updateChannelMemoryEntry,
+              removeChannelMemoryEntries,
               clearChannelMemory,
             },
             memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
               bridgeFacade,
               config.cwd,
             ),
+            channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
+            observedContacts: {
+              observe: (channelName, observation) => {
+                observedContacts.observe(channelName, observation);
+              },
+            },
+            ...(loopController ? { loopController } : {}),
           }),
           startupSignal,
         ),
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerBackgroundResponseRelay(bridgeFacade, createdRouter, channels);
     registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
@@ -397,10 +575,9 @@ export async function runChannelDaemonWorker(
         if (startupSignal?.aborted) {
           throw err;
         }
-        const safeMessage = sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          512,
-        );
+        const message = readConnectErrorMessage(err);
+        const code = readConnectErrorCode(err);
+        const safeMessage = sanitizeLogText(message, 512);
         writeStderrLine(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
@@ -409,11 +586,84 @@ export async function runChannelDaemonWorker(
         } catch {
           // best-effort
         }
+        connectFailureCount += 1;
+        if (connectFailureCount <= MAX_CHANNEL_STARTUP_FAILURES) {
+          const reportMessage =
+            sanitizeWorkerDiagnostic(
+              message,
+              MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+              diagnosticRedaction,
+            ) || 'Channel connection failed.';
+          const reportCode = code
+            ? sanitizeWorkerDiagnostic(
+                code,
+                MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+                diagnosticRedaction,
+              )
+            : undefined;
+          await abortableStartup(
+            opts.reportStartup?.({
+              type: 'channel_startup_failure',
+              failure: {
+                channel:
+                  sanitizeWorkerDiagnostic(
+                    name,
+                    MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+                    diagnosticRedaction,
+                  ) || '<unnamed>',
+                phase: 'connect',
+                ...(reportCode ? { code: reportCode } : {}),
+                message: reportMessage,
+              },
+            }),
+            startupSignal,
+          );
+        } else if (connectFailureCount === MAX_CHANNEL_STARTUP_FAILURES + 1) {
+          await abortableStartup(
+            opts.reportStartup?.({
+              type: 'channel_startup_failures_truncated',
+            }),
+            startupSignal,
+          );
+        }
       }
     }
 
     if (connected.length === 0) {
       throw new Error('No channels connected.');
+    }
+
+    if (loopStore) {
+      const schedulerChannels = new Map<string, ChannelLoopRunner>();
+      for (const name of connected) {
+        const channel = channels.get(name)!;
+        schedulerChannels.set(name, {
+          runLoopPrompt: async (job, options) => {
+            let jobWorkspace: string | undefined;
+            try {
+              jobWorkspace = canonicalizeWorkspace(job.cwd);
+            } catch {
+              jobWorkspace = undefined;
+            }
+            if (jobWorkspace !== daemonWorkspace) {
+              await loopStore.disable(job.id).catch(() => false);
+              writeStderrLine(
+                `[Channel] Disabled loop "${sanitizeLogText(job.id, 128)}": its workspace does not match this daemon worker.`,
+              );
+              throw new Error(
+                `Loop ${sanitizeLogText(job.id, 128)} is outside daemon workspace and was disabled.`,
+              );
+            }
+            return channel.runLoopPrompt(job, options);
+          },
+        });
+      }
+      scheduler = new ChannelLoopScheduler({
+        store: loopStore,
+        channels: schedulerChannels,
+        nextFireTime,
+      });
+      scheduler.start();
     }
 
     opts.sendReady?.({
@@ -424,6 +674,19 @@ export async function runChannelDaemonWorker(
 
     return {
       channels: connected,
+      async deliverChannelMessage(request: ChannelDeliveryRequest) {
+        const channel = channels.get(request.channelName);
+        if (!channel || !connected.includes(request.channelName)) {
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            `Channel "${request.channelName}" is not running.`,
+          );
+        }
+        await channel.deliverProactive(
+          { channelName: request.channelName, ...request.target },
+          request.text,
+        );
+      },
       validateWebhookTask(task: ChannelWebhookTask): void {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
@@ -446,22 +709,24 @@ export async function runChannelDaemonWorker(
         }
       },
       async close() {
+        scheduler?.stop();
         disconnectAll();
         try {
           bridge.stop();
         } finally {
-          createdRouter.clearAll();
+          createdRouter.dispose();
         }
       },
     };
   } catch (err) {
+    scheduler?.stop();
     disconnectAll();
     try {
       bridge.stop();
     } catch {
       // best-effort during startup rollback
     } finally {
-      router?.clearAll();
+      router?.dispose();
     }
     throw err;
   }
@@ -512,6 +777,64 @@ function assertInternalDaemonWorkerInvocation(): void {
   }
 }
 
+function reportStartupToSupervisor(
+  message: ChannelStartupReportMessage,
+  signal: AbortSignal,
+  subscribeMessage: (listener: (message: unknown) => void) => () => void = (
+    listener,
+  ) => {
+    process.on('message', listener);
+    return () => process.removeListener('message', listener);
+  },
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(startupAbortError());
+  }
+  const send = process.send;
+  if (!send) {
+    return Promise.reject(new Error('Channel worker IPC is unavailable.'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let unsubscribeMessage = () => {};
+    const cleanup = () => {
+      unsubscribeMessage();
+      process.removeListener('disconnect', onDisconnect);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onMessage = (value: unknown) => {
+      if (isChannelStartupReportAckMessage(value)) {
+        finish();
+      }
+    };
+    const onDisconnect = () => {
+      finish(new Error('Channel worker IPC disconnected during startup.'));
+    };
+    const onAbort = () => {
+      finish(startupAbortError());
+    };
+    unsubscribeMessage = subscribeMessage(onMessage);
+    process.once('disconnect', onDisconnect);
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      send.call(process, message, (error) => {
+        if (error) {
+          finish(new Error('Channel worker startup report failed.'));
+        }
+      });
+    } catch {
+      finish(new Error('Channel worker startup report failed.'));
+    }
+  });
+}
+
 export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
   command: 'daemon-worker',
   describe: false,
@@ -523,6 +846,22 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     }),
   handler: async (argv) => {
     const startupAbortController = new AbortController();
+    let channelLoopMcpHost: ChannelLoopMcpWorkerHost | undefined;
+    const messageSubscribers = new Set<(message: unknown) => void>();
+    let onWorkerMessage: ((message: unknown) => void) | undefined;
+    const subscribeMessage = (listener: (message: unknown) => void) => {
+      messageSubscribers.add(listener);
+      return () => messageSubscribers.delete(listener);
+    };
+    const disposeChannelLoopMcpHost = () => {
+      if (onWorkerMessage) {
+        process.removeListener('message', onWorkerMessage);
+        onWorkerMessage = undefined;
+      }
+      messageSubscribers.clear();
+      channelLoopMcpHost?.dispose();
+      channelLoopMcpHost = undefined;
+    };
     let pendingShutdownReason: NodeJS.Signals | 'disconnect' | undefined;
     const onEarlyShutdown = (reason: NodeJS.Signals | 'disconnect') => {
       if (pendingShutdownReason) {
@@ -552,6 +891,17 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     try {
       assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
+      const send = process.send!;
+      channelLoopMcpHost = new ChannelLoopMcpWorkerHost((message, callback) =>
+        send.call(process, message, callback ?? (() => {})),
+      );
+      onWorkerMessage = (message: unknown) => {
+        if (channelLoopMcpHost?.handleMessage(message)) return;
+        for (const subscriber of [...messageSubscribers]) {
+          subscriber(message);
+        }
+      };
+      process.on('message', onWorkerMessage);
       const selection = normalizeServeChannelSelection(argv.channel);
       if (!selection) {
         throw new Error('--channel is required.');
@@ -562,6 +912,13 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         workspace,
         selection,
         startupSignal: startupAbortController.signal,
+        reportStartup: (message) =>
+          reportStartupToSupervisor(
+            message,
+            startupAbortController.signal,
+            subscribeMessage,
+          ),
+        channelLoopMcpHost,
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });
         },
@@ -589,8 +946,74 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           // Supervisor will time out if the IPC channel is already closed.
         }
       };
+      const sendChannelDeliveryResult = (
+        id: string,
+        result:
+          | { ok: true }
+          | {
+              ok: false;
+              code: ChannelDeliveryErrorCode;
+              error: string;
+            },
+      ) => {
+        try {
+          process.send?.({
+            type: 'channel_delivery_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // The supervisor times out if the IPC channel is already closed.
+        }
+      };
       const activeWebhookTasks = new Map<string, Promise<void>>();
+      const activeChannelDeliveries = new Map<string, Promise<void>>();
       const onMessage = (message: unknown) => {
+        if (isChannelDeliveryMessage(message)) {
+          if (message.expiresAt <= Date.now()) {
+            sendChannelDeliveryResult(message.id, {
+              ok: false,
+              code: 'channel_delivery_timeout',
+              error: 'Channel delivery IPC timed out.',
+            });
+            return;
+          }
+          if (
+            activeChannelDeliveries.size >= MAX_CHANNEL_DELIVERIES_IN_FLIGHT
+          ) {
+            sendChannelDeliveryResult(message.id, {
+              ok: false,
+              code: 'channel_delivery_queue_full',
+              error: 'Channel delivery queue is full.',
+            });
+            return;
+          }
+          const deliveryId = message.id;
+          const delivery = handle
+            .deliverChannelMessage(message.request)
+            .then(() => {
+              sendChannelDeliveryResult(deliveryId, { ok: true });
+            })
+            .catch((error: unknown) => {
+              sendChannelDeliveryResult(deliveryId, {
+                ok: false,
+                code: classifyChannelDeliveryError(error),
+                error: sanitizeWorkerDiagnostic(
+                  error instanceof Error ? error.message : String(error),
+                  512,
+                  {
+                    ...(daemonToken ? { daemonToken } : {}),
+                    workerEnv: process.env,
+                  },
+                ),
+              });
+            })
+            .finally(() => {
+              activeChannelDeliveries.delete(deliveryId);
+            });
+          activeChannelDeliveries.set(deliveryId, delivery);
+          return;
+        }
         if (!isChannelWebhookTaskMessage(message)) return;
         if (message.expiresAt <= Date.now()) {
           sendWebhookTaskResult(message.id, {
@@ -662,7 +1085,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         }
       }, CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS);
       heartbeatTimer.unref();
-      process.on('message', onMessage);
+      const unsubscribeMessage = subscribeMessage(onMessage);
 
       let shuttingDown = false;
       let exitCode = 0;
@@ -676,19 +1099,28 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         } else {
           shuttingDown = true;
           clearHeartbeat();
-          process.removeListener('message', onMessage);
+          unsubscribeMessage();
           try {
-            if (activeWebhookTasks.size > 0) {
+            const deliveryCount = activeChannelDeliveries.size;
+            const webhookCount = activeWebhookTasks.size;
+            if (deliveryCount > 0) {
               writeStderrLine(
-                `[Channel] shutdown: draining ${activeWebhookTasks.size} webhook task(s)...`,
+                `[Channel] shutdown: draining ${deliveryCount} channel delivery task(s)...`,
               );
+            }
+            if (webhookCount > 0) {
+              writeStderrLine(
+                `[Channel] shutdown: draining ${webhookCount} webhook task(s)...`,
+              );
+            }
+            if (deliveryCount > 0 || webhookCount > 0) {
               await Promise.race([
-                Promise.allSettled(activeWebhookTasks.values()),
+                Promise.allSettled([
+                  ...activeChannelDeliveries.values(),
+                  ...activeWebhookTasks.values(),
+                ]),
                 new Promise<void>((resolve) => {
-                  const timer = setTimeout(
-                    resolve,
-                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
-                  );
+                  const timer = setTimeout(resolve, WORKER_SHUTDOWN_DRAIN_MS);
                   timer.unref();
                 }),
               ]);
@@ -706,6 +1138,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
             );
           } finally {
             clearHeartbeat();
+            disposeChannelLoopMcpHost();
             finish();
           }
         }
@@ -721,13 +1154,14 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       }
       await finished;
       clearHeartbeat();
-      process.removeListener('message', onMessage);
+      unsubscribeMessage();
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('disconnect', onDisconnect);
       process.exit(exitCode);
     } catch (err) {
       removeEarlyShutdownHandlers();
+      disposeChannelLoopMcpHost();
       const safeMessage = sanitizeLogText(
         err instanceof Error ? err.message : String(err),
         512,
@@ -763,4 +1197,19 @@ function classifyWebhookTaskValidationError(
     return 'channel_worker_unavailable';
   }
   return 'channel_webhook_enqueue_failed';
+}
+
+function classifyChannelDeliveryError(
+  error: unknown,
+): ChannelDeliveryErrorCode {
+  if (isChannelDeliveryError(error)) {
+    return error.code;
+  }
+  if (
+    isChannelProactiveDeliveryError(error) &&
+    error.disposition === 'permanent'
+  ) {
+    return 'channel_delivery_rejected';
+  }
+  return 'channel_delivery_failed';
 }

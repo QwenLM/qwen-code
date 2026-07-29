@@ -130,10 +130,19 @@
   -webkit-line-clamp: unset;
 }
 
+/* Kept in the accessibility tree (used as the alertdialog's aria-describedby
+   and the option group's label) but visually hidden — the tool name header and
+   the option labels already convey the choice to sighted users. */
 .question {
-  display: none;
-  color: var(--muted-foreground);
-  margin: 10px 0 0;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .options {
@@ -158,10 +167,17 @@
   background: transparent;
   cursor: pointer;
   color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 12px;
   font-weight: 500;
   line-height: 22px;
   white-space: nowrap;
+  appearance: none;
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
 }
 
 .optionPlain {

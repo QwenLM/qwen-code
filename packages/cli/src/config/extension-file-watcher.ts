@@ -42,12 +42,25 @@ export class ExtensionFileWatcher {
   private staleFiles = new Set<string>();
   private watching = false;
   private watchGeneration = 0;
+  private readonly storeStatePath: string;
+  private generationPoller?: ReturnType<typeof setInterval>;
+  private observedStoreGeneration?: number;
 
   constructor(
     private readonly config: Config,
     private readonly extensionsDir = Storage.getUserExtensionsDir(),
     private readonly refreshState = new ExtensionRefreshState(),
-  ) {}
+    storeStatePath?: string,
+  ) {
+    this.storeStatePath =
+      storeStatePath ??
+      path.join(
+        path.dirname(this.extensionsDir),
+        'extension-store',
+        'state.json',
+      );
+    this.observedStoreGeneration = this.readStoreGeneration();
+  }
 
   startWatching(): void {
     this.stopWatching();
@@ -99,6 +112,7 @@ export class ExtensionFileWatcher {
     if (!fs.existsSync(this.extensionsDir)) {
       this.watchExtensionsParent();
     }
+    this.startGenerationPolling();
   }
 
   stopWatching(): void {
@@ -108,6 +122,8 @@ export class ExtensionFileWatcher {
     this.bootstrapWatcher = undefined;
     this.watching = false;
     this.watchGeneration++;
+    if (this.generationPoller) clearInterval(this.generationPoller);
+    this.generationPoller = undefined;
     this.mutationListenerDisposer?.();
     this.mutationListenerDisposer = undefined;
     this.endPendingMutationSuppressions();
@@ -128,6 +144,7 @@ export class ExtensionFileWatcher {
     if (fs.existsSync(this.extensionsDir)) {
       roots.add(this.extensionsDir);
     }
+    roots.add(this.storeStatePath);
     for (const extension of this.config.getActiveExtensions()) {
       if (extension.installMetadata?.type === 'link') {
         const rawSource = extension.installMetadata.source;
@@ -215,6 +232,17 @@ export class ExtensionFileWatcher {
     event: WatchEvent,
     changedPath: string,
   ): RefreshAction | false {
+    if (changedPath === path.resolve(this.storeStatePath)) {
+      const generation = this.readStoreGeneration();
+      if (generation !== undefined) {
+        this.markStoreGenerationChanged(generation, true);
+      } else {
+        this.refreshState.markExtensionsChanged(
+          'extension store generation changed',
+        );
+      }
+      return false;
+    }
     if (this.staleFiles.has(changedPath)) {
       return 'stale';
     }
@@ -341,5 +369,55 @@ export class ExtensionFileWatcher {
     bootstrapWatcher?.close().catch((error: unknown) => {
       debugLogger.warn('Extension bootstrap watcher close error:', error);
     });
+  }
+
+  private startGenerationPolling(): void {
+    if (this.generationPoller) clearInterval(this.generationPoller);
+    this.pollStoreGeneration();
+    this.generationPoller = setInterval(
+      () => this.pollStoreGeneration(),
+      30_000,
+    );
+    this.generationPoller.unref?.();
+  }
+
+  private pollStoreGeneration(): void {
+    const generation = this.readStoreGeneration();
+    if (generation === undefined) return;
+    this.markStoreGenerationChanged(generation);
+  }
+
+  private markStoreGenerationChanged(generation: number, force = false): void {
+    const previous = this.observedStoreGeneration;
+    // First observed generation — establish baseline without firing a change
+    // notification. On a fresh install, state.json doesn't exist yet so the
+    // baseline is undefined; the store then writes generation:0 and the next
+    // poll sees undefined→0. That transition is baseline establishment, not
+    // a real extension change (see #7029).
+    if (previous === undefined) {
+      this.observedStoreGeneration = generation;
+      return;
+    }
+    if (!force && previous === generation) return;
+    if (this.refreshState.isSuppressed()) return;
+    const marked = this.refreshState.markExtensionsChanged(
+      'extension store generation changed',
+    );
+    if (marked || this.refreshState.needsExtensionRefresh()) {
+      this.observedStoreGeneration = generation;
+    }
+  }
+
+  private readStoreGeneration(): number | undefined {
+    try {
+      const parsed = JSON.parse(
+        fs.readFileSync(this.storeStatePath, 'utf8'),
+      ) as { generation?: unknown };
+      return typeof parsed.generation === 'number'
+        ? parsed.generation
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

@@ -72,9 +72,9 @@ Migration note for existing TypeScript plugins: if your adapter constructor or f
 Channel adapters can run in two host modes:
 
 - `qwen channel start [name]` is the standalone service. It uses `AcpBridge` over a `qwen-code --acp` child process and remains the default channel command.
-- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. `qwen serve` starts one out-of-process channel worker, the worker connects back to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade.
+- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. Named channels are grouped by owning workspace and `qwen serve` starts one out-of-process worker per owning runtime. Each worker connects back to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade. `--channel all` stays primary-only.
 
-In daemon-managed mode, one daemon is bound to one workspace. Every selected channel's `cwd` must resolve to that same workspace. The optional `shellCommand` method is exposed to adapters only when the daemon advertises the `session_shell_command` capability.
+In daemon-managed mode, every named channel's `cwd` must resolve to exactly one registered, trusted workspace. Its worker receives that runtime's cwd and environment overlay; an ambiguous or untrusted selection fails instead of using primary. The optional `shellCommand` method is exposed to adapters only when the daemon advertises the `session_shell_command` capability.
 
 ## Architecture
 
@@ -298,10 +298,10 @@ When `requireMention` is `true` (default), group messages are only processed if 
 ### PairingStore
 
 ```typescript
-constructor(channelName: string)
+constructor(channelName: string, workspaceCwd?: string)
 ```
 
-Persists pairing state to `~/.qwen/channels/{channelName}-pairing.json` and `{channelName}-allowlist.json`.
+Persists pairing state to `{channelName}-pairing.json` and `{channelName}-allowlist.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. The first time a given (workspace, channel) pair is constructed, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved; a per-channel `<channel>.migrated` sentinel in the scope directory marks that decision, after which legacy files are never consulted again for that channel. Channel names are URI-encoded in file names, so a name containing path separators cannot escape the scope directory. To revoke a sender, remove their entry from the scoped allowlist (and from the legacy global file, while it exists) — deleting the scoped file does not revoke, and recreating the scope directory from scratch re-imports the legacy baseline.
 
 | Method                                | Description                                                                                               |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -320,6 +320,7 @@ interface Envelope {
   senderId: string; // stable, unique sender ID
   senderName: string; // display name
   chatId: string; // distinguishes DMs from groups
+  chatName?: string; // inbound group display name, when provided
   text: string; // message text (@mentions stripped)
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions

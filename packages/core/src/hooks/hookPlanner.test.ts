@@ -111,6 +111,9 @@ describe('HookPlanner', () => {
         undefined,
       );
       expect(getHookMatcherTarget(HookEventName.PostToolBatch)).toBe(undefined);
+      expect(getHookMatcherTarget(HookEventName.MessageDisplay)).toBe(
+        undefined,
+      );
     });
   });
 
