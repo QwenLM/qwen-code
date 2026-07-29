@@ -247,6 +247,49 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(response.content).not.toContain('line1');
     });
 
+    it('reads a bounded ACP line window from text above MAX_READ_BYTES', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-window.txt');
+      const lines = Array.from(
+        { length: 4_000 },
+        (_, index) => `line${index + 1} ${'x'.repeat(80)}`,
+      );
+      const content = lines.join('\n');
+      expect(Buffer.byteLength(content)).toBeGreaterThan(MAX_READ_BYTES);
+      await fsp.writeFile(target, content, 'utf8');
+
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const response = await adapter.readText({
+        path: target,
+        sessionId: 'sess:test',
+        line: 3,
+        limit: 20,
+      });
+
+      expect(response.content).toBe(lines.slice(2, 22).join('\n'));
+    });
+
+    it('keeps an oversized ACP line-only read behind the snapshot cap', async () => {
+      const { MAX_READ_BYTES } = await import('./fs/policy.js');
+      const target = path.join(tmpDir, 'large-line-only.txt');
+      await fsp.writeFile(target, 'x'.repeat(MAX_READ_BYTES + 1), 'utf8');
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+
+      const err = await adapter
+        .readText({
+          path: target,
+          sessionId: 'sess:test',
+          line: 2,
+        })
+        .catch((error: unknown) => error);
+
+      expect((err as { kind?: string }).kind).toBe('file_too_large');
+    });
+
     it('treats null line/limit as undefined (ACP wire compatibility)', async () => {
       const target = path.join(tmpDir, 'null-window.txt');
       await fsp.writeFile(target, 'hello\nworld\n', 'utf8');
