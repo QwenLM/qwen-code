@@ -14978,7 +14978,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ============================================================
-undici@7.29.0
+undici@7.27.2
 (git+https://github.com/nodejs/undici.git)
 
 MIT License
