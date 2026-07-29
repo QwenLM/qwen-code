@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
@@ -15,35 +15,9 @@ import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-const ENV_KEYS = [
-  'OPENAI_API_KEY',
-  'OPENAI_BASE_URL',
-  'OPENAI_MODEL',
-  'QWEN_MODEL',
-  'QWEN_HOME',
-  'QWEN_RUNTIME_DIR',
-  'NO_PROXY',
-  'no_proxy',
-] as const;
-
 describe('list_directory', () => {
-  let savedEnv: Record<string, string | undefined> = {};
-
-  beforeEach(() => {
-    for (const key of ENV_KEYS) {
-      savedEnv[key] = process.env[key];
-    }
-  });
-
   afterEach(() => {
-    for (const key of ENV_KEYS) {
-      if (savedEnv[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = savedEnv[key];
-      }
-    }
-    savedEnv = {};
+    vi.unstubAllEnvs();
   });
 
   it('should be able to list a directory', async () => {
@@ -83,14 +57,14 @@ describe('list_directory', () => {
       return { content: 'The directory contains file1.txt and subdir.' };
     }, fakeServerHostOptions());
 
-    process.env['OPENAI_API_KEY'] = 'fake-key';
-    process.env['OPENAI_BASE_URL'] = fakeServer.baseUrl;
-    process.env['OPENAI_MODEL'] = 'fake-model';
-    process.env['QWEN_MODEL'] = 'fake-model';
-    process.env['QWEN_HOME'] = join(rig.testDir!, '.qwen-home');
-    process.env['QWEN_RUNTIME_DIR'] = join(rig.testDir!, '.qwen-home');
-    process.env['NO_PROXY'] = noProxy;
-    process.env['no_proxy'] = noProxy;
+    vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+    vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+    vi.stubEnv('OPENAI_MODEL', 'fake-model');
+    vi.stubEnv('QWEN_MODEL', 'fake-model');
+    vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+    vi.stubEnv('NO_PROXY', noProxy);
+    vi.stubEnv('no_proxy', noProxy);
 
     try {
       const prompt = `Call the list_directory tool on the current directory.`;
