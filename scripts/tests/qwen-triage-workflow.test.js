@@ -545,7 +545,13 @@ describe('qwen-triage tmux workflow', () => {
     // still warning that an external author's report is adversarial input.
     expect(section).toContain('The author lacks write access');
     expect(section).toContain('sponsored run');
-    expect(section).toContain('ephemeral GitHub-hosted runner');
+    // The controls, not a machine: external runs share the persistent pool
+    // with everyone else, so the guidance must name what actually bounds
+    // them. An "ephemeral runner" claim here would be describing a design
+    // that no longer exists.
+    expect(section).toContain('risk screen');
+    expect(section).toContain('full workspace wipe');
+    expect(section).not.toContain('ephemeral');
     expect(section).toContain('same skepticism as the fork');
     expect(section).not.toContain('sandboxed lanes are unavailable');
 
@@ -557,6 +563,42 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(order).toContain('(2b-bis)');
     expect(order).toContain('not an enrichment');
+  });
+
+  it('makes the not-verified sentence a mechanical 2b-bis trigger', () => {
+    // Post-merge measurement of #7917 (2026-07-29): 9 eligible PRs, two
+    // considered-and-declined mentions, zero positive recommendations — and
+    // the one clear behavioural candidate (#7947, bounded reads) wrote
+    // "author tested on macOS only" in its own Stage 2 comment and never
+    // named a lane. The judgement-based rule ("when 2b cannot settle it")
+    // failed exactly where the comment had already written the gap down. So
+    // the trigger is now textual: the draft's own admission is the trigger,
+    // and pending CI does not lift it.
+    const section = prSkill
+      .slice(
+        prSkill.indexOf('#### 2b-bis.'),
+        prSkill.indexOf('#### 2c. Real-Scenario'),
+      )
+      .replace(/\s+/g, ' ');
+    expect(section).toContain('mechanical, not a judgement call');
+    expect(section).toContain('grep your own draft');
+    // The trigger phrases are the ones real comments actually emit — the
+    // first two are verbatim from #7947's and #7951's Stage 2 comments.
+    expect(section).toContain('not verified');
+    expect(section).toContain('author tested on <one platform> only');
+    expect(section).toContain('not independently re-run');
+    // Pending CI must not lift the trigger: #7947's likely out was "the
+    // ubuntu Test job is still in progress".
+    expect(section).toContain('"CI is still running" does not lift');
+    // The mechanical rule must sit BEFORE the skip cases, or the skip cases
+    // read as outs from it rather than the other way around.
+    expect(section.indexOf('mechanical, not a judgement call')).toBeLessThan(
+      section.indexOf('Skip it — explicitly'),
+    );
+    // And the skip cases themselves must survive — the trigger tightens the
+    // rule, it does not replace the two legitimate outs.
+    expect(section).toContain('No behavioural claim to settle');
+    expect(section).toContain('The author lacks write access');
   });
 
   it('names /verify on the high-risk paths, not just tmux', () => {
