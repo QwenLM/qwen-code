@@ -5,9 +5,11 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { X509Certificate } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { up, down, status } from './orchestrator.js';
+import { readState } from './state.js';
 import type { RunCommand, CommandResult } from './exec.js';
 
 const RUNNING = JSON.stringify({
@@ -15,6 +17,30 @@ const RUNNING = JSON.stringify({
   Self: { DNSName: 'laptop-wsl.tn.ts.net.', TailscaleIPs: ['100.1.2.3'] },
 });
 const ok = (stdout = ''): CommandResult => ({ code: 0, stdout, stderr: '' });
+
+// A short static self-signed EC cert fixture (10-year validity), used only to
+// exercise the real `X509Certificate(...).validTo` parse path in
+// `readCertExpiry` — generated once via:
+//   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+//     -keyout /dev/null -out fixture.crt -days 3650 -nodes -subj "/CN=test.ts.net"
+const FIXTURE_CERT = `-----BEGIN CERTIFICATE-----
+MIIBgTCCASegAwIBAgIUcjHPDdamKJs+DNUfYI8MiyFpPBowCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLdGVzdC50cy5uZXQwHhcNMjYwNzI5MDE1MzAzWhcNMzYwNzI2
+MDE1MzAzWjAWMRQwEgYDVQQDDAt0ZXN0LnRzLm5ldDBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABCzTeL4514klGDNi1b/spMWeWZUEOXSdY/eDuM0GRiYJqmPZaRdE
++LCdKyeUq12EMof0ZWIsxvHYfgt53t/4H6+jUzBRMB0GA1UdDgQWBBRV9IfASE0x
+p5kvjZnS8KtnAzpbATAfBgNVHSMEGDAWgBRV9IfASE0xp5kvjZnS8KtnAzpbATAP
+BgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIBMkIA5rkPP1ObJJzo1w
+6zBzuKdajpOeIpRsNbr9jIasAiEA8NdmkV99/Xd3399uUYeLSXyGnK978RKfGBgg
+cukmM3E=
+-----END CERTIFICATE-----
+`;
+// Expected ISO expiry, derived the same way `readCertExpiry` does — proves
+// the orchestrator's parse matches reality without hardcoding a date string
+// that would drift if the fixture is ever regenerated.
+const FIXTURE_CERT_EXPIRY_ISO = new Date(
+  new X509Certificate(FIXTURE_CERT).validTo,
+).toISOString();
 
 let dir: string | undefined;
 afterEach(() => {
@@ -35,8 +61,14 @@ const DEPS = (d: string, run: RunCommand) => ({
 
 // tailnet Running + cert ok; the is-active answer is read live from `active()`,
 // and `onStart` fires when the gateway unit is launched — so a test can model
-// "inactive until started" (exercises the start path + idempotency).
-function base(active: () => boolean, onStart?: () => void): RunCommand {
+// "inactive until started" (exercises the start path + idempotency). `onStop`
+// fires with the unit name systemctl was asked to stop, so a test can assert
+// which unit was actually recorded/stopped rather than just that stop ran.
+function base(
+  active: () => boolean,
+  onStart?: () => void,
+  onStop?: (unit: string) => void,
+): RunCommand {
   return async (argv) => {
     const k = argv.join(' ');
     if (k === 'tailscale status --json') return ok(RUNNING);
@@ -49,7 +81,10 @@ function base(active: () => boolean, onStart?: () => void): RunCommand {
       return active()
         ? ok('active\n')
         : { code: 3, stdout: 'inactive\n', stderr: '' };
-    if (k.startsWith('systemctl --user stop')) return ok();
+    if (k.startsWith('systemctl --user stop')) {
+      onStop?.(argv[3]);
+      return ok();
+    }
     return { code: 1, stdout: '', stderr: `unstubbed ${k}` };
   };
 }
@@ -168,8 +203,90 @@ describe('renderQr', () => {
   });
 });
 
+describe('certExpiry', () => {
+  // `tailscale cert` here actually writes the fixture cert to the requested
+  // `--cert-file` path, so `up`'s `readCertExpiry` reads a real file — this
+  // exercises the X509Certificate parse itself, not just the wiring.
+  function withRealCert(
+    active: () => boolean,
+    onStart?: () => void,
+  ): RunCommand {
+    return async (argv) => {
+      const k = argv.join(' ');
+      if (k === 'tailscale status --json') return ok(RUNNING);
+      if (argv[0] === 'tailscale' && argv[1] === 'cert') {
+        const certFile = argv[argv.indexOf('--cert-file') + 1];
+        writeFileSync(certFile, FIXTURE_CERT);
+        return ok();
+      }
+      if (argv[0] === 'systemd-run') {
+        onStart?.();
+        return ok();
+      }
+      if (k.startsWith('systemctl --user is-active'))
+        return active()
+          ? ok('active\n')
+          : { code: 3, stdout: 'inactive\n', stderr: '' };
+      if (k.startsWith('systemctl --user stop')) return ok();
+      return { code: 1, stdout: '', stderr: `unstubbed ${k}` };
+    };
+  }
+
+  it('up populates certExpiry from the real cert file', async () => {
+    const d = mkdir();
+    let starts = 0;
+    const run = withRealCert(
+      () => starts > 0,
+      () => {
+        starts++;
+      },
+    );
+    const res = await up(DEPS(d, run));
+    expect(res.ok).toBe(true);
+    expect(res.certExpiry).toBe(FIXTURE_CERT_EXPIRY_ISO);
+  });
+
+  it('status surfaces the certExpiry persisted by a prior up', async () => {
+    const d = mkdir();
+    let starts = 0;
+    const run = withRealCert(
+      () => starts > 0,
+      () => {
+        starts++;
+      },
+    );
+    await up(DEPS(d, run));
+    const s = await status(DEPS(d, run));
+    expect(s.certExpiry).toBe(FIXTURE_CERT_EXPIRY_ISO);
+  });
+});
+
 describe('down', () => {
-  it('stops and clears state (idempotent)', async () => {
+  it('stops the recorded unit and clears state', async () => {
+    const d = mkdir();
+    let starts = 0;
+    let stoppedUnit: string | undefined;
+    const run = base(
+      () => starts > 0,
+      () => {
+        starts++;
+      },
+      (unit) => {
+        stoppedUnit = unit;
+      },
+    );
+    const deps = DEPS(d, run);
+    await up(deps); // writes state + records the unit that was started
+    expect(readState(d)).not.toBeNull(); // sanity: state exists before down
+
+    const res = await down(deps);
+
+    expect(res.ok).toBe(true);
+    expect(stoppedUnit).toBe('qwen-rc-gateway'); // the unit recorded in state was actually stopped
+    expect(readState(d)).toBeNull(); // state was cleared
+  });
+
+  it('is idempotent when there is no prior state', async () => {
     const d = mkdir();
     const res = await down(
       DEPS(
@@ -178,6 +295,7 @@ describe('down', () => {
       ),
     );
     expect(res.ok).toBe(true);
+    expect(readState(d)).toBeNull();
   });
 });
 

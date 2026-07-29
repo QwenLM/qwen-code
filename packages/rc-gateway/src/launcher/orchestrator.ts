@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { X509Certificate } from 'node:crypto';
 import { join } from 'node:path';
 import type { RunCommand } from './exec.js';
 import { ensureUp, nodeIdentity } from './tailscale.js';
@@ -16,6 +17,7 @@ import {
   type LauncherState,
 } from './state.js';
 import { renderQr } from './qr.js';
+import { BOOTSTRAP_CODE_FILENAME } from '../bootstrap.js';
 
 export interface Deps {
   run: RunCommand;
@@ -42,10 +44,20 @@ function connectUrl(host: string, port: number): string {
 }
 
 function readBootstrapCode(dir: string): string | undefined {
-  const p = join(dir, 'owner-bootstrap.code');
+  const p = join(dir, BOOTSTRAP_CODE_FILENAME);
   if (!existsSync(p)) return undefined;
   const c = readFileSync(p, 'utf8').trim();
   return c.length > 0 ? c : undefined;
+}
+
+/** Best-effort read of a cert's `notAfter` as an ISO string. `undefined` on any failure. */
+function readCertExpiry(certPath: string): string | undefined {
+  try {
+    const cert = new X509Certificate(readFileSync(certPath));
+    return new Date(cert.validTo).toISOString();
+  } catch {
+    return undefined;
+  }
 }
 
 export async function up(deps: Deps): Promise<UpResult> {
@@ -83,6 +95,7 @@ export async function up(deps: Deps): Promise<UpResult> {
   }
 
   const url = connectUrl(id.host, port);
+  const certExpiry = readCertExpiry(cert.pair.certPath);
 
   // 3. Start the gateway unit — unless already active (idempotent).
   if (!(await isActive(run, unit))) {
@@ -112,13 +125,28 @@ export async function up(deps: Deps): Promise<UpResult> {
     }
   }
 
-  const state: LauncherState = { unit, url, host: id.host, port };
+  const state: LauncherState = {
+    unit,
+    url,
+    host: id.host,
+    port,
+    certExpiry,
+  };
   writeState(dir, state);
 
   // 4. Connect info.
   const bootstrapCode = readBootstrapCode(dir);
   const qr = await renderQr(url).catch(() => undefined);
-  return { ok: true, url, host: id.host, port, unit, bootstrapCode, qr };
+  return {
+    ok: true,
+    url,
+    host: id.host,
+    port,
+    unit,
+    bootstrapCode,
+    certExpiry,
+    qr,
+  };
 }
 
 export async function down(deps: Deps): Promise<{ ok: boolean }> {
