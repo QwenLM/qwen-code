@@ -158,6 +158,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    const botUsername = this.botUsername?.toLowerCase();
+    if (
+      this.config.senderPolicy === 'allowlist' &&
+      botUsername &&
+      allowed.includes(botUsername)
+    ) {
+      if (allowed.every((user) => user === botUsername)) {
+        throw new Error(
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+        );
+      }
+      process.stderr.write(
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+      );
+    }
     this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
   }
