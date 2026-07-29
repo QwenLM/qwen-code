@@ -1123,6 +1123,7 @@ const {
   getTaskActivityKey,
   getEnvironmentAgentTasks,
   mergeMonitorTaskSnapshot,
+  mergeSideTaskCatalog,
 } = await import('./App');
 
 (
@@ -1130,6 +1131,62 @@ const {
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+describe('mergeSideTaskCatalog', () => {
+  const listed = (sessionId: string) => ({ sessionId, title: sessionId });
+
+  it('replaces the catalog when the parent session changes', () => {
+    const next = mergeSideTaskCatalog(
+      { parentSessionId: 'parent-a', items: [listed('stale')], loaded: true },
+      'parent-b',
+      [listed('b1')],
+      new Set(['stale']),
+    );
+    expect(next).toEqual({
+      parentSessionId: 'parent-b',
+      items: [listed('b1')],
+      loaded: true,
+    });
+  });
+
+  it('treats a successful listing as authoritative for confirmed items', () => {
+    const next = mergeSideTaskCatalog(
+      {
+        parentSessionId: 'parent-a',
+        items: [listed('kept'), listed('deleted-elsewhere')],
+        loaded: true,
+      },
+      'parent-a',
+      [listed('kept')],
+      new Set(),
+    );
+    expect(next.items.map((item) => item.sessionId)).toEqual(['kept']);
+  });
+
+  it('keeps a locally created draft the listing has not echoed yet', () => {
+    const next = mergeSideTaskCatalog(
+      {
+        parentSessionId: 'parent-a',
+        items: [listed('kept'), listed('draft')],
+        loaded: true,
+      },
+      'parent-a',
+      [listed('kept')],
+      new Set(['draft']),
+    );
+    expect(next.items.map((item) => item.sessionId)).toEqual(['kept', 'draft']);
+  });
+
+  it('does not duplicate a draft once the listing confirms it', () => {
+    const next = mergeSideTaskCatalog(
+      { parentSessionId: 'parent-a', items: [listed('draft')], loaded: true },
+      'parent-a',
+      [listed('draft')],
+      new Set(['draft']),
+    );
+    expect(next.items.map((item) => item.sessionId)).toEqual(['draft']);
+  });
+});
 
 describe('task activity key', () => {
   it('includes background shells in any tool-call state', () => {

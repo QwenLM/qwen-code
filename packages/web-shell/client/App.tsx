@@ -1059,6 +1059,40 @@ function mergeShellTaskSnapshot(
     : next;
 }
 
+interface SideTaskCatalogState {
+  parentSessionId?: string;
+  items: SideTaskListItem[];
+  loaded: boolean;
+}
+
+// Merge a fresh side-task listing into the cached catalog. The listing is
+// authoritative: a cached item survives only while it is still listed or is a
+// locally created draft the daemon has not echoed back yet (optimisticIds).
+// Without the optimistic guard, a task deleted or archived on another client
+// would be re-added from the cache forever.
+export function mergeSideTaskCatalog(
+  catalog: SideTaskCatalogState,
+  parentSessionId: string,
+  listedItems: SideTaskListItem[],
+  optimisticIds: ReadonlySet<string>,
+): SideTaskCatalogState {
+  if (catalog.parentSessionId !== parentSessionId) {
+    return { parentSessionId, items: listedItems, loaded: true };
+  }
+  const listedIds = new Set(listedItems.map((item) => item.sessionId));
+  return {
+    parentSessionId,
+    loaded: true,
+    items: [
+      ...listedItems,
+      ...catalog.items.filter(
+        (item) =>
+          !listedIds.has(item.sessionId) && optimisticIds.has(item.sessionId),
+      ),
+    ],
+  };
+}
+
 function agentStatusFromTool(
   tool: ACPToolCall,
 ): DaemonSessionAgentTaskStatus['status'] {
@@ -2366,11 +2400,11 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
-  const [sideTaskCatalog, setSideTaskCatalog] = useState<{
-    parentSessionId?: string;
-    items: SideTaskListItem[];
-    loaded: boolean;
-  }>({ items: [], loaded: false });
+  const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
+    items: [],
+    loaded: false,
+  });
+  const optimisticSideTaskIdsRef = useRef(new Set<string>());
   const visibleSideTasks =
     sideTaskCatalog.parentSessionId === connection.sessionId
       ? sideTaskCatalog.items
@@ -2403,8 +2437,9 @@ export function App({
     [connection.sessionId, connection.workspaceCwd, sideTasksAvailable, t],
   );
   const createEmptySideTask = useCallback(() => {
-    createSideTask();
-  }, [createSideTask]);
+    if (createSideTask()) return;
+    pushToast('error', t('sideTask.createFailed'));
+  }, [createSideTask, pushToast, t]);
   const createSideTaskSession = useCallback(
     async (_tabId: string, parentSessionId: string, title: string) => {
       const parentClientId =
@@ -2430,7 +2465,7 @@ export function App({
   );
   const handleSideTaskCreated = useCallback(
     (tabId: string, sessionId: string) => {
-      const tab = artifactPanelTabsRef.current.find(
+      let createdTab = artifactPanelTabsRef.current.find(
         (candidate) => candidate.id === tabId,
       );
       setArtifactPanelTabs((tabs) =>
@@ -2440,26 +2475,49 @@ export function App({
             : tab,
         ),
       );
-      if (tab?.kind === 'side_task') {
-        setSideTaskCatalog((catalog) => {
-          if (catalog.parentSessionId !== tab.parentSessionId) return catalog;
-          if (catalog.items.some((item) => item.sessionId === sessionId)) {
-            return catalog;
-          }
-          return {
-            ...catalog,
-            items: [
-              ...catalog.items,
-              {
-                sessionId,
-                title: tab.title,
-                workspaceCwd: tab.workspaceCwd,
-                updatedAt: new Date().toISOString(),
-              },
-            ],
-          };
-        });
+      if (!createdTab) {
+        // Creation can resolve after we navigate away from the parent session;
+        // the draft tab then lives in a saved per-session bucket rather than the
+        // live tabs, so write the sessionId there too or reopening the parent
+        // creates a duplicate side task.
+        for (const state of artifactPanelStateBySessionRef.current.values()) {
+          const candidate = state.tabs.find(
+            (bucketTab) => bucketTab.id === tabId,
+          );
+          if (!candidate) continue;
+          createdTab = candidate;
+          state.tabs = state.tabs.map((bucketTab) =>
+            bucketTab.id === tabId && bucketTab.kind === 'side_task'
+              ? { ...bucketTab, sessionId }
+              : bucketTab,
+          );
+          break;
+        }
       }
+      const sideTaskTab =
+        createdTab?.kind === 'side_task' ? createdTab : undefined;
+      if (!sideTaskTab) return;
+      optimisticSideTaskIdsRef.current.add(sessionId);
+      setSideTaskCatalog((catalog) => {
+        if (catalog.parentSessionId !== sideTaskTab.parentSessionId) {
+          return catalog;
+        }
+        if (catalog.items.some((item) => item.sessionId === sessionId)) {
+          return catalog;
+        }
+        return {
+          ...catalog,
+          items: [
+            ...catalog.items,
+            {
+              sessionId,
+              title: sideTaskTab.title,
+              workspaceCwd: sideTaskTab.workspaceCwd,
+              updatedAt: new Date().toISOString(),
+            },
+          ],
+        };
+      });
     },
     [],
   );
@@ -2557,20 +2615,17 @@ export function App({
           workspaceCwd: session.workspaceCwd || workspaceCwd,
           updatedAt: session.updatedAt || session.createdAt,
         }));
-        setSideTaskCatalog((catalog) => {
-          if (catalog.parentSessionId !== parentSessionId) {
-            return { parentSessionId, items: listedItems, loaded: true };
-          }
-          const listedIds = new Set(listedItems.map((item) => item.sessionId));
-          return {
+        for (const item of listedItems) {
+          optimisticSideTaskIdsRef.current.delete(item.sessionId);
+        }
+        setSideTaskCatalog((catalog) =>
+          mergeSideTaskCatalog(
+            catalog,
             parentSessionId,
-            loaded: true,
-            items: [
-              ...listedItems,
-              ...catalog.items.filter((item) => !listedIds.has(item.sessionId)),
-            ],
-          };
-        });
+            listedItems,
+            optimisticSideTaskIdsRef.current,
+          ),
+        );
       })
       .catch(() => {
         if (cancelled) return;
