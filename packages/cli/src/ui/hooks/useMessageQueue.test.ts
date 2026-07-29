@@ -6,7 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useMessageQueue, type QueuedSubmission } from './useMessageQueue.js';
+import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
+import { useMessageQueue } from './useMessageQueue.js';
 
 describe('useMessageQueue', () => {
   beforeEach(() => {
@@ -85,11 +86,332 @@ describe('useMessageQueue', () => {
     );
   });
 
+  it('keeps one hidden Goal turn out of the public queue and wakes dequeue', () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-1',
+      revision: 2,
+      turnId: 'turn-1',
+    };
+    const input: Parameters<GoalTurnHost['startGoalTurn']>[0] = {
+      permit,
+      continuationContext: 'Continue the active Goal',
+      verifierFeedback: 'Need stronger evidence',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    const queue = result.current as typeof result.current & {
+      enqueueGoalTurn?: (value: typeof input) => void;
+      pendingSubmissionCount?: number;
+      popNextSubmission?: () => unknown;
+    };
+
+    expect(queue.enqueueGoalTurn).toBeTypeOf('function');
+    act(() => {
+      queue.enqueueGoalTurn!(input);
+      queue.enqueueGoalTurn!(input);
+    });
+
+    expect(result.current.messageQueue).toEqual([]);
+    expect((result.current as typeof queue).pendingSubmissionCount).toBe(1);
+
+    let submission: unknown;
+    act(() => {
+      submission = queue.popNextSubmission!();
+    });
+    expect(submission).toEqual({
+      kind: 'goal',
+      permit,
+      turnKey: 'goal-runtime:turn-1',
+      continuationContext: 'Continue the active Goal',
+      verifierFeedback: 'Need stronger evidence',
+    });
+    expect(queue.popNextSubmission!()).toBeNull();
+  });
+
+  it('peeks a stable plain-user batch key without consuming messages', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('first prompt');
+      result.current.addMessage('/help');
+      result.current.addMessage('second prompt');
+    });
+    const queue = result.current as typeof result.current & {
+      peekNextUserBatchKey?: () => string | undefined;
+      popNextSubmission: () => unknown;
+    };
+
+    expect(queue.peekNextUserBatchKey).toBeTypeOf('function');
+    const firstPeek = queue.peekNextUserBatchKey!();
+    const secondPeek = queue.peekNextUserBatchKey!();
+
+    expect(firstPeek).toEqual(expect.any(String));
+    expect(secondPeek).toBe(firstPeek);
+    expect(result.current.messageQueue).toEqual([
+      'first prompt',
+      '/help',
+      'second prompt',
+    ]);
+
+    let submission: unknown;
+    act(() => {
+      submission = queue.popNextSubmission();
+    });
+    expect(submission).toEqual({
+      kind: 'user',
+      modelText: 'first prompt\n\nsecond prompt',
+      turnKey: firstPeek,
+    });
+    expect(result.current.messageQueue).toEqual(['/help']);
+    expect(queue.peekNextUserBatchKey!()).toBeUndefined();
+  });
+
+  it('keeps a Goal permit hidden until plain user preprocessing succeeds', () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-1',
+      revision: 2,
+      turnId: 'turn-user-priority',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit,
+        continuationContext: 'automatic continuation',
+      });
+      result.current.addMessage('user goes first');
+    });
+    const userTurnKey = result.current.peekNextUserBatchKey();
+
+    let submission;
+    act(() => {
+      submission = result.current.popNextSubmission();
+    });
+
+    expect(submission).toEqual({
+      kind: 'user',
+      modelText: 'user goes first',
+      turnKey: userTurnKey,
+    });
+    expect(result.current.pendingSubmissionCount).toBe(1);
+    let claimedGoal;
+    act(() => {
+      claimedGoal = result.current.claimGoalTurn();
+    });
+    expect(claimedGoal).toEqual({
+      kind: 'goal',
+      permit,
+      turnKey: 'goal-runtime:turn-user-priority',
+      continuationContext: 'automatic continuation',
+    });
+    expect(result.current.pendingSubmissionCount).toBe(0);
+  });
+
+  it('defensively copies a Goal permit when it is admitted', () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-copy',
+      revision: 3,
+      turnId: 'turn-copy',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit,
+        continuationContext: 'copy the permit',
+      });
+    });
+
+    permit.revision = 99;
+    const submission = result.current.popNextSubmission();
+
+    expect(submission?.kind).toBe('goal');
+    if (!submission || submission.kind !== 'goal') {
+      throw new Error('Expected a queued Goal turn');
+    }
+    expect(submission.permit).toEqual({
+      goalId: 'goal-copy',
+      revision: 3,
+      turnId: 'turn-copy',
+    });
+    expect(submission.permit).not.toBe(permit);
+  });
+
+  it('creates a stable direct-user admission that claims a hidden Goal', () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-direct',
+      revision: 4,
+      turnId: 'turn-direct',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit,
+        continuationContext: 'direct user wins',
+      });
+    });
+    const queue = result.current as typeof result.current & {
+      claimDirectUserAdmission?: () => unknown;
+    };
+
+    expect(queue.claimDirectUserAdmission).toBeTypeOf('function');
+    let admission: unknown;
+    act(() => {
+      admission = queue.claimDirectUserAdmission!();
+    });
+
+    expect(admission).toEqual({
+      turnKey: expect.any(String),
+      goal: {
+        kind: 'goal',
+        permit,
+        turnKey: 'goal-runtime:turn-direct',
+        continuationContext: 'direct user wins',
+      },
+    });
+    expect(result.current.pendingSubmissionCount).toBe(0);
+    let nextAdmission: unknown;
+    act(() => {
+      nextAdmission = queue.claimDirectUserAdmission!();
+    });
+    expect(nextAdmission).toEqual({
+      turnKey: expect.any(String),
+    });
+  });
+
+  it('lets a system turn claim a hidden Goal without creating a user key', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit: {
+          goalId: 'goal-system',
+          revision: 2,
+          turnId: 'turn-system',
+        },
+        continuationContext: 'system event goes first',
+      });
+    });
+    const queue = result.current as typeof result.current & {
+      claimGoalTurn?: () => unknown;
+    };
+
+    expect(queue.claimGoalTurn).toBeTypeOf('function');
+    let claimed: unknown;
+    act(() => {
+      claimed = queue.claimGoalTurn!();
+    });
+
+    expect(claimed).toEqual({
+      kind: 'goal',
+      permit: {
+        goalId: 'goal-system',
+        revision: 2,
+        turnId: 'turn-system',
+      },
+      turnKey: 'goal-runtime:turn-system',
+      continuationContext: 'system event goes first',
+    });
+    expect(result.current.pendingSubmissionCount).toBe(0);
+    expect(queue.claimGoalTurn!()).toBeUndefined();
+  });
+
+  it('does not reuse real-user turn keys across hook instances', () => {
+    const first = renderHook(() => useMessageQueue());
+    const second = renderHook(() => useMessageQueue());
+
+    const firstAdmission = first.result.current.claimDirectUserAdmission();
+    const secondAdmission = second.result.current.claimDirectUserAdmission();
+
+    expect(firstAdmission.turnKey).not.toBe(secondAdmission.turnKey);
+  });
+
+  it('releases Goal dedup state after many claimed turns', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    for (let index = 0; index < 160; index++) {
+      act(() => {
+        result.current.enqueueGoalTurn({
+          permit: {
+            goalId: 'goal-many-turns',
+            revision: 1,
+            turnId: `turn-${index}`,
+          },
+          continuationContext: `continue ${index}`,
+        });
+        result.current.claimGoalTurn();
+      });
+    }
+
+    expect(result.current.pendingSubmissionCount).toBe(0);
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit: {
+          goalId: 'goal-many-turns',
+          revision: 1,
+          turnId: 'turn-0',
+        },
+        continuationContext: 'turn ids do not leak forever',
+      });
+    });
+    expect(result.current.pendingSubmissionCount).toBe(1);
+  });
+
+  it('reports queued real-user priority separately from hidden Goal work', () => {
+    const { result } = renderHook(() => useMessageQueue());
+
+    expect(result.current.hasQueuedUserMessages()).toBe(false);
+    expect(result.current.getPendingSubmissionCount()).toBe(0);
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit: {
+          goalId: 'goal-priority',
+          revision: 1,
+          turnId: 'turn-priority',
+        },
+        continuationContext: 'hidden',
+      });
+    });
+    expect(result.current.hasQueuedUserMessages()).toBe(false);
+    expect(result.current.getPendingSubmissionCount()).toBe(1);
+    act(() => {
+      result.current.addMessage('/help');
+    });
+    expect(result.current.hasQueuedUserMessages()).toBe(true);
+    expect(result.current.getPendingSubmissionCount()).toBe(2);
+  });
+
+  it('removes queued Goal turns without deleting real user text', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit: {
+          goalId: 'goal-preempt',
+          revision: 1,
+          turnId: 'turn-preempt',
+        },
+        continuationContext: 'remove only this entry',
+      });
+      result.current.addMessage('keep me');
+    });
+    const queue = result.current as typeof result.current & {
+      removeGoalTurns?: () => number;
+    };
+
+    expect(queue.removeGoalTurns).toBeTypeOf('function');
+    let removed = 0;
+    act(() => {
+      removed = queue.removeGoalTurns!();
+    });
+
+    expect(removed).toBe(1);
+    expect(result.current.messageQueue).toEqual(['keep me']);
+    expect(result.current.pendingSubmissionCount).toBe(1);
+    expect(result.current.popNextSubmission()).toMatchObject({
+      kind: 'user',
+      modelText: 'keep me',
+    });
+  });
+
   describe('popAllMessages (cancel and ESC/Up restore)', () => {
     it('returns null when the queue is empty', () => {
       const { result } = renderHook(() => useMessageQueue());
 
-      let popped: QueuedSubmission | null = null;
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
@@ -107,12 +429,13 @@ describe('useMessageQueue', () => {
         result.current.addMessage('Message 3');
       });
 
-      let popped: QueuedSubmission | null = null;
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toEqual({
+      expect(popped).toMatchObject({
+        kind: 'user',
         modelText: 'Message 1\n\nMessage 2\n\nMessage 3',
       });
       expect(result.current.messageQueue).toEqual([]);
@@ -125,12 +448,15 @@ describe('useMessageQueue', () => {
         result.current.addMessage('Only message');
       });
 
-      let popped: QueuedSubmission | null = null;
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toEqual({ modelText: 'Only message' });
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'Only message',
+      });
       expect(result.current.messageQueue).toEqual([]);
     });
 
@@ -146,53 +472,115 @@ describe('useMessageQueue', () => {
         result.current.addMessage('world');
       });
 
-      let popped: QueuedSubmission | null = null;
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toEqual({
+      expect(popped).toMatchObject({
+        kind: 'user',
         modelText: '/model\n\nhello\n\nworld',
       });
       expect(result.current.messageQueue).toEqual([]);
     });
 
-    it('aggregates provenance only when every queued message has it', () => {
+    it('reports the exact removed turn keys for Goal reservation release', () => {
       const { result } = renderHook(() => useMessageQueue());
+      act(() => result.current.addMessage('queued user'));
+      const reservedKey = result.current.peekNextUserBatchKey();
+      const removed: string[][] = [];
 
       act(() => {
-        result.current.addMessage('model one', false, 'user one');
-        result.current.addMessage('model two', false, 'user two');
+        result.current.popAllMessages((keys) => removed.push(keys));
       });
 
-      let popped: QueuedSubmission | null = null;
-      act(() => {
-        popped = result.current.popAllMessages();
-      });
+      expect(removed).toEqual([[reservedKey]]);
+    });
+  });
 
-      expect(popped).toEqual({
-        modelText: 'model one\n\nmodel two',
-        submittedPrompt: 'user one\n\nuser two',
+  it('holds reserved user input behind a stopped Goal until /goal resumes it', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('queued user');
+      result.current.addMessage('/goal resume');
+    });
+    const reservedKey = result.current.peekNextUserBatchKey();
+
+    let goalControl: ReturnType<typeof result.current.popNextSubmission>;
+    act(() => {
+      goalControl = result.current.popNextSubmission('only');
+    });
+    expect(goalControl!).toMatchObject({
+      kind: 'user',
+      modelText: '/goal resume',
+    });
+    expect(result.current.messageQueue).toEqual(['queued user']);
+    expect(result.current.popNextSubmission('only')).toBeNull();
+    let userSubmission: ReturnType<typeof result.current.popNextSubmission>;
+    act(() => {
+      userSubmission = result.current.popNextSubmission();
+    });
+    expect(userSubmission!).toEqual({
+      kind: 'user',
+      modelText: 'queued user',
+      turnKey: reservedKey,
+    });
+  });
+
+  it('prioritizes a Goal control over ordinary input while the Goal is active', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('queued user');
+      result.current.addMessage('/goal pause');
+    });
+
+    let goalControl: ReturnType<typeof result.current.popNextSubmission>;
+    act(() => {
+      goalControl = result.current.popNextSubmission('priority');
+    });
+
+    expect(goalControl!).toMatchObject({
+      kind: 'user',
+      modelText: '/goal pause',
+    });
+    expect(result.current.messageQueue).toEqual(['queued user']);
+  });
+
+  it('keeps ordinary input queued while an active Goal has no continuation ready', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('queued user');
+    });
+
+    expect(result.current.popNextSubmission('priority')).toBeNull();
+    expect(result.current.messageQueue).toEqual(['queued user']);
+  });
+
+  it('drains a hidden Goal continuation before ordinary queued input', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('queued user');
+      result.current.enqueueGoalTurn({
+        permit: {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'goal-turn-1',
+        },
+        continuationContext: 'continue the active Goal',
       });
     });
 
-    it('omits aggregate provenance when any queued message lacks it', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      act(() => {
-        result.current.addMessage('model one', false, 'user one');
-        result.current.addMessage('restored steer');
-      });
-
-      let popped: QueuedSubmission | null = null;
-      act(() => {
-        popped = result.current.popAllMessages();
-      });
-
-      expect(popped).toEqual({
-        modelText: 'model one\n\nrestored steer',
-      });
+    let submission: ReturnType<typeof result.current.popNextSubmission>;
+    act(() => {
+      submission = result.current.popNextSubmission('priority');
     });
+
+    expect(submission!).toMatchObject({
+      kind: 'goal',
+      turnKey: 'goal-runtime:goal-turn-1',
+    });
+    expect(result.current.messageQueue).toEqual(['queued user']);
+    expect(result.current.popNextSubmission('priority')).toBeNull();
   });
 
   describe('drainQueue (mid-turn drain for tool-result injection)', () => {
@@ -225,14 +613,13 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['/model']);
     });
 
-    it('drains goal commands during an active turn', () => {
+    it('keeps Goal creation queued until an ordinary turn reaches idle', () => {
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
         result.current.addMessage('steer now');
-        result.current.addMessage('/goal clear');
+        result.current.addMessage('/goal ship the release');
         result.current.addMessage('/model');
-        result.current.addMessage('/goal replace the active goal');
       });
 
       let drained: string[] = [];
@@ -240,12 +627,38 @@ describe('useMessageQueue', () => {
         drained = result.current.drainQueue();
       });
 
-      expect(drained).toEqual([
-        'steer now',
-        '/goal clear',
-        '/goal replace the active goal',
+      expect(drained).toEqual(['steer now']);
+      expect(result.current.messageQueue).toEqual([
+        '/goal ship the release',
+        '/model',
       ]);
-      expect(result.current.messageQueue).toEqual(['/model']);
+    });
+
+    it('drains only Goal controls while a Goal turn is running', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('plain user text');
+        result.current.addMessage('/goal pause');
+        result.current.addMessage('/model');
+        result.current.addMessage('/goal edit revised objective');
+        result.current.addMessage('/goal clear');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, true);
+      });
+
+      expect(drained).toEqual([
+        '/goal pause',
+        '/goal edit revised objective',
+        '/goal clear',
+      ]);
+      expect(result.current.messageQueue).toEqual([
+        'plain user text',
+        '/model',
+      ]);
     });
 
     it('leaves goal commands queued at the idle boundary', () => {
@@ -346,39 +759,20 @@ describe('useMessageQueue', () => {
 
       expect(result.current.messageQueue).toEqual(['steer now', 'newer input']);
     });
-
-    it('drops provenance when interrupted steer messages are restored', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      act(() => {
-        result.current.addMessage('steer now', false, 'raw steer');
-      });
-      act(() => {
-        const drained = result.current.drainQueue();
-        result.current.restoreMessages(drained);
-      });
-
-      let submission: QueuedSubmission | null = null;
-      act(() => {
-        submission = result.current.popNextTurn();
-      });
-
-      expect(submission).toEqual({ modelText: 'steer now' });
-    });
   });
 
-  describe('popNextTurn', () => {
+  describe('popNextSegment', () => {
     it('returns null when the queue is empty', () => {
       const { result } = renderHook(() => useMessageQueue());
 
-      let submission: QueuedSubmission | null = null;
+      let segment: string | null = null;
       act(() => {
-        submission = result.current.popNextTurn();
+        segment = result.current.popNextSegment();
       });
-      expect(submission).toBeNull();
+      expect(segment).toBeNull();
     });
 
-    it('pops the first slash command and leaves the rest queued', () => {
+    it('pops the first item and leaves the rest queued', () => {
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -386,15 +780,15 @@ describe('useMessageQueue', () => {
         result.current.addMessage('/help');
       });
 
-      let submission: QueuedSubmission | null = null;
+      let segment: string | null = null;
       act(() => {
-        submission = result.current.popNextTurn();
+        segment = result.current.popNextSegment();
       });
-      expect(submission).toEqual({ modelText: '/model' });
+      expect(segment).toBe('/model');
       expect(result.current.messageQueue).toEqual(['/help']);
     });
 
-    it('drains slash commands one item at a time across repeated calls', () => {
+    it('drains the queue one item at a time across repeated calls', () => {
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -403,67 +797,22 @@ describe('useMessageQueue', () => {
         result.current.addMessage('/help');
       });
 
-      const submissions: Array<QueuedSubmission | null> = [];
+      const segments: Array<string | null> = [];
       act(() => {
-        submissions.push(result.current.popNextTurn());
+        segments.push(result.current.popNextSegment());
       });
       act(() => {
-        submissions.push(result.current.popNextTurn());
+        segments.push(result.current.popNextSegment());
       });
       act(() => {
-        submissions.push(result.current.popNextTurn());
+        segments.push(result.current.popNextSegment());
       });
       act(() => {
-        submissions.push(result.current.popNextTurn());
+        segments.push(result.current.popNextSegment());
       });
 
-      expect(submissions).toEqual([
-        { modelText: '/model' },
-        { modelText: '/theme' },
-        { modelText: '/help' },
-        null,
-      ]);
+      expect(segments).toEqual(['/model', '/theme', '/help', null]);
       expect(result.current.messageQueue).toEqual([]);
-    });
-
-    it('batches all plain prompts while leaving interleaved slash commands', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      act(() => {
-        result.current.addMessage('/model');
-        result.current.addMessage('model one', false, 'user one');
-        result.current.addMessage('/help');
-        result.current.addMessage('model two', true, 'user two');
-      });
-
-      let submission: QueuedSubmission | null = null;
-      act(() => {
-        submission = result.current.popNextTurn();
-      });
-
-      expect(submission).toEqual({
-        modelText: 'model one\n\nmodel two',
-        submittedPrompt: 'user one\n\nuser two',
-      });
-      expect(result.current.messageQueue).toEqual(['/model', '/help']);
-    });
-
-    it('fails closed when a batched prompt lacks provenance', () => {
-      const { result } = renderHook(() => useMessageQueue());
-
-      act(() => {
-        result.current.addMessage('model one', false, 'user one');
-        result.current.addMessage('model two');
-      });
-
-      let submission: QueuedSubmission | null = null;
-      act(() => {
-        submission = result.current.popNextTurn();
-      });
-
-      expect(submission).toEqual({
-        modelText: 'model one\n\nmodel two',
-      });
     });
   });
 });

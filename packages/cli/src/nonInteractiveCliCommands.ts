@@ -184,6 +184,13 @@ function handleCommandResult(
         originalType: 'confirm_action',
       };
 
+    case 'goal_control':
+      return {
+        type: 'unsupported',
+        reason: 'Goal control is not supported in non-interactive mode yet.',
+        originalType: 'goal_control',
+      };
+
     default: {
       // Exhaustiveness check
       const _exhaustive: never = result;

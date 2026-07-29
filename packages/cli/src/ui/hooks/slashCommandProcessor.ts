@@ -1065,6 +1065,28 @@ export const useSlashCommandProcessor = (
                     });
                   }
                   return { type: 'handled' };
+                case 'goal_control': {
+                  if (commandContext.ui.isIdleRef.current) {
+                    const snapshot = result.response.snapshot;
+                    if (snapshot.goal || result.cause === 'clear') {
+                      addItem(
+                        {
+                          type: MessageType.GOAL_STATE,
+                          snapshot,
+                          ...(result.cause ? { cause: result.cause } : {}),
+                        },
+                        Date.now(),
+                      );
+                    } else {
+                      addMessage({
+                        type: MessageType.INFO,
+                        content: 'No Goal set.',
+                        timestamp: new Date(),
+                      });
+                    }
+                  }
+                  return { type: 'handled' };
+                }
                 case 'dialog':
                   switch (result.dialog) {
                     case 'arena_start':
