@@ -1825,8 +1825,14 @@ export const useGeminiStream = (
   );
 
   const handleErrorEvent = useCallback(
-    (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
-      lastPromptErroredRef.current = true;
+    (
+      eventValue: GeminiErrorEventValue,
+      userMessageTimestamp: number,
+      submitType: SendMessageType,
+    ) => {
+      if (submitType !== SendMessageType.Goal) {
+        lastPromptErroredRef.current = true;
+      }
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
@@ -1844,7 +1850,10 @@ export const useGeminiStream = (
       );
 
       if (!isShowingAutoRetry) {
-        const retryHint = t('Press Ctrl+Y to retry');
+        const retryHint =
+          submitType !== SendMessageType.Goal
+            ? t('Press Ctrl+Y to retry')
+            : undefined;
         // Store error with hint as a pending item (not in history).
         // This allows the hint to be removed when the user retries with Ctrl+Y,
         // since pending items are in the dynamic rendering area (not <Static>).
@@ -2105,6 +2114,7 @@ export const useGeminiStream = (
       stream: AsyncIterable<GeminiEvent>,
       userMessageTimestamp: number,
       signal: AbortSignal,
+      submitType: SendMessageType,
       turnAdmission?: GoalTurnAdmission,
     ): Promise<StreamProcessingResult> => {
       let geminiMessageBuffer = '';
@@ -2265,7 +2275,7 @@ export const useGeminiStream = (
               };
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
-              handleErrorEvent(event.value, userMessageTimestamp);
+              handleErrorEvent(event.value, userMessageTimestamp, submitType);
               break;
             case ServerGeminiEventType.ChatCompressed:
               flushBufferedStreamEvents();
@@ -3250,6 +3260,7 @@ export const useGeminiStream = (
             stream,
             userMessageTimestamp,
             processingSignal,
+            submitType,
             turnAdmission,
           );
           if (

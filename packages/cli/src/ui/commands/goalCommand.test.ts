@@ -49,11 +49,12 @@ function makeRuntime(
   return { dispatch, getSnapshot, runtime };
 }
 
-function makeContext(runtime: GoalRuntime) {
+function makeContext(runtime: GoalRuntime, { trusted = true } = {}) {
   const getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
-  const config = { getGoalRuntimeReady } as unknown as Config;
+  const isTrustedFolder = vi.fn(() => trusted);
+  const config = { getGoalRuntimeReady, isTrustedFolder } as unknown as Config;
   const context = createMockCommandContext({ services: { config } });
-  return { context, getGoalRuntimeReady };
+  return { context, getGoalRuntimeReady, isTrustedFolder };
 }
 
 describe('parseGoalCommand', () => {
@@ -289,7 +290,7 @@ describe('goalCommand', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it('works with a bare config that exposes no trust or hook services', async () => {
+  it('creates a Goal without requiring hook services', async () => {
     const before = noGoalSnapshot();
     const after = goalSnapshot({ objective: 'Bare Goal', revision: 1 });
     const { dispatch, runtime } = makeRuntime(before, { snapshot: after });
@@ -304,10 +305,45 @@ describe('goalCommand', () => {
     expect(result).toMatchObject({ type: 'goal_control' });
   });
 
+  it.each(['set Ship it', 'edit Better', 'resume'])(
+    'rejects %j in an untrusted workspace before runtime admission',
+    async (args) => {
+      const { dispatch, runtime } = makeRuntime(goalSnapshot());
+      const { context, getGoalRuntimeReady } = makeContext(runtime, {
+        trusted: false,
+      });
+
+      const result = await goalCommand.action!(context, args);
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringMatching(/trusted workspaces/i),
+      });
+      expect(getGoalRuntimeReady).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['', 'clear', 'pause'])(
+    'still allows %j in an untrusted workspace',
+    async (args) => {
+      const { runtime } = makeRuntime(goalSnapshot());
+      const { context } = makeContext(runtime, { trusted: false });
+
+      const result = await goalCommand.action!(context, args);
+
+      expect(result).toMatchObject({ type: 'goal_control' });
+    },
+  );
+
   it('maps runtime errors to the existing error action without state', async () => {
     const failure = new Error('Goal persistence is unavailable');
     const getGoalRuntimeReady = vi.fn().mockRejectedValue(failure);
-    const config = { getGoalRuntimeReady } as unknown as Config;
+    const config = {
+      getGoalRuntimeReady,
+      isTrustedFolder: () => true,
+    } as unknown as Config;
     const context = createMockCommandContext({ services: { config } });
 
     const result = await goalCommand.action!(context, 'status objective');

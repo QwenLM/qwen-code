@@ -9690,6 +9690,43 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('omits the Ctrl+Y retry hint for stream errors during a Goal turn', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'Goal stream error' } },
+          };
+        })(),
+      );
+
+      const goal: QueuedGoalTurn = {
+        kind: 'goal',
+        permit: { goalId: 'goal-err', revision: 1, turnId: 'turn-err' },
+        turnKey: 'goal-runtime:turn-err',
+        continuationContext: 'continue toward the objective',
+      };
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          goal.continuationContext,
+          SendMessageType.Goal,
+          'prompt-id-goal-error',
+          { goal },
+        );
+      });
+
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+        expect((errorItem as { hint?: string })?.hint).toBeUndefined();
+      });
+    });
+
     it('should clear stale countdown error when retry succeeds without a second Retry event', async () => {
       vi.useFakeTimers();
       try {

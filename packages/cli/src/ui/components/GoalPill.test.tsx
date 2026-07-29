@@ -109,7 +109,7 @@ describe('GoalPill', () => {
     ['complete', snapshot('complete'), ''],
   ])('renders accessible lifecycle text for %s', (_name, value, expected) => {
     vi.setSystemTime(NOW);
-    const { lastFrame } = renderPill({ snapshot: value });
+    const { lastFrame, unmount } = renderPill({ snapshot: value });
 
     if (expected) {
       expect(lastFrame()).toContain(expected);
@@ -118,15 +118,18 @@ describe('GoalPill', () => {
     } else {
       expect(lastFrame()).toBe('');
     }
+    // Active snapshots start a real elapsed-time interval; unmount clears it.
+    unmount();
   });
 
   it('adds the current active span to persisted active time', () => {
     vi.setSystemTime(NOW);
-    const { lastFrame } = renderPill({
+    const { lastFrame, unmount } = renderPill({
       snapshot: snapshot('active', 'running'),
     });
 
     expect(lastFrame()).toContain('(5s)');
+    unmount();
   });
 
   it('keeps paused elapsed time frozen while wall clock advances', () => {

@@ -272,6 +272,20 @@ export const goalCommand: SlashCommand = {
     const operation = parseGoalCommand(args);
     if (operation.kind === 'error') return errorMessage(operation.message);
 
+    // Starting or re-driving an autonomous Goal ingests workspace context
+    // (QWEN.md, files) without per-tool confirmation, so it requires a trusted
+    // workspace — the same boundary the legacy hook path enforces. `status`,
+    // `clear`, and `pause` only read or reduce work, so they stay available.
+    const requiresTrustedFolder =
+      operation.kind === 'set' ||
+      operation.kind === 'edit' ||
+      operation.kind === 'resume';
+    if (requiresTrustedFolder && !config.isTrustedFolder()) {
+      return errorMessage(
+        '/goal is only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+      );
+    }
+
     try {
       const runtime = await config.getGoalRuntimeReady();
       const snapshot = runtime.getSnapshot();

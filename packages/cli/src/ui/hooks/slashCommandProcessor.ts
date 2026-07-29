@@ -1066,7 +1066,14 @@ export const useSlashCommandProcessor = (
                   }
                   return { type: 'handled' };
                 case 'goal_control': {
-                  if (commandContext.ui.isIdleRef.current) {
+                  // `status` is a pure read that emits no runtime broadcast, so
+                  // it must render its own card even mid-turn. Mutations broadcast
+                  // a GoalState event the active stream renders, so they defer to
+                  // it while a turn is running.
+                  const rendersHere =
+                    result.operation.kind === 'status' ||
+                    commandContext.ui.isIdleRef.current;
+                  if (rendersHere) {
                     const snapshot = result.response.snapshot;
                     if (snapshot.goal || result.cause === 'clear') {
                       addItem(

@@ -164,6 +164,30 @@ describe('useMessageQueue', () => {
     expect(queue.peekNextUserBatchKey!()).toBeUndefined();
   });
 
+  it('pops a slash-command-headed queue one command at a time in normal mode', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.addMessage('/model');
+      result.current.addMessage('/help');
+    });
+
+    let submission: ReturnType<typeof result.current.popNextSubmission> = null;
+    act(() => {
+      submission = result.current.popNextSubmission();
+    });
+
+    expect(submission).toMatchObject({ kind: 'user', modelText: '/model' });
+    expect(result.current.messageQueue).toEqual(['/help']);
+
+    let second: ReturnType<typeof result.current.popNextSubmission> = null;
+    act(() => {
+      second = result.current.popNextSubmission();
+    });
+
+    expect(second).toMatchObject({ kind: 'user', modelText: '/help' });
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
   it('hides the plain-user batch key from an active Goal turn reservation', () => {
     const { result } = renderHook(() => useMessageQueue());
     act(() => {
@@ -824,6 +848,44 @@ describe('useMessageQueue', () => {
       });
 
       expect(result.current.messageQueue).toEqual(['steer now', 'newer input']);
+    });
+
+    it('preserves submittedPrompt provenance when restoring one interrupted message', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.restoreMessages(['steer now'], 'original prompt');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'steer now',
+        submittedPrompt: 'original prompt',
+      });
+    });
+
+    it('drops submittedPrompt provenance when restoring multiple messages', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.restoreMessages(['first', 'second'], 'original prompt');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'first\n\nsecond',
+      });
+      expect(popped!.submittedPrompt).toBeUndefined();
     });
   });
 });
