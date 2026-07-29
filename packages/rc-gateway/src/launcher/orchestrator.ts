@@ -3,7 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import { join } from 'node:path';
 import type { RunCommand } from './exec.js';
@@ -25,7 +25,17 @@ export interface Deps {
   port: number;
   unit: string; // e.g. qwen-rc-gateway
   serveCmd: string[]; // PATH-independent argv prefix for qwen-rc, e.g. [process.argv[0], process.argv[1]]
+  // The gateway unit writes owner-bootstrap.code from inside the unit
+  // process, hundreds of ms after `systemd-run` merely accepts the job —
+  // `up` polls for it. These are injectable purely so tests don't incur
+  // real multi-second waits; production uses the defaults below.
+  bootstrapTimeoutMs?: number;
+  bootstrapPollMs?: number;
 }
+
+/** Production polling defaults — see `Deps.bootstrapTimeoutMs`/`bootstrapPollMs`. */
+const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 15_000;
+const DEFAULT_BOOTSTRAP_POLL_MS = 200;
 
 export interface UpResult {
   ok: boolean;
@@ -48,6 +58,37 @@ function readBootstrapCode(dir: string): string | undefined {
   if (!existsSync(p)) return undefined;
   const c = readFileSync(p, 'utf8').trim();
   return c.length > 0 ? c : undefined;
+}
+
+/**
+ * Poll for `<dir>/owner-bootstrap.code` until it exists (with non-empty
+ * content) or `timeoutMs` elapses. The gateway unit writes this file from
+ * its own process well after `systemd-run` returns, so a same-tick read
+ * (the previous behavior) races the gateway's boot and, on a first-ever
+ * `up`, reliably loses.
+ *
+ * The check always runs BEFORE the delay, so a file that is already present
+ * (the common case in tests, and on a warm restart if `down` didn't run)
+ * returns immediately with no real sleep incurred.
+ *
+ * Deliberately keyed on `readBootstrapCode`'s non-empty check, not
+ * `existsSync`: the gateway creates-then-writes the file, so a bare
+ * existence check can observe a truncated/zero-length file mid-write. That
+ * would return an incomplete code instead of continuing to poll — so this
+ * treats a present-but-empty file the same as absent and keeps polling.
+ */
+async function waitForBootstrapCode(
+  dir: string,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const code = readBootstrapCode(dir);
+    if (code) return code;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 /** Best-effort read of a cert's `notAfter` as an ISO string. `undefined` on any failure. */
@@ -134,9 +175,20 @@ export async function up(deps: Deps): Promise<UpResult> {
   };
   writeState(dir, state);
 
-  // 4. Connect info.
-  const bootstrapCode = readBootstrapCode(dir);
+  // 4. Connect info. The gateway (whether just started, or already active
+  // from a prior `up`) writes owner-bootstrap.code from inside the unit
+  // process — poll for it rather than reading synchronously, which would
+  // race the gateway's boot.
+  const bootstrapCode = await waitForBootstrapCode(
+    dir,
+    deps.bootstrapTimeoutMs ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS,
+    deps.bootstrapPollMs ?? DEFAULT_BOOTSTRAP_POLL_MS,
+  );
   const qr = await renderQr(url).catch(() => undefined);
+  const hint =
+    bootstrapCode === undefined
+      ? 'The pairing code was not ready yet — the gateway may still be starting. Run `qwen-rc status`, then retry `qwen-rc up` to fetch it.'
+      : undefined;
   return {
     ok: true,
     url,
@@ -146,6 +198,7 @@ export async function up(deps: Deps): Promise<UpResult> {
     bootstrapCode,
     certExpiry,
     qr,
+    hint,
   };
 }
 
@@ -174,6 +227,11 @@ export async function down(deps: Deps): Promise<{ ok: boolean }> {
   const st = readState(dir);
   await stopUnit(run, st?.unit ?? unit); // idempotent; a stopped unit is fine
   clearState(dir);
+  // Each gateway boot mints a fresh owner-bootstrap code. Leaving the old
+  // file behind would let a subsequent `up` read a STALE code that doesn't
+  // match the next boot's — pairing would then fail. Removing it here means
+  // a following `up` only ever sees a code minted by the gateway it started.
+  rmSync(join(dir, BOOTSTRAP_CODE_FILENAME), { force: true });
   return { ok: true };
 }
 

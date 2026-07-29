@@ -1890,8 +1890,9 @@ if (process.argv[2] === 'serve') {
   // Tailscale + native-TLS + systemd --user gateway unit on this machine.
   // Daemon-free glue: all logic lives in ./launcher/orchestrator.js — this
   // branch only parses argv, wires the real exec boundary, and renders the
-  // result as text or `--json`. Printed/JSON output carries connect metadata
-  // + the pairing code only, never session/tool content.
+  // result as text or `--json`. `--json` carries connect metadata only — it
+  // deliberately OMITS the one-time owner pairing code (see upJson below);
+  // only the human-readable terminal path prints that code.
   void (async () => {
     const { up, down, status, upJson } = await import(
       './launcher/orchestrator.js'
