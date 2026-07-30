@@ -239,7 +239,7 @@ describe('composer visual effects fallback', () => {
 });
 
 describe('specular effect idle bail-out', () => {
-  it('stops the rAF loop when idle and restarts on pointer proximity', () => {
+  it('stops the rAF loop only after brightness decays below the threshold', () => {
     const drawArrays = vi.fn();
     const clear = vi.fn();
     const glStub = {
@@ -316,7 +316,10 @@ describe('specular effect idle bail-out', () => {
 
     expect(rafCallbacks.length).toBe(1);
 
-    let now = 0;
+    // Start at the real clock so the first delta is positive; the effect
+    // seeds lastFrame from performance.now() and a synthetic clock starting
+    // at zero would produce negative deltas that break the exponential decay.
+    let now = performance.now();
     const drainFrames = (count: number, stepMs: number) => {
       for (let i = 0; i < count; i++) {
         const callback = rafCallbacks.shift();
@@ -326,25 +329,41 @@ describe('specular effect idle bail-out', () => {
       }
     };
 
-    // Run enough idle frames for brightness to decay below 0.002
+    // Move the pointer close so proximity (and therefore brightness) rises,
+    // then drain frames while the highlight is visibly above the threshold.
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
+      );
+    });
+    drainFrames(30, 16);
+    const drawsWhileBright = drawArrays.mock.calls.length;
+    expect(drawsWhileBright).toBeGreaterThan(0);
+
+    // Move the pointer far away so proximity drops to zero and brightness
+    // decays exponentially until the bail-out threshold is crossed.
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 300, clientY: 300 }),
+      );
+    });
     drainFrames(120, 16);
-    const drawsAfterDecay = drawArrays.mock.calls.length;
 
-    // The loop should have stopped — no new rAF callback queued
+    // The loop kept drawing through the decay, then stopped — no new rAF
+    // callback queued, and the final frame cleared without drawing.
+    expect(drawArrays.mock.calls.length).toBeGreaterThan(drawsWhileBright);
     expect(rafCallbacks.length).toBe(0);
-    // The last frame cleared but did not draw
-    expect(clear.mock.calls.length).toBeGreaterThan(drawsAfterDecay);
+    expect(clear.mock.calls.length).toBeGreaterThan(
+      drawArrays.mock.calls.length,
+    );
 
-    // A nearby pointer move restarts the loop
+    // A nearby pointer move restarts the loop.
     act(() => {
       window.dispatchEvent(
         new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
       );
     });
     expect(rafCallbacks.length).toBe(1);
-
-    drainFrames(1, 16);
-    expect(drawArrays.mock.calls.length).toBeGreaterThan(drawsAfterDecay);
   });
 });
 
@@ -454,5 +473,152 @@ describe('dot field pointer speed baseline', () => {
     });
 
     expect(addColorStop).not.toHaveBeenCalled();
+  });
+});
+
+describe('dot field static grid and idle loop', () => {
+  const mockDotsRect = () =>
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 30,
+      height: 30,
+      top: 0,
+      left: 0,
+      right: 30,
+      bottom: 30,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+  const makeContextStub = () => ({
+    arc: vi.fn(),
+    beginPath: vi.fn(),
+    clearRect: vi.fn(),
+    createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+    fill: vi.fn(),
+    fillRect: vi.fn(),
+    moveTo: vi.fn(),
+    setTransform: vi.fn(),
+  });
+
+  it('renders the static dot grid once under prefers-reduced-motion', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(prefers-reduced-motion: reduce)',
+          media: query,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as MediaQueryList,
+    );
+    mockDotsRect();
+    const contextStub = makeContextStub();
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      contextStub as unknown as CanvasRenderingContext2D,
+    );
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    rafSpy.mockClear();
+    act(() =>
+      root.render(
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <NewSessionDotField />
+        </ThemeProvider>,
+      ),
+    );
+
+    // A 30px box at a 15px step yields a 2×2 grid that must be painted even
+    // though every dot is already settled on its anchor.
+    expect(contextStub.arc.mock.calls.length).toBeGreaterThan(0);
+    expect(contextStub.fill).toHaveBeenCalled();
+    expect(rafSpy).not.toHaveBeenCalled();
+  });
+
+  it('paints the grid on the first frame before any pointer movement', () => {
+    vi.useFakeTimers();
+    mockDotsRect();
+    const contextStub = makeContextStub();
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      contextStub as unknown as CanvasRenderingContext2D,
+    );
+
+    let drawFrame: FrameRequestCallback | undefined;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      drawFrame = callback;
+      return 1;
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    act(() =>
+      root.render(
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <NewSessionDotField />
+        </ThemeProvider>,
+      ),
+    );
+
+    act(() => {
+      drawFrame?.(0);
+    });
+
+    expect(contextStub.arc.mock.calls.length).toBeGreaterThan(0);
+    expect(contextStub.fill).toHaveBeenCalled();
+  });
+
+  it('stops the rAF loop when idle and restarts on pointer movement', () => {
+    vi.useFakeTimers();
+    mockDotsRect();
+    const contextStub = makeContextStub();
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      contextStub as unknown as CanvasRenderingContext2D,
+    );
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    let rafId = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      rafCallbacks.push(callback);
+      return ++rafId;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    act(() =>
+      root.render(
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <NewSessionDotField />
+        </ThemeProvider>,
+      ),
+    );
+
+    expect(rafCallbacks.length).toBe(1);
+
+    // First frame paints the grid and re-arms the loop.
+    act(() => {
+      rafCallbacks.shift()?.(0);
+    });
+    // The next idle frame settles and stops the loop without re-arming it.
+    act(() => {
+      vi.advanceTimersByTime(20);
+      rafCallbacks.shift()?.(16);
+    });
+    expect(rafCallbacks.length).toBe(0);
+
+    // Pointer movement wakes the loop again.
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
+      );
+    });
+    expect(rafCallbacks.length).toBe(1);
   });
 });

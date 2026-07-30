@@ -15,6 +15,7 @@ import type {
   MobileComposerBackend,
   SlashMenuState,
 } from '../hooks/useComposerCore';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -100,6 +101,7 @@ const composerCoreState = vi.hoisted(() => ({
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
   openHistorySearch: vi.fn(),
+  shellMode: false,
 }));
 
 const voiceButtonState = vi.hoisted(() => ({
@@ -159,7 +161,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       clear: vi.fn(),
       retryLast: vi.fn(),
       replaceEditorText: vi.fn(),
-      shellMode: false,
+      shellMode: composerCoreState.shellMode,
       setShellMode: vi.fn(),
       toggleShellMode: vi.fn(),
       currentMode: 'default',
@@ -226,6 +228,7 @@ const mounted: Array<{
 
 afterEach(() => {
   composerCoreState.slashMenu = null;
+  composerCoreState.shellMode = false;
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -258,6 +261,8 @@ function renderChatEditor(props: {
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   placeholderText?: string;
+  disabled?: boolean;
+  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
 }) {
   const {
@@ -441,6 +446,36 @@ describe('ChatEditor animation layers', () => {
 
     act(() => vi.advanceTimersByTime(3 * 45));
     expect(typewriter()?.textContent).toBe('abc_');
+  });
+
+  it('hides the typewriter when disabled, in shell mode, or during a followup', () => {
+    const typewriterOf = (container: HTMLElement) =>
+      container.querySelector('[data-web-shell-composer-typewriter]');
+
+    expect(
+      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
+    ).not.toBeNull();
+
+    expect(
+      typewriterOf(
+        renderChatEditor({ placeholderText: 'abc', disabled: true }),
+      ),
+    ).toBeNull();
+
+    composerCoreState.shellMode = true;
+    expect(
+      typewriterOf(renderChatEditor({ placeholderText: 'abc' })),
+    ).toBeNull();
+    composerCoreState.shellMode = false;
+
+    expect(
+      typewriterOf(
+        renderChatEditor({
+          placeholderText: 'abc',
+          followupState: { suggestion: 'next', isVisible: true, shownAt: 0 },
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

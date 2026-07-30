@@ -35,6 +35,8 @@ export function NewSessionDotField() {
     let engagement = 0;
     let glowOpacity = 0;
     let frameId = 0;
+    let running = false;
+    let needsRepaint = true;
     let speedTimer: number | undefined;
 
     const buildDots = () => {
@@ -64,8 +66,8 @@ export function NewSessionDotField() {
       if (engagement < 0.001) engagement = 0;
       glowOpacity += (engagement - glowOpacity) * 0.08;
 
-      if (engagement === 0 && glowOpacity < 0.001) {
-        let settled = true;
+      let settled = engagement === 0 && glowOpacity < 0.001;
+      if (settled) {
         for (const dot of dots) {
           if (
             Math.abs(dot.x - dot.anchorX) > 0.01 ||
@@ -75,10 +77,12 @@ export function NewSessionDotField() {
             break;
           }
         }
-        if (settled) {
-          if (!reducedMotion) frameId = window.requestAnimationFrame(draw);
-          return;
-        }
+      }
+
+      if (settled && !needsRepaint) {
+        running = false;
+        frameId = 0;
+        return;
       }
 
       context.clearRect(0, 0, width, height);
@@ -132,7 +136,15 @@ export function NewSessionDotField() {
         context.globalAlpha = 1;
       }
 
+      needsRepaint = false;
       if (!reducedMotion) frameId = window.requestAnimationFrame(draw);
+    };
+
+    const startLoop = () => {
+      if (!reducedMotion && !running) {
+        running = true;
+        frameId = window.requestAnimationFrame(draw);
+      }
     };
 
     const resize = () => {
@@ -144,7 +156,9 @@ export function NewSessionDotField() {
       canvas.height = Math.ceil(height * dpr);
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
       buildDots();
+      needsRepaint = true;
       if (reducedMotion) draw();
+      else startLoop();
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -157,6 +171,7 @@ export function NewSessionDotField() {
       }
       pointer.x = x;
       pointer.y = y;
+      startLoop();
     };
 
     const resizeObserver = new ResizeObserver(resize);
@@ -172,8 +187,8 @@ export function NewSessionDotField() {
         if (pointer.speed < 0.001) pointer.speed = 0;
         pointer.previousX = pointer.x;
         pointer.previousY = pointer.y;
+        if (pointer.speed > 0) startLoop();
       }, 20);
-      frameId = window.requestAnimationFrame(draw);
     }
 
     return () => {

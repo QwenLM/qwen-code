@@ -270,7 +270,7 @@ export function SpecularComposerEffect({
       brightness +=
         (targetBrightness - brightness) * (1 - Math.exp(-delta * 8));
 
-      if (brightness < 0.002 && !focused && proximity === 0) {
+      if (brightness < 0.002 && !focused && proximity < 0.002) {
         running = false;
         frameId = 0;
         gl.clear(gl.COLOR_BUFFER_BIT);
