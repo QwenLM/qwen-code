@@ -32,7 +32,7 @@ The missing primitive is a final execution-boundary decision over the effective 
 
 The host supplies a `ToolInvocationGuard` in `ConfigParameters`. The guard receives:
 
-- the runtime-owned tool call identifier;
+- the runtime-accepted tool-call correlation identifier;
 - the canonical tool name;
 - a structured clone of the final invocation parameters; and
 - the invocation abort signal.
@@ -40,6 +40,11 @@ The host supplies a `ToolInvocationGuard` in `ConfigParameters`. The guard recei
 The decision is either `{ allowed: true }` or `{ allowed: false, reason? }`. A missing or blank denial reason uses a stable generic message. Exceptions, malformed decisions, and clone failures use a separate stable failure message and deny execution. A supplied denial reason is user-visible and may enter existing tool-result and telemetry surfaces, so it must not contain secrets or raw provider errors.
 
 The cloned arguments prevent a guard from mutating the invocation that Qwen Code will execute. The contract does not make arbitrary tool arguments secret; an embedding host must treat them as sensitive application data.
+
+The tool-call identifier may originate in a model response. It is useful for
+correlating the guard decision with existing lifecycle events, but it is not an
+authenticated subject or a standalone idempotency key. A managed host that
+needs strong identity must bind it to host-owned session and prompt identity.
 
 ## Execution placement
 
