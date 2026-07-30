@@ -98,6 +98,7 @@ export function createAgentViewSupervisorServer(
         server.once('error', reject);
         server.listen(options.socketPath, () => {
           server.off('error', reject);
+          server.on('error', () => {});
           if (isWindowsPipePath(options.socketPath)) {
             resolve();
             return;

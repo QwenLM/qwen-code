@@ -209,7 +209,7 @@ describe('bridgeAgentViewTerminal', () => {
 
   it('drains pending stdout writes when the input pump fails', async () => {
     const pty = new FakeTerminalPty();
-    const stdout = new MemoryWritable();
+    const stdout = new DeferredWritable();
     const stdin: AsyncIterable<AgentViewTerminalBytes> = {
       [Symbol.asyncIterator]: () => ({
         next: () =>
@@ -222,6 +222,24 @@ describe('bridgeAgentViewTerminal', () => {
     const done = bridgeAgentViewTerminal({ stdin, stdout, pty });
     pty.emitData('output');
 
+    // Let microtasks settle: the output write reaches DeferredWritable._write
+    // (which defers the callback) and the pump failure reaches the finally.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The bridge must not settle while the write callback is deferred.
+    let settled = false;
+    void done.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    stdout.flush();
     await expect(done).rejects.toThrow('stdin failed');
     expect(stdout.output()).toBe('output');
   });
@@ -295,6 +313,28 @@ class MemoryWritable extends Writable {
   ): void {
     this.chunks.push(Buffer.from(chunk));
     callback();
+  }
+
+  output(): string {
+    return Buffer.concat(this.chunks).toString('utf8');
+  }
+}
+
+class DeferredWritable extends Writable {
+  private readonly chunks: Buffer[] = [];
+  private pending: Array<() => void> = [];
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(Buffer.from(chunk));
+    this.pending.push(callback);
+  }
+
+  flush(): void {
+    for (const cb of this.pending.splice(0)) cb();
   }
 
   output(): string {

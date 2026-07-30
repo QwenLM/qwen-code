@@ -297,16 +297,15 @@ export async function attachAgentViewSupervisorTerminal(
       );
     }
 
+    const controller = new AbortController();
+    socket.once('close', () => controller.abort());
+    socket.on('error', () => {});
+
     if (leftover.length > 0) {
+      socket.pause();
       await writeToWritable(stdout, leftover);
     }
 
-    const controller = new AbortController();
-    socket.once('close', () => controller.abort());
-    // openAttachStream removed its listeners; swallow socket errors so a
-    // supervisor crash surfaces as 'close' (which aborts) instead of an
-    // uncaught 'error' that would kill the CLI process.
-    socket.on('error', () => {});
     const restoreRawMode = setRawMode(stdin, options.rawMode ?? true);
     try {
       return await bridgeAgentViewTerminal({
@@ -318,6 +317,7 @@ export async function attachAgentViewSupervisorTerminal(
           },
           onData(callback) {
             socket.on('data', callback);
+            socket.resume();
             return {
               dispose: () => {
                 socket.off('data', callback);
