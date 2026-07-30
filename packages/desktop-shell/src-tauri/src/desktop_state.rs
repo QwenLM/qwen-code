@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
@@ -8,6 +9,7 @@ const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 820;
 const MIN_WIDTH: u32 = 900;
 const MIN_HEIGHT: u32 = 600;
+static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -141,7 +143,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
         .ok_or_else(|| "Desktop settings path has no parent directory.".to_string())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("Failed to create desktop settings directory: {error}"))?;
-    let temporary = path.with_extension("json.tmp");
+    let temporary = path.with_extension(format!(
+        "json.{}.tmp",
+        NEXT_WRITE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::write(&temporary, contents)
         .map_err(|error| format!("Failed to write desktop settings: {error}"))?;
     if let Err(error) = fs::rename(&temporary, path) {

@@ -43,6 +43,7 @@ const child = spawn(
 
 let output = '';
 let done = false;
+let verifying = false;
 const timeout = setTimeout(
   () => finish(new Error('Timed out waiting for bundled daemon startup')),
   45_000,
@@ -52,7 +53,10 @@ child.stderr.setEncoding('utf8');
 child.stdout.on('data', (chunk) => {
   output += chunk;
   const match = output.match(/qwen serve listening on (http:\/\/[^\s]+)/);
-  if (match) void verify(match[1]);
+  if (match && !verifying) {
+    verifying = true;
+    void verify(match[1]).catch(finish);
+  }
 });
 child.stderr.on('data', (chunk) => {
   output += chunk;

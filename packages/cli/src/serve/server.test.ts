@@ -2947,6 +2947,22 @@ describe('createServeApp', () => {
       expect(health.body).toEqual({ status: 'ok' });
     });
 
+    it('bootstraps browser auth from the daemon desktop marker', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
+        undefined,
+        { webShellDir, daemonEnv: { QWEN_CODE_DESKTOP: '1' } },
+      );
+      const response = await request(app)
+        .get('/?token=desktop-secret')
+        .set('Host', host)
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(response.status).toBe(303);
+      expect(response.headers['set-cookie']?.[0]).toContain(
+        'qwen-daemon-token=desktop-secret',
+      );
+    });
+
     it('does not mint browser auth cookies outside the desktop shell', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },

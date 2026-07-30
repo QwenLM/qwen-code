@@ -17,6 +17,7 @@ use url::Url;
 const LISTEN_PREFIX: &str = "qwen serve listening on ";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
 const HEALTH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILURE_OUTPUT_LIMIT: usize = 16 * 1024;
 static NEXT_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 const TEST_RUNTIME_INFO_ENV: &str = "QWEN_DESKTOP_TEST_RUNTIME_INFO";
@@ -59,18 +60,22 @@ impl DesktopRuntime {
         let mut child = command
             .group_spawn()
             .map_err(|error| format!("Failed to start bundled Qwen Code runtime: {error}"))?;
-        let stdout = child
-            .inner()
-            .stdout
-            .take()
-            .ok_or_else(|| "Bundled runtime stdout was not captured.".to_string())?;
-        let stderr = child
-            .inner()
-            .stderr
-            .take()
-            .ok_or_else(|| "Bundled runtime stderr was not captured.".to_string())?;
+        let Some(stdout) = child.inner().stdout.take() else {
+            stop_runtime_child(&mut child);
+            return Err("Bundled runtime stdout was not captured.".to_string());
+        };
+        let Some(stderr) = child.inner().stderr.take() else {
+            stop_runtime_child(&mut child);
+            return Err("Bundled runtime stderr was not captured.".to_string());
+        };
         let failure_output = Arc::new(Mutex::new(String::new()));
-        let log = Arc::new(Mutex::new(open_log(log_path)?));
+        let log = match open_log(log_path) {
+            Ok(log) => Arc::new(Mutex::new(log)),
+            Err(error) => {
+                stop_runtime_child(&mut child);
+                return Err(error);
+            }
+        };
         let (listen_sender, listen_receiver) = std::sync::mpsc::channel();
         capture_stdout(
             stdout,
@@ -89,7 +94,10 @@ impl DesktopRuntime {
                     return Err(error);
                 }
             };
-        write_test_runtime_info(&base_url, &token)?;
+        if let Err(error) = write_test_runtime_info(&base_url, &token) {
+            stop_runtime_child(&mut child);
+            return Err(error);
+        }
 
         let child = Arc::new(Mutex::new(Some(child)));
         let stopping = Arc::new(AtomicBool::new(false));
@@ -247,6 +255,11 @@ fn open_log(path: &Path) -> Result<File, String> {
         .map_err(|error| format!("Failed to open desktop runtime log: {error}"))
 }
 
+fn stop_runtime_child(child: &mut GroupChild) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn append_log(log: &Mutex<File>, stream: &str, line: &str) {
     let mut log = match log.lock() {
         Ok(guard) => guard,
@@ -374,6 +387,10 @@ fn wait_for_health(
     let health_url = base_url
         .join("health")
         .map_err(|error| format!("Failed to construct runtime health URL: {error}"))?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(HEALTH_REQUEST_TIMEOUT))
+        .build()
+        .into();
     while Instant::now() < deadline {
         if let Some(status) = child
             .try_wait()
@@ -384,7 +401,8 @@ fn wait_for_health(
                 failure_output,
             ));
         }
-        let response = ureq::get(health_url.as_str())
+        let response = agent
+            .get(health_url.as_str())
             .header("Authorization", &format!("Bearer {token}"))
             .call();
         if response.is_ok_and(|response| {

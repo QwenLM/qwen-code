@@ -210,10 +210,6 @@ function verifyChecksum(archivePath, archiveName, checksums) {
 }
 
 function extractNodeArchive(archivePath, destination) {
-  if (archivePath.endsWith('.zip')) {
-    execFileSync('tar', ['-xf', archivePath, '-C', destination]);
-    return;
-  }
   execFileSync('tar', ['-xf', archivePath, '-C', destination]);
 }
 

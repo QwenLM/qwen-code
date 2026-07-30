@@ -121,8 +121,6 @@ jobs:
     env:
       QWEN_CODE_COMMIT: '${{ needs.prepare.outputs.qwen_code_sha }}'
       QWEN_DESKTOP_TARGET: '${{ matrix.rust_target }}'
-      TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}'
     steps:
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
       - name: 'Configure source directory'
@@ -150,7 +148,7 @@ jobs:
         with:
           targets: '${{ matrix.rust_target }}'
 
-      - uses: 'Swatinem/rust-cache@v2'
+      - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
         with:
           workspaces: 'packages/desktop-shell/src-tauri -> target'
 
@@ -177,6 +175,8 @@ jobs:
       - name: 'Require updater signing key for publishing'
         if: '${{ inputs.dry_run == false }}'
         shell: 'bash'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
         run: |
           set -euo pipefail
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
@@ -262,6 +262,8 @@ jobs:
         shell: 'bash'
         env:
           DRY_RUN: '${{ inputs.dry_run }}'
+          TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}'
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
           set -euo pipefail
