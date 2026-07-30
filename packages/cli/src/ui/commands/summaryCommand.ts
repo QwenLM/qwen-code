@@ -22,12 +22,13 @@ export const summaryCommand: SlashCommand = {
   name: 'summary',
   get description() {
     return t(
-      'Generate a project summary and save it to .qwen/PROJECT_SUMMARY.md',
+      'Generate a project summary and save it to .qwen/PROJECT_SUMMARY.md (or a custom path)',
     );
   },
+  argumentHint: '[path]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  action: async (context): Promise<SlashCommandActionReturn> => {
+  action: async (context, args): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
@@ -140,29 +141,64 @@ export const summaryCommand: SlashCommand = {
       filePathForDisplay: string;
       fullPath: string;
     }> => {
-      // Ensure .qwen directory exists
       const projectRoot = config.getProjectRoot();
-      const qwenDir = path.join(projectRoot, '.qwen');
-      try {
-        await fsPromises.mkdir(qwenDir, { recursive: true });
-      } catch (_err) {
-        // Directory might already exist, ignore error
+      const customPath = args?.trim();
+
+      let summaryPath: string;
+      let filePathForDisplay: string;
+
+      if (customPath) {
+        // Resolve relative to project root
+        const resolved = path.isAbsolute(customPath)
+          ? customPath
+          : path.resolve(projectRoot, customPath);
+
+        // If the path ends with a separator or is an existing directory,
+        // append the default filename
+        const isDir =
+          resolved.endsWith('/') ||
+          resolved.endsWith('\\') ||
+          (await fsPromises
+            .stat(resolved)
+            .then((s) => s.isDirectory())
+            .catch(() => false));
+
+        if (isDir) {
+          summaryPath = path.join(resolved, 'PROJECT_SUMMARY.md');
+        } else {
+          summaryPath = resolved;
+        }
+
+        // Ensure parent directory exists
+        await fsPromises.mkdir(path.dirname(summaryPath), { recursive: true });
+
+        filePathForDisplay = path.isAbsolute(customPath)
+          ? summaryPath
+          : path.relative(projectRoot, summaryPath);
+      } else {
+        // Default: save to .qwen/PROJECT_SUMMARY.md
+        const qwenDir = path.join(projectRoot, '.qwen');
+        try {
+          await fsPromises.mkdir(qwenDir, { recursive: true });
+        } catch (_err) {
+          // Directory might already exist, ignore error
+        }
+        summaryPath = path.join(qwenDir, 'PROJECT_SUMMARY.md');
+        filePathForDisplay = '.qwen/PROJECT_SUMMARY.md';
       }
 
-      // Save the summary to PROJECT_SUMMARY.md
-      const summaryPath = path.join(qwenDir, 'PROJECT_SUMMARY.md');
       const summaryContent = `${markdownSummary}
 
 ---
 
 ## Summary Metadata
-**Update time**: ${new Date().toISOString()} 
+**Update time**: ${new Date().toISOString()}
 `;
 
       await fsPromises.writeFile(summaryPath, summaryContent, 'utf8');
 
       return {
-        filePathForDisplay: '.qwen/PROJECT_SUMMARY.md',
+        filePathForDisplay,
         fullPath: summaryPath,
       };
     };
