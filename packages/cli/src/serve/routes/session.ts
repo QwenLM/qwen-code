@@ -12,6 +12,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
+  SessionService,
   SessionOrganizationError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
