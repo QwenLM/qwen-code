@@ -54,8 +54,13 @@ import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
 } from '../voice/voice-workspace-target';
-import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
+import {
+  GitBranchChipContent,
+  GitBranchIndicator,
+  gitBranchAriaLabel,
+} from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
+import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
@@ -111,6 +116,7 @@ interface ChatEditorProps {
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -131,6 +137,8 @@ interface ChatEditorProps {
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
+  /** Git working directory for worktree sessions; targets git operations. */
+  gitCwd?: string;
   /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
   gitModeIntent?: SessionGitIntent;
   /** Callback when the user changes the git mode intent via the composer chip popover. */
@@ -139,6 +147,8 @@ interface ChatEditorProps {
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
   onOpenGitDiff?: () => void;
+  /** Opens the commit dialog. */
+  onOpenCommit?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1152,6 +1162,7 @@ export const ChatEditor = memo(
     const {
       onSubmit,
       onInputTextChange,
+      onAttachmentsChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1169,10 +1180,12 @@ export const ChatEditor = memo(
       currentModel = '',
       gitBranch,
       gitWorktree,
+      gitCwd,
       gitModeIntent,
       onGitModeIntentChange,
       gitStatus,
       onOpenGitDiff,
+      onOpenCommit,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -1257,9 +1270,14 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
+    useEffect(() => {
+      onAttachmentsChange?.(core.hasAttachments);
+    }, [core.hasAttachments, onAttachmentsChange]);
+
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
@@ -2144,13 +2162,31 @@ export const ChatEditor = memo(
                         onIntentChange={onGitModeIntentChange}
                       />
                     ) : (
-                      <GitBranchIndicator
-                        branch={gitBranch}
-                        status={gitStatus}
-                        compact={!showGitBranchLabel}
+                      <BranchPickerPopover
+                        open={branchPickerOpen}
+                        onOpenChange={setBranchPickerOpen}
+                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
+                        gitCwd={gitCwd}
                         onOpenDiff={onOpenGitDiff}
-                        worktree={gitWorktree}
-                      />
+                        onOpenCommit={onOpenCommit}
+                      >
+                        <button
+                          type="button"
+                          className={styles.gitBranchChipButton}
+                          aria-label={gitBranchAriaLabel(
+                            gitBranch,
+                            gitStatus,
+                            t,
+                          )}
+                        >
+                          <GitBranchIndicator
+                            branch={gitBranch}
+                            status={gitStatus}
+                            compact={!showGitBranchLabel}
+                            worktree={gitWorktree}
+                          />
+                        </button>
+                      </BranchPickerPopover>
                     ))}
                   {showModeAction && (
                     <div

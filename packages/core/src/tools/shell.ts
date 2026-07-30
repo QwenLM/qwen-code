@@ -1022,9 +1022,10 @@ const OUTPUT_FLUSH_TIMEOUT_MS = 10_000;
  * lets `/tasks` consumers (and the status sidecar) observe a terminal
  * status and read the output file BEFORE the trailing bytes are on
  * disk, producing truncated logs. `'error'` covers a late EIO /
- * ENOSPC racing `.end()` itself, and the timer covers a stream whose
- * events never fire at all (e.g. one already destroyed by an earlier
- * write error) — whichever lands first, `settle` runs exactly once.
+ * ENOSPC racing `.end()` itself, an already-destroyed or
+ * already-finished stream short-circuits (neither event would ever
+ * fire on it), and the timer backstops a stream wedged mid-flush —
+ * whichever lands first, `settle` runs exactly once.
  */
 function endStreamThenSettle(
   stream: fs.WriteStream,
@@ -1033,27 +1034,33 @@ function endStreamThenSettle(
   settle: () => void,
 ): void {
   let settled = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
   const runOnce = () => {
     if (settled) return;
     settled = true;
+    if (flushTimer !== null) clearTimeout(flushTimer);
     settle();
   };
+  // A destroyed or already-finished stream emits neither 'finish' nor
+  // 'error' — `.end()` on it is a silent no-op (Node only delivers
+  // ERR_STREAM_DESTROYED to an `end()` callback), so waiting would
+  // always burn the full timeout with nothing left to flush.
+  // `writableFinished`, not `writableEnded`: the latter is already
+  // true mid-flush, which is exactly the window this helper waits for.
+  if (stream.destroyed || stream.writableFinished) {
+    runOnce();
+    return;
+  }
   try {
-    const flushTimer = setTimeout(() => {
+    flushTimer = setTimeout(() => {
       debugLogger.warn(
         `${origin}: output stream flush timed out for ${shellId} after ${OUTPUT_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
       );
       runOnce();
     }, OUTPUT_FLUSH_TIMEOUT_MS);
     flushTimer.unref();
-    stream.once('finish', () => {
-      clearTimeout(flushTimer);
-      runOnce();
-    });
-    stream.once('error', () => {
-      clearTimeout(flushTimer);
-      runOnce();
-    });
+    stream.once('finish', runOnce);
+    stream.once('error', runOnce);
     stream.end();
   } catch (closeErr) {
     debugLogger.warn(

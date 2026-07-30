@@ -62,6 +62,16 @@ test('creates and deletes a typed Channel configuration', async ({
         fields: [],
       },
     ],
+    pairingRequests: {
+      'release-bot': [
+        {
+          senderId: 'user-42',
+          senderName: 'Ada',
+          code: 'ABCD1234',
+          createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
+        },
+      ],
+    },
   });
   await page.addInitScript(() => {
     window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
@@ -118,6 +128,33 @@ test('creates and deletes a typed Channel configuration', async ({
         },
       }),
     ]);
+
+  await page.getByRole('button', { name: 'Edit release-bot' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Edit DingTalk' }),
+  ).toBeVisible();
+  await expect(page.getByText('Ada', { exact: true })).toBeVisible();
+  await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Approve Ada, code ABCD1234' })
+    .click();
+  await expect(page.getByText('No pending requests')).toBeVisible();
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'POST' &&
+          request.path.endsWith(
+            '/channels/release-bot/pairing-requests/approve',
+          ),
+      ),
+    )
+    .toEqual([
+      expect.objectContaining({
+        body: { code: 'ABCD1234' },
+      }),
+    ]);
+  await page.getByRole('button', { name: 'Close' }).click();
 
   await page.getByRole('button', { name: 'Delete release-bot' }).click();
   const confirmation = page.getByRole('alertdialog');

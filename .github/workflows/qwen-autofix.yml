@@ -113,6 +113,12 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
+  # Suggestions may improve a young PR, but continuing to implement them after
+  # five change-producing rounds expands the diff and creates fresh review
+  # churn. From round 6 onward, only Critical findings, formally requested
+  # changes, failed checks, and base conflicts may drive code changes;
+  # lower-severity feedback is recorded and left open.
+  CRITICAL_ONLY_AFTER_ROUND: '5'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -2259,15 +2265,11 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
-            # Per AGENTS.md's review policy, Suggestion-level findings ARE
-            # addressed during a PR's first ~5 review rounds; only past that are
-            # they deferred (with a recorded reason). The loop's MAX_ROUNDS cap is
-            # that same boundary — every round the loop actually runs is within
-            # the address-Suggestions window — so /review `**[Suggestion]**`
-            # inline comments count as actionable feedback here. The agent's
-            # triage still decides implement-vs-defer per finding and records the
-            # decision in its summary comment, and the MAX_ROUNDS handoff is the
-            # defer-to-a-human boundary.
+            # Per AGENTS.md's review policy, Suggestion-level findings are
+            # actionable during the first five change-producing rounds. The
+            # scan still selects later feedback so prepare can record and
+            # watermark its deferral; only the address job filters what may
+            # drive code changes.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -2817,8 +2819,75 @@ jobs:
             STALE='true'
             echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
           fi
+          CRITICAL_ONLY='false'
+          if [[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]; then
+            CRITICAL_ONLY='true'
+          fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
           echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
+
+          rm -f "${WORKDIR}/deferred-feedback.md"
+          if [[ "${CRITICAL_ONLY}" == "true" ]]; then
+            PR_URL="https://github.com/${REPO}/pull/${PR}"
+            {
+              echo '## Deferred non-Critical feedback'
+              echo
+              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. Any items listed below stay open for human follow-up; do not modify code, resolve threads, or reply on their behalf."
+              echo
+              jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
+                .[]
+                | select((.submitted_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.state // "") == "COMMENTED")
+                | select(((.body // "") | contains("**[Critical]**")) | not)
+                | "- Review by @\(.user.login): \(.html_url // $pr_url)"' \
+                "${WORKDIR}/rv.json"
+              jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" \
+                --slurpfile reviews "${WORKDIR}/rv.json" '
+                add as $comments
+                | ($reviews | add) as $reviews
+                | $comments[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((
+                    ((.body // "") | contains("**[Critical]**"))
+                    or ((.in_reply_to_id // null) as $root
+                      | $root != null
+                      and any($comments[];
+                        .id == $root
+                        and ((.body // "") | contains("**[Critical]**"))))
+                    or ((.pull_request_review_id // null) as $review
+                      | $review != null
+                      and any($reviews[];
+                        .id == $review
+                        and ((.state // "") == "CHANGES_REQUESTED")))
+                  ) | not)
+                | "- Inline rc:\(.id) \(.path // "?"):\(.line // "?"): \(.html_url // $pr_url)"' \
+                "${WORKDIR}/rc.json"
+              jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
+                .[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)
+                | select(((.body // "") | contains("**[Critical]**")) | not)
+                | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
+                "${WORKDIR}/ic.json"
+              echo
+              echo '<details>'
+              echo '<summary>中文说明</summary>'
+              echo
+              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后，进入仅处理 Critical 的模式。以上内容保持开放，留待人工跟进；不要为其修改代码、解决线程或代为回复。"
+              echo
+              echo '</details>'
+            } > "${WORKDIR}/deferred-feedback.md"
+          fi
 
           # Render the actionable feedback into one prompt-ready file.
           {
@@ -2831,40 +2900,60 @@ jobs:
             echo
             echo "## Reviews"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.submitted_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))
+              | select(($critical_only | not)
+                  or (.state // "") == "CHANGES_REQUESTED"
+                  or ((.body // "") | contains("**[Critical]**")))
               | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
-            # Mirrors the review-scan gate: per AGENTS.md, Suggestion-level
-            # findings are actionable within the first ~5 review rounds (the
-            # loop's whole operating range), so they are rendered for the agent
-            # to triage — implement if valuable, otherwise record the deferral.
-            jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
-              .[]
+            jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
+              --slurpfile reviews "${WORKDIR}/rv.json" '
+              add as $comments
+              | ($reviews | add) as $reviews
+              | $comments[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select(($critical_only | not)
+                  or ((.body // "") | contains("**[Critical]**"))
+                  or ((.in_reply_to_id // null) as $root
+                    | $root != null
+                    and any($comments[];
+                      .id == $root
+                      and ((.body // "") | contains("**[Critical]**"))))
+                  or ((.pull_request_review_id // null) as $review
+                    | $review != null
+                    and any($reviews[];
+                      .id == $review
+                      and ((.state // "") == "CHANGES_REQUESTED"))))
               | "- [rc:\(.id)] \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo
             echo "## Issue-level comments"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
+              | select(($critical_only | not)
+                  or ((.body // "") | contains("**[Critical]**")))
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
+            if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
+              echo
+              cat "${WORKDIR}/deferred-feedback.md"
+            fi
             echo
             echo "## Failed checks"
             jq -r --arg wm "${WATERMARK}" '
@@ -3377,6 +3466,10 @@ jobs:
               # line, and jq scan() matches across newlines. The backslashes
               # render away in markdown, so the visible text is unchanged.
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
+              if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
+              fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
@@ -3396,6 +3489,10 @@ jobs:
               echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point: · 已审阅最新反馈——无需改动。逐点说明原因如下："
               echo
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
+              if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
+              fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo

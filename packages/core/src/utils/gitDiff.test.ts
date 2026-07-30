@@ -2241,3 +2241,52 @@ describe('fetchGitCommitDetail', () => {
     expect(detail!.files.some((f) => f.path === 'feature.txt')).toBe(true);
   });
 });
+
+describe('fetchGitLog range argument injection guard', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await makeRepo();
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'first');
+    await fs.writeFile(path.join(repo, 'a.txt'), 'two\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+  });
+
+  afterEach(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('honours a legitimate revision range', async () => {
+    const log = await fetchGitLog(repo, { range: 'HEAD~1..HEAD' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(1);
+    expect(log!.entries[0].subject).toBe('second');
+  });
+
+  it('ignores a range that is really a git option and writes no file', async () => {
+    const target = path.join(repo, 'PWNED.txt');
+    const log = await fetchGitLog(repo, {
+      range: `--output=${target}`,
+    });
+    // The malicious range is dropped, so the full log is returned and git
+    // never interprets `--output` (which would truncate/create the file).
+    expect(log).not.toBeNull();
+    expect(log!.entries.length).toBe(2);
+    await expect(fs.access(target)).rejects.toThrow();
+  });
+
+  it('drops a range starting with .. and returns the full log', async () => {
+    const log = await fetchGitLog(repo, { range: '..HEAD' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(2);
+  });
+
+  it('drops a range with characters outside the allowlist', async () => {
+    const log = await fetchGitLog(repo, { range: 'HEAD;rm -rf /' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(2);
+  });
+});

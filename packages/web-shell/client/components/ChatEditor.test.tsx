@@ -24,8 +24,75 @@ Element.prototype.scrollIntoView = vi.fn();
 
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
+  pastedImages: [] as Array<{ data: string; media_type: string }>,
   removeTopTag: vi.fn(),
 }));
+
+// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      client: {
+        workspaceGitBranches: vi.fn().mockResolvedValue({
+          v: 1,
+          local: [],
+          remote: [],
+          tags: [],
+          recent: [],
+          head: 'main',
+          detached: false,
+        }),
+        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+        workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+        workspaceGitPush: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceGitPull: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceByCwd: () => ({
+          workspaceGit: vi.fn().mockResolvedValue({
+            v: 2,
+            branch: 'main',
+            detached: false,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+            hasUpstream: false,
+            ahead: 0,
+            behind: 0,
+            stashCount: 0,
+            operation: null,
+            computedAt: 0,
+          }),
+          workspaceGitBranches: vi.fn().mockResolvedValue({
+            v: 1,
+            local: [],
+            remote: [],
+            tags: [],
+            recent: [],
+            head: 'main',
+            detached: false,
+          }),
+          workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+          workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+          workspaceGitPush: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          workspaceGitPull: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      capabilities: { features: [] },
+    }),
+  };
+});
 
 const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
@@ -63,6 +130,9 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       clearText: vi.fn(),
       getText: vi.fn(() => ''),
       hasInput: vi.fn(() => false),
+      hasAttachments:
+        mockComposerCoreState.pastedImages.length > 0 ||
+        mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
       handle: {
         focus: vi.fn(),
@@ -73,8 +143,11 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         addTags: vi.fn(),
         removeInlineTags: vi.fn(),
         submit: vi.fn(),
+        hasAttachments: () =>
+          mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.composerTags.length > 0,
       },
-      pastedImages: [],
+      pastedImages: mockComposerCoreState.pastedImages,
       removeImage: vi.fn(),
       composerTags: mockComposerCoreState.composerTags,
       removeTopTag: mockComposerCoreState.removeTopTag,
@@ -158,11 +231,13 @@ afterEach(() => {
     portalRoot.remove();
   }
   mockComposerCoreState.composerTags = [];
+  mockComposerCoreState.pastedImages = [];
   mockComposerCoreState.removeTopTag.mockReset();
 });
 
 function renderChatEditor(props: {
   composerTags?: WebShellComposerTag[];
+  pastedImages?: Array<{ data: string; media_type: string }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -174,10 +249,12 @@ function renderChatEditor(props: {
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   customization?: WebShellCustomization;
 }) {
   const {
     composerTags,
+    pastedImages,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -185,6 +262,9 @@ function renderChatEditor(props: {
   } = props;
   if (composerTags) {
     mockComposerCoreState.composerTags = composerTags;
+  }
+  if (pastedImages) {
+    mockComposerCoreState.pastedImages = pastedImages;
   }
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
@@ -238,6 +318,36 @@ describe('ChatEditor voice toolbar integration', () => {
         visibleToolbarActions: [],
       }).querySelector('[data-testid="voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor attachment reporting', () => {
+  it('reports whether the composer has tags or pasted images', () => {
+    const onEmptyAttachmentsChange = vi.fn();
+    renderChatEditor({
+      onAttachmentsChange: onEmptyAttachmentsChange,
+    });
+    expect(onEmptyAttachmentsChange).toHaveBeenLastCalledWith(false);
+
+    const onTaggedAttachmentsChange = vi.fn();
+    renderChatEditor({
+      composerTags: [
+        {
+          id: 'file:reference',
+          kind: 'file',
+          value: 'reference',
+        },
+      ],
+      onAttachmentsChange: onTaggedAttachmentsChange,
+    });
+    expect(onTaggedAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const onImageAttachmentsChange = vi.fn();
+    renderChatEditor({
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+      onAttachmentsChange: onImageAttachmentsChange,
+    });
+    expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
   });
 });
 

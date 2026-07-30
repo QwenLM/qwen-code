@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -21,6 +22,7 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -505,6 +507,116 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('re-resolve immediately before EACH patch');
   });
 
+  it('keeps the sandboxed-lane recommendation out of the local-only section', () => {
+    // Measured on 2026-07-28: of 16 open PRs whose AUTHOR had write access
+    // and that already carried a triage comment, exactly 1 mentioned
+    // `/verify`. The instruction existed the whole time — buried as a
+    // conditional clause inside a section headed "local invocation ONLY"
+    // that opens with "Never in unattended CI." An agent running in CI
+    // reasonably skipped the whole section, so the instruction never fired.
+    //
+    // The fix is positional, so the test has to be positional too:
+    // asserting merely that the file mentions `/verify` would have passed
+    // throughout the entire period the recommendation was dead.
+    const localOnly = prSkill.indexOf('local invocation ONLY');
+    const recommendation = prSkill.indexOf(
+      '#### 2b-bis. Name the sandboxed lane when CI cannot settle the claim',
+    );
+    expect(recommendation).toBeGreaterThan(-1);
+    expect(localOnly).toBeGreaterThan(-1);
+    expect(recommendation).toBeLessThan(localOnly);
+
+    // Whitespace-normalised: these are prose assertions, and prettier
+    // reflows this file. A test that goes red on a re-wrap teaches people to
+    // ignore it.
+    const section = prSkill
+      .slice(recommendation, localOnly)
+      .replace(/\s+/g, ' ');
+    // It must be reachable on the CI path...
+    expect(section).toContain('required element of the Stage 2 comment');
+    expect(section).toContain('applies on an unattended run');
+    expect(section).not.toContain('Never in unattended CI');
+    // ...name the trigger and what it settles, not just the trigger...
+    expect(section).toContain('@qwen-code /verify');
+    expect(section).toContain('the specific claim it would settle');
+    // ...and keep the author-permission case, which since the sponsored
+    // lane shipped must offer the sponsored /verify (ephemeral runner +
+    // risk screen) rather than declaring the lanes unavailable — while
+    // still warning that an external author's report is adversarial input.
+    expect(section).toContain('The author lacks write access');
+    expect(section).toContain('sponsored run');
+    // The controls, not a machine: external runs share the persistent pool
+    // with everyone else, so the guidance must name what actually bounds
+    // them. An "ephemeral runner" claim here would be describing a design
+    // that no longer exists.
+    expect(section).toContain('risk screen');
+    expect(section).toContain('full workspace wipe');
+    expect(section).not.toContain('ephemeral');
+    expect(section).toContain('same skepticism as the fork');
+    expect(section).not.toContain('sandboxed lanes are unavailable');
+
+    // The assembly order is the other half: a section nothing assembles is
+    // as dead as one nobody reads.
+    const order = prSkill.slice(
+      prSkill.indexOf('Post a single Stage 2 comment'),
+      prSkill.indexOf('### Stage 3'),
+    );
+    expect(order).toContain('(2b-bis)');
+    expect(order).toContain('not an enrichment');
+  });
+
+  it('makes the not-verified sentence a mechanical 2b-bis trigger', () => {
+    // Post-merge measurement of #7917 (2026-07-29): 9 eligible PRs, two
+    // considered-and-declined mentions, zero positive recommendations — and
+    // the one clear behavioural candidate (#7947, bounded reads) wrote
+    // "author tested on macOS only" in its own Stage 2 comment and never
+    // named a lane. The judgement-based rule ("when 2b cannot settle it")
+    // failed exactly where the comment had already written the gap down. So
+    // the trigger is now textual: the draft's own admission is the trigger,
+    // and pending CI does not lift it.
+    const section = prSkill
+      .slice(
+        prSkill.indexOf('#### 2b-bis.'),
+        prSkill.indexOf('#### 2c. Real-Scenario'),
+      )
+      .replace(/\s+/g, ' ');
+    expect(section).toContain('mechanical, not a judgement call');
+    expect(section).toContain('grep your own draft');
+    // The trigger phrases are the ones real comments actually emit — the
+    // first two are verbatim from #7947's and #7951's Stage 2 comments.
+    expect(section).toContain('not verified');
+    expect(section).toContain('author tested on <one platform> only');
+    expect(section).toContain('not independently re-run');
+    // Pending CI must not lift the trigger: #7947's likely out was "the
+    // ubuntu Test job is still in progress".
+    expect(section).toContain('"CI is still running" does not lift');
+    // The mechanical rule must sit BEFORE the skip cases, or the skip cases
+    // read as outs from it rather than the other way around.
+    expect(section.indexOf('mechanical, not a judgement call')).toBeLessThan(
+      section.indexOf('Skip it — explicitly'),
+    );
+    // And the skip cases themselves must survive — the trigger tightens the
+    // rule, it does not replace the two legitimate outs.
+    expect(section).toContain('No behavioural claim to settle');
+    expect(section).toContain('The author lacks write access');
+  });
+
+  it('names /verify on the high-risk paths, not just tmux', () => {
+    // 1e is the strongest triage-time signal in the skill (10 of 31 reverted
+    // PRs touched these paths vs 5 of 60 controls, p = 0.006) — and it used
+    // to recommend tmux alone, pointing at the local-only 2c. So the PRs
+    // most likely to be reverted were the ones never offered the lane that
+    // proves a change is load-bearing.
+    const highRisk = prSkill.slice(
+      prSkill.indexOf('If any file matches (the strongest triage-time signal'),
+      prSkill.indexOf('This signal is NOT a terminal gate'),
+    );
+    expect(highRisk).toContain('@qwen-code /verify');
+    expect(highRisk).toContain('2b-bis');
+    // The dead pointer into the local-only section must not come back.
+    expect(highRisk).not.toContain('Stage 2c');
+  });
+
   it('scopes the approve-skip check to the bot own approval on the reviewed commit', () => {
     // A maintainer approved a PR three minutes before re-triggering /triage.
     // The agent read that human approval as "existing approval from prior run
@@ -686,7 +798,13 @@ describe('qwen-triage verify workflow', () => {
   // drops the /verify patterns from the case statement falls back to
   // commenter-only gating, which this catches via the author-without-write
   // arm; dropping the commenter check is caught by the drive-by arm.
-  it('gates /verify on both the author and the commenter, fail-closed', () => {
+  it('classifies /verify trust by author and gates on the commenter', () => {
+    // The commenter GATES (they spend the runner slot and model budget);
+    // the author's permission sets a TRUST LEVEL. Both run on the
+    // persistent pool (maintainer decision), so the level selects the
+    // extra controls an external run gets: pinned head OID, risk screen,
+    // workspace wipe. Every lookup failure denies: a request that cannot
+    // be classified must not pick a trust level.
     const permStep = step('Check principal write permission');
     const body = permStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
     expect(body).toBeTruthy();
@@ -697,6 +815,12 @@ describe('qwen-triage verify workflow', () => {
       join(dir, 'gh'),
       [
         '#!/usr/bin/env bash',
+        'if [ "$1" = pr ]; then',
+        '  # gh pr view <n> ... --json headRefOid: the sponsorship snapshot.',
+        '  [ "$3" = "99" ] && exit 1',
+        '  echo deadbeefcafe',
+        '  exit 0',
+        'fi',
         'u="${2##*collaborators/}"; u="${u%%/*}"',
         'case "$u" in',
         '  alice) echo write ;;',
@@ -709,7 +833,7 @@ describe('qwen-triage verify workflow', () => {
     );
 
     let n = 0;
-    const gate = (commentBody, author, commenter) => {
+    const gate = (commentBody, author, commenter, issueNumber = '1') => {
       const out = join(dir, `out-${n++}`);
       writeFileSync(out, '');
       spawnSync('bash', ['-c', script], {
@@ -725,57 +849,70 @@ describe('qwen-triage verify workflow', () => {
           ISSUE_AUTHOR: author,
           COMMENT_USER: commenter,
           PR_NUMBER: '1',
+          ISSUE_NUMBER: issueNumber,
           TMUX_PR: '',
         },
         encoding: 'utf8',
       });
       const lines = readFileSync(out, 'utf8').trim().split('\n');
+      const val = (k) =>
+        lines
+          .filter((l) => l.startsWith(`${k}=`))
+          .pop()
+          ?.slice(k.length + 1);
       return {
-        run: lines.filter((l) => l.startsWith('should_run=')).pop(),
-        explain: lines.some((l) => l === 'explain_deny=true'),
+        run: val('should_run'),
+        trust: val('verify_trust'),
+        oid: val('verify_head_oid'),
       };
     };
 
     try {
-      // Drive-by commenter without write cannot spend the sandbox budget.
-      const driveBy = gate('@qwen-code /verify', 'alice', 'mallory');
-      expect(driveBy.run).toBe('should_run=false');
-      expect(driveBy.explain).toBe(false);
-      // Both principals hold write -> allowed.
-      expect(gate('@qwen-code /verify', 'alice', 'bob').run).toBe(
-        'should_run=true',
+      // Drive-by commenter without write cannot spend the sandbox budget,
+      // whoever the author is.
+      expect(gate('@qwen-code /verify', 'alice', 'mallory').run).toBe('false');
+      // Write-access author -> trusted, no snapshot needed.
+      const trusted = gate('@qwen-code /verify', 'alice', 'bob');
+      expect(trusted.run).toBe('true');
+      expect(trusted.trust).toBe('trusted');
+      expect(trusted.oid).toBeUndefined();
+      // EXTERNAL author + trusted commenter -> allowed as a sponsored run
+      // with the head OID snapped now. This is the case that used to deny.
+      const sponsored = gate('@qwen-code /verify', 'mallory', 'bob');
+      expect(sponsored.run).toBe('true');
+      expect(sponsored.trust).toBe('external');
+      expect(sponsored.oid).toBe('deadbeefcafe');
+      // Author commenting on their own PR is still trusted.
+      expect(gate('@qwen-code /verify', 'alice', 'alice').trust).toBe(
+        'trusted',
       );
-      // A trusted commenter on an untrusted author's PR is denied (the
-      // sandbox executes the AUTHOR's code) but gets the explanation flag.
-      const untrustedAuthor = gate('@qwen-code /verify', 'mallory', 'bob');
-      expect(untrustedAuthor.run).toBe('should_run=false');
-      expect(untrustedAuthor.explain).toBe(true);
-      // Author commenting on their own PR is checked exactly once.
-      expect(gate('@qwen-code /verify', 'alice', 'alice').run).toBe(
-        'should_run=true',
+      // Author permission unreadable -> deny; routing must not guess.
+      expect(gate('@qwen-code /verify', 'charlie', 'bob').run).toBe('false');
+      // Deleted author (empty login) -> deny, same reason.
+      expect(gate('@qwen-code /verify', '', 'bob').run).toBe('false');
+      // Head OID snapshot failure -> deny: a sponsored run without a
+      // pinned head would execute whatever gets pushed next.
+      expect(gate('@qwen-code /verify', 'mallory', 'bob', '99').run).toBe(
+        'false',
       );
-      // A permission-API failure fails closed and stays silent.
-      const apiError = gate('@qwen-code /verify', 'charlie', 'bob');
-      expect(apiError.run).toBe('should_run=false');
-      expect(apiError.explain).toBe(false);
-      // /tmux keeps its existing author-only gate; /triage keeps the
-      // commenter gate.
-      expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe(
-        'should_run=true',
-      );
-      expect(gate('@qwen-code /triage', 'alice', 'mallory').run).toBe(
-        'should_run=false',
-      );
+      // /tmux keeps its author-only gate; /triage keeps the commenter gate.
+      expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe('true');
+      expect(gate('@qwen-code /tmux', 'mallory', 'bob').run).toBe('false');
+      expect(gate('@qwen-code /triage', 'mallory', 'bob').run).toBe('true');
+      // Neither non-verify path emits trust outputs. Assert the REAL keys:
+      // this line read `.runner` — a name from an earlier design that
+      // `gate()` never returns — so it was `expect(undefined).toBeUndefined()`
+      // and could not fail, however badly the trust level leaked.
+      const triage = gate('@qwen-code /triage', 'mallory', 'bob');
+      expect(triage.trust).toBeUndefined();
+      expect(triage.oid).toBeUndefined();
+      const tmux = gate('@qwen-code /tmux', 'alice', 'bob');
+      expect(tmux.trust).toBeUndefined();
+      expect(tmux.oid).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
-
-  // The pin step's sweep runs BEFORE npm ci/build execute the PR's
-  // lifecycle scripts, so a postinstall can re-plant a fake
-  // tmp/*-verify-* dir whose zeroed timestamp sorts ahead of the agent's
-  // real one. The agent step must therefore sweep again after the last
-  // PR-controlled process and before qwen launches.
   it('sweeps planted verify artifacts after the last PR-controlled process', () => {
     const runStep = step('Run verification agent');
     const sweep =
@@ -826,11 +963,490 @@ describe('qwen-triage verify hardening', () => {
   // job's PR guard skips it and publish-verify skips with it — accepted
   // looking, permanently silent. Every step that answers a /verify request
   // carries the same guard.
+  // With external code on the PERSISTENT pool, the wipe replaces machine
+  // destruction as the deny-by-default control — so it must run, must run
+  // BEFORE the checkout that brings PR code in, and must fail the job
+  // rather than proceed on a workspace it could not clear.
+  it('wipes the workspace before external code, ahead of checkout', () => {
+    const verifyJob = job('verify');
+    // Both trust levels share one machine class now; nothing routes.
+    expect(verifyJob).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(verifyJob).not.toContain('ubuntu-latest');
+
+    const wipe = stepIn('verify', 'Wipe workspace before external code');
+    expect(wipe).not.toBe('');
+    // Gated on the trust level, not on everything: a trusted run keeps the
+    // warm workspace it has always had.
+    expect(wipe).toContain(
+      "needs.authorize.outputs.verify_trust == 'external'",
+    );
+    // Ordering is the whole point — after checkout it would delete the
+    // code under test instead of the previous run's leftovers.
+    expect(
+      verifyJob.indexOf('Wipe workspace before external code'),
+    ).toBeLessThan(verifyJob.indexOf('Checkout PR merge ref'));
+    // Fails the job when the workspace is not actually empty afterwards.
+    expect(wipe).toContain('refusing to execute external code on it');
+    expect(wipe).toContain('exit 1');
+  });
+
+  // The wipe is the deny-by-default control, so run the real step text
+  // against a workspace carrying the vectors the allowlist sweep is built
+  // to enumerate — plus one it is not — and require every one to be gone.
+  it('removes planted persistence vectors, known and unknown', () => {
+    const wipe = stepIn('verify', 'Wipe workspace before external code')
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(wipe).toBeTruthy();
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-'));
+    try {
+      const ws = join(dir, 'workspace');
+      mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
+      // Vectors the sweep enumerates...
+      writeFileSync(join(ws, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nid\n');
+      writeFileSync(
+        join(ws, '.git', 'config.worktree'),
+        '[core]\n\thooksPath = /\n',
+      );
+      // ...and ones it does not: a dotfile the next npm run would read,
+      // and an ordinary file. Deny-by-default has to take all of them.
+      writeFileSync(join(ws, '.npmrc'), 'script-shell=/tmp/evil\n');
+      writeFileSync(join(ws, 'package.json'), '{}');
+      mkdirSync(join(ws, 'node_modules'), { recursive: true });
+
+      const res = spawnSync('bash', ['-c', wipe], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_WORKSPACE: ws,
+          GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+        },
+      });
+      expect(res.status).toBe(0);
+      expect(readdirSync(ws)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The guard has to be exercised with the REAL dangerous paths — that is
+  // the whole point of it — but a test that passes `/` to a live `rm -rf`
+  // is only safe while the guard exists. Written that way it detonates on
+  // the developer's machine the moment anyone removes the guard, which is
+  // exactly when the test is supposed to protect them. (It did: a mutation
+  // run that deleted the guard spent six minutes attempting to delete `/`
+  // before it was killed. macOS permissions absorbed it; nothing was lost,
+  // and nothing about that outcome was by design.)
+  //
+  // So `rm` is stubbed to a recorder on PATH. The destructive primitive
+  // cannot fire here under ANY edit, and the assertion is on the decision
+  // rather than on filesystem effects: with the guard gone the recorder
+  // shows an attempted delete and the test fails, having deleted nothing.
+  it('refuses a suspicious workspace path without invoking rm', () => {
+    const wipe = stepIn('verify', 'Wipe workspace before external code')
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(wipe).toBeTruthy();
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$RM_CALLS"',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+
+      for (const bad of ['/', '/usr', '/etc', '/var', '/root', '/home', '']) {
+        writeFileSync(calls, '');
+        const guard = spawnSync('bash', ['-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            RM_CALLS: calls,
+            GITHUB_WORKSPACE: bad,
+            GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+          },
+        });
+        // Non-zero, not exactly 1: two mechanisms refuse here — the `case`
+        // exits 1 for a named path, while an empty one never reaches it
+        // because `${GITHUB_WORKSPACE:?}` aborts the shell first (127).
+        expect(
+          guard.status,
+          `path ${bad || '<empty>'} was not refused`,
+        ).not.toBe(0);
+        // The load-bearing assertion: no delete was even attempted.
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The pre-run wipe answers what an external run inherits; the
+  // post-run wipe answers what it leaves behind for the next pool job.
+  it('wipes the workspace after external code, on every outcome', () => {
+    const verifyJob = job('verify');
+    const postWipe = stepIn('verify', 'Wipe workspace after external code');
+    expect(postWipe).not.toBe('');
+    // Gated on the trust level: a trusted run keeps its warm workspace.
+    expect(postWipe).toContain(
+      "needs.authorize.outputs.verify_trust == 'external'",
+    );
+    // Must run on every outcome, including cancellation and timeout.
+    expect(postWipe).toContain('always()');
+    // Ordering: after the agent, not before it.
+    expect(verifyJob.indexOf('Run verification agent')).toBeLessThan(
+      verifyJob.indexOf('Wipe workspace after external code'),
+    );
+    // Same path guard as the pre-run wipe.
+    expect(postWipe).toContain('refusing to wipe suspicious workspace path');
+  });
+
+  // The sponsored lane's pre-execution risk screen, driven for real: the
+  // actual resolve-step text runs against a stubbed gh and a live local
+  // HTTP server standing in for the model endpoint, so the heredoc's
+  // fetch/parse/fail-closed logic is what executes — not a re-statement
+  // of it. Every arm asserts on the step's real GITHUB_OUTPUT.
+  it('screens sponsored runs mechanically and via the model, fail-closed', async () => {
+    const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+    const script = resolveStep
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(script).toBeTruthy();
+    // The screen prompt must describe the ACTUAL environment. The pool is
+    // persistent and network-isolated, not ephemeral — a stale prompt
+    // calibrates the model for leniency it should not have.
+    expect(script).not.toContain('ephemeral');
+    expect(script).not.toContain('credential-free');
+    expect(script).toContain('network-isolated');
+
+    // The model endpoint must be a SEPARATE process: the scenarios run the
+    // step via spawnSync, which blocks this process's event loop — an
+    // in-process server could never answer, and the screen's fetch would
+    // sit on its 120 s abort timer instead of testing anything.
+    const dir = mkdtempSync(join(tmpdir(), 'verify-screen-'));
+    const replyFile = join(dir, 'model-reply');
+    const hitsFile = join(dir, 'model-hits');
+    const portFile = join(dir, 'model-port');
+    writeFileSync(portFile, '');
+    writeFileSync(replyFile, '{"risk":"clear"}');
+    writeFileSync(hitsFile, '');
+    const serverProc = spawn(
+      process.execPath,
+      [
+        '-e',
+        [
+          "const http=require('http'),fs=require('fs');",
+          'const s=http.createServer((q,r)=>{',
+          "fs.appendFileSync(process.env.HITS,'x');",
+          "r.setHeader('content-type','application/json');",
+          "r.end(JSON.stringify({choices:[{message:{content:fs.readFileSync(process.env.REPLY,'utf8')}}]}));",
+          '});',
+          "s.listen(0,'127.0.0.1',()=>fs.writeFileSync(process.env.PORTF,String(s.address().port)));",
+        ].join(''),
+      ],
+      {
+        env: {
+          ...process.env,
+          HITS: hitsFile,
+          REPLY: replyFile,
+          PORTF: portFile,
+        },
+        stdio: 'ignore',
+      },
+    );
+    for (let i = 0; i < 100 && !readFileSync(portFile, 'utf8').trim(); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const port = readFileSync(portFile, 'utf8').trim();
+    expect(port).not.toBe('');
+    const modelHits = () => readFileSync(hitsFile, 'utf8').length;
+    const setReply = (v) => writeFileSync(replyFile, v);
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"--json state,isDraft,mergeable"*)',
+
+        '    echo \'{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE"}\' ;;',
+        '  *pulls/*/files*) echo packages/core/src/x.ts ;;',
+        '  *"pr diff"*) cat "$GH_STUB_DIFF" ;;',
+        '  *"--json number,title"*)',
+        '    printf \'{"headRefOid":"%s","author":{"login":"ext"}}\' "$GH_STUB_OID" ;;',
+        '  *collaborators/*) echo none ;;',
+        '  *"api user"*) echo bot ;;',
+        '  *comments*) echo "[]" ;;',
+        '  *) exit 0 ;;',
+        'esac',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    let n = 0;
+    const run = ({ trust, diff, prOid, sponsoredOid, baseUrl, apiKey }) => {
+      const temp = join(dir, `t${n}`);
+      mkdirSync(temp, { recursive: true });
+      const out = join(dir, `out-${n}`);
+      const diffFile = join(dir, `diff-${n}`);
+      n += 1;
+      writeFileSync(out, '');
+      writeFileSync(diffFile, diff);
+      const res = spawnSync('bash', ['-c', script], {
+        cwd: temp,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_TOKEN: 'x',
+          GH_STUB_DIFF: diffFile,
+          GH_STUB_OID: prOid ?? 'oid-1',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_OUTPUT: out,
+          RUNNER_TEMP: temp,
+          PR_NUMBER: '7',
+          RUN_URL: 'u',
+          VERIFY_TRUST: trust,
+          SPONSORED_OID: sponsoredOid ?? 'oid-1',
+          REVIEW_OPENAI_API_KEY: apiKey === undefined ? 'k' : apiKey,
+          REVIEW_OPENAI_BASE_URL: baseUrl ?? `http://127.0.0.1:${port}/v1`,
+          OPENAI_MODEL: 'screen-model',
+        },
+      });
+      expect(res.status).toBe(0);
+      const lines = readFileSync(out, 'utf8').trim().split('\n');
+      const val = (k) =>
+        lines
+          .filter((l) => l.startsWith(`${k}=`))
+          .pop()
+          ?.slice(k.length + 1);
+      return { decision: val('decision'), reason: val('skip_reason') ?? '' };
+    };
+
+    const CLEAN = '+++ b/packages/core/src/x.ts\n+const x = 1;\n';
+    try {
+      const before = modelHits();
+
+      // Fail closed on an unfetchable diff: a transient `gh pr diff`
+      // failure or an empty result must refuse rather than hand the model
+      // an empty string it would almost certainly call "clear". No model
+      // call is spent: the fetch guard runs before the screen.
+      const noDiff = run({ trust: 'external', diff: '' });
+      expect(noDiff.decision).toBe('skip');
+      expect(noDiff.reason).toContain('could not be fetched');
+      expect(modelHits()).toBe(before);
+
+      // Mechanical: an added npm lifecycle script refuses WITHOUT spending
+      // a model call — a mechanical flag cannot be un-refused by a second
+      // opinion, so paying for one would be pure waste.
+      const lifecycle = run({
+        trust: 'external',
+        diff: '+++ b/package.json\n+    "postinstall": "node evil.js",\n',
+      });
+      expect(lifecycle.decision).toBe('skip');
+      expect(lifecycle.reason).toContain('risk screen');
+      expect(lifecycle.reason).toContain('npm lifecycle');
+      expect(modelHits()).toBe(before);
+
+      // npm runs pre/post hooks for ANY `npm run <script>`, and this job
+      // runs `npm run build` while the agent runs the PR's suites — so a
+      // `prebuild` executes exactly like a `postinstall`. The alternation
+      // originally stopped at the install lifecycle and let these through.
+      for (const script of ['prebuild', 'postbuild', 'pretest', 'posttest']) {
+        const hook = run({
+          trust: 'external',
+          diff: `+++ b/package.json\n+    "${script}": "node payload.js",\n`,
+        });
+        expect(hook.decision, `${script} was not flagged`).toBe('skip');
+        expect(hook.reason).toContain('npm lifecycle');
+      }
+
+      // Mechanical: a dependency resolving off-registry.
+      const offReg = run({
+        trust: 'external',
+        diff: '+++ b/package-lock.json\n+      "resolved": "https://evil.example/x.tgz",\n',
+      });
+      expect(offReg.decision).toBe('skip');
+      expect(offReg.reason).toContain('registry.npmjs.org');
+
+      // A lookalike host CONTAINS the registry name, so an unanchored
+      // exclusion read it as npmjs and waved it through — and the malicious
+      // tarball's own postinstall lives inside the tarball, never in the
+      // diff this screen can see.
+      for (const url of [
+        'https://registry.npmjs.org.evil.com/pkg.tgz',
+        'https://evil.com/?u=registry.npmjs.org',
+        'https://registry.npmjs.org@evil.com/pkg.tgz',
+      ]) {
+        const lookalike = run({
+          trust: 'external',
+          diff: `+++ b/package-lock.json\n+      "resolved": "${url}",\n`,
+        });
+        expect(lookalike.decision, `${url} was not flagged`).toBe('skip');
+        expect(lookalike.reason).toContain('registry.npmjs.org');
+      }
+      // ...and the genuine registry still passes, or the arm would be
+      // refusing every lockfile change and the tests above would prove
+      // nothing.
+      expect(
+        run({
+          trust: 'external',
+          diff: '+++ b/package-lock.json\n+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.0.0.tgz",\n',
+        }).decision,
+      ).toBe('run');
+
+      // Package-manager config: settings like `script-shell` redirect what
+      // every later npm invocation executes.
+      for (const cfg of ['.npmrc', '.yarnrc', '.yarnrc.yml', 'bunfig.toml']) {
+        const pm = run({
+          trust: 'external',
+          diff: `+++ b/${cfg}\n+script-shell=/tmp/evil\n`,
+        });
+        expect(pm.decision, `${cfg} was not flagged`).toBe('skip');
+        expect(pm.reason).toContain('package-manager configuration');
+      }
+
+      // The regex must not be root-anchored: a .npmrc in a package
+      // subdirectory is just as dangerous as one at the root.
+      const nested = run({
+        trust: 'external',
+        diff: '+++ b/packages/core/.npmrc\n+script-shell=/tmp/evil\n',
+      });
+      expect(nested.decision, 'nested .npmrc was not flagged').toBe('skip');
+      expect(nested.reason).toContain('package-manager configuration');
+
+      // A rename-only hunk emits `rename to` with no `+++ b/` header.
+      const renamed = run({
+        trust: 'external',
+        diff: 'rename from something\nrename to .npmrc\n',
+      });
+      expect(renamed.decision, 'rename to .npmrc was not flagged').toBe('skip');
+      expect(renamed.reason).toContain('package-manager configuration');
+
+      // Long opaque single-line content: a space-free field of 600+ chars
+      // is the shape of a packed payload, and the arm must skip lockfile
+      // integrity/resolved lines or every dependency bump would refuse.
+      const packed = run({
+        trust: 'external',
+        diff: `+++ b/src/x.js\n+${'A'.repeat(700)}\n`,
+      });
+      expect(packed.decision).toBe('skip');
+      expect(packed.reason).toContain('long opaque');
+      expect(
+        run({
+          trust: 'external',
+          diff: `+++ b/package-lock.json\n+      "integrity": "sha512-${'B'.repeat(700)}",\n`,
+        }).decision,
+      ).toBe('run');
+
+      // A line with spaces is still caught when one space-free field
+      // is >= 600 chars (the old rule required the WHOLE line to be
+      // space-free, so a single space anywhere was a bypass).
+      const spacedOpaque = run({
+        trust: 'external',
+        diff: `+++ b/src/x.js\n+const p = '${'C'.repeat(650)}';\n`,
+      });
+      expect(spacedOpaque.decision, 'spaced opaque field was not flagged').toBe(
+        'skip',
+      );
+      expect(spacedOpaque.reason).toContain('long opaque');
+      // ...but a line whose fields are all short must still pass, or the
+      // arm would be refusing ordinary code.
+      expect(
+        run({
+          trust: 'external',
+          diff: `+++ b/src/x.js\n+${'word '.repeat(200)}\n`,
+        }).decision,
+      ).toBe('run');
+
+      // Oversized diff: the model screen reads at most 200 KB, so a
+      // larger diff would be screened on a prefix only — fail closed.
+      const oversized = run({
+        trust: 'external',
+        diff: CLEAN + '+'.padEnd(200001, 'x') + '\n',
+      });
+      expect(oversized.decision).toBe('skip');
+      expect(oversized.reason).toContain('too large to screen');
+
+      // Unconfigured model screen -> refuse. A missing key must never mean
+      // "nothing flagged it, proceed".
+      const unconfigured = run({
+        trust: 'external',
+        diff: CLEAN,
+        apiKey: '',
+      });
+      expect(unconfigured.decision).toBe('skip');
+      expect(unconfigured.reason).toContain('not configured');
+
+      // Clean diff + model clear -> the run proceeds.
+      setReply('{"risk":"clear"}');
+      const clear = run({ trust: 'external', diff: CLEAN });
+      expect(clear.decision).toBe('run');
+      expect(modelHits()).toBeGreaterThan(before);
+
+      // Model flagged -> refused.
+      setReply('{"risk":"flagged"}');
+      expect(run({ trust: 'external', diff: CLEAN }).decision).toBe('skip');
+
+      // Unparseable model reply -> refused (fail closed), never treated
+      // as clear.
+      setReply('looks fine to me!');
+      const garbage = run({ trust: 'external', diff: CLEAN });
+      expect(garbage.decision).toBe('skip');
+      expect(garbage.reason).toContain('unparseable');
+
+      // Unreachable model endpoint -> refused (fail closed).
+      setReply('{"risk":"clear"}');
+      const dead = run({
+        trust: 'external',
+        diff: CLEAN,
+        baseUrl: 'http://127.0.0.1:1/v1',
+      });
+      expect(dead.decision).toBe('skip');
+
+      // Sponsorship pin: the head moved after the sponsoring comment.
+      const moved = run({
+        trust: 'external',
+        diff: CLEAN,
+        prOid: 'oid-2',
+        sponsoredOid: 'oid-1',
+      });
+      expect(moved.decision).toBe('skip');
+      expect(moved.reason).toContain('re-comment');
+
+      // A trusted-level run is untouched by the screen: the same author is
+      // refused by the execution-time permission re-check instead, and the
+      // refusal points at the sponsored alternative.
+      const ecs = run({ trust: 'trusted', diff: CLEAN });
+      expect(ecs.decision).toBe('skip');
+      expect(ecs.reason).toContain('sponsor');
+    } finally {
+      serverProc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60000);
+
   it('restricts every verify notice to pull requests', () => {
+    // 'Explain denied verify request' is gone by design: an external author
+    // no longer denies the run — it routes it to the hosted lane instead.
+    expect(stepIn('authorize', 'Explain denied verify request')).toBe('');
     for (const name of [
       'Acknowledge verify request',
       'Report disabled verify lane',
-      'Explain denied verify request',
     ]) {
       const raw = stepIn('authorize', name);
       expect(raw, `${name} is missing from the authorize job`).not.toBe('');
@@ -1193,8 +1809,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(chown).toBeGreaterThan(repin);
     expect(launch).toBeGreaterThan(home);
     // Killing is not enough on its own: surviving build processes must
-    // fail the step rather than race the sweeps that follow.
-    expect(runStep).toContain('pgrep -u node');
+    // fail the step rather than race the sweeps that follow. The check
+    // disregards zombies — see the build-process-guard suite for why.
+    expect(runStep).toContain('live_build_processes');
     expect(runStep).toContain('refusing to start the agent');
     expect(runStep).toContain('"HOME=$AGENT_HOME"');
     // The proxy must require this run's bearer, not just a fixed dummy key.
@@ -1472,6 +2089,48 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
+  // expected A/B base-cell failures proving the tests are load-bearing"
+  // while assertions.json said fail:7 — so the publisher's trust rule
+  // (merge-ready requires fail==0) correctly refused it and the headline
+  // degraded to "no usable structured verdict". Both sides told the truth
+  // about different questions. The fix is the counting semantics: a control
+  // cell that fails AS PREDICTED is a passed assertion.
+  it('defines expected failures as passes in the assertion contract', () => {
+    const rules = verifySkill
+      .slice(verifySkill.indexOf('## Hard rules'))
+      .replace(/\s+/g, ' ');
+    expect(rules).toContain('Expected failures are passes');
+    expect(rules).toContain('assert the control goes red');
+    expect(rules).toContain('counts only UNEXPECTED outcomes');
+    // The rule must state the publisher-side consequence, or an agent has no
+    // reason to believe the count semantics are load-bearing.
+    expect(rules).toContain('cannot be `merge-ready`');
+    expect(rules).toContain('`inconclusive`, not `findings`');
+    // And it must sit in Hard rules, not in narrative prose.
+    expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
+      verifySkill.indexOf('## Hard rules'),
+    );
+  });
+
+  // The whole report is already inside a <details> on the PR. With the
+  // Chinese summary as the last item, reaching it meant expanding that fold
+  // and scrolling the entire English report — ~90 lines on a real one.
+  it('puts the report Chinese summary next to the verdict, not last', () => {
+    const struct = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(struct).toBeTruthy();
+    const zh = struct.indexOf('中文摘要');
+    expect(zh).toBeGreaterThan(-1);
+    expect(zh).toBeLessThan(struct.indexOf('Central claim + A/B table'));
+    expect(zh).toBeLessThan(struct.indexOf('**Not covered**'));
+    expect(zh).toBeLessThan(struct.indexOf('**Methodology**'));
+    // Moved, not duplicated — two summaries would drift apart.
+    expect(struct.match(/中文摘要/g)?.length).toBe(1);
+  });
+
   // Only a validated assertions object counts as evidence.
   it('rejects inconsistent assertions objects', () => {
     const publishStep = step('Post verification report comment');
@@ -1565,6 +2224,76 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // Every weak terminal body carries the qualitative prefix and folds its
+  // Chinese into <details>, matching the full-report path's layout.
+  it('renders weak terminal bodies with qualitative glyphs and folded Chinese', () => {
+    const dir = fixture();
+    try {
+      const cancelled = render(dir, {
+        NAME: 'wk-cancelled',
+        VERIFY_RESULT: 'cancelled',
+      });
+      expect(cancelled).toContain('\u26a0\ufe0f incomplete \u2014 cancelled');
+      expect(cancelled).toContain('<details>');
+      expect(cancelled).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u5df2\u53d6\u6d88</summary>',
+      );
+
+      const infra = render(dir, {
+        NAME: 'wk-infra',
+        VERIFY_RESULT: 'failure',
+        VERDICT: '',
+      });
+      expect(infra).toContain(
+        '\u26a0\ufe0f incomplete \u2014 infrastructure failure',
+      );
+      expect(infra).toContain('<details>');
+      expect(infra).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c</summary>',
+      );
+
+      const skipped = render(dir, {
+        NAME: 'wk-skipped',
+        VERDICT: 'skipped',
+        SKIP_REASON: 'the PR is a draft',
+      });
+      expect(skipped).toContain('\u26a0\ufe0f not run \u2014 skipped');
+      expect(skipped).toContain('the PR is a draft');
+      expect(skipped).toContain('<details>');
+      expect(skipped).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u8fd0\u884c \u00b7 \u5df2\u8df3\u8fc7</summary>',
+      );
+
+      const na = render(dir, { NAME: 'wk-na', VERDICT: 'n/a' });
+      expect(na).toContain('\u26a0\ufe0f not run \u2014 n/a');
+      expect(na).toContain('<details>');
+      expect(na).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u8fd0\u884c \u00b7 \u4e0d\u9002\u7528</summary>',
+      );
+      // The Chinese body must be INSIDE the fold, not unfolded below.
+      const naDetails = na.indexOf('<details>');
+      const naZh = na.indexOf('\u8be5 PR \u4ec5\u6539\u52a8\u6587\u6863');
+      expect(naZh).toBeGreaterThan(naDetails);
+
+      const dl = render(dir, {
+        NAME: 'wk-dl',
+        DOWNLOAD_OUTCOME: 'failure',
+      });
+      expect(dl).toContain(
+        '\u26a0\ufe0f incomplete \u2014 results unavailable',
+      );
+      expect(dl).toContain('<details>');
+      expect(dl).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u7ed3\u679c\u4e0d\u53ef\u7528</summary>',
+      );
+      const dlDetails = dl.indexOf('<details>');
+      const dlZh = dl.indexOf('\u9a8c\u8bc1\u5df2\u6267\u884c');
+      expect(dlZh).toBeGreaterThan(dlDetails);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // The prepare step classifies install/build failures; the comment must
   // agree with that classification instead of always blaming the PR.
   it('reports an infra-classified prepare failure as infrastructure', () => {
@@ -1577,6 +2306,15 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(infra).toContain('infrastructure failure');
       expect(infra).not.toContain('treated as a PR failure');
+      // The qualitative glyph is what a swapped assignment would corrupt
+      // while every substring above still matched: an infra incident is
+      // nobody's-fault (warning); a real build failure is the PR's (cross).
+      expect(infra).toContain(
+        '\u26a0\ufe0f incomplete \u2014 infrastructure failure',
+      );
+      expect(infra).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c</summary>',
+      );
 
       const real = render(dir, {
         NAME: 'fail',
@@ -1590,6 +2328,15 @@ describe('qwen-triage verify publish fidelity', () => {
       // reader cannot tell this verdict from the single-shot one that
       // mis-blamed a PR for an ETXTBSY race.
       expect(real).toContain('failed twice in a row');
+      expect(real).toContain(
+        '\u274c not passed \u2014 the PR could not be built',
+      );
+      expect(real).toContain(
+        '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a\u274c \u4e0d\u901a\u8fc7 \u00b7 PR \u6784\u5efa\u5931\u8d25</summary>',
+      );
+      // The retry clause has a Chinese counterpart on this same arm; pin
+      // it so a dropped PREPARE_ATTEMPTS_ZH interpolation cannot ship silent.
+      expect(real).toContain('\u8fde\u7eed\u4e24\u6b21');
 
       // The build arm of the phase mapping was never rendered by any test,
       // so a typo in that command name would have shipped unnoticed.
@@ -1632,6 +2379,232 @@ describe('qwen-triage verify publish fidelity', () => {
 
   // Only bodies carrying findings are substantive; weak notices must not be
   // snapshotted as the previous round's report.
+  // The scope disclaimer under the headline has been bilingual since the
+  // lane shipped, but the verdict itself — the one line a reader acts on —
+  // was English-only. A Chinese reader got the caveat and not the
+  // conclusion.
+  it('leads every verdict with a distinct qualitative call, bilingually', () => {
+    // "merge-ready (agent verdict)" is lane jargon; the maintainer asked for
+    // pass/no-pass. Every arm now leads with a qualitative call, and only
+    // agent verdicts may claim passed/not-passed — a crashed, timed-out, or
+    // verdict-less run says nothing about the PR and must render as
+    // incomplete/inconclusive, never as a pass or a fail.
+    const dir = fixture();
+    try {
+      const ARMS = [
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' },
+          '\u2705 passed \u2014 merge-ready (agent verdict)',
+          '\u2705 \u901a\u8fc7 \u00b7 \u53ef\u5408\u5165\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
+          '\u274c not passed \u2014 findings reported (agent verdict)',
+          '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u62a5\u544a\u4e86\u53d1\u73b0\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
+          '\u274c not passed \u2014 blocked (agent verdict)',
+          '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u963b\u585e\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
+          '\u26a0\ufe0f inconclusive \u2014 the agent could not reach a conclusion',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 agent \u672a\u80fd\u5f97\u51fa\u7ed3\u8bba',
+        ],
+        [
+          { VERDICT: 'pass' },
+          '\u26a0\ufe0f inconclusive \u2014 completed without a usable structured verdict',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u5df2\u5b8c\u6210\u4f46\u65e0\u53ef\u7528\u7684\u7ed3\u6784\u5316\u5224\u5b9a',
+        ],
+        [
+          { VERDICT: 'fail' },
+          '\u26a0\ufe0f incomplete \u2014 the agent run failed',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 agent \u8fd0\u884c\u5931\u8d25',
+        ],
+        [
+          { VERDICT: 'timeout' },
+          '\u26a0\ufe0f incomplete \u2014 the run timed out with partial evidence',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u8fd0\u884c\u8d85\u65f6\uff0c\u8bc1\u636e\u4e0d\u5b8c\u6574',
+        ],
+        [
+          { VERDICT: 'infra-error' },
+          '\u26a0\ufe0f incomplete \u2014 infra-error (crash, OOM, or unwritable results)',
+          '\u26a0\ufe0f \u672a\u5b8c\u6210 \u00b7 \u57fa\u7840\u8bbe\u65bd\u6545\u969c\uff08\u5d29\u6e83\u3001OOM \u6216\u7ed3\u679c\u4e0d\u53ef\u5199\uff09',
+        ],
+        [
+          { VERDICT: 'bogus' },
+          '\u26a0\ufe0f inconclusive \u2014 the run ended in an unrecognized state',
+          '\u26a0\ufe0f \u65e0\u6cd5\u5224\u5b9a \u00b7 \u8fd0\u884c\u4ee5\u672a\u8bc6\u522b\u7684\u72b6\u6001\u7ed3\u675f',
+        ],
+      ];
+      const seenEn = new Set();
+      const seenZh = new Set();
+      ARMS.forEach(([env, en, zh], i) => {
+        const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
+        expect(body).toContain(`**Sandboxed verification: ${en}**`);
+        expect(body).toContain(
+          `<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a${zh}</summary>`,
+        );
+        // Only agent verdicts judge the code: every process-outcome arm must
+        // carry \u26a0\ufe0f, and never the pass/fail glyphs.
+        if (!env.AGENT_VERDICT) {
+          const head = body.slice(0, body.indexOf('<details>'));
+          expect(head).toContain('\u26a0\ufe0f');
+          expect(head).not.toContain('\u2705');
+          expect(head).not.toContain('\u274c');
+        }
+        seenEn.add(en);
+        seenZh.add(zh);
+      });
+      // Distinct per arm, both sides. A single hardcoded string — or one
+      // that echoes the English — satisfies per-arm containment, so the
+      // pairing is pinned as a bijection.
+      expect(seenEn.size).toBe(ARMS.length);
+      expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['pass', { VERDICT: 'pass', AGENT_VERDICT: 'merge-ready' }],
+    ['timeout', { VERDICT: 'timeout', AGENT_VERDICT: '' }],
+  ])(
+    'keeps English unfolded and folds the Chinese into one details (%s)',
+    (_label, env) => {
+      const dir = fixture();
+      try {
+        const body = render(dir, { NAME: `fold-${_label}`, ...env });
+        const details = body.indexOf(
+          '<summary>\u4e2d\u6587 \u2014 \u5224\u5b9a\uff1a',
+        );
+        const detailsEnd = body.indexOf('</details>');
+        expect(details).toBeGreaterThan(-1);
+        // English body sits BEFORE the fold...
+        if (_label === 'pass') {
+          expect(body.indexOf('Ran the PR in an isolated')).toBeLessThan(
+            details,
+          );
+          expect(body.indexOf('Scripted assertions:')).toBeLessThan(details);
+        } else {
+          expect(
+            body.indexOf('The verification run did not complete'),
+          ).toBeLessThan(details);
+        }
+        // ...and every Chinese body line sits INSIDE it.
+        const zhBody =
+          _label === 'pass'
+            ? body.indexOf('\u6c99\u7bb1\u9a8c\u8bc1\u5728\u9694\u79bb')
+            : body.indexOf(
+                '\u672c\u6b21\u9a8c\u8bc1\u8fd0\u884c\u672a\u6b63\u5e38\u7ed3\u675f',
+              );
+        expect(zhBody).toBeGreaterThan(details);
+        expect(zhBody).toBeLessThan(detailsEnd);
+        if (_label === 'pass') {
+          const assertZh = body.indexOf('\u811a\u672c\u65ad\u8a00\uff1a');
+          expect(assertZh).toBeGreaterThan(details);
+          expect(assertZh).toBeLessThan(detailsEnd);
+        }
+        // The report block stays outside the Chinese fold.
+        expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
+          detailsEnd,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('renders the assertion count in both languages', () => {
+    const dir = fixture();
+    try {
+      const body = render(dir, {
+        NAME: 'assertzh',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed · 0 failed · 10 total',
+      );
+      expect(body).toContain('脚本断言：10 通过 · 0 失败 · 10 总计');
+
+      // The Chinese line rides the same validated object as the English one:
+      // an inconsistent assertions.json must suppress BOTH, or the comment
+      // grows a number that no gate checked.
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1,"fail":0,"total":0}',
+      );
+      const bad = render(dir, {
+        NAME: 'assertbad',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(bad).not.toContain('Scripted assertions:');
+      expect(bad).not.toContain('脚本断言');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #7836: when the agent claims merge-ready but assertions.json records
+  // failures, the publisher must explain the mismatch in the comment body
+  // so a reader does not see a hedged headline above "7 failed" with
+  // nothing connecting them.
+  it('explains why a merge-ready claim was not trusted', () => {
+    const dir = fixture();
+    try {
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1675,"fail":7,"total":1682}',
+      );
+      const body = render(dir, {
+        NAME: 'mismatch',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'The agent reported `merge-ready`, but `assertions.json` recorded 7 failures',
+      );
+      expect(body).toContain('\u26a0\ufe0f inconclusive');
+      expect(body).not.toContain('\u2705 passed');
+      // The Chinese counterpart must sit INSIDE the fold, so a Chinese-only
+      // reader expanding it sees the reason, not just the raw numbers.
+      const details = body.indexOf('<details>');
+      const detailsEnd = body.indexOf('</details>');
+      const zhMismatch = body.indexOf('agent \u62a5\u544a\u4e86 `merge-ready`');
+      expect(zhMismatch).toBeGreaterThan(details);
+      expect(zhMismatch).toBeLessThan(detailsEnd);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Float counts (10.0) must be floored to integers (10) so a clean run
+  // is not downgraded by a string comparison against '0.0'.
+  it('floors float assertion counts to integers', () => {
+    const dir = fixture();
+    try {
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":10.0,"fail":0.0,"total":10}',
+      );
+      const body = render(dir, {
+        NAME: 'float',
+        VERDICT: 'pass',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed \u00b7 0 failed \u00b7 10 total',
+      );
+      expect(body).toContain('\u2705 passed');
+      expect(body).not.toContain('10.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('marks only finding-bearing bodies as substantive', () => {
     const dir = fixture();
     const M = 'qwen-triage:verify-substantive';
@@ -2379,7 +3352,9 @@ describe('qwen-triage verify maintainer-review round', () => {
     // A mid-body stall closes the response (curl 18), not a hang until the
     // client's own timeout (curl 28).
     expect(out).toContain('stall_exit=18');
-  });
+    // 20 chunks x 200 ms is 4 s before the stall arm even starts, so this
+    // cannot fit vitest's 5 s default. It was timing out on main.
+  }, 30000);
 
   // GitHub cancels the OLDER pending run in a concurrency group, so the
   // requester's own /verify proceeds — the earlier "queued behind other
@@ -2652,7 +3627,9 @@ describe('qwen-triage tmux lane parity', () => {
     const out = runProxyWatchdogTest(proxy);
     expect(out).toContain('chunks=20');
     expect(out).toContain('stall_exit=18');
-  });
+    // Same reason as its verify-lane twin: the stream alone outlasts the
+    // 5 s default.
+  }, 30000);
 
   // PR lifecycle scripts run before the agent and can plant a
   // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
@@ -2758,7 +3735,7 @@ describe('qwen-triage tmux lane parity', () => {
     const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
     expect(runStep).toContain('pkill -KILL -u node');
     expect(runStep).toContain(
-      'Processes owned by the build user survived; refusing to start the agent.',
+      'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
     );
     // Before the sweep and the proxy: the cleanup must not race a live
     // process, and no leftover child may be alive when the proxy binds.
@@ -2862,4 +3839,123 @@ describe('qwen-triage tmux lane parity', () => {
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
+});
+
+describe('qwen-triage build-process guard', () => {
+  // The guard fired on a real run (job 30267953352) and failed the job with
+  // nothing but "processes survived" — no pid, no state, no command line.
+  // Nobody could tell a genuine leftover from a harmless one, including the
+  // person who wrote it. Both lanes now name what survived.
+  it('names the surviving processes instead of just refusing', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(runStep, `${lane} lost the guard`).toContain(
+        'live_build_processes',
+      );
+      expect(runStep).toContain('surviving process:');
+      expect(runStep).toContain(
+        'Processes owned by the build user survived SIGKILL; refusing to start the agent.',
+      );
+    }
+  });
+
+  // `ps -u node` exits 1 when the user owns zero processes. Under
+  // `set -euo pipefail` the bare assignment would die silently on the
+  // success path — the `|| true` absorbs the no-match status.
+  it('"survivors" assignment tolerates zero processes under pipefail', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      expect(
+        runStep,
+        `${lane}: survivors assignment must survive ps exit 1`,
+      ).toContain('survivors="$(live_build_processes)" || true');
+    }
+  });
+
+  // A zombie cannot be killed and cannot execute anything, so counting one
+  // means this check can never clear.
+  //
+  // PLATFORM NOTE, and the reason this test is split in two: Linux pgrep
+  // reports defunct processes ("Defunct processes are reported." — pgrep(1),
+  // procps-ng), which is why the original `pgrep -u node` guard could hang
+  // on a zombie in CI. macOS pgrep does NOT list them, so the behavioural
+  // arm below cannot discriminate the old implementation from the new one
+  // here — verified directly: ps lists our zombie, pgrep does not. The
+  // structural assertion is therefore the one that holds on every platform.
+  it('excludes zombies from the surviving-process check', () => {
+    for (const lane of ['verify', 'tmux-testing']) {
+      const runStep = stepIn(
+        lane,
+        lane === 'verify'
+          ? 'Run verification agent'
+          : 'Run tmux real-user testing',
+      );
+      const body = runStep
+        .match(/live_build_processes\(\) \{\n([\s\S]*?)\n\s*\}/)?.[1]
+        ?.trim();
+      expect(body, `${lane}: no live_build_processes body`).toBeTruthy();
+      // It must read process STATE and drop zombies. `pgrep` alone cannot:
+      // on Linux it reports defunct processes and offers no default filter.
+      expect(body, `${lane}: the filter must inspect process state`).toMatch(
+        /stat=/,
+      );
+      expect(body, `${lane}: the filter must exclude zombies`).toMatch(
+        /\/\^Z\//,
+      );
+      expect(body).not.toMatch(/^pgrep\b/);
+    }
+  });
+
+  // The OS property the exclusion rests on: a zombie survives SIGKILL and
+  // ps still lists it, so an unfiltered check would never clear.
+  it('confirms a zombie survives SIGKILL and stays visible to ps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zombie-'));
+    try {
+      writeFileSync(
+        join(dir, 'mkzombie.py'),
+        [
+          'import os, time',
+          'pid = os.fork()',
+          'if pid == 0:',
+          '    os._exit(0)',
+          'print(pid, flush=True)',
+          'time.sleep(8)',
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        `python3 "$1/mkzombie.py" > "$1/zpid" &`,
+        'PP=$!',
+        'sleep 1',
+        'Z="$(tr -d " \n" < "$1/zpid")"',
+        '[ -n "$Z" ] || { echo "no-zombie"; kill $PP 2>/dev/null; exit 0; }',
+        'kill -9 "$Z" 2>/dev/null',
+        'sleep 0.5',
+        'echo "state=$(ps -o stat= -p "$Z" 2>/dev/null | tr -d " ")"',
+        'echo "unfiltered=$(ps -o pid= -p "$Z" 2>/dev/null | wc -l | tr -d " ")"',
+        `echo "filtered=$(ps -o pid=,stat=,args= -p "$Z" 2>/dev/null | awk '$2 !~ /^Z/' | wc -l | tr -d ' ')"`,
+        'kill $PP 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 30000,
+      }).stdout;
+      if (out.includes('no-zombie')) return;
+      expect(out).toMatch(/state=Z/);
+      expect(out).toContain('unfiltered=1');
+      expect(out).toContain('filtered=0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
 });
