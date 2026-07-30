@@ -4295,27 +4295,29 @@ export class GeminiChat {
       const recovery = tryRecoverXmlToolCalls(contentText);
       if (recovery.recovered) {
         hasToolCall = true;
-        const replacementParts: Part[] = [];
+        // recovery.remainingText is derived from the join of ALL text
+        // parts, so every text part is consumed. Remove them, reinsert
+        // remainingText at the first text position so non-text parts
+        // (inlineData/fileData) keep their original relative order, and
+        // append functionCallParts at the end.
+        const textIndices: number[] = [];
+        for (let i = 0; i < consolidatedHistoryParts.length; i++) {
+          if (consolidatedHistoryParts[i]!.text !== undefined)
+            textIndices.push(i);
+        }
+        for (let j = textIndices.length - 1; j >= 0; j--) {
+          consolidatedHistoryParts.splice(textIndices[j]!, 1);
+        }
+        const insertAt = Math.min(
+          textIndices[0] ?? 0,
+          consolidatedHistoryParts.length,
+        );
         if (recovery.remainingText) {
-          replacementParts.push({ text: recovery.remainingText });
+          consolidatedHistoryParts.splice(insertAt, 0, {
+            text: recovery.remainingText,
+          });
         }
-        replacementParts.push(...recovery.functionCallParts);
-        // recovery.remainingText is derived from the join of ALL text parts,
-        // so every text part is consumed (scanning backward: the last one is
-        // replaced with the recovery result, the earlier ones removed) to
-        // avoid duplicating their content in history. Non-text parts
-        // (inlineData/fileData) keep their positions.
-        let replaced = false;
-        for (let i = consolidatedHistoryParts.length - 1; i >= 0; i--) {
-          const part = consolidatedHistoryParts[i];
-          if (!part.text) continue;
-          if (replaced) {
-            consolidatedHistoryParts.splice(i, 1);
-          } else {
-            consolidatedHistoryParts.splice(i, 1, ...replacementParts);
-            replaced = true;
-          }
-        }
+        consolidatedHistoryParts.push(...recovery.functionCallParts);
         // Recompute contentText and contentParts so the JSONL recording
         // below stays aligned with in-memory history (--resume fidelity).
         contentText = consolidatedHistoryParts

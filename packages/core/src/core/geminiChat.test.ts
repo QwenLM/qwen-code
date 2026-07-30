@@ -13108,6 +13108,12 @@ describe('GeminiChat', async () => {
       expect(parts.filter((p) => p.text === 'I will read it.')).toHaveLength(1);
       // The interleaved non-text part is preserved.
       expect(parts.some((p) => p.inlineData)).toBe(true);
+      // Order fidelity: text before the image stays before it after recovery.
+      const textIdx = parts.findIndex((p) => p.text === 'I will read it.');
+      const imageIdx = parts.findIndex((p) => p.inlineData);
+      const callIdx = parts.findIndex((p) => p.functionCall);
+      expect(textIdx).toBeLessThan(imageIdx);
+      expect(imageIdx).toBeLessThan(callIdx);
     });
 
     it('preserves non-text parts when the XML spans multiple text parts', async () => {
