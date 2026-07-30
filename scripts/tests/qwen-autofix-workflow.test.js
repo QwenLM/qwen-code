@@ -2202,7 +2202,10 @@ describe('qwen-autofix workflow', () => {
       'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
-      'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"',
+    );
+    expect(workflow).toContain(
+      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
@@ -5823,6 +5826,97 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep).toContain('milestone digest failed to post');
   });
 
+  it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
+    // A one-shot push dies `fetch first` whenever anything pushes to the PR
+    // head during the agent's ~50-minute window (observed twice in one day,
+    // #7983/#7985 — a full verified agent run thrown away each time). The
+    // per-PR head-write concurrency group cannot prevent this: it only
+    // serialises THIS repo's workflows, not the PR author or the fork side.
+    // On rejection the report step fetches the moved head, MERGES it into
+    // the local line, and retries a bounded number of times; the merge
+    // result descends from the remote head so the retry is a fast-forward.
+    expect(pushAndReportStep).toContain('for push_attempt in 1 2 3; do');
+    // A successful push breaks out of the loop immediately — without this
+    // pin, deleting the break survives: the loop range and give-up message
+    // are still asserted as strings, but a successful push then re-runs
+    // git push twice more and the salvage legs execute against a branch
+    // that was already pushed.
+    expect(pushAndReportStep).toMatch(
+      /if git push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+    );
+    // BOTH push-URL constructions stay pinned — the fork one is pinned by
+    // the fork-plumbing test, and the same-repo one lost its old
+    // `origin "${BRANCH}"` pin in this rework: a mutation swapping ${REPO}
+    // for ${HEAD_REPO} (empty in the same-repo case → a malformed
+    // `github.com/.git` remote) must not survive.
+    expect(pushAndReportStep).toContain(
+      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+    );
+    expect(pushAndReportStep).toContain(
+      'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
+    );
+    // Every failure path in the salvage loop is ::error::-annotated — a
+    // deleted fork branch (or transient network error) must not kill the
+    // step with an unannotated exit 128 under bash -e. The structural pin
+    // connects the message to its exit 1: deleting that exit 1 proceeds to
+    // `git merge FETCH_HEAD` against a stale FETCH_HEAD.
+    expect(pushAndReportStep).toMatch(
+      /echo "::error::could not fetch the moved head \(attempt \$\{push_attempt\}\)[^\n]*"\n\s+exit 1/,
+    );
+    // The disclosure flag keys on HEAD actually advancing: a transient
+    // push failure on an unmoved branch no-ops the merge ("Already up to
+    // date") and must NOT tell the reviewer to re-check commits that
+    // never existed.
+    expect(pushAndReportStep).toMatch(
+      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n\s+if ! git -c user\.name=/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
+    );
+    // Merge, never rebase: the agent's own conflict-resolution rounds create
+    // merge commits, and a rebase would flatten them and can silently
+    // re-introduce the conflicts they resolved.
+    expect(pushAndReportStep).toContain('merge --no-edit FETCH_HEAD');
+    expect(pushAndReportStep).not.toContain('git rebase');
+    // The merge commit needs an explicit identity on a bare runner.
+    expect(pushAndReportStep).toContain('-c user.name="${AUTOFIX_BOT}"');
+    expect(pushAndReportStep).toContain(
+      '-c user.email="${AUTOFIX_BOT}@users.noreply.github.com"',
+    );
+    // A genuine content conflict aborts cleanly and falls through to the
+    // existing failure path — the salvage must never overwrite either side.
+    expect(pushAndReportStep).toContain('git merge --abort || true');
+    // Structural pin: deleting this exit 1 falls through to the report
+    // section and posts a round-complete comment as if the push succeeded.
+    expect(pushAndReportStep).toMatch(
+      /echo "::error::the commits pushed during the run conflict with this fix[^\n]*"\n\s+exit 1/,
+    );
+    // The salvage is disclosed in the round report: the round's verification
+    // ran before the merge, so mid-run commits deserve a re-check. The
+    // structure pin keeps the warning conditional — making it unconditional
+    // (printed every round) passes presence-only checks but is the exact
+    // false-disclosure this head's own fix commit closes from the other side.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\{PUSH_RACE_MERGED\}" == .true. \]\]; then\n\s+echo\n\s+echo "⚠️ The branch received new commits/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
+    );
+    expect(pushAndReportStep).toContain('verification predates that merge');
+    // Bounded: the loop gives up after the last attempt instead of spinning.
+    // The structural pin connects the guard value to the error exit — a
+    // mutation of == 3 to == 4 survives presence-only checks: the loop
+    // range string is unchanged and the error message still exists as dead
+    // code, but execution falls through to the report section after 3
+    // failed attempts and posts a round-complete comment as if the push
+    // succeeded. Deleting exit 1 alone also survives without this pin:
+    // the guard fires and prints the error but execution continues past
+    // fi, the for-loop exhausts, and the report section runs.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\{push_attempt\}" == 3 \]\]; then\n\s+echo "::error::push rejected \$\{push_attempt\} times; giving up"\n\s+exit 1/,
+    );
+  });
+
   it('pushes autofix branches without rewriting remote history', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
     // No bare -f / +refspec force forms either. (--no-verify is NOT a force
@@ -5834,7 +5928,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
     expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
     expect(pushAndReportStep).toContain(
-      'git push --no-verify origin "${BRANCH}"',
+      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host

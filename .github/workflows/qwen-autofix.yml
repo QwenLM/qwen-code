@@ -3669,10 +3669,54 @@ jobs:
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
               # PR branch when the author ticked the box).
-              git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"
+              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"
             else
-              git push --no-verify origin "${BRANCH}"
+              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
             fi
+            # Salvage a race-lost push instead of discarding the run. The
+            # per-PR head-write concurrency group serialises THIS repo's
+            # workflows, but it cannot stop the PR author (or anything on the
+            # fork side) pushing during the agent's ~50-minute window —
+            # observed twice in one day (#7983, #7985): a one-shot push died
+            # `fetch first` and a full verified agent run was thrown away.
+            # On rejection, fetch the moved head and MERGE it into the local
+            # line (merge, not rebase: the agent's own conflict-resolution
+            # rounds create merge commits, and a rebase would flatten them
+            # and can silently re-introduce the conflicts it resolved). The
+            # merge result descends from the remote head, so the retried push
+            # is a fast-forward. A genuine content conflict aborts and falls
+            # through to the existing failure path — same as today.
+            PUSH_RACE_MERGED='false'
+            for push_attempt in 1 2 3; do
+              if git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+                break
+              fi
+              if [[ "${push_attempt}" == 3 ]]; then
+                echo "::error::push rejected ${push_attempt} times; giving up"
+                exit 1
+              fi
+              echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
+              if ! git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+                echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
+                exit 1
+              fi
+              # The disclosure flag keys on HEAD actually advancing: a push
+              # can fail transiently (upload timeout, 503) with the branch
+              # unmoved, and the merge then no-ops "Already up to date" —
+              # flagging that would tell the reviewer to re-check mid-run
+              # commits that never existed.
+              PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+              if ! git -c user.name="${AUTOFIX_BOT}" \
+                -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
+                merge --no-edit FETCH_HEAD; then
+                git merge --abort || true
+                echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
+                exit 1
+              fi
+              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
+                PUSH_RACE_MERGED='true'
+              fi
+            done
             # Resolve the review threads whose findings the agent actually
             # IMPLEMENTED, so a human re-reviewing sees only what is still open
             # instead of re-reading every thread to work out what was handled.
@@ -3788,6 +3832,10 @@ jobs:
               fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
+              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+                echo
+                echo "⚠️ The branch received new commits while this round ran; they were merged into this push, but this round's verification predates that merge — re-check anything that landed mid-run. · 本轮运行期间分支收到了新的提交；本次推送已将其合并，但本轮验证在合并之前完成——请复查运行期间落地的改动。"
+              fi
               echo
               echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
               echo
