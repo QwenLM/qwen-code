@@ -90,6 +90,7 @@ export function ChannelPairingRequests({
 }: ChannelPairingRequestsProps) {
   const { t } = useI18n();
   const headingId = useId();
+  const approvalsHeadingId = useId();
   const mounted = useRef(false);
   const currentChannelName = useRef(channelName);
   currentChannelName.current = channelName;
@@ -398,118 +399,120 @@ export function ChannelPairingRequests({
         </ul>
       ) : null}
 
-      <div className={styles.divider} />
+      <section aria-labelledby={approvalsHeadingId}>
+        <div className={styles.divider} />
 
-      <div className={styles.header}>
-        <div>
-          <h4 className={styles.title}>
-            {t('channels.editor.pairing.approvals.title')}
-          </h4>
-          <p className={styles.description}>
-            {t('channels.editor.pairing.approvals.description')}
-          </p>
-        </div>
-        <div className={styles.headerActions}>
-          <Badge variant="outline">{approvedSenderIds.length}</Badge>
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="ghost"
-            disabled={approvalsLoading || Boolean(revokingSenderId)}
-            aria-label={t('channels.editor.pairing.approvals.refresh')}
-            onClick={() => {
-              setRevokeSuccess(undefined);
-              setApprovalsReloadToken((current) => current + 1);
-            }}
-          >
-            {approvalsLoading ? <Spinner /> : <RefreshCwIcon />}
-          </Button>
-        </div>
-      </div>
-
-      {approvalsError ? (
-        <Alert variant="destructive">
-          <AlertCircleIcon />
-          <AlertTitle>
-            {t('channels.editor.pairing.approvals.error')}
-          </AlertTitle>
-          <AlertDescription>{approvalsError}</AlertDescription>
-          <Button
-            className="mt-2 w-fit"
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={approvalsLoading}
-            onClick={() => setApprovalsReloadToken((current) => current + 1)}
-          >
-            {t('channels.editor.pairing.retry')}
-          </Button>
-        </Alert>
-      ) : null}
-
-      {revokeSuccess ? (
-        <div role="status" className={styles.success}>
-          <CheckIcon />
-          {revokeSuccess}
-        </div>
-      ) : null}
-
-      {!approvalsLoading &&
-      !approvalsError &&
-      approvedSenderIds.length === 0 ? (
-        <div className={styles.empty}>
-          <ShieldCheckIcon aria-hidden="true" />
+        <div className={styles.header}>
           <div>
-            <p className={styles.emptyTitle}>
-              {t('channels.editor.pairing.approvals.empty.title')}
-            </p>
-            <p className={styles.emptyDescription}>
-              {t('channels.editor.pairing.approvals.empty.description')}
+            <h4 id={approvalsHeadingId} className={styles.title}>
+              {t('channels.editor.pairing.approvals.title')}
+            </h4>
+            <p className={styles.description}>
+              {t('channels.editor.pairing.approvals.description')}
             </p>
           </div>
+          <div className={styles.headerActions}>
+            <Badge variant="outline">{approvedSenderIds.length}</Badge>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              disabled={approvalsLoading || Boolean(revokingSenderId)}
+              aria-label={t('channels.editor.pairing.approvals.refresh')}
+              onClick={() => {
+                setRevokeSuccess(undefined);
+                setApprovalsReloadToken((current) => current + 1);
+              }}
+            >
+              {approvalsLoading ? <Spinner /> : <RefreshCwIcon />}
+            </Button>
+          </div>
         </div>
-      ) : null}
 
-      {approvedSenderIds.length > 0 ? (
-        <ul className={styles.list}>
-          {approvedSenderIds.map((senderId) => (
-            <li key={senderId} className={styles.approval}>
-              <div className={styles.approvalIdentity}>
-                <ShieldCheckIcon aria-hidden="true" />
-                <code className={styles.approvalSenderId}>{senderId}</code>
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="destructive"
-                disabled={Boolean(revokingSenderId) || Boolean(approvingCode)}
-                aria-label={t('channels.editor.pairing.approvals.revokeFor', {
-                  senderId,
-                })}
-                onClick={() => setRevokeTarget(senderId)}
-              >
-                {revokingSenderId === senderId ? <Spinner /> : <Trash2Icon />}
-                {t('channels.editor.pairing.approvals.revoke')}
-              </Button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+        {approvalsError ? (
+          <Alert variant="destructive">
+            <AlertCircleIcon />
+            <AlertTitle>
+              {t('channels.editor.pairing.approvals.error')}
+            </AlertTitle>
+            <AlertDescription>{approvalsError}</AlertDescription>
+            <Button
+              className="mt-2 w-fit"
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={approvalsLoading}
+              onClick={() => setApprovalsReloadToken((current) => current + 1)}
+            >
+              {t('channels.editor.pairing.retry')}
+            </Button>
+          </Alert>
+        ) : null}
 
-      {staticAllowedUsers.length > 0 ? (
-        <Alert>
-          <InfoIcon />
-          <AlertTitle>
-            {t('channels.editor.pairing.allowlist.title')}
-          </AlertTitle>
-          <AlertDescription>
-            <p>{t('channels.editor.pairing.allowlist.description')}</p>
-            <code className={styles.allowlist}>
-              {staticAllowedUsers.join(', ')}
-            </code>
-          </AlertDescription>
-        </Alert>
-      ) : null}
+        {revokeSuccess ? (
+          <div role="status" className={styles.success}>
+            <CheckIcon />
+            {revokeSuccess}
+          </div>
+        ) : null}
+
+        {!approvalsLoading &&
+        !approvalsError &&
+        approvedSenderIds.length === 0 ? (
+          <div className={styles.empty}>
+            <ShieldCheckIcon aria-hidden="true" />
+            <div>
+              <p className={styles.emptyTitle}>
+                {t('channels.editor.pairing.approvals.empty.title')}
+              </p>
+              <p className={styles.emptyDescription}>
+                {t('channels.editor.pairing.approvals.empty.description')}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {approvedSenderIds.length > 0 ? (
+          <ul className={styles.list}>
+            {approvedSenderIds.map((senderId) => (
+              <li key={senderId} className={styles.approval}>
+                <div className={styles.approvalIdentity}>
+                  <ShieldCheckIcon aria-hidden="true" />
+                  <code className={styles.approvalSenderId}>{senderId}</code>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  disabled={Boolean(revokingSenderId) || Boolean(approvingCode)}
+                  aria-label={t('channels.editor.pairing.approvals.revokeFor', {
+                    senderId,
+                  })}
+                  onClick={() => setRevokeTarget(senderId)}
+                >
+                  {revokingSenderId === senderId ? <Spinner /> : <Trash2Icon />}
+                  {t('channels.editor.pairing.approvals.revoke')}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {staticAllowedUsers.length > 0 ? (
+          <Alert>
+            <InfoIcon />
+            <AlertTitle>
+              {t('channels.editor.pairing.allowlist.title')}
+            </AlertTitle>
+            <AlertDescription>
+              <p>{t('channels.editor.pairing.allowlist.description')}</p>
+              <code className={styles.allowlist}>
+                {staticAllowedUsers.join(', ')}
+              </code>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+      </section>
 
       <AlertDialog
         open={Boolean(revokeTarget)}
@@ -521,7 +524,7 @@ export function ChannelPairingRequests({
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t('channels.editor.pairing.approvals.confirm.title', {
-                senderId: revokeTarget ?? '',
+                senderId: revokeTarget || undefined,
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>

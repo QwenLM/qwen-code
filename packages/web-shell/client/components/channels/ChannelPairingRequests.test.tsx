@@ -641,4 +641,19 @@ describe('ChannelPairingRequests', () => {
 
     expect(container.textContent).not.toContain('ABCD1234');
   });
+
+  it('does not show approvals from the previous Channel while loading', async () => {
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValueOnce({ senderIds: ['paired-user'] })
+      .mockReturnValueOnce(
+        new Promise<DaemonChannelPairingApprovalsSnapshot>(() => undefined),
+      );
+    await renderRequests({ listApprovals });
+    expect(container.textContent).toContain('paired-user');
+
+    await renderRequests({ channelName: 'other-bot', listApprovals });
+
+    expect(container.textContent).not.toContain('paired-user');
+  });
 });

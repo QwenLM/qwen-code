@@ -347,6 +347,7 @@ for (const theme of THEMES) {
       await expect(
         page.getByText('release-manager', { exact: true }),
       ).toBeVisible();
+      await editHeading.click();
       await page
         .getByRole('heading', { name: 'Pairing approvals' })
         .scrollIntoViewIfNeeded();
