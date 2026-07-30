@@ -251,7 +251,8 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // Cross-realm `instanceof Error` is false for vm-realm Errors; use
       // duck-typed extraction so script-thrown errors aren't coerced to
       // their "Error: <msg>" toString() form.
-      const { message, phases, logs, meta } = settlement;
+      const { message, details } = settlement;
+      const { phases, logs, meta } = details ?? {};
       // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
       // accumulated before the failure, include them in the display so
       // the user can see what ran before the error.

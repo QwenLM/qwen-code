@@ -19,7 +19,6 @@ import {
   WorkflowExecutionError,
   WorkflowOrchestrator,
   type WorkflowAgentDispatch,
-  type WorkflowMeta,
   type WorkflowOrchestratorEmitter,
   type WorkflowRunOutcome,
 } from './workflow-orchestrator.js';
@@ -38,20 +37,9 @@ export interface WorkflowRunnerOptions {
   onUpdate?: (entry: WorkflowTask) => void;
 }
 
-export interface WorkflowRunSuccess {
-  ok: true;
-  outcome: WorkflowRunOutcome;
-}
-
-export interface WorkflowRunFailure {
-  ok: false;
-  message: string;
-  phases?: string[];
-  logs?: string[];
-  meta?: WorkflowMeta;
-}
-
-export type WorkflowRunSettlement = WorkflowRunSuccess | WorkflowRunFailure;
+export type WorkflowRunSettlement =
+  | { ok: true; outcome: WorkflowRunOutcome }
+  | { ok: false; message: string; details?: WorkflowExecutionError };
 
 export class WorkflowRunHandle {
   readonly completion: Promise<WorkflowRunSettlement>;
@@ -75,46 +63,34 @@ export class WorkflowRunner {
   static async start(
     options: WorkflowRunnerOptions,
   ): Promise<WorkflowRunHandle> {
-    const controller = createChildAbortController(options.signal);
+    const config = options.config;
     const budget = WorkflowBudgetImpl.fromEnv();
-    const dispatch =
-      options.dispatch ??
-      createProductionDispatch(
-        options.config,
-        controller.signal,
-        (outputTokens) => budget.recordSpent(outputTokens),
-      );
-    const orchestrator = new WorkflowOrchestrator(dispatch);
-
-    let resolvedScript = options.script ?? '';
-    let resolvedScriptPath = options.scriptPath;
-    try {
-      if (options.scriptPath && options.script === undefined) {
-        const loaded = await resolveSavedWorkflowScript(
-          { scriptPath: options.scriptPath },
-          options.config,
-        );
-        resolvedScript = loaded.script;
-        resolvedScriptPath = loaded.scriptPath;
-      }
-    } catch (error) {
-      controller.abort();
-      throw error;
-    }
-
+    const loaded =
+      options.scriptPath && options.script === undefined
+        ? await resolveSavedWorkflowScript(
+            { scriptPath: options.scriptPath },
+            config,
+          )
+        : undefined;
+    const script = loaded?.script ?? options.script ?? '';
+    const scriptPath = loaded?.scriptPath ?? options.scriptPath;
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
-    let journal: WorkflowJournal | undefined;
-    let resumeReplay: JournalReplay | undefined;
-    const storage = options.config.storage;
-    if (storage) {
-      journal = new WorkflowJournal(storage.getWorkflowRunJournalPath(runId));
-      if (options.resumeFromRunId) {
-        resumeReplay = await journal.load();
-      }
-    }
-
-    const registry = options.config.getWorkflowRunRegistry?.();
+    const storage = config.storage;
+    const journal = storage
+      ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
+      : undefined;
+    const resumeReplay: JournalReplay | undefined = options.resumeFromRunId
+      ? await journal?.load()
+      : undefined;
+    const controller = createChildAbortController(options.signal);
+    const dispatch =
+      options.dispatch ??
+      createProductionDispatch(config, controller.signal, (outputTokens) =>
+        budget.recordSpent(outputTokens),
+      );
+    const orchestrator = new WorkflowOrchestrator(dispatch);
+    const registry = config.getWorkflowRunRegistry?.();
     const entry = registry?.register({
       runId,
       meta: null,
@@ -123,170 +99,101 @@ export class WorkflowRunner {
       outputFile: '',
       abortController: controller,
       tokenBudgetTotal: budget.total,
-      script: resolvedScript,
-      scriptPath: resolvedScriptPath,
+      script,
+      scriptPath,
     });
-    const emitter = createEmitter(runId, registry, entry, options.onUpdate);
+    const emitUpdate = (): void => {
+      if (!entry || !options.onUpdate) return;
+      try {
+        options.onUpdate(entry);
+      } catch {
+        // UI refresh failures must not affect workflow execution.
+      }
+    };
+    const emitter: WorkflowOrchestratorEmitter = {
+      phaseStarted: (title) => {
+        registry?.onPhaseStarted(runId, title);
+        emitUpdate();
+      },
+      agentDispatched: () => {
+        registry?.onAgentDispatched(runId);
+        emitUpdate();
+      },
+      agentCompleted: () => registry?.onAgentCompleted(runId),
+      logAppended: () => {},
+      budgetUpdated: (spent, total) => {
+        registry?.onBudgetUpdated(runId, spent, total);
+        emitUpdate();
+      },
+    };
 
     const handle: WorkflowRunHandle = new WorkflowRunHandle(
       runId,
       budget,
       registry,
       controller,
-      (): Promise<WorkflowRunSettlement> =>
-        settleRun({
-          options,
-          handle,
-          orchestrator,
-          controller,
-          registry,
-          entry,
-          emitter,
-          budget,
-          runId,
-          resolvedScript,
-          journal,
-          resumeReplay,
-        }),
+      async (): Promise<WorkflowRunSettlement> => {
+        try {
+          const outcome = await orchestrator.run({
+            script,
+            args: options.args,
+            abortOnTimeout: controller,
+            runId,
+            emitter,
+            budget,
+            resolveSavedWorkflow: (ref) =>
+              resolveSavedWorkflowScript(ref, config),
+            journal,
+            resumeReplay,
+          });
+          if (entry) {
+            entry.meta = outcome.meta;
+            if (outcome.meta?.name && entry.description === runId) {
+              entry.description = outcome.meta.name;
+            }
+          }
+          registry?.setRecentLogs(runId, outcome.logs);
+          registry?.complete(runId, outcome.result, Date.now());
+          return { ok: true, outcome };
+        } catch (error) {
+          const details =
+            error instanceof WorkflowExecutionError ? error : undefined;
+          const message = extractErrorMessage(error);
+          if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
+          if (details?.logs) registry?.setRecentLogs(runId, details.logs);
+          if (options.signal.aborted) {
+            registry?.cancel(runId, Date.now());
+          } else {
+            registry?.fail(runId, message, Date.now());
+          }
+          return { ok: false, message, details };
+        } finally {
+          controller.abort();
+          if (entry && entry.status !== 'running') {
+            await writeWorkflowSnapshot(config, entry);
+            try {
+              logWorkflowRun(
+                config,
+                new WorkflowRunEvent({
+                  status: entry.status,
+                  agents_dispatched: entry.agentsDispatched,
+                  agents_completed: entry.agentsCompleted,
+                  phase_count: entry.phases.length,
+                  tokens_spent: entry.tokensSpent,
+                  duration_ms:
+                    (entry.endTime ?? entry.startTime) - entry.startTime,
+                }),
+              );
+            } catch {
+              // Telemetry must not affect workflow execution.
+            }
+          }
+          registry?.releaseHandle(runId, handle);
+        }
+      },
     );
     registry?.attachHandle(handle);
     return handle;
-  }
-}
-
-interface SettleRunOptions {
-  options: WorkflowRunnerOptions;
-  handle: WorkflowRunHandle;
-  orchestrator: WorkflowOrchestrator;
-  controller: AbortController;
-  registry: WorkflowRunRegistry | undefined;
-  entry: WorkflowTask | undefined;
-  emitter: WorkflowOrchestratorEmitter;
-  budget: WorkflowBudgetImpl;
-  runId: string;
-  resolvedScript: string;
-  journal: WorkflowJournal | undefined;
-  resumeReplay: JournalReplay | undefined;
-}
-
-async function settleRun(
-  context: SettleRunOptions,
-): Promise<WorkflowRunSettlement> {
-  const {
-    options,
-    handle,
-    orchestrator,
-    controller,
-    registry,
-    entry,
-    emitter,
-    budget,
-    runId,
-    resolvedScript,
-    journal,
-    resumeReplay,
-  } = context;
-
-  try {
-    const outcome = await orchestrator.run({
-      script: resolvedScript,
-      args: options.args,
-      abortOnTimeout: controller,
-      runId,
-      emitter,
-      budget,
-      resolveSavedWorkflow: (ref) =>
-        resolveSavedWorkflowScript(ref, options.config),
-      journal,
-      resumeReplay,
-    });
-
-    if (entry) {
-      entry.meta = outcome.meta;
-      if (outcome.meta?.name && entry.description === runId) {
-        entry.description = outcome.meta.name;
-      }
-    }
-    registry?.setRecentLogs(runId, outcome.logs);
-    registry?.complete(runId, outcome.result, Date.now());
-    return { ok: true, outcome };
-  } catch (error) {
-    const message = extractErrorMessage(error);
-    const phases =
-      error instanceof WorkflowExecutionError ? error.phases : undefined;
-    const logs =
-      error instanceof WorkflowExecutionError ? error.logs : undefined;
-    const meta =
-      error instanceof WorkflowExecutionError
-        ? (error.meta ?? undefined)
-        : undefined;
-    if (entry && meta && !entry.meta) entry.meta = meta;
-    if (logs) registry?.setRecentLogs(runId, logs);
-    if (options.signal.aborted) {
-      registry?.cancel(runId, Date.now());
-    } else {
-      registry?.fail(runId, message, Date.now());
-    }
-    return { ok: false, message, phases, logs, meta };
-  } finally {
-    controller.abort();
-    if (entry && entry.status !== 'running') {
-      await writeWorkflowSnapshot(options.config, entry);
-      emitTelemetry(options.config, entry);
-    }
-    registry?.releaseHandle(runId, handle);
-  }
-}
-
-function createEmitter(
-  runId: string,
-  registry: WorkflowRunRegistry | undefined,
-  entry: WorkflowTask | undefined,
-  onUpdate: ((entry: WorkflowTask) => void) | undefined,
-): WorkflowOrchestratorEmitter {
-  const emitUpdate = (): void => {
-    if (!entry || !onUpdate) return;
-    try {
-      onUpdate(entry);
-    } catch {
-      // UI refresh failures must not affect workflow execution.
-    }
-  };
-  return {
-    phaseStarted: (title) => {
-      registry?.onPhaseStarted(runId, title);
-      emitUpdate();
-    },
-    agentDispatched: () => {
-      registry?.onAgentDispatched(runId);
-      emitUpdate();
-    },
-    agentCompleted: () => {
-      registry?.onAgentCompleted(runId);
-    },
-    logAppended: () => {},
-    budgetUpdated: (spent, total) => {
-      registry?.onBudgetUpdated(runId, spent, total);
-      emitUpdate();
-    },
-  };
-}
-
-function emitTelemetry(config: Config, entry: WorkflowTask): void {
-  try {
-    logWorkflowRun(
-      config,
-      new WorkflowRunEvent({
-        status: entry.status,
-        agents_dispatched: entry.agentsDispatched,
-        agents_completed: entry.agentsCompleted,
-        phase_count: entry.phases.length,
-        tokens_spent: entry.tokensSpent,
-        duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
-      }),
-    );
-  } catch {
-    // Telemetry must not affect workflow execution.
   }
 }
 

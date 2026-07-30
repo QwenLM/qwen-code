@@ -283,9 +283,9 @@ export class WorkflowRunRegistry {
   }
 
   attachHandle(handle: WorkflowRunHandle): void {
-    const entry = this.entries.get(handle.runId);
-    if (!entry || entry.status !== 'running') return;
-    this.handles.set(handle.runId, handle);
+    if (this.entries.get(handle.runId)?.status === 'running') {
+      this.handles.set(handle.runId, handle);
+    }
   }
 
   getHandle(runId: string): WorkflowRunHandle | undefined {
@@ -293,9 +293,7 @@ export class WorkflowRunRegistry {
   }
 
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
-    if (this.handles.get(runId) === handle) {
-      this.handles.delete(runId);
-    }
+    if (this.handles.get(runId) === handle) this.handles.delete(runId);
   }
 
   /**
@@ -425,12 +423,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     entry.notified = true;
     try {
-      const handle = this.handles.get(runId);
-      if (handle) {
-        handle.abort();
-      } else {
-        entry.abortController.abort();
-      }
+      (this.handles.get(runId) ?? entry.abortController).abort();
     } catch (error) {
       debugLogger.error('Failed to abort workflow controller:', error);
     }
@@ -504,12 +497,7 @@ export class WorkflowRunRegistry {
       entry.endTime = endTime;
       entry.notified = true;
       try {
-        const handle = this.handles.get(entry.runId);
-        if (handle) {
-          handle.abort();
-        } else {
-          entry.abortController.abort();
-        }
+        (this.handles.get(entry.runId) ?? entry.abortController).abort();
       } catch (error) {
         debugLogger.error(
           'abortAll: failed to abort workflow controller:',
