@@ -119,7 +119,13 @@ export class WorkflowRunner {
         registry?.onAgentDispatched(runId);
         emitUpdate();
       },
-      agentCompleted: () => registry?.onAgentCompleted(runId),
+      agentCompleted: () => {
+        // No emitUpdate: budgetUpdated fires right after and renders both
+        // updates together (avoids 2x TUI redraws per agent).
+        registry?.onAgentCompleted(runId);
+      },
+      // Deliberate no-op: logs are snapshotted at terminal via
+      // setRecentLogs; per-line emit would cause up to 10k TUI redraws.
       logAppended: () => {},
       budgetUpdated: (spent, total) => {
         registry?.onBudgetUpdated(runId, spent, total);
@@ -197,6 +203,11 @@ export class WorkflowRunner {
   }
 }
 
+/**
+ * Duck-typed extraction so vm-realm Errors (raised inside the sandbox)
+ * don't coerce to "Error: <msg>" via toString(). See workflow-orchestrator.ts
+ * for the matching helper on the orchestrator side.
+ */
 function extractErrorMessage(error: unknown): string {
   if (error && typeof error === 'object' && 'message' in error) {
     const message = (error as { message: unknown }).message;
