@@ -2707,6 +2707,8 @@ describe('runNonInteractive', () => {
       baseUrl: 'https://vision.example/v1',
       agentCapable: true,
     });
+    const selector = 'vision-agent\0https://vision.example/v1\0';
+    let acceptedSameSelector = false;
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
       value: {
@@ -2717,10 +2719,16 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-vision-route',
       },
     };
-    mockCoreExecuteToolCall.mockResolvedValue({
-      responseParts: [{ text: 'tool response' }],
-      modelOverride: 'other-model',
-    });
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        acceptedSameSelector =
+          options.onToolResultFullTurnModel?.(selector) ?? false;
+        return {
+          responseParts: [{ text: 'tool response' }],
+          modelOverride: 'other-model',
+        };
+      },
+    );
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
@@ -2737,10 +2745,10 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
     );
 
-    const selector = 'vision-agent\0https://vision.example/v1\0';
     expect(resolveForModel).toHaveBeenCalledWith(selector.slice(0, -1), {
       failClosed: true,
     });
+    expect(acceptedSameSelector).toBe(true);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       1,
       headlessImageParts,

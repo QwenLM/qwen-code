@@ -1868,7 +1868,9 @@ export async function runNonInteractive(
             toolCallRequests,
             (override) => {
               if (inlineModelOverrideActive) return false;
-              if (fullTurnModelOverrideActive) return false;
+              if (fullTurnModelOverrideActive && modelOverride !== override) {
+                return false;
+              }
               if (modelOverride?.endsWith('\0') && modelOverride !== override) {
                 return false;
               }
