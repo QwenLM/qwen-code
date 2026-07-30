@@ -23,14 +23,14 @@ const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
     outputs: ['decision.json'],
-    invocation: (o) => `/autofix assess-candidates --workdir ${o.workdir}`,
+    invocation: (o) => `/autofix-workflow assess-candidates --workdir ${o.workdir}`,
   },
   'develop-issue': {
     inputs: ['candidates.json', 'decision.json'],
     outputs: ['e2e-report.md', 'pr-title.txt', 'pr-body.md'],
     required: ['issue'],
     invocation: (o) =>
-      `/autofix develop-issue --issue ${o.issue} --workdir ${o.workdir}`,
+      `/autofix-workflow develop-issue --issue ${o.issue} --workdir ${o.workdir}`,
   },
   'address-review': {
     inputs: ['feedback.md'],
@@ -39,7 +39,7 @@ const specs = {
     anyOutput: true,
     exclusiveOutput: true,
     invocation: (o) =>
-      `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
+      `/autofix-workflow address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
   },
 };
 

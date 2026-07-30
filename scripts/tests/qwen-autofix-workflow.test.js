@@ -4894,7 +4894,7 @@ describe('qwen-autofix workflow', () => {
       mkdirSync(join(dir, 'autofix-skill', 'scripts'), { recursive: true });
       writeFileSync(
         join(dir, 'autofix-skill', 'SKILL.md'),
-        '---\nname: autofix\n---\nSTAGED_SKILL_SENTINEL\n',
+        '---\nname: autofix-workflow\n---\nSTAGED_SKILL_SENTINEL\n',
       );
       const stagedRunner = join(
         dir,
@@ -5145,7 +5145,7 @@ describe('qwen-autofix workflow', () => {
   it('keeps agent decision logic in the project autofix skill', () => {
     const skill = readAutofixSkill();
 
-    expect(skill).toContain('name: autofix');
+    expect(skill).toContain('name: autofix-workflow');
     for (const requiredText of [
       'assess-candidates',
       'develop-issue',
@@ -5167,6 +5167,11 @@ describe('qwen-autofix workflow', () => {
     ]) {
       expect(skill).toContain(requiredText);
     }
+
+    expect(skill).not.toMatch(/^name: autofix$/m);
+    expect(
+      readFileSync('packages/core/src/skills/bundled/autofix/SKILL.md', 'utf8'),
+    ).toMatch(/^name: autofix$/m);
 
     expect(assessCandidatesStep).toContain(
       'run-agent.mjs \\\n            --mode assess-candidates',
@@ -5217,7 +5222,7 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('keeps the current autofix skill limited to workflow-invoked modes', () => {
+  it('keeps the workflow autofix skill limited to workflow-invoked modes', () => {
     const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
     expect(stderr).toContain(
@@ -5251,7 +5256,7 @@ describe('qwen-autofix workflow', () => {
     expect(stdout).toContain('Mode: address-review');
     expect(stdout).toContain('Invocation:');
     expect(stdout).toContain(
-      '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
+      '/autofix-workflow address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
     );
   });
 

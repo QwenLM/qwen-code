@@ -1,5 +1,5 @@
 ---
-name: autofix
+name: autofix-workflow
 description: Use when Qwen Code Autofix runs from GitHub Actions or an operator dry-run to choose an approved issue, implement it, or address review feedback on an existing autofix PR.
 ---
 
