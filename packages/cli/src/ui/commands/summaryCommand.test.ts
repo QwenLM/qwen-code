@@ -80,28 +80,36 @@ describe('summaryCommand custom export path', () => {
   });
 
   it('writes a relative file path as-is', async () => {
-    await run('notes.md');
+    const result = await run('notes.md');
     expect(await fileExists(path.join(projectRoot, 'notes.md'))).toBe(true);
+    expect(result.content).toContain('notes.md');
+    expect(result.content).not.toContain(projectRoot);
   });
 
   it('treats a relative path with a trailing separator as a directory', async () => {
     // Regression: path.resolve strips the trailing separator, so the directory
     // must be detected from the raw argument, not the resolved path.
-    await run('docs/');
+    const result = await run('docs/');
     expect(
       await fileExists(path.join(projectRoot, 'docs', 'PROJECT_SUMMARY.md')),
     ).toBe(true);
     expect(await fileExists(path.join(projectRoot, 'docs'))).toBe(false);
+    expect(result.content).toContain(path.join('docs', 'PROJECT_SUMMARY.md'));
+    expect(result.content).not.toContain(projectRoot);
   });
 
   it('appends the default filename for an existing directory', async () => {
     await fs.mkdir(path.join(projectRoot, 'existingdir'));
-    await run('existingdir');
+    const result = await run('existingdir');
     expect(
       await fileExists(
         path.join(projectRoot, 'existingdir', 'PROJECT_SUMMARY.md'),
       ),
     ).toBe(true);
+    expect(result.content).toContain(
+      path.join('existingdir', 'PROJECT_SUMMARY.md'),
+    );
+    expect(result.content).not.toContain(projectRoot);
   });
 
   it('writes an absolute path as-is and reports it absolutely', async () => {
