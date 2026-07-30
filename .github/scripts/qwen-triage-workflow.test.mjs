@@ -40,6 +40,10 @@ const verifyJob = doc.jobs.verify;
 const verifyOwnershipStep = verifyJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
+const tmuxJob = doc.jobs['tmux-testing'];
+const tmuxOwnershipStep = tmuxJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
 
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
@@ -282,9 +286,14 @@ describe('qwen-triage: git exec-vector cleanup', () => {
   });
 });
 
-describe('qwen-triage: verify workspace cleanup', () => {
-  it('restores write permission before returning the workspace to the runner', () => {
+describe('qwen-triage: workspace ownership restore', () => {
+  it('verify: restores write permission before returning the workspace to the runner', () => {
     assert.ok(verifyOwnershipStep, 'verify ownership-restore step must exist');
+    assert.equal(
+      verifyOwnershipStep.if,
+      'always()',
+      'ownership restore must run unconditionally — without always(), a failed/cancelled verify leaves root-owned files that break the next checkout',
+    );
     assert.match(
       verifyOwnershipStep.run,
       /chmod -R u\+rwX "\$GITHUB_WORKSPACE\/\.qwen"/,
@@ -300,6 +309,23 @@ describe('qwen-triage: verify workspace cleanup', () => {
     assert.ok(
       chmodIndex < chownIndex,
       'the root-owned read-only tree must be made writable before ownership is returned',
+    );
+  });
+
+  it('tmux-testing: returns ownership to the runner unconditionally', () => {
+    assert.ok(
+      tmuxOwnershipStep,
+      'tmux-testing ownership-restore step must exist',
+    );
+    assert.equal(
+      tmuxOwnershipStep.if,
+      'always()',
+      'ownership restore must run unconditionally — the prepare step chowns to node:node; without always(), a failed/cancelled run leaves node-owned files that break the next checkout',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+      'tmux-testing must return workspace ownership to the runner',
     );
   });
 });
