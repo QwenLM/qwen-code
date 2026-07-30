@@ -266,9 +266,9 @@ jobs:
         run: |
           set -euo pipefail
           args=( ${{ matrix.tauri_args }} )
-          if [ "$RUNNER_OS" = 'macOS' ] && [ "$DRY_RUN" = 'true' ]; then
-            args+=(--config '{"bundle":{"macOS":{"signingIdentity":"-"}}}')
-          elif [ "$RUNNER_OS" = 'Windows' ] && [ "$DRY_RUN" = 'false' ]; then
+          if [ "$DRY_RUN" = 'true' ]; then
+            args+=(--no-sign)
+          elif [ "$RUNNER_OS" = 'Windows' ]; then
             args+=(--config "$WINDOWS_CONFIG")
           fi
           npm run tauri -- build "${args[@]}"
@@ -342,12 +342,19 @@ jobs:
             exit 1
           fi
 
-      - uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+      - if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'desktop-${{ matrix.rust_target }}'
           path: '${{ runner.temp }}/desktop-artifacts/*'
           if-no-files-found: 'error'
           retention-days: 14
+      - name: 'List artifacts for fork dry run'
+        if: "${{ github.repository != 'QwenLM/qwen-code' }}"
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          find "$RUNNER_TEMP/desktop-artifacts" -maxdepth 1 -type f -print
 
   publish:
     name: 'Publish GitHub release'
