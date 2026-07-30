@@ -367,6 +367,194 @@ describe('specular effect idle bail-out', () => {
   });
 });
 
+describe('specular effect pointer leave', () => {
+  it('resets proximity so the idle bail-out fires after the pointer leaves', () => {
+    const drawArrays = vi.fn();
+    const clear = vi.fn();
+    const glStub = {
+      ARRAY_BUFFER: 0x8892,
+      BLEND: 0x0be2,
+      COLOR_BUFFER_BIT: 0x4000,
+      COMPILE_STATUS: 0x8b81,
+      FLOAT: 0x1406,
+      FRAGMENT_SHADER: 0x8b30,
+      LINK_STATUS: 0x8b82,
+      ONE: 1,
+      ONE_MINUS_SRC_ALPHA: 0x0303,
+      STATIC_DRAW: 0x88e4,
+      TRIANGLES: 0x0004,
+      VERTEX_SHADER: 0x8b31,
+      attachShader: vi.fn(),
+      bindBuffer: vi.fn(),
+      blendFunc: vi.fn(),
+      bufferData: vi.fn(),
+      clear,
+      compileShader: vi.fn(),
+      createBuffer: vi.fn(() => ({})),
+      createProgram: vi.fn(() => ({})),
+      createShader: vi.fn(() => ({})),
+      deleteBuffer: vi.fn(),
+      deleteProgram: vi.fn(),
+      deleteShader: vi.fn(),
+      drawArrays,
+      enable: vi.fn(),
+      enableVertexAttribArray: vi.fn(),
+      getAttribLocation: vi.fn(() => 0),
+      getExtension: vi.fn(() => ({ loseContext: vi.fn() })),
+      getProgramParameter: vi.fn(() => true),
+      getShaderParameter: vi.fn(() => true),
+      getUniformLocation: vi.fn(() => ({})),
+      linkProgram: vi.fn(),
+      shaderSource: vi.fn(),
+      uniform1f: vi.fn(),
+      uniform2f: vi.fn(),
+      uniform3f: vi.fn(),
+      useProgram: vi.fn(),
+      vertexAttribPointer: vi.fn(),
+      viewport: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      glStub as unknown as WebGL2RenderingContext,
+    );
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    let rafId = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      rafCallbacks.push(callback);
+      return ++rafId;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+    function Harness() {
+      const composerRef = useRef<HTMLDivElement>(null);
+      return (
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <div ref={composerRef} data-web-shell-composer-surface>
+            <SpecularComposerEffect targetRef={composerRef} />
+            <div data-web-shell-composer-editor />
+          </div>
+        </ThemeProvider>
+      );
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    act(() => root.render(<Harness />));
+
+    let now = performance.now();
+    const drainFrames = (count: number, stepMs: number) => {
+      for (let i = 0; i < count; i++) {
+        const callback = rafCallbacks.shift();
+        if (!callback) break;
+        now += stepMs;
+        callback(now);
+      }
+    };
+
+    // Move the pointer close so proximity rises and the loop is drawing.
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
+      );
+    });
+    drainFrames(10, 16);
+    expect(drawArrays.mock.calls.length).toBeGreaterThan(0);
+
+    // Pointer leaves the document — proximity resets to zero.
+    act(() => {
+      document.documentElement.dispatchEvent(new MouseEvent('pointerleave'));
+    });
+
+    // Brightness decays and the idle bail-out stops the loop.
+    drainFrames(120, 16);
+    expect(rafCallbacks.length).toBe(0);
+  });
+});
+
+describe('specular effect WebGL cleanup', () => {
+  it('releases WebGL resources on unmount', () => {
+    const loseContext = vi.fn();
+    const glStub = {
+      ARRAY_BUFFER: 0x8892,
+      BLEND: 0x0be2,
+      COLOR_BUFFER_BIT: 0x4000,
+      COMPILE_STATUS: 0x8b81,
+      FLOAT: 0x1406,
+      FRAGMENT_SHADER: 0x8b30,
+      LINK_STATUS: 0x8b82,
+      ONE: 1,
+      ONE_MINUS_SRC_ALPHA: 0x0303,
+      STATIC_DRAW: 0x88e4,
+      TRIANGLES: 0x0004,
+      VERTEX_SHADER: 0x8b31,
+      attachShader: vi.fn(),
+      bindBuffer: vi.fn(),
+      blendFunc: vi.fn(),
+      bufferData: vi.fn(),
+      clear: vi.fn(),
+      compileShader: vi.fn(),
+      createBuffer: vi.fn(() => ({})),
+      createProgram: vi.fn(() => ({})),
+      createShader: vi.fn(() => ({})),
+      deleteBuffer: vi.fn(),
+      deleteProgram: vi.fn(),
+      deleteShader: vi.fn(),
+      drawArrays: vi.fn(),
+      enable: vi.fn(),
+      enableVertexAttribArray: vi.fn(),
+      getAttribLocation: vi.fn(() => 0),
+      getExtension: vi.fn(() => ({ loseContext })),
+      getProgramParameter: vi.fn(() => true),
+      getShaderParameter: vi.fn(() => true),
+      getUniformLocation: vi.fn(() => ({})),
+      linkProgram: vi.fn(),
+      shaderSource: vi.fn(),
+      uniform1f: vi.fn(),
+      uniform2f: vi.fn(),
+      uniform3f: vi.fn(),
+      useProgram: vi.fn(),
+      vertexAttribPointer: vi.fn(),
+      viewport: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      glStub as unknown as WebGL2RenderingContext,
+    );
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+    function Harness() {
+      const composerRef = useRef<HTMLDivElement>(null);
+      return (
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <div ref={composerRef} data-web-shell-composer-surface>
+            <SpecularComposerEffect targetRef={composerRef} />
+            <div data-web-shell-composer-editor />
+          </div>
+        </ThemeProvider>
+      );
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(<Harness />));
+
+    expect(
+      container.querySelector('[data-web-shell-composer-specular] canvas'),
+    ).not.toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+
+    expect(glStub.deleteBuffer).toHaveBeenCalled();
+    expect(glStub.deleteProgram).toHaveBeenCalled();
+    expect(glStub.deleteShader).toHaveBeenCalled();
+    expect(loseContext).toHaveBeenCalled();
+  });
+});
+
 describe('dot field settled skip', () => {
   it('skips canvas draws when all dots are settled and engagement is zero', () => {
     vi.useFakeTimers();

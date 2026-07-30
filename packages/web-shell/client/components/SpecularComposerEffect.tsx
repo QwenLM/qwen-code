@@ -234,6 +234,11 @@ export function SpecularComposerEffect({
       startLoop();
     };
 
+    const onPointerLeave = () => {
+      proximity = 0;
+      pointerAngle = null;
+    };
+
     const onFocusIn = (event: FocusEvent) => {
       if (!isEditorTarget(event.target)) return;
       pointerAngle = angle;
@@ -301,6 +306,7 @@ export function SpecularComposerEffect({
     resizeObserver.observe(target);
     resize();
     window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
     target.addEventListener('focusin', onFocusIn);
     target.addEventListener('focusout', onFocusOut);
     const activeElement = document.activeElement;
@@ -316,6 +322,10 @@ export function SpecularComposerEffect({
       window.cancelAnimationFrame(frameId);
       resizeObserver.disconnect();
       window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener(
+        'pointerleave',
+        onPointerLeave,
+      );
       target.removeEventListener('focusin', onFocusIn);
       target.removeEventListener('focusout', onFocusOut);
       canvas.remove();
