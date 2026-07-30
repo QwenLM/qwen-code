@@ -10,7 +10,6 @@
 
 import path from 'node:path';
 
-const CORE_SOURCE_ROOT = path.join('packages', 'core', 'src');
 const TEST_OR_FIXTURE_SEGMENTS = new Set(['__tests__', 'fixtures']);
 
 function isCoreProductionFile(filename) {
