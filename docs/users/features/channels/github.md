@@ -75,7 +75,7 @@ For GitHub Enterprise Server, set `baseUrl`:
 | `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
 | `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
 | `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
-| `blockStreaming`          | `"off"`                  | Keep GitHub final-only. Enable only when raw intermediate model text is acceptable to publish |
+| `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported |
 | `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                  |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
@@ -114,17 +114,15 @@ Non-comment activity (push, label changes) bumps the notification's `updated_at`
 
 For an accepted issue or pull-request comment, the channel adds GitHub's `👀` reaction while the agent is working, then removes it when the run completes, fails, or is cancelled. Both operations are best-effort: a reaction API or permission failure is logged and never prevents the final response.
 
-### Final-only output (recommended)
+### Final-only output
 
-Keep `blockStreaming` set to `"off"` for GitHub bots. This is the default and publishes exactly one final agent response. It prevents transient model output — such as planning notes, tool narration, subagent progress, or unfinished review drafts — from becoming permanent issue or pull-request comments.
+The GitHub channel always forces final-only delivery. The adapter sets `blockStreaming` to `"off"`, so intermediate model chunks are never published as separate comments and `blockStreaming: "on"` is not supported.
 
 ```json
 {
   "blockStreaming": "off"
 }
 ```
-
-`blockStreaming: "on"` delivers raw model text chunks as multiple irreversible GitHub comments. Use it only when each intermediate chunk is deliberately suitable for public publication. GitHub cannot edit or retract the emitted comments.
 
 ## Known Limitations
 
