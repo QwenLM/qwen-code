@@ -1171,14 +1171,16 @@ export function createServeApp(
             o.startsWith('moz-extension://'),
         )
       : [];
-  if (webShellDir && opts.token && process.env['QWEN_CODE_DESKTOP'] === '1') {
+  if (webShellDir && opts.token && daemonEnv['QWEN_CODE_DESKTOP'] === '1') {
     const token = opts.token;
     app.use((req: Request, res: Response, next: NextFunction) => {
       if (!isDocumentNavigation(req) || req.query['token'] !== token) {
         next();
         return;
       }
-      const url = new URL(`${req.protocol}://${req.get('host')}${req.originalUrl}`);
+      const url = new URL(
+        `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+      );
       url.searchParams.delete('token');
       res.cookie('qwen-daemon-token', token, {
         httpOnly: true,

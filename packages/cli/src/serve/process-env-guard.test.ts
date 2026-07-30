@@ -174,8 +174,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps process-environment compatibility fallbacks and detects the process-scoped desktop shell bootstrap.',
-      accesses: { 'key:QWEN_CODE_DESKTOP': 1, whole: 1 },
+        'Embedded server construction keeps process-environment compatibility fallbacks.',
+      accesses: { whole: 1 },
     },
   ],
   [

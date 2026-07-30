@@ -2892,10 +2892,8 @@ describe('createServeApp', () => {
       '<script type="module" src="/assets/app.js"></script></head>' +
       '<body><div id="root"></div></body></html>';
     const host = `127.0.0.1:${baseOpts.port}`;
-    let previousDesktopEnv: string | undefined;
 
     beforeEach(async () => {
-      previousDesktopEnv = process.env['QWEN_CODE_DESKTOP'];
       webShellDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-webshell-'));
       await fsp.writeFile(path.join(webShellDir, 'index.html'), INDEX_HTML);
       await fsp.mkdir(path.join(webShellDir, 'assets'));
@@ -2906,11 +2904,6 @@ describe('createServeApp', () => {
     });
 
     afterEach(async () => {
-      if (previousDesktopEnv === undefined) {
-        delete process.env['QWEN_CODE_DESKTOP'];
-      } else {
-        process.env['QWEN_CODE_DESKTOP'] = previousDesktopEnv;
-      }
       await fsp.rm(webShellDir, { recursive: true, force: true });
     });
     it('serves the shell at the root with security headers', async () => {
@@ -2930,11 +2923,11 @@ describe('createServeApp', () => {
     });
 
     it('bootstraps authenticated browser navigation with an HttpOnly cookie', async () => {
-      process.env['QWEN_CODE_DESKTOP'] = '1';
+      const daemonEnv = { QWEN_CODE_DESKTOP: '1' };
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },
         undefined,
-        { webShellDir },
+        { webShellDir, daemonEnv },
       );
       const bootstrap = await request(app)
         .get('/?token=desktop-secret')
@@ -2956,11 +2949,11 @@ describe('createServeApp', () => {
     });
 
     it('does not mint browser auth cookies outside the desktop shell', async () => {
-      delete process.env['QWEN_CODE_DESKTOP'];
+      const daemonEnv = {};
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },
         undefined,
-        { webShellDir },
+        { webShellDir, daemonEnv },
       );
       const response = await request(app)
         .get('/?token=desktop-secret')
@@ -2971,11 +2964,11 @@ describe('createServeApp', () => {
     });
 
     it('does not accept an invalid browser bootstrap token', async () => {
-      process.env['QWEN_CODE_DESKTOP'] = '1';
+      const daemonEnv = { QWEN_CODE_DESKTOP: '1' };
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },
         undefined,
-        { webShellDir },
+        { webShellDir, daemonEnv },
       );
       const response = await request(app)
         .get('/?token=wrong-secret')
