@@ -149,7 +149,7 @@ export function useMouseEvents(
   // with. On the non-VP main screen, holding mouse tracking just hijacks the
   // wheel (Terminal.app diverts it away from scrollback), so by DEFAULT mouse
   // tracking is denied outside VP. Surfaces that legitimately consume the wheel
-  // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
+  // pass `bypassVpGate` to opt in. This keeps the non-VP main screen scrollable
   // no matter how many click/hover subscribers are added later.
   const settings = useContext(SettingsContext);
   const isVpMode = useVirtualViewport(settings?.merged.ui?.useTerminalBuffer);

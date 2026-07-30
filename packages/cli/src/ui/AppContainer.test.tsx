@@ -68,6 +68,10 @@ import {
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import {
+  useThoughtExpanded,
+  type ThoughtExpandedValue,
+} from './contexts/ThoughtExpandedContext.js';
+import {
   type HistoryItem,
   type HistoryItemWithoutId,
   MessageType,
@@ -94,10 +98,12 @@ vi.mock('ink', async (importOriginal) => {
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
 let capturedRenderMode: RenderMode;
+let capturedThoughtExpanded: ThoughtExpandedValue;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
   capturedRenderMode = useRenderMode().renderMode;
+  capturedThoughtExpanded = useThoughtExpanded();
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -239,6 +245,7 @@ describe('AppContainer State Management', () => {
     capturedUIState = null!;
     capturedUIActions = null!;
     capturedRenderMode = 'render';
+    capturedThoughtExpanded = null!;
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -4757,7 +4764,7 @@ describe('AppContainer State Management', () => {
 
     const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 
-    it('Ctrl+O is handled by the TOGGLE_THINKING_EXPANDED branch (calls refreshStatic)', () => {
+    it('Ctrl+O flips the full-detail state that expands thoughts and tool output', () => {
       render(
         <AppContainer
           config={mockConfig}
@@ -4769,24 +4776,23 @@ describe('AppContainer State Management', () => {
       const handleKeypress = getGlobalKeypress();
       expect(handleKeypress).toBeDefined();
 
-      // refreshStatic writes clearTerminal when not in VP mode — proves the
-      // TOGGLE_THINKING_EXPANDED branch executed (it calls setThoughtExpanded
-      // then refreshStatic). Without this branch the key would fall through
-      // to later handlers that do NOT call refreshStatic.
-      const writesBefore = mockStdout.write.mock.calls.length;
-      act(() => {
-        handleKeypress!(ctrlO);
-      });
-      expect(mockStdout.write.mock.calls.length).toBeGreaterThan(writesBefore);
+      // The observable behaviour is the ThoughtExpandedContext flip that
+      // MainContent reads as `fullDetail` to force-expand every thought and
+      // tool group. Asserting the repaint alone is vacuous — refreshStatic
+      // repaints even if the state flip is deleted — so assert the state
+      // itself. Removing setThoughtExpanded makes this fail.
+      expect(capturedThoughtExpanded.allExpanded).toBe(false);
 
-      // A second press also hits the same branch (toggle back).
-      const writesAfterFirst = mockStdout.write.mock.calls.length;
       act(() => {
         handleKeypress!(ctrlO);
       });
-      expect(mockStdout.write.mock.calls.length).toBeGreaterThan(
-        writesAfterFirst,
-      );
+      expect(capturedThoughtExpanded.allExpanded).toBe(true);
+
+      // A second press toggles back.
+      act(() => {
+        handleKeypress!(ctrlO);
+      });
+      expect(capturedThoughtExpanded.allExpanded).toBe(false);
     });
   });
 
