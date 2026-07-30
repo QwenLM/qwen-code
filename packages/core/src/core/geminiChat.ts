@@ -2597,9 +2597,14 @@ export class GeminiChat {
         };
 
         // Fold the running attempt's text into the accumulated buffer,
-        // stripping any overlap it replayed from the previous attempt's tail.
-        // Called on both exits from an attempt — success and cut — so the
-        // accumulated buffer never contains text twice.
+        // stripping any overlap it replayed from the previous attempt's tail,
+        // so the accumulated buffer never contains text twice.
+        //
+        // Called on the cut exit only. The success exit merges the prefix into
+        // history and breaks, and nothing reads the buffer after the loop, so
+        // folding there would have no reader. A post-loop read added later
+        // (telemetry, a MAX_TOKENS-recovery guard) would be missing the final
+        // attempt's text and must fold on the success path too.
         const foldTransportAttemptText = () => {
           transportContinuationText += getRecoveryContinuationSuffix(
             transportContinuationText,
