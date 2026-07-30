@@ -26,6 +26,7 @@
 
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
+import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
@@ -180,6 +181,7 @@ export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
 
 export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
+  private readonly handles = new Map<string, WorkflowRunHandle>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
@@ -278,6 +280,22 @@ export class WorkflowRunRegistry {
     }
     this.emitStatusChange(entry);
     return entry;
+  }
+
+  attachHandle(handle: WorkflowRunHandle): void {
+    const entry = this.entries.get(handle.runId);
+    if (!entry || entry.status !== 'running') return;
+    this.handles.set(handle.runId, handle);
+  }
+
+  getHandle(runId: string): WorkflowRunHandle | undefined {
+    return this.handles.get(runId);
+  }
+
+  releaseHandle(runId: string, handle: WorkflowRunHandle): void {
+    if (this.handles.get(runId) === handle) {
+      this.handles.delete(runId);
+    }
   }
 
   /**
@@ -407,7 +425,12 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     entry.notified = true;
     try {
-      entry.abortController.abort();
+      const handle = this.handles.get(runId);
+      if (handle) {
+        handle.abort();
+      } else {
+        entry.abortController.abort();
+      }
     } catch (error) {
       debugLogger.error('Failed to abort workflow controller:', error);
     }
@@ -457,6 +480,7 @@ export class WorkflowRunRegistry {
       | WorkflowTask
       | undefined;
     this.entries.clear();
+    this.handles.clear();
     if (sample) this.emitStatusChange(sample);
   }
 
@@ -480,7 +504,12 @@ export class WorkflowRunRegistry {
       entry.endTime = endTime;
       entry.notified = true;
       try {
-        entry.abortController.abort();
+        const handle = this.handles.get(entry.runId);
+        if (handle) {
+          handle.abort();
+        } else {
+          entry.abortController.abort();
+        }
       } catch (error) {
         debugLogger.error(
           'abortAll: failed to abort workflow controller:',
