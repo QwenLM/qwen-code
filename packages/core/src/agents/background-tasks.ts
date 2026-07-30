@@ -24,6 +24,7 @@
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
@@ -385,6 +386,7 @@ export interface NotificationMeta {
   status: TaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
+  todoWorkChainId?: string;
 }
 
 export type BackgroundNotificationCallback = (
@@ -676,6 +678,7 @@ export class BackgroundTaskRegistry {
     entry.notified = options.preserveNotificationState
       ? ((registration as AgentTask).notified ?? false)
       : false;
+    entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     entry.pendingMessages = registration.pendingMessages ?? [];
     // Resolve the parent's display name at registration time — before the
     // parent can evict — so the UI's orphan annotation survives it. Owned
@@ -1601,6 +1604,7 @@ export class BackgroundTaskRegistry {
       status: entry.status,
       stats: entry.stats,
       toolUseId: entry.toolUseId,
+      todoWorkChainId: entry.todoWorkChainId,
     };
 
     try {

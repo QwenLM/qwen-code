@@ -12,6 +12,7 @@ describe('channel registry', () => {
       'feishu',
       'qq',
       'github',
+      'gitlab',
     ]);
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),

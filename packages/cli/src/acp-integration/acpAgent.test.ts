@@ -835,6 +835,7 @@ import {
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
 import type {
   Agent,
   LoadSessionResponse,
@@ -2074,6 +2075,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
       'never',
     );
+    expect(innerConfig.setSessionWriterTakeoverPolicy).toHaveBeenCalledWith(
+      'certified',
+    );
+    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+      handoff: true,
+    });
     expect(order).toEqual(['writer', 'resources']);
     expect(mockRunExitCleanup).toHaveBeenCalledOnce();
   });
@@ -2682,6 +2689,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it.each([
+    ['channel', 'channel', false],
+    ['scheduled task', 'scheduled_task', true],
+    ['unattributed', undefined, true],
+  ])(
+    'sets native Cron for a %s daemon session without mutating persisted settings',
+    async (_label, sourceType, expectedCron) => {
+      await setupSessionMocks(`session-cron-${sourceType ?? 'default'}`);
+      const requestSettings = makeSessionSettings();
+      requestSettings.merged.experimental = { cron: true };
+      vi.mocked(loadSettings).mockReturnValue(requestSettings);
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          ...(sourceType
+            ? {
+                _meta: {
+                  [SESSION_SOURCE_META_KEY]: { sourceType },
+                },
+              }
+            : {}),
+        });
+
+        const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+        expect(sessionSettings?.experimental?.cron).toBe(expectedCron);
+        expect(requestSettings.merged.experimental?.cron).toBe(true);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('profiles newSession stages under the daemon trace context', async () => {
     const parentContext = { trace: 'parent' };
     mockExtractDaemonTraceContext.mockReturnValue(parentContext);
@@ -2968,6 +3022,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       setSessionWriterReclaimPolicy: vi.fn(),
+      setSessionWriterTakeoverPolicy: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
@@ -13149,6 +13204,38 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
     expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['load', 'resume'] as const)(
+    'disables native Cron when %s restores a channel session',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const requestSettings = makeRestoreSettings();
+      requestSettings.merged.experimental = { cron: true };
+      vi.mocked(loadSettings).mockReturnValue(requestSettings);
+      const { agent, agentPromise } = await spawnAgent();
+      const params = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: { sourceType: 'channel' },
+        },
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(params);
+      } else {
+        await agent.unstable_resumeSession(params);
+      }
+
+      const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+      expect(sessionSettings?.experimental?.cron).toBe(false);
+      expect(requestSettings.merged.experimental?.cron).toBe(true);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   /**
    * A persisted `system` / `slash_command` record carrying goal cards — the only

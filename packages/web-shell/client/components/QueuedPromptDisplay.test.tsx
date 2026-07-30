@@ -73,6 +73,36 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).toContain('排队消息二');
   });
 
+  it('shows server queue status without an insert action', () => {
+    const onInsert = vi.fn();
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
+      onInsert,
+    });
+
+    expect(container.textContent).toContain('服务器排队中...');
+    expect(container.querySelector('[role="status"]')).toBeTruthy();
+    expect(
+      container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeNull();
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+    expect(container.textContent).not.toContain('插入');
+    expect(onInsert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the spinner while a prompt is still submitting', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '正在发送', serverState: 'submitting' }],
+    });
+
+    expect(container.textContent).toContain('提交中...');
+    expect(
+      container.querySelector('[class*="queuedPromptSpinner"]'),
+    ).toBeTruthy();
+  });
+
   it('renders queued reference annotations as tags', () => {
     const serialized = '<context id="orders">orders</context>';
     const text = `inspect ${serialized} now`;

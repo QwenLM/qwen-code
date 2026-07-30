@@ -86,7 +86,15 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
-import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  ChatRecordingFailureEvent,
+} from '../services/chatRecordingService.js';
+import type { ResumedSessionData } from '../services/sessionService.js';
+import {
+  GoalPersistenceUnavailableError,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
 import {
   SessionTranscriptChangedError,
   SessionWriterLease,
@@ -2185,6 +2193,146 @@ describe('Server Config (config.ts)', () => {
       expect(flush).not.toHaveBeenCalled();
     });
 
+    const resumedGoalSession = (
+      status: 'active' | 'paused',
+    ): ResumedSessionData => {
+      const record: ChatRecord = {
+        uuid: `goal-${status}`,
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          v: 2,
+          cause: status === 'active' ? 'create' : 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'g-resumed',
+              revision: 1,
+              objective: 'resume me',
+              status,
+              evidenceCursor: { recordId: 'goal-active' },
+              turnCount: 1,
+              activeTimeMs: 10,
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          },
+        },
+      };
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    it('restores the complete resumed-session Goal before exposing readiness', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+
+      const initial = await config.getGoalRuntimeReady();
+      expect(initial.getSnapshot().goal).toMatchObject({
+        objective: 'resume me',
+        status: 'paused',
+      });
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      const replacement = await config.getGoalRuntimeReady();
+      expect(replacement).not.toBe(initial);
+      expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('owns one durable Goal runtime per canonical session', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const first = config.getGoalRuntime();
+
+      expect(config.getGoalRuntime()).toBe(first);
+      config.startNewSession('replacement-session');
+      const replacement = config.getGoalRuntime();
+
+      expect(replacement).not.toBe(first);
+      await expect(
+        first.dispatch({ action: 'create', objective: 'stale' }),
+      ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('rebinds the current Goal host to every replacement runtime', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('active'),
+      });
+      const started: string[] = [];
+      const host: GoalTurnHost = {
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      };
+
+      config.bindGoalTurnHost(host);
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() =>
+        expect(started).toEqual(['g-resumed', 'g-resumed']),
+      );
+    });
+
+    it('does not expose volatile Goal state when chat recording is disabled', () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      expect(() => config.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
+    it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const canonical = config.getGoalRuntime();
+      const child = Object.create(config) as Config;
+
+      expect(() => child.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+      expect(() =>
+        child.bindGoalTurnHost({
+          startGoalTurn: vi.fn(),
+          preemptGoalTurn: vi.fn(),
+        }),
+      ).toThrow(GoalPersistenceUnavailableError);
+      await expect(
+        child.rebaseGoalRuntimeFromActiveTranscript(),
+      ).rejects.toThrow(GoalPersistenceUnavailableError);
+      await child.shutdown();
+      expect(() => canonical.getSnapshot()).not.toThrow();
+      expect(config.getGoalRuntime()).toBe(canonical);
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -2624,6 +2772,29 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('accepts managed handoff only after certified takeover is configured', async () => {
+      const standalone = new Config(baseParams);
+      await standalone.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          standalone as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(false);
+
+      const managed = new Config(baseParams);
+      managed.setSessionWriterTakeoverPolicy('certified');
+      await managed.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          managed as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(true);
+    });
+
     it.each([
       [
         'an ACP session without an opt-in',
@@ -3144,6 +3315,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -6138,6 +6311,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -6168,6 +6343,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
     });
@@ -8781,5 +8958,134 @@ describe('Model Switching and Config Updates', () => {
       );
       expect(response.success).toBe(true);
     });
+  });
+
+  it('moves only the continued work chain Todo reminder', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.setActiveTodoReminder('prompt-cron', 'unfinished cron work');
+
+    config.startActiveTodoWorkChain('prompt-retry', 'prompt-user');
+
+    expect(config.getActiveTodoReminder('prompt-retry')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+  });
+
+  it('clears stale Todo reminders when a new ordinary work chain starts', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-old');
+    config.setActiveTodoReminder('prompt-old', 'old work');
+
+    config.startActiveTodoWorkChain('prompt-new');
+
+    expect(config.getActiveTodoReminder('prompt-new')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-old')).toBeUndefined();
+  });
+
+  it('re-issues the active Todo reminder only every third tool turn', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished work');
+
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+
+    config.setActiveTodoReminder('prompt-user', 'updated work');
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+  });
+
+  it('moves related automatic work without clearing unrelated reminders', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.startAutomaticActiveTodoWorkChain('prompt-unrelated');
+    config.setActiveTodoReminder('prompt-unrelated', 'other work');
+
+    config.startAutomaticActiveTodoWorkChain('prompt-cron');
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-related-notification',
+      'prompt-user',
+    );
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-related-notification')).toBe(
+      'unfinished user work',
+    );
+    expect(
+      config.getActiveTodoWorkChainOwner(
+        'prompt-related-notification',
+        'stale-owner',
+      ),
+    ).toBe('prompt-user');
+    expect(
+      config.getActiveTodoWorkChainOwner('prompt-unmapped', 'inherited-owner'),
+    ).toBe('inherited-owner');
+    expect(config.getActiveTodoReminder('prompt-unrelated')).toBe('other work');
+
+    config.endAutomaticActiveTodoWorkChain('prompt-cron');
+    config.endAutomaticActiveTodoWorkChain('prompt-related-notification');
+
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-stale-notification',
+      'prompt-stale-owner',
+    );
+    config.setActiveTodoReminder(
+      'prompt-stale-notification',
+      'stale automatic work',
+    );
+    config.endAutomaticActiveTodoWorkChain('prompt-stale-notification');
+
+    expect(config.getActiveTodoReminder('prompt-stale-owner')).toBeUndefined();
+  });
+
+  it('isolates active Todo reminders inherited through child Configs', () => {
+    const parent = Object.create(Config.prototype) as Config;
+    const child = Object.create(parent) as Config;
+    parent.setActiveTodoReminder('parent-prompt', 'parent work');
+
+    child.setActiveTodoReminder('child-prompt', 'child work');
+    child.startActiveTodoWorkChain('child-retry', 'child-prompt');
+
+    expect(parent.getActiveTodoReminder('parent-prompt')).toBe('parent work');
+    expect(parent.getActiveTodoReminder('child-retry')).toBeUndefined();
+    expect(child.getActiveTodoReminder('parent-prompt')).toBeUndefined();
+    expect(child.getActiveTodoReminder('child-retry')).toBe('child work');
+  });
+
+  it('clears active Todo reminders for a new session', () => {
+    const config = new Config(baseParams);
+    config.setActiveTodoReminder('old-prompt', 'unfinished old work');
+    config.startActiveTodoWorkChain('old-retry', 'old-prompt');
+
+    config.startNewSession('new-session-id');
+
+    expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
+    expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
   });
 });

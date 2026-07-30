@@ -1,4 +1,5 @@
 export { getGlobalQwenDir, resolvePath } from './paths.js';
+export { PollingChannelBase } from './PollingChannelBase.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
@@ -81,7 +82,6 @@ export {
   sanitizeLogText,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
@@ -95,7 +95,10 @@ export type {
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelPlugin,
+  ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
@@ -103,6 +106,9 @@ export type {
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
   ChannelType,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   DmPolicy,
   Envelope,
@@ -119,4 +125,6 @@ export type {
   SenderPolicy,
   SessionScope,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';

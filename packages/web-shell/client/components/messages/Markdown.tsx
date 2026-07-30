@@ -13,6 +13,7 @@ import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components } from 'react-markdown';
+import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -30,6 +31,11 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import {
+  DEFAULT_WEB_SHELL_MARKDOWN_CHART,
+  WebShellMarkdownChartProvider,
+  createWebShellMarkdownChartPre,
+} from './MarkdownChartRenderer';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
@@ -549,22 +555,52 @@ const IsStreamingContext = createContext(false);
 const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
   undefined,
 );
+const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+
+interface PositionedCodeNode {
+  readonly position?: {
+    readonly start: { readonly offset?: number };
+    readonly end: { readonly offset?: number };
+  };
+}
+
+function isIncompleteTailFence(
+  document: string | undefined,
+  node: PositionedCodeNode | undefined,
+  isStreaming: boolean,
+): boolean {
+  if (!isStreaming || document === undefined) return false;
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  if (start === undefined || end === undefined) return false;
+  return (
+    !isMarkdownFenceClosed(document.slice(start, end)) &&
+    document.slice(end).trim().length === 0
+  );
+}
 
 function MarkdownCode({
   className,
   children,
+  node,
 }: {
   className?: string;
   children?: ReactNode;
+  node?: PositionedCodeNode;
 }) {
   const isStreaming = useContext(IsStreamingContext);
+  const document = useContext(MarkdownDocumentContext);
   const isBlock =
     className?.startsWith('language-') ||
     (typeof children === 'string' && children.includes('\n'));
 
   if (isBlock) {
     return (
-      <MarkdownFencedCode className={className} isStreaming={isStreaming}>
+      <MarkdownFencedCode
+        className={className}
+        isStreaming={isStreaming}
+        isIncomplete={isIncompleteTailFence(document, node, isStreaming)}
+      >
         {children}
       </MarkdownFencedCode>
     );
@@ -576,10 +612,12 @@ function MarkdownFencedCode({
   className,
   children,
   isStreaming,
+  isIncomplete,
 }: {
   className?: string;
   children?: ReactNode;
   isStreaming?: boolean;
+  isIncomplete?: boolean;
 }) {
   const source = useContext(MarkdownSourceContext);
   const appTheme = useTheme();
@@ -603,6 +641,7 @@ function MarkdownFencedCode({
         className,
         code,
         isStreaming: !!isStreaming,
+        isIncomplete: !!isIncomplete,
         source,
         theme: appTheme,
       });
@@ -616,6 +655,7 @@ function MarkdownFencedCode({
               source,
               appTheme,
               isStreaming ? 'streaming' : 'settled',
+              isIncomplete ? 'incomplete' : 'complete',
               code,
             ]}
           >
@@ -750,6 +790,7 @@ export const Markdown = memo(function Markdown({
   tableMode,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
+  const theme = useTheme();
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
     content && source && sourceMarkdown?.transformMarkdown
@@ -773,6 +814,33 @@ export const Markdown = memo(function Markdown({
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
   }, [components, effectiveTableMode, sourceComponents]);
+  const chart =
+    source === 'assistant' && !sourceComponents?.code && !sourceComponents?.pre
+      ? (sourceMarkdown?.chart ??
+        (sourceMarkdown?.renderCodeBlock
+          ? undefined
+          : DEFAULT_WEB_SHELL_MARKDOWN_CHART))
+      : undefined;
+  const chartPre = useMemo(
+    () =>
+      chart
+        ? createWebShellMarkdownChartPre(chart.registry, {
+            chartClassName: chart.chartClassName,
+            chartStyle: { minHeight: 360, ...chart.chartStyle },
+          })
+        : undefined,
+    [chart],
+  );
+  const componentsWithCharts = useMemo(
+    () =>
+      chartPre
+        ? {
+            ...renderedComponents,
+            pre: chartPre,
+          }
+        : renderedComponents,
+    [chartPre, renderedComponents],
+  );
 
   if (!content) return null;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
@@ -782,6 +850,29 @@ export const Markdown = memo(function Markdown({
     ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
     : [rehypeKatex];
 
+  const renderedMarkdown = (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={componentsWithCharts}
+      urlTransform={markdownUrlTransform}
+    >
+      {renderedContent}
+    </ReactMarkdown>
+  );
+  const chartAwareMarkdown = chart ? (
+    <WebShellMarkdownChartProvider
+      customization={chart}
+      source={renderedContent}
+      streaming={!!isStreaming}
+      theme={theme}
+    >
+      {renderedMarkdown}
+    </WebShellMarkdownChartProvider>
+  ) : (
+    renderedMarkdown
+  );
+
   return (
     <div
       className={source !== 'thinking' ? styles.content : undefined}
@@ -789,14 +880,9 @@ export const Markdown = memo(function Markdown({
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
         <MarkdownSourceContext.Provider value={source}>
-          <ReactMarkdown
-            remarkPlugins={remarkPlugins}
-            rehypePlugins={rehypePlugins}
-            components={renderedComponents}
-            urlTransform={markdownUrlTransform}
-          >
-            {renderedContent}
-          </ReactMarkdown>
+          <MarkdownDocumentContext.Provider value={renderedContent}>
+            {chartAwareMarkdown}
+          </MarkdownDocumentContext.Provider>
         </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>
