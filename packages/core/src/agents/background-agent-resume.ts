@@ -980,6 +980,7 @@ export class BackgroundAgentResumeService {
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
+          meta.executionAllowedTools,
         );
       } else {
         const resumeSubagentConfig =
@@ -1659,6 +1660,7 @@ export class BackgroundAgentResumeService {
     eventEmitter: AgentEventEmitter,
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
+    executionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1666,6 +1668,9 @@ export class BackgroundAgentResumeService {
     };
     const toolConfig: ToolConfig = {
       tools: [...runtime.toolNames],
+      ...(executionAllowedTools !== undefined
+        ? { executionAllowedTools: structuredClone(executionAllowedTools) }
+        : {}),
     };
 
     return AgentHeadless.create(

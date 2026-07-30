@@ -1874,6 +1874,28 @@ describe('Server Config (config.ts)', () => {
       expect(Object.keys(result!)).not.toContain('playwright');
     });
 
+    it('getMcpServers does not stamp cwd — cwd binding happens in populateMcpServerCommand', () => {
+      const explicitCwd = path.resolve('/explicit/mcp');
+      const config = new Config({
+        ...baseParams,
+        targetDir: path.resolve('/session/worktree'),
+        mcpServers: {
+          implicit: { command: 'node', args: ['server.js'] },
+          explicit: { command: 'node', cwd: explicitCwd },
+          remote: { httpUrl: 'https://example.test/mcp' },
+          sdk: { type: 'sdk', command: 'placeholder' },
+          tcpWithCommand: { tcp: 'tcp://example.test:9000', command: 'node' },
+        },
+      });
+
+      const servers = config.getMcpServers()!;
+      expect(servers['implicit']?.cwd).toBeUndefined();
+      expect(servers['explicit']?.cwd).toBe(explicitCwd);
+      expect(servers['remote']?.cwd).toBeUndefined();
+      expect(servers['sdk']?.cwd).toBeUndefined();
+      expect(servers['tcpWithCommand']?.cwd).toBeUndefined();
+    });
+
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
       const config = new Config({
         ...baseParams,
@@ -3097,6 +3119,38 @@ describe('Server Config (config.ts)', () => {
       ]);
 
       expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('aborts active workflows during shutdown', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+      const abortController = new AbortController();
+      const registry = config.getWorkflowRunRegistry();
+      registry.register({
+        runId: 'wf_1234',
+        meta: null,
+        status: 'running',
+        startTime: Date.now(),
+        outputFile: '/tmp/wf_1234.jsonl',
+        abortController,
+      });
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+        strictResourceCleanup: true,
+      });
+
+      expect(abortController.signal.aborted).toBe(true);
+      expect(registry.get('wf_1234')?.status).toBe('cancelled');
     });
 
     it('allows a later shutdown to retry incomplete resource cleanup', async () => {
@@ -5182,6 +5236,64 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should reconcile MCP servers with the new session cwd', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node', args: ['server.js'] } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockClear();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledOnce();
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(config);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should report MCP reconcile failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should continue after recording flush fails', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
@@ -5508,6 +5620,40 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getTargetDir()).toBe(newDir);
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should report both memory and MCP refresh failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();

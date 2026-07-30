@@ -190,7 +190,9 @@ import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import {
+  registerSessionModel,
   registerSessionProjectDir,
+  unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
@@ -1574,6 +1576,7 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 let projectDirEnvClaimed = false;
+let modelEnvClaimed = false;
 
 function resolveSensitiveSpanAttributeMaxLength(
   value: number | undefined,
@@ -2022,6 +2025,10 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
+  // (first in this process); gates the global write in publishModelEnv so no
+  // other instance updates it. Per-session publishing is not gated on it.
+  private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
@@ -2347,6 +2354,20 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+
+    // Publish the active model id for shell subprocesses. Every Config
+    // publishes its own session's model — publishModelEnv registers it per
+    // session, like the project dir above, so daemon-mode subprocesses read
+    // theirs, not the first session's. The process-global slot is claimed
+    // first-writer-wins, as QWEN_CODE_SESSION_ID is, so a throwaway Config
+    // never clobbers the live session's global value. Done here rather than
+    // alongside the session ID because the value comes from the ModelsConfig
+    // just constructed.
+    if (!modelEnvClaimed && process.env) {
+      modelEnvClaimed = true;
+      this.ownsModelEnvSlot = true;
+    }
+    this.publishModelEnv();
 
     if (
       this.telemetrySettings.enabled &&
@@ -3567,6 +3588,9 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+    // Auth flows call refreshAuth directly — no model-change notification
+    // fires — and the resolved model can differ from the pre-auth one.
+    this.publishModelEnv();
 
     // Re-apply the user's reasoning effort that the provider sync above wiped.
     if (priorReasoningEffort) {
@@ -3672,6 +3696,13 @@ export class Config {
     if (process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
+    // Re-key the per-session model registry onto the new session id. Without
+    // this the entry stays keyed on the outgoing id, so after /clear (or
+    // /reset, /new, /resume) a non-owner Config's subprocesses resolve the
+    // model by the new id, miss, and fall back to another session's value.
+    // Drop the orphaned entry too — shutdown only unregisters the current id.
+    unregisterSessionModel(previousSessionId);
+    this.publishModelEnv();
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
     this.getOwnActiveTodoReminders().clear();
@@ -3861,9 +3892,30 @@ export class Config {
   }
 
   private notifyModelChangeListeners(): void {
+    this.publishModelEnv();
     const model = this.getModel();
     for (const listener of this.modelChangeListeners) {
       listener(model);
+    }
+  }
+
+  // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
+  // has no other authoritative source: settings files miss /model switches and
+  // describe the wrong home under QWEN_HOME isolation. Published per session —
+  // every Config writes its OWN session's model, keyed on sessionId exactly
+  // like the project dir, so in daemon mode each session's subprocesses read
+  // theirs, not the first session's (a process-global slot alone would hold
+  // whichever session booted first). The process-global slot is the
+  // single-session CLI fallback, gated on the claiming instance so a throwaway
+  // Config never clobbers the live session's value there.
+  private publishModelEnv(): void {
+    if (!process.env) {
+      return;
+    }
+    const model = this.getModel();
+    registerSessionModel(this.sessionId, model);
+    if (this.ownsModelEnvSlot) {
+      process.env['QWEN_CODE_MODEL'] = model;
     }
   }
 
@@ -4513,7 +4565,10 @@ export class Config {
     newDir: string,
     expectedCanonicalDir?: string,
     opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
-  ): Promise<{ memoryRefreshError?: unknown }> {
+  ): Promise<{
+    memoryRefreshError?: unknown;
+    mcpRefreshError?: unknown;
+  }> {
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -4578,12 +4633,25 @@ export class Config {
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 
+    let memoryRefreshError: unknown;
     try {
       await this.refreshHierarchicalMemory();
-      return {};
     } catch (error) {
-      return { memoryRefreshError: error };
+      memoryRefreshError = error;
     }
+
+    let mcpRefreshError: unknown;
+    try {
+      await this.waitForMcpReady();
+      await this.refreshMcpServers();
+    } catch (error) {
+      mcpRefreshError = error;
+    }
+
+    return {
+      ...(memoryRefreshError !== undefined && { memoryRefreshError }),
+      ...(mcpRefreshError !== undefined && { mcpRefreshError }),
+    };
   }
 
   /**
@@ -4739,6 +4807,10 @@ export class Config {
         unregisterSessionProjectDir(this.sessionId);
         this.sessionProjectDirRegistered = false;
       }
+      // Drop this session's model registry entry. It is registered at
+      // construction (publishModelEnv), so it is released on every shutdown —
+      // same daemon-mode leak rationale as the project dir above.
+      unregisterSessionModel(this.sessionId);
 
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.goalTurnHostUnbind?.();
@@ -4760,6 +4832,7 @@ export class Config {
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
+      this.workflowRunRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
@@ -5276,6 +5349,10 @@ export class Config {
         this.recentlyRemovedMcpServers.add(name);
       }
     }
+    await this.refreshMcpServers();
+  }
+
+  private async refreshMcpServers(): Promise<void> {
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -5283,13 +5360,12 @@ export class Config {
       );
       return;
     }
+
     if (this.mcpReconcileInProgress) {
       // Coalesce: a pass is already running. Mark that the desired state
       // advanced so its drain loop runs again with the latest config, and
       // await that in-flight pass — NOT a resolved promise — so this caller
-      // does not proceed (e.g. the hot-reload listener emitting approval events
-      // and logging "complete") before its coalesced change is actually
-      // reconciled, and so it observes a shared reconcile failure.
+      // does not proceed before its coalesced change is actually reconciled.
       this.mcpReconcilePending = true;
       this.debugLogger.debug(
         '[mcp-hot-reload] reconcile already in flight — coalescing into a follow-up pass',
@@ -5298,8 +5374,7 @@ export class Config {
     }
     this.mcpReconcileInProgress = true;
     const registry = this.getToolRegistry();
-    // Run pass 1 + its drain loop as a single promise, assigned BEFORE the
-    // first await so a coalesced caller arriving mid-flight can await it.
+    // Assign before the first await so a coalesced caller can await this pass.
     const runReconcile = (async () => {
       try {
         this.debugLogger.debug(
@@ -5308,9 +5383,8 @@ export class Config {
         await registry
           .getMcpClientManager()
           .discoverAllMcpToolsIncremental(this);
-        // Drain any change that arrived while this pass was in flight. The pool
-        // path returns the in-flight promise rather than queuing, so awaiting
-        // is not enough — re-run once more to pick up the latest config.
+        // The pool path returns an in-flight promise, so re-run after any
+        // coalesced change to ensure the latest effective config is applied.
         let pass = 1;
         while (this.mcpReconcilePending) {
           this.mcpReconcilePending = false;
@@ -5334,17 +5408,13 @@ export class Config {
         throw err;
       } finally {
         this.mcpReconcileInProgress = false;
-        // Clear the coalesce flag too: if a pass threw, a pending follow-up
-        // would otherwise stay stuck `true` and make the next (unrelated)
-        // reconcile run an extra no-op drain pass. The next real settings
-        // change re-triggers reconcile anyway.
+        // A failed pass must not leak a pending drain into the next reconcile.
         this.mcpReconcilePending = false;
         this.mcpReconcilePromise = undefined;
       }
     })();
     this.mcpReconcilePromise = runReconcile;
-    // Propagate failure to this caller (and, via the shared promise, to any
-    // coalesced callers). Existing callers rely on the throw.
+    // Propagate failure to this caller and every coalesced caller.
     await runReconcile;
   }
 
