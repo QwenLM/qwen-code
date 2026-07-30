@@ -321,33 +321,25 @@ async function initSession(
       const rig = new TestRig();
       rig.setup('acp-cron-e2e');
 
-      // Scripted model responses:
-      //   0: cron_create tool call (first prompt asks to create a cron job)
-      //   1: confirmation text after cron_create tool result
-      //   2: interactive prompt response
-      //   3: cron-fired prompt response
-      //   4: cleanup prompt response
+      // Only requestIndex 0 is load-bearing: it returns the cron_create
+      // tool call. The CLI makes internal model calls (tool-call
+      // classification, suggestion mode) between user-facing turns, so
+      // later indices do not map 1:1 to the prompts sent below. No
+      // assertion reads scripted response content, so the default reply
+      // suffices for every other turn.
       const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-        switch (requestIndex) {
-          case 0:
-            return {
-              toolCalls: [
-                fakeToolCall('cron_create', {
-                  cron: '*/1 * * * *',
-                  prompt: 'Say CRONFIRE7742 and nothing else',
-                  recurring: true,
-                }),
-              ],
-            };
-          case 1:
-            return { content: 'Cron job created.' };
-          case 2:
-            return { content: 'INTERACTIVE8899' };
-          case 3:
-            return { content: 'CRONFIRE7742' };
-          default:
-            return { content: 'Done.' };
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('cron_create', {
+                cron: '*/1 * * * *',
+                prompt: 'Say CRONFIRE7742 and nothing else',
+                recurring: true,
+              }),
+            ],
+          };
         }
+        return { content: 'Done.' };
       }, FAKE_SERVER_OPTIONS);
 
       const { sendRequest, cleanup, stderr, waitForSessionUpdate } =
@@ -409,17 +401,6 @@ async function initSession(
           15_000, // should already be here by now
         );
         expect(cronAgentMsg.receivedAt).toBeGreaterThan(promptDoneAt);
-
-        // --- Part 4: Clean up the cron job ---
-        await sendRequest('session/prompt', {
-          sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: 'Delete all cron jobs using cron_delete.',
-            },
-          ],
-        });
       } catch (e) {
         if (stderr.length) console.error('Agent stderr:', stderr.join(''));
         throw e;
