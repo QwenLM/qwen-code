@@ -360,6 +360,8 @@ describe('Permission Control (E2E)', () => {
         (async () => {
           for await (const message of q) {
             if (isSDKResultMessage(message)) {
+              // Resolve on result (one per turn), not assistant message
+              // (which may fire multiple times per turn: thinking + text)
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
@@ -439,6 +441,8 @@ describe('Permission Control (E2E)', () => {
         (async () => {
           for await (const message of q) {
             if (isSDKResultMessage(message)) {
+              // Resolve on result (one per turn), not assistant message
+              // (which may fire multiple times per turn: thinking + text)
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
@@ -518,6 +522,8 @@ describe('Permission Control (E2E)', () => {
         (async () => {
           for await (const message of q) {
             if (isSDKResultMessage(message)) {
+              // Resolve on result (one per turn), not assistant message
+              // (which may fire multiple times per turn: thinking + text)
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
