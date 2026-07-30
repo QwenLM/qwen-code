@@ -18,6 +18,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const cacheProducerWorkflow = readFileSync(
+  '.github/workflows/npm-cache.yml',
+  'utf8',
+);
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -3876,6 +3880,39 @@ describe('qwen-triage tmux lane parity', () => {
       expect(npmCaches.length).toBeGreaterThanOrEqual(2);
       for (const c of npmCaches) expect(c).toBe(cachePath);
     }
+  });
+  it('clears stale npm cache before restore in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      expect(clearStep, `${jobName} must have a clear step`).toContain(
+        'rm -rf',
+      );
+      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
+      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      expect(clearIdx).toBeGreaterThan(-1);
+      expect(restoreIdx).toBeGreaterThan(-1);
+      expect(clearIdx).toBeLessThan(restoreIdx);
+    }
+  });
+});
+
+describe('qwen-triage npm cache producer', () => {
+  it('saves with the same key and path the triage lanes restore', () => {
+    expect(cacheProducerWorkflow).toContain('actions/cache/save@');
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const path = restoreStep.match(/path:\s*'([^']+)'/)?.[1];
+      const key = restoreStep.match(/key:\s*'([^']+)'/)?.[1];
+      expect(path).toBeTruthy();
+      expect(key).toBeTruthy();
+      expect(cacheProducerWorkflow).toContain(path);
+      expect(cacheProducerWorkflow).toContain(key);
+    }
+  });
+
+  it('triggers on push to main', () => {
+    expect(cacheProducerWorkflow).toMatch(/push:/);
+    expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
   });
 });
 

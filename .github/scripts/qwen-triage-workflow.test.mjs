@@ -21,6 +21,13 @@ const workflowPath = join(
   'qwen-triage.yml',
 );
 const doc = parse(readFileSync(workflowPath, 'utf8'));
+const cacheProducerPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'npm-cache.yml',
+);
+const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
 const prWorkflowPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -380,5 +387,60 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
         `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
       );
     });
+
+    it(`${jobName}: clears stale npm cache before restore`, () => {
+      const clearIdx = jobDef.steps.findIndex(
+        (s) => s.name === 'Clear stale npm cache',
+      );
+      const restoreIdx = jobDef.steps.findIndex(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.ok(clearIdx !== -1, `'Clear stale npm cache' step must exist in ${jobName}`);
+      assert.ok(restoreIdx !== -1, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        clearIdx < restoreIdx,
+        'clear step must come before restore step',
+      );
+      assert.match(
+        jobDef.steps[clearIdx].run,
+        /rm -rf/,
+        'clear step must rm -rf the cache directory',
+      );
+    });
   }
+});
+
+describe('qwen-triage: npm cache producer workflow', () => {
+  const saveJob = cacheProducerDoc.jobs.save;
+
+  it('triggers on push to main only', () => {
+    const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
+    assert.ok(push, 'must have a push trigger');
+    assert.deepEqual(push.branches, ['main']);
+  });
+
+  it('saves with the same key and path the triage lanes restore', () => {
+    const saveStep = saveJob.steps.find(
+      (s) => s.uses?.startsWith('actions/cache/save@'),
+    );
+    assert.ok(saveStep, 'must have an actions/cache/save step');
+    for (const [jobName, jobDef] of [
+      ['verify', verifyJob],
+      ['tmux-testing', tmuxJob],
+    ]) {
+      const restoreStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.equal(
+        saveStep.with.path,
+        restoreStep.with.path,
+        `cache path must match ${jobName} restore path`,
+      );
+      assert.equal(
+        saveStep.with.key,
+        restoreStep.with.key,
+        `cache key must match ${jobName} restore key`,
+      );
+    }
+  });
 });

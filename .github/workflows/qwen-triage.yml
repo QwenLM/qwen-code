@@ -1037,6 +1037,10 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "${{ runner.temp }}/npm-cache"'
+
       - name: 'Restore npm cache'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
@@ -1045,9 +1049,6 @@ jobs:
           path: '${{ runner.temp }}/npm-cache'
           key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
           restore-keys: 'npm-ci-'
-          # TODO: add a save step in a trusted base-branch workflow (e.g. ci.yml
-          # on push to main) using actions/cache/save with this same key+path,
-          # or the restore will always miss.
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -2440,6 +2441,10 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "${{ runner.temp }}/npm-cache"'
+
       - name: 'Restore npm cache'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
@@ -2448,9 +2453,6 @@ jobs:
           path: '${{ runner.temp }}/npm-cache'
           key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
           restore-keys: 'npm-ci-'
-          # TODO: add a save step in a trusted base-branch workflow (e.g. ci.yml
-          # on push to main) using actions/cache/save with this same key+path,
-          # or the restore will always miss.
 
       - name: 'Install and build PR app'
         id: 'prepare'
