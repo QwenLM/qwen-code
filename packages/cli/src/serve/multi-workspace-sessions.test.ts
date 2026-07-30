@@ -703,9 +703,12 @@ function makeRuntime(input: {
   primary: boolean;
   trusted: boolean;
   bridge: AcpSessionBridge;
+  sessionRuntimeBaseDir?: string;
 }): WorkspaceRuntime {
   return {
     ...input,
+    sessionRuntimeBaseDir:
+      input.sessionRuntimeBaseDir ?? Storage.getRuntimeBaseDir(),
     env: { mode: 'parent-process', overlayKeys: [] },
     workspaceService: {} as DaemonWorkspaceService,
     routeFileSystemFactory: {
@@ -747,6 +750,8 @@ function makeHarness(opts?: {
   secondaryRewindImpl?: AcpSessionBridge['rewindSession'];
   secondaryShellImpl?: AcpSessionBridge['executeShellCommand'];
   serveOptions?: Partial<ServeOptions>;
+  primaryRuntimeBaseDir?: string;
+  secondaryRuntimeBaseDir?: string;
 }) {
   const primaryBridge = makeBridge(
     PRIMARY_CWD,
@@ -775,6 +780,9 @@ function makeHarness(opts?: {
       primary: true,
       trusted: opts?.primaryTrusted ?? true,
       bridge: primaryBridge,
+      ...(opts?.primaryRuntimeBaseDir
+        ? { sessionRuntimeBaseDir: opts.primaryRuntimeBaseDir }
+        : {}),
     }),
     makeRuntime({
       workspaceId: 'secondary-id',
@@ -783,6 +791,9 @@ function makeHarness(opts?: {
       primary: false,
       trusted: opts?.secondaryTrusted ?? true,
       bridge: secondaryBridge,
+      ...(opts?.secondaryRuntimeBaseDir
+        ? { sessionRuntimeBaseDir: opts.secondaryRuntimeBaseDir }
+        : {}),
     }),
   ]);
   const app = createServeApp(
@@ -3631,7 +3642,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('keeps archive and delete blocked while a workspace export is in flight', async () => {
+  it('reports archive and delete conflicts while a workspace export is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440283';
       await writeStoredSession({
@@ -3672,10 +3683,15 @@ describe('multi-workspace session dispatch', () => {
           .post('/workspaces/secondary-id/sessions/archive')
           .set('Host', host())
           .send({ sessionIds: [sessionId] });
-        expect(archive.status).toBe(409);
+        expect(archive.status).toBe(200);
         expect(archive.body).toMatchObject({
-          code: 'session_archiving',
-          sessionId,
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         });
 
         const remove = await request(app)
@@ -3884,7 +3900,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('keeps unarchive and delete blocked while archived export is in flight', async () => {
+  it('reports unarchive and delete conflicts while archived export is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440289';
       await writeStoredSession({
@@ -3926,8 +3942,16 @@ describe('multi-workspace session dispatch', () => {
           .post('/workspaces/secondary-id/sessions/unarchive')
           .set('Host', host())
           .send({ sessionIds: [sessionId] });
-        expect(unarchive.status).toBe(409);
-        expect(unarchive.body.code).toBe('session_archiving');
+        expect(unarchive.status).toBe(200);
+        expect(unarchive.body).toMatchObject({
+          unarchived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
+        });
 
         const remove = await request(app)
           .post('/workspaces/secondary-id/sessions/delete')
@@ -4601,6 +4625,75 @@ describe('multi-workspace session dispatch', () => {
       });
       expect(primaryBridge.closeCalls).toEqual([]);
       expect(secondaryBridge.closeCalls).toEqual([sessionId]);
+    });
+  });
+
+  it('keeps secondary maintenance inside its fixed runtime root', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440123';
+      const runtimeRoot = Storage.getRuntimeBaseDir();
+      const primaryRuntimeBaseDir = path.join(runtimeRoot, 'primary-runtime');
+      const secondaryRuntimeBaseDir = path.join(
+        runtimeRoot,
+        'secondary-runtime',
+      );
+      await Storage.runWithResolvedRuntimeBaseDir(primaryRuntimeBaseDir, () =>
+        writeStoredSession({
+          sessionId,
+          cwd: PRIMARY_CWD,
+          timestamp: '2026-07-08T00:14:00.000Z',
+          prompt: 'primary fixed-root target',
+          mtime: new Date('2026-07-08T00:14:00.000Z'),
+        }),
+      );
+      await Storage.runWithResolvedRuntimeBaseDir(secondaryRuntimeBaseDir, () =>
+        writeStoredSession({
+          sessionId,
+          cwd: SECONDARY_CWD,
+          timestamp: '2026-07-08T00:15:00.000Z',
+          prompt: 'secondary fixed-root target',
+          mtime: new Date('2026-07-08T00:15:00.000Z'),
+        }),
+      );
+      const primaryService = new SessionService(PRIMARY_CWD, {
+        runtimeBaseDir: primaryRuntimeBaseDir,
+      });
+      const primaryLease = await primaryService.acquireSessionWriterLease(
+        sessionId,
+        {
+          processKind: 'daemon',
+          reclaimPolicy: 'never',
+        },
+      );
+
+      try {
+        const { app } = makeHarness({
+          primaryRuntimeBaseDir,
+          secondaryRuntimeBaseDir,
+          primarySummaries: [],
+          secondarySummaries: [],
+        });
+        const archived = await request(app)
+          .post('/workspaces/secondary-id/sessions/archive')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] })
+          .expect(200);
+
+        expect(archived.body).toMatchObject({
+          archived: [sessionId],
+          errors: [],
+        });
+        await expect(
+          primaryService.getSessionLocation(sessionId),
+        ).resolves.toBe('active');
+        await expect(
+          new SessionService(SECONDARY_CWD, {
+            runtimeBaseDir: secondaryRuntimeBaseDir,
+          }).getSessionLocation(sessionId),
+        ).resolves.toBe('archived');
+      } finally {
+        await primaryLease.release();
+      }
     });
   });
 
