@@ -2794,6 +2794,30 @@ describe('Session', () => {
       expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
     });
 
+    it('publishes refreshed skill content without reloading settings or notifying twice', async () => {
+      const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+        suppressNextSlashReload: vi.fn(),
+        notifyConfigChanged,
+      });
+
+      await session.refreshSkillsFromSettings({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+
+      expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+          }),
+        }),
+      );
+      expect(notifyConfigChanged).not.toHaveBeenCalled();
+    });
+
     it('notifies SkillManager when the command update fails', async () => {
       const suppressNextSlashReload = vi.fn();
       const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);

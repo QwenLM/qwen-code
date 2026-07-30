@@ -3328,6 +3328,7 @@ class QwenAgent implements Agent {
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
+  private workspaceExtensionStatusRefreshPromise: Promise<void> | undefined;
   private readonly pendingMcpAuthentications = new Map<
     string,
     PendingMcpAuthentication
@@ -3516,6 +3517,41 @@ class QwenAgent implements Agent {
       return this.config;
     }
     return this.workspaceMcpDiscoveryConfig ?? this.config;
+  }
+
+  private refreshBootstrapExtensionStatus(): Promise<void> {
+    if (this.workspaceExtensionStatusRefreshPromise) {
+      return this.workspaceExtensionStatusRefreshPromise;
+    }
+
+    const promise = (async () => {
+      const errors: unknown[] = [];
+      try {
+        await this.config.getExtensionManager().refreshCache();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await this.config.getSkillManager()?.refreshCache();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(
+          errors,
+          'Bootstrap extension status refresh failed',
+        );
+      }
+    })();
+    this.workspaceExtensionStatusRefreshPromise = promise;
+    const clear = () => {
+      if (this.workspaceExtensionStatusRefreshPromise === promise) {
+        this.workspaceExtensionStatusRefreshPromise = undefined;
+      }
+    };
+    void promise.then(clear, clear);
+    return promise;
   }
 
   private getLiveMcpConfigs(serverName: string): Config[] {
@@ -5832,26 +5868,69 @@ class QwenAgent implements Agent {
     };
   }
 
+  /**
+   * Keeps the extension-derived half of the skill snapshot self-healing.
+   *
+   * Skills have a watcher (`SkillManager.startWatching`); extensions do not, so
+   * without this the child would never notice an extension installed, removed,
+   * enabled, or disabled outside the daemon — and extension-level skills are
+   * derived from that set, so a skill-watcher tick alone cannot recover it.
+   *
+   * The check is one `readdir` plus a bounded number of `stat`s, and refreshes
+   * only when the sources actually moved, so a steady-state read still parses
+   * no manifest and no `SKILL.md`. Failures are logged and swallowed: a status
+   * read must not fail because revalidation could not run.
+   *
+   * Skipped in safe and bare mode. Those modes deliberately never populate the
+   * extension cache (`Config.initialize` omits the refresh), and the snapshot
+   * derives extension skills from `getExtensions()` — so revalidating here
+   * would load the extensions those modes exist to exclude.
+   */
+  private async revalidateExtensionSources(config: Config): Promise<void> {
+    // Everything here is inside the boundary, mode check included: this must not
+    // be able to fail a status read no matter which accessor misbehaves.
+    try {
+      if (config.isSafeMode() || config.getBareMode()) return;
+      const changed = await config
+        .getExtensionManager()
+        .refreshCacheIfSourcesChanged();
+      if (!changed) return;
+      await config.getSkillManager()?.refreshCache();
+    } catch (error) {
+      debugLogger.warn('Extension source revalidation failed:', error);
+    }
+  }
+
   private async buildWorkspaceSkillsStatus(
     config: Config,
   ): Promise<ServeWorkspaceSkillsStatus> {
     const skillManager = config.getSkillManager();
     if (!skillManager) {
+      // No manager means nothing has been enumerated and nothing ever will be
+      // on this config — report that rather than an empty "initialized" list,
+      // which the daemon would latch as a valid snapshot and then keep serving
+      // in preference to its own local enumeration.
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
-        initialized: true,
+        initialized: false,
         skills: [],
       };
     }
 
+    await this.revalidateExtensionSources(config);
+
     try {
-      const resolved = resolveSkillSettings(
-        loadSettings(this.workspaceCwd(config), {
-          consumeCorruptionEnvVars: false,
-          skipLoadEnvironment: true,
-        }),
-      );
+      const skills = skillManager.getCachedSkills();
+      if (skills === null) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: this.workspaceCwd(config),
+          initialized: false,
+          skills: [],
+        };
+      }
+      const resolved = resolveSkillSettings(this.settings);
       const disablements = new Map(
         Array.from(config.getDisabledSkillNames(), (name) => {
           const normalizedName = name.trim().toLowerCase();
@@ -5862,17 +5941,6 @@ class QwenAgent implements Agent {
           ] as const;
         }),
       );
-      try {
-        await config.getExtensionManager().refreshCache();
-      } catch (error) {
-        debugLogger.warn('Extension cache refresh failed:', error);
-      }
-      try {
-        await skillManager.refreshCache();
-      } catch (error) {
-        debugLogger.warn('Skill cache refresh failed:', error);
-      }
-      const skills = await skillManager.listSkills();
       const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
       const skillsByKey = new Map(
         skills.map((skill) => [
@@ -9648,6 +9716,16 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {
         const sessionId = params['sessionId'] as string;
+        const rawRefreshBootstrap = params['refreshBootstrap'];
+        if (
+          rawRefreshBootstrap !== undefined &&
+          typeof rawRefreshBootstrap !== 'boolean'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'refreshBootstrap must be a boolean',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         const extensionManager = config.getExtensionManager();
@@ -9661,6 +9739,12 @@ class QwenAgent implements Agent {
         };
         await runRefresh(async () => await extensionManager.refreshCache());
         await runRefresh(async () => await extensionManager.refreshTools());
+        const bootstrapConfig = this.config;
+        if (rawRefreshBootstrap !== false && bootstrapConfig !== config) {
+          await runRefresh(
+            async () => await this.refreshBootstrapExtensionStatus(),
+          );
+        }
         const discoveryConfig = this.workspaceMcpDiscoveryConfig;
         if (discoveryConfig && discoveryConfig !== config) {
           const discoveryExtensionManager =
@@ -10493,10 +10577,62 @@ class QwenAgent implements Agent {
         };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
-        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        const rawReason = params['reason'];
+        if (
+          rawReason !== undefined &&
+          rawReason !== 'settings' &&
+          rawReason !== 'content' &&
+          rawReason !== 'all'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'reason must be settings, content, or all',
+          );
+        }
+        const reason = rawReason ?? 'all';
+        const refreshSettings = reason !== 'content';
+        const refreshContent = reason !== 'settings';
+        if (refreshSettings) {
+          this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        }
         const sessions = this.getActiveSessions();
+        const settingsReloadResults = refreshSettings
+          ? await Promise.allSettled(
+              sessions.map((session) =>
+                Promise.resolve().then(() => session.reloadSkillSettings()),
+              ),
+            )
+          : undefined;
+        let configResults: Array<PromiseSettledResult<void>> = [];
+        if (refreshContent) {
+          const skillManagers = new Set(
+            [this.config, ...sessions.map((session) => session.getConfig())]
+              .map((config) => config.getSkillManager())
+              .filter(
+                (manager): manager is NonNullable<typeof manager> =>
+                  manager !== undefined,
+              ),
+          );
+          configResults = await Promise.allSettled(
+            [...skillManagers].map((manager) => manager.refreshCache()),
+          );
+          for (const result of configResults) {
+            if (result.status === 'rejected') {
+              debugLogger.warn(`Skill config refresh failed: ${result.reason}`);
+            }
+          }
+        }
         const results = await Promise.allSettled(
-          sessions.map((session) => session.refreshSkillsFromSettings()),
+          sessions.map((session, index) => {
+            const settingsReload = settingsReloadResults?.[index];
+            if (settingsReload?.status === 'rejected') {
+              return Promise.reject(settingsReload.reason);
+            }
+            return session.refreshSkillsFromSettings({
+              reloadSettings: false,
+              notifyConfigChanged: !refreshContent,
+            });
+          }),
         );
         for (let i = 0; i < results.length; i++) {
           if (results[i]!.status === 'rejected') {
@@ -10513,6 +10649,13 @@ class QwenAgent implements Agent {
           sessionsFailed: results.filter(
             (result) => result.status === 'rejected',
           ).length,
+          configsRefreshed: configResults.filter(
+            (result) => result.status === 'fulfilled',
+          ).length,
+          configsFailed: configResults.filter(
+            (result) => result.status === 'rejected',
+          ).length,
+          reason,
         };
       }
       default:
