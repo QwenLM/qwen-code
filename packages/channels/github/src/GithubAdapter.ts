@@ -631,7 +631,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         .split('\n')
         .some((line) => {
           if (!line) return false;
-          const record = JSON.parse(line) as Partial<PublicationAuditRecord>;
+          let record: Partial<PublicationAuditRecord>;
+          try {
+            record = JSON.parse(line) as Partial<PublicationAuditRecord>;
+          } catch {
+            return false;
+          }
           return (
             record.outcome === 'posted' &&
             record.channel === auditBase.channel &&

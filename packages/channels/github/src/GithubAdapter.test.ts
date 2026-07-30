@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1575,6 +1576,7 @@ describe('GithubChannel', () => {
       ).rejects.toThrow('rate limited');
 
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
+      expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
     });
 
     it('preserves concurrent delivery while recovering a pending final', async () => {
@@ -1802,7 +1804,7 @@ describe('GithubChannel', () => {
       mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
       writeFileSync(
         auditPath(),
-        `${JSON.stringify({
+        `{"partial"\n${JSON.stringify({
           at: '2026-07-30T00:01:00.000Z',
           type: 'github_publication',
           outcome: 'posted',
