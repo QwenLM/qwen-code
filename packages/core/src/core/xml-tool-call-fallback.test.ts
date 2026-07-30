@@ -199,6 +199,16 @@ describe('extractXmlToolCalls', () => {
       '~~~';
     expect(extractXmlToolCalls(text)).toEqual([]);
   });
+
+  it('treats a shorter same-delimiter fence as content, not a close (CommonMark 4.5)', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```\n' +
+      '````';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
 });
 
 describe('tryRecoverXmlToolCalls', () => {
@@ -345,6 +355,19 @@ describe('tryRecoverXmlToolCalls', () => {
       invoke('run_shell_command', param('command', 'echo hi')) +
       '\n```\n' +
       '~~~';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
+  it('does not recover an invoke nested in a longer same-delimiter fence', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```\n' +
+      '````';
     const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);

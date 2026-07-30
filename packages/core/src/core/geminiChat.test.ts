@@ -12921,5 +12921,129 @@ describe('GeminiChat', async () => {
         false,
       );
     });
+
+    it('does not duplicate earlier text or drop non-text parts when recovering', async () => {
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: 'I will read it.' },
+                    {
+                      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+                    },
+                    { text: xml },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-multipart',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      expect(
+        chunks.some((c) =>
+          c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+        ),
+      ).toBe(true);
+
+      const history = chat.getHistory();
+      const parts = history[history.length - 1]!.parts ?? [];
+      expect(parts.some((p) => p.functionCall?.name === 'read_file')).toBe(
+        true,
+      );
+      expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
+        false,
+      );
+      // The earlier prose appears exactly once (no duplication from the join).
+      expect(parts.filter((p) => p.text === 'I will read it.')).toHaveLength(1);
+      // The interleaved non-text part is preserved.
+      expect(parts.some((p) => p.inlineData)).toBe(true);
+    });
+
+    it('preserves non-text parts when the XML spans multiple text parts', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      text: '<invoke name="read_file"><parameter name="file_path">',
+                    },
+                    {
+                      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'a.ts</parameter></invoke>' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-split',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      const synthetic = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) =>
+          p.functionCall?.id?.startsWith('xml-recovered-'),
+        ),
+      );
+      expect(synthetic).toBeDefined();
+
+      const history = chat.getHistory();
+      const parts = history[history.length - 1]!.parts ?? [];
+      expect(parts.some((p) => p.functionCall?.name === 'read_file')).toBe(
+        true,
+      );
+      expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
+        false,
+      );
+      // The non-text part that split the XML must survive the rebuild.
+      expect(parts.some((p) => p.inlineData)).toBe(true);
+    });
   });
 });

@@ -60,17 +60,21 @@ function stripDelimitingNewlines(value: string): string {
 
 /**
  * Returns true when `index` falls inside an unclosed fenced code block.
- * Tracks delimiter type so a ~~~ fence is only closed by ~~~ (and vice
- * versa), consistent with CommonMark.
+ * Tracks delimiter type and length so a fence is only closed by a run of
+ * the same delimiter that is at least as long as the opener, consistent
+ * with CommonMark §4.5 (a shorter same-delimiter run is content, not a
+ * close).
  */
 function positionInsideFence(text: string, index: number): boolean {
-  let openFence: string | null = null;
+  let openFence: { delim: string; len: number } | null = null;
   for (const line of text.slice(0, index).split('\n')) {
     const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
     if (!m) continue;
     const delim = m[2] ? '`' : '~';
-    if (openFence === null) openFence = delim;
-    else if (openFence === delim) openFence = null;
+    const len = m[1].length;
+    if (openFence === null) openFence = { delim, len };
+    else if (openFence.delim === delim && len >= openFence.len)
+      openFence = null;
   }
   return openFence !== null;
 }

@@ -4261,21 +4261,21 @@ export class GeminiChat {
           replacementParts.push({ text: recovery.remainingText });
         }
         replacementParts.push(...recovery.functionCallParts);
-        let spliced = false;
+        // recovery.remainingText is derived from the join of ALL text parts,
+        // so every text part is consumed (scanning backward: the last one is
+        // replaced with the recovery result, the earlier ones removed) to
+        // avoid duplicating their content in history. Non-text parts
+        // (inlineData/fileData) keep their positions.
+        let replaced = false;
         for (let i = consolidatedHistoryParts.length - 1; i >= 0; i--) {
           const part = consolidatedHistoryParts[i];
-          if (part.text && containsXmlToolCalls(part.text)) {
+          if (!part.text) continue;
+          if (replaced) {
+            consolidatedHistoryParts.splice(i, 1);
+          } else {
             consolidatedHistoryParts.splice(i, 1, ...replacementParts);
-            spliced = true;
-            break;
+            replaced = true;
           }
-        }
-        if (!spliced) {
-          // The XML spanned multiple consolidated parts, so no single part
-          // matched the full pattern. Rebuild from the recovery result so
-          // history stays aligned with the synthetic chunk yielded below.
-          consolidatedHistoryParts.length = 0;
-          consolidatedHistoryParts.push(...replacementParts);
         }
         // Recompute contentText and contentParts so the JSONL recording
         // below stays aligned with in-memory history (--resume fidelity).
