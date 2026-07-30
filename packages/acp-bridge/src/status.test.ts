@@ -11,7 +11,9 @@ import {
   BridgeTimeoutError,
   MissingCliEntryError,
   SERVE_ERROR_KINDS,
+  aggregateSubagentStatuses,
   mapDomainErrorToErrorKind,
+  type ServeSessionTaskStatus,
 } from './status.js';
 
 describe('SERVE_ERROR_KINDS', () => {
@@ -236,5 +238,45 @@ describe('mapDomainErrorToErrorKind', () => {
     expect(mapDomainErrorToErrorKind(null)).toBe(undefined);
     expect(mapDomainErrorToErrorKind(undefined)).toBe(undefined);
     expect(mapDomainErrorToErrorKind({ code: 'ENOTFOUND' })).toBe(undefined);
+  });
+});
+
+describe('aggregateSubagentStatuses', () => {
+  const agent = (status: string) =>
+    ({ kind: 'agent', status }) as unknown as ServeSessionTaskStatus;
+  const other = (kind: 'shell' | 'monitor') =>
+    ({ kind, status: 'running' }) as unknown as ServeSessionTaskStatus;
+
+  it('returns all-zero counts for no tasks', () => {
+    expect(aggregateSubagentStatuses([])).toEqual({
+      total: 0,
+      running: 0,
+      paused: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+    });
+  });
+
+  it('counts agent tasks by lifecycle status and ignores non-agent tasks', () => {
+    expect(
+      aggregateSubagentStatuses([
+        agent('running'),
+        agent('running'),
+        agent('paused'),
+        agent('completed'),
+        agent('failed'),
+        agent('cancelled'),
+        other('shell'),
+        other('monitor'),
+      ]),
+    ).toEqual({
+      total: 6,
+      running: 2,
+      paused: 1,
+      completed: 1,
+      failed: 1,
+      cancelled: 1,
+    });
   });
 });

@@ -692,6 +692,45 @@ export interface ServeSessionTasksStatus {
   tasks: ServeSessionTaskStatus[];
 }
 
+/**
+ * Aggregate counts of subagent (agent-kind) tasks by lifecycle status. Used to
+ * expose subagent activity for monitoring (e.g. a daemon health/observability
+ * endpoint) without consumers fanning out `getSessionTasksStatus` per session.
+ */
+export interface ServeSubagentStatusSummary {
+  /** Total number of agent (subagent) tasks observed. */
+  total: number;
+  running: number;
+  paused: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+}
+
+/**
+ * Counts agent-kind tasks in `tasks` by lifecycle status; shell/monitor tasks
+ * are ignored. Pure and synchronous so it is trivially testable and safe to
+ * call from a health/observability path.
+ */
+export function aggregateSubagentStatuses(
+  tasks: readonly ServeSessionTaskStatus[],
+): ServeSubagentStatusSummary {
+  const summary: ServeSubagentStatusSummary = {
+    total: 0,
+    running: 0,
+    paused: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+  };
+  for (const task of tasks) {
+    if (task.kind !== 'agent') continue;
+    summary.total += 1;
+    summary[task.status] += 1;
+  }
+  return summary;
+}
+
 export interface ServeSessionStatsModelMetrics {
   api: {
     totalRequests: number;
