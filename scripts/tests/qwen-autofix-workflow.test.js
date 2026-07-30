@@ -3322,7 +3322,13 @@ describe('qwen-autofix workflow', () => {
         ),
       );
     expect(countInline(false)).toBe(5);
-    expect(countInline(true)).toBe(3);
+    // In Critical-only mode the REVIEW BOT's suggestion (12) is filtered,
+    // but MAINTAINER comments (13) stay actionable regardless of wording —
+    // the lexical **[Critical]** test applies only to the bot's own
+    // findings. Observed on #8037/#7944/#7885/#7799: a maintainer's
+    // "fix 1 and 3 before merge" was deferred wholesale as one
+    // 'non-Critical item' and the agent never read it.
+    expect(countInline(true)).toBe(4);
 
     // Actionable reviews and issue-level comments filters: extract and
     // execute against fixture data with critical_only both ways, mirroring
@@ -3356,6 +3362,14 @@ describe('qwen-autofix workflow', () => {
         author_association: 'NONE',
         body: '**[Critical]** memory leak in the owner route',
       },
+      {
+        id: 23,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:03Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'I verified locally; please fix findings 1 and 3 before merge.',
+      },
     ];
     const countActionableReviews = (criticalOnly) =>
       Number(
@@ -3382,10 +3396,11 @@ describe('qwen-autofix workflow', () => {
           { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
         ),
       );
-    // All three are actionable while suggestions are in scope; in
-    // Critical-only mode the non-Critical COMMENTED review is excluded.
-    expect(countActionableReviews(false)).toBe(3);
-    expect(countActionableReviews(true)).toBe(2);
+    // All four are actionable while suggestions are in scope; in
+    // Critical-only mode only the BOT's non-Critical COMMENTED review is
+    // excluded — the maintainer's COMMENTED review stays actionable.
+    expect(countActionableReviews(false)).toBe(4);
+    expect(countActionableReviews(true)).toBe(3);
 
     const actionableIssueFilter = prepareBranchAndFeedbackStep.match(
       /echo "## Issue-level comments"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
@@ -3441,9 +3456,10 @@ describe('qwen-autofix workflow', () => {
       );
     // Normal and Critical comments are actionable while suggestions are in
     // scope; the command-style comment is always excluded. In Critical-only
-    // mode, only the Critical comment remains.
+    // mode the maintainer's comment STAYS actionable alongside the bot's
+    // Critical one — only bot non-Critical output is filtered.
     expect(countActionableIssue(false)).toBe(2);
-    expect(countActionableIssue(true)).toBe(1);
+    expect(countActionableIssue(true)).toBe(2);
 
     // Deferred queries: extract and execute against fixture data,
     // mirroring the actionable inline filter test above.
@@ -3471,6 +3487,15 @@ describe('qwen-autofix workflow', () => {
         body: '**[Critical]** memory leak in the owner route',
         html_url: 'https://github.com/test/pull/1#review-22',
       },
+      {
+        id: 23,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'I verified locally; please fix findings 1 and 3 before merge.',
+        html_url: 'https://github.com/test/pull/1#review-23',
+      },
     ];
     const countDeferredReviews = Number(
       execFileSync(
@@ -3496,8 +3521,9 @@ describe('qwen-autofix workflow', () => {
         { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
       ),
     );
-    // COMMENTED non-Critical review is deferred; CHANGES_REQUESTED and
-    // COMMENTED Critical reviews are not.
+    // Only the BOT's COMMENTED non-Critical review is deferred;
+    // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
+    // COMMENTED review are not.
     expect(countDeferredReviews).toBe(1);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
@@ -3532,10 +3558,11 @@ describe('qwen-autofix workflow', () => {
         { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
       ),
     );
-    // Suggestion (id 12) and unclassified (id 13) are deferred; Critical
-    // (11), reply-to-Critical (14), and CHANGES_REQUESTED-associated (15)
-    // are not.
-    expect(countDeferredInline).toBe(2);
+    // Only the BOT's suggestion (id 12) is deferred; the maintainer's
+    // unclassified comment (13) stays actionable, and Critical (11),
+    // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
+    // never deferred.
+    expect(countDeferredInline).toBe(1);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
       /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
@@ -3566,6 +3593,14 @@ describe('qwen-autofix workflow', () => {
         body: '@qwen-code /review',
         html_url: 'https://github.com/test/pull/1#issuecomment-32',
       },
+      {
+        id: 33,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Suggestion]** consider caching this lookup',
+        html_url: 'https://github.com/test/pull/1#issuecomment-33',
+      },
     ];
     const countDeferredIssue = Number(
       execFileSync(
@@ -3591,8 +3626,8 @@ describe('qwen-autofix workflow', () => {
         { encoding: 'utf8', input: JSON.stringify(issueComments) },
       ),
     );
-    // Normal comment is deferred; Critical and command-style comments are
-    // not.
+    // Only the BOT's suggestion (33) is deferred; the maintainer's normal
+    // comment (30), the Critical (31), and the command (32) are not.
     expect(countDeferredIssue).toBe(1);
 
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
@@ -3600,6 +3635,20 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).toContain(
       'or (.state // "") == "CHANGES_REQUESTED"',
     );
+    // The human bypass is present in ALL THREE actionable filters and the
+    // bot-only select in ALL THREE deferred builders — the lexical
+    // **[Critical]** test applies exclusively to the review bot's output.
+    expect(
+      prepareBranchAndFeedbackStep.split('or ((.user.login // "") != $rb)')
+        .length - 1,
+    ).toBe(3);
+    expect(
+      prepareBranchAndFeedbackStep
+        .match(
+          /## Deferred non-Critical feedback[\s\S]*?deferred-feedback\.md/,
+        )?.[0]
+        ?.split('| select((.user.login // "") == $rb)').length - 1,
+    ).toBe(3);
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the

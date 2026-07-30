@@ -2832,14 +2832,14 @@ jobs:
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. Any items listed below stay open for human follow-up; do not modify code, resolve threads, or reply on their behalf."
+              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback is never deferred. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
                 .[]
                 | select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.user.login // "") == $rb)
                 | select((.state // "") == "COMMENTED")
                 | select(((.body // "") | contains("**[Critical]**")) | not)
                 | "- Review by @\(.user.login): \(.html_url // $pr_url)"' \
@@ -2852,7 +2852,7 @@ jobs:
                 | $comments[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.user.login // "") == $rb)
                 | select((
                     ((.body // "") | contains("**[Critical]**"))
                     or ((.in_reply_to_id // null) as $root
@@ -2873,7 +2873,7 @@ jobs:
                 .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
-                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.user.login // "") == $rb)
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
                 | select(((.body // "") | contains("**[Critical]**")) | not)
@@ -2883,7 +2883,7 @@ jobs:
               echo '<details>'
               echo '<summary>中文说明</summary>'
               echo
-              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后，进入仅处理 Critical 的模式。以上内容保持开放，留待人工跟进；不要为其修改代码、解决线程或代为回复。"
+              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式：以上为自动评审的非 Critical 建议，予以延后、保持开放并留待人工跟进——不要为其修改代码、解决线程或代为回复。维护者的反馈永远不会被延后。（如需解除该模式，评论 \`@qwen-code /retry\` 即可开启新的计数窗口。）"
               echo
               echo '</details>'
             } > "${WORKDIR}/deferred-feedback.md"
@@ -2907,6 +2907,7 @@ jobs:
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))
               | select(($critical_only | not)
+                  or ((.user.login // "") != $rb)
                   or (.state // "") == "CHANGES_REQUESTED"
                   or ((.body // "") | contains("**[Critical]**")))
               | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
@@ -2923,6 +2924,7 @@ jobs:
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select(($critical_only | not)
+                  or ((.user.login // "") != $rb)
                   or ((.body // "") | contains("**[Critical]**"))
                   or ((.in_reply_to_id // null) as $root
                     | $root != null
@@ -2947,6 +2949,7 @@ jobs:
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
+                  or ((.user.login // "") != $rb)
                   or ((.body // "") | contains("**[Critical]**")))
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
