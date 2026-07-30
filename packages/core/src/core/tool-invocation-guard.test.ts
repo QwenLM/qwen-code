@@ -45,6 +45,30 @@ describe('evaluateToolInvocationGuard', () => {
     });
   });
 
+  it('uses a stable reason when the guard denies with a blank reason', async () => {
+    await expect(
+      evaluateToolInvocationGuard(
+        vi.fn().mockResolvedValue({ allowed: false, reason: ' ' }),
+        context(),
+      ),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'Tool invocation denied by host policy',
+    });
+  });
+
+  it('uses a stable reason when the guard denies with a non-string reason', async () => {
+    await expect(
+      evaluateToolInvocationGuard(
+        vi.fn().mockResolvedValue({ allowed: false, reason: 42 }),
+        context(),
+      ),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'Tool invocation denied by host policy',
+    });
+  });
+
   it('fails closed when the guard throws', async () => {
     await expect(
       evaluateToolInvocationGuard(
