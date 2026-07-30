@@ -533,24 +533,37 @@ export function stampCliEntryEnv(entryPath?: string): void {
   }
 }
 
+/**
+ * The process-level `uncaughtException` handler registered at the entry point,
+ * before the session ID (and thus the debug-log path) is known. Benign PTY
+ * teardown races are suppressed; anything else is reported to stderr and fatal.
+ *
+ * `setupUncaughtExceptionHandler` in gemini.tsx removes this handler and
+ * installs a session-aware replacement once interactive startup is far enough
+ * along to leave the alternate screen and write the debug file. Exactly one
+ * listener must be active: two would conflict (the first calls `process.exit`
+ * before the second runs) and this basic one lacks the visibility behavior.
+ */
+export function handleUncaughtException(error: unknown): void {
+  if (isExpectedPtyRaceError(error)) {
+    return;
+  }
+
+  if (error instanceof Error) {
+    writeStderrLine(error.stack ?? error.message);
+  } else {
+    writeStderrLine(String(error));
+  }
+  process.exit(1);
+}
+
 export async function runCliEntryPoint(
   run: () => Promise<void> = runCliEntry,
   handleError: (error: unknown) => Promise<void> = handleCriticalError,
 ): Promise<void> {
   stampCliEntryEnv();
 
-  process.on('uncaughtException', (error) => {
-    if (isExpectedPtyRaceError(error)) {
-      return;
-    }
-
-    if (error instanceof Error) {
-      writeStderrLine(error.stack ?? error.message);
-    } else {
-      writeStderrLine(String(error));
-    }
-    process.exit(1);
-  });
+  process.on('uncaughtException', handleUncaughtException);
 
   try {
     await run();

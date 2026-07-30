@@ -20,7 +20,10 @@ import {
 import { t } from '../../../i18n/index.js';
 import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
-import { wrapToVisualLines } from '../../utils/textUtils.js';
+import {
+  wrapToVisualLines,
+  sanitizeTerminalText,
+} from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
 
 export const THINKING_ICON = `${ICON.THEREFORE} `;
@@ -345,7 +348,7 @@ const ThinkBody: React.FC<{
       <ErrorBoundary
         fallback={(err) => (
           <Text color={theme.text.secondary} dimColor>
-            {err.message}
+            {sanitizeTerminalText(err.message)}
           </Text>
         )}
       >

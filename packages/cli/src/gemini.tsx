@@ -82,7 +82,7 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
-import { writeStderrLine } from './utils/stdioHelpers.js';
+import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 import {
@@ -167,9 +167,25 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { handleUncaughtException, isExpectedPtyRaceError } from './cli.js';
+
+let uncaughtExceptionHandler: ((error: Error) => void) | undefined;
 
 export function setupUncaughtExceptionHandler(sessionId: string) {
-  process.on('uncaughtException', (error) => {
+  // runCliEntryPoint() registered the basic handleUncaughtException at startup,
+  // before the session ID existed. Replace it now: two listeners conflict — the
+  // first calls process.exit(1) so the second never runs — and the basic one
+  // lacks both the PTY-race guard (so it would crash the session on a benign
+  // teardown error) and the alternate-screen handling below. Also drop any
+  // handler a previous call installed so exactly one listener is ever active.
+  process.removeListener('uncaughtException', handleUncaughtException);
+  if (uncaughtExceptionHandler) {
+    process.removeListener('uncaughtException', uncaughtExceptionHandler);
+  }
+  uncaughtExceptionHandler = (error) => {
+    if (isExpectedPtyRaceError(error)) {
+      return;
+    }
     const timestamp = new Date().toISOString();
     const line = `${timestamp} [ERROR] [STARTUP] [UNCAUGHT_EXCEPTION] ${error.message}\n${error.stack ?? ''}\n`;
     // debugLogger.error() uses async fs.appendFile — the write would be
@@ -182,18 +198,22 @@ export function setupUncaughtExceptionHandler(sessionId: string) {
     }
     // In VP / alternate-screen mode, stderr is written to the alternate
     // buffer which is discarded on teardown. Leave the alternate screen
-    // *before* writing the error so the user actually sees it.
-    try {
-      process.stdout.write('\x1b[?1049l'); // leave alternate screen
-      process.stdout.write('\x1b[?25h'); // show cursor
-    } catch {
-      // stdout may be broken; the debug log above is the primary record.
+    // *before* writing the error so the user actually sees it. Guard on
+    // isTTY: with stdout redirected to a file the escapes would corrupt it.
+    if (process.stdout.isTTY) {
+      try {
+        process.stdout.write('\x1b[?1049l'); // leave alternate screen
+        process.stdout.write('\x1b[?25h'); // show cursor
+      } catch {
+        // stdout may be broken; the debug log above is the primary record.
+      }
     }
-    writeStderrLine(
+    writeStderrLineSafe(
       `\nFatal: uncaught exception (logged to debug file)\n${error.stack ?? error.message}`,
     );
     process.exit(1);
-  });
+  };
+  process.on('uncaughtException', uncaughtExceptionHandler);
 }
 
 export function setupUnhandledRejectionHandler() {

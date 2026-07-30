@@ -66,7 +66,14 @@ export class ErrorBoundary extends Component<
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
     const normalized = normalizeError(error);
-    lastRenderError = normalized;
+    // Only boundaries that report the error (via onError) feed the exit-time
+    // echo. A boundary with no onError — e.g. the inline ThinkBody fallback —
+    // handles the error itself and the app continues; recording it would print
+    // a spurious "Rendering error (logged to debug file)" on a normal /quit
+    // even though nothing was ever logged.
+    if (this.props.onError) {
+      lastRenderError = normalized;
+    }
     this.props.onError?.(normalized, info);
   }
 
