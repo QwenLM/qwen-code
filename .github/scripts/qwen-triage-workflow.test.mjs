@@ -45,6 +45,33 @@ const tmuxOwnershipStep = tmuxJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
 
+const ciWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'ci.yml',
+);
+const ciDoc = parse(readFileSync(ciWorkflowPath, 'utf8'));
+const ciTestJob = ciDoc.jobs.test;
+const ciOwnershipStep = ciTestJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciCleanStep = ciTestJob.steps.find(
+  (s) => s.name === 'Clean stale .qwen before checkout',
+);
+
+const prReviewWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'qwen-code-pr-review.yml',
+);
+const prReviewDoc = parse(readFileSync(prReviewWorkflowPath, 'utf8'));
+const prReviewJob = prReviewDoc.jobs['review-pr'];
+const prReviewOwnershipStep = prReviewJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assert.ok(triageStep, 'triage step (id: triage) must exist');
@@ -326,6 +353,84 @@ describe('qwen-triage: workspace ownership restore', () => {
       tmuxOwnershipStep.run,
       /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
       'tmux-testing must return workspace ownership to the runner',
+    );
+  });
+});
+
+describe('ci.yml: rename-aside ownership recovery', () => {
+  it('ownership-restore step exists and probes writability before renaming', () => {
+    assert.ok(
+      ciOwnershipStep,
+      'ci.yml test job must have a "Restore workspace ownership" step',
+    );
+    assert.match(
+      ciOwnershipStep.run,
+      /for stale in \.qwen \.git/,
+      'rename-aside loop must cover both .qwen and .git',
+    );
+    assert.match(
+      ciOwnershipStep.run,
+      /touch "\$target\/\.probe"/,
+      'must probe writability with a touch before deciding to rename',
+    );
+    assert.match(
+      ciOwnershipStep.run,
+      /mv "\$target" "\$\{target\}\.stale\.\$\$"/,
+      'must rename unwriteable dirs aside with a .stale.$$ suffix',
+    );
+  });
+
+  it('cleanup step removes renamed-aside dirs', () => {
+    assert.ok(
+      ciCleanStep,
+      'ci.yml test job must have a "Clean stale .qwen before checkout" step',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\.qwen\.stale\.\*/,
+      'cleanup glob must cover .qwen.stale.* dirs',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\.git\.stale\.\*/,
+      'cleanup glob must cover .git.stale.* dirs',
+    );
+  });
+});
+
+describe('qwen-code-pr-review.yml: rename-aside ownership recovery', () => {
+  it('ownership-restore step exists and probes writability before renaming', () => {
+    assert.ok(
+      prReviewOwnershipStep,
+      'review-pr job must have a "Restore workspace ownership" step',
+    );
+    assert.match(
+      prReviewOwnershipStep.run,
+      /for stale in \.qwen \.git/,
+      'rename-aside loop must cover both .qwen and .git',
+    );
+    assert.match(
+      prReviewOwnershipStep.run,
+      /touch "\$target\/\.probe"/,
+      'must probe writability with a touch before deciding to rename',
+    );
+    assert.match(
+      prReviewOwnershipStep.run,
+      /mv "\$target" "\$\{target\}\.stale\.\$\$"/,
+      'must rename unwriteable dirs aside with a .stale.$$ suffix',
+    );
+  });
+
+  it('cleans up renamed-aside dirs inline', () => {
+    assert.match(
+      prReviewOwnershipStep.run,
+      /\.qwen\.stale\.\*/,
+      'inline cleanup must cover .qwen.stale.* dirs',
+    );
+    assert.match(
+      prReviewOwnershipStep.run,
+      /\.git\.stale\.\*/,
+      'inline cleanup must cover .git.stale.* dirs',
     );
   });
 });
