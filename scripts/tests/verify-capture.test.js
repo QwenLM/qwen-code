@@ -142,6 +142,26 @@ describe('verify-capture helper', () => {
       expect(res.stdout).toContain('2 rows');
     }));
 
+  // console.log-terminated stdout already ends with \n; the old join('\n')
+  // inserted a phantom blank row between stdout and stderr.
+  it('does not insert a phantom blank row when stdout ends with a newline', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'no-phantom.png');
+      const res = run([
+        '--out',
+        out,
+        '--cols',
+        '40',
+        '--',
+        'node',
+        '-e',
+        'console.log("result: 42"); process.stderr.write("warning: flaky\\n")',
+      ]);
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      expect(res.stdout).toContain('2 rows');
+    }));
+
   // Colour and weight are the whole reason to render rather than paste text:
   // a red FAIL beside a green PASS is what makes the cell readable at a glance.
   //
@@ -170,9 +190,11 @@ describe('verify-capture helper', () => {
     }));
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
-  // which the bounds guard maps to FG_DEFAULT. Exercise that branch so a
-  // future simplification to ANSI[cell.fg] cannot ship fill="undefined".
-  it('renders 256-colour and truecolor via the default-grey fallback', () =>
+  // which the bounds guard maps to FG_DEFAULT (#d4d4d4). Decode pixels and
+  // assert the fallback grey is present, so deleting the guard cannot ship
+  // fill="undefined" (which librsvg paints black) while the test stays green.
+  it('renders 256-colour and truecolor via the default-grey fallback', async () => {
+    let png;
     withDir((dir) => {
       const out = path.join(dir, 'fallback.png');
       const res = run(['--out', out], {
@@ -180,7 +202,22 @@ describe('verify-capture helper', () => {
       });
       expect(res.status).toBe(0);
       expect(isPng(out)).toBe(true);
-    }));
+      png = readFileSync(out);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    // FG_DEFAULT is #d4d4d4 — look for a pixel matching it.
+    let hasFallback = false;
+    for (let i = 0; i + 2 < data.length; i += info.channels) {
+      if (data[i] === 0xd4 && data[i + 1] === 0xd4 && data[i + 2] === 0xd4) {
+        hasFallback = true;
+        break;
+      }
+    }
+    expect(hasFallback, '256-colour text did not render as #d4d4d4').toBe(true);
+  });
 
   // SGR 30 maps to #1e1e1e — identical to the canvas BG — so black-foreground
   // text (the normal way to label a coloured badge, e.g. vitest's project
@@ -314,6 +351,18 @@ describe('verify-capture helper', () => {
       expect(isPng(out)).toBe(true);
       expect(res.stderr).toContain('warning: input occupies 4 terminal rows');
       expect(res.stderr).toContain('dropped the top 1');
+    }));
+
+  // Non-newline-terminated input of exactly --rows lines fits: no final CRLF
+  // scrolls the viewport, so the usable capacity is rows, not rows - 1.
+  it('does not warn for non-newline-terminated input that fits --rows', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'no-nl.png');
+      const res = run(['--out', out, '--rows', '4'], {
+        input: 'l1\nl2\nl3\nl4',
+      });
+      expect(res.status).toBe(0);
+      expect(res.stderr).not.toContain('warning');
     }));
 
   describe('fails loudly rather than writing a broken image', () => {

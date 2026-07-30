@@ -135,6 +135,7 @@ const escapeXml = (s) =>
 /** Collect the bytes to render: either a child command's output, or stdin. */
 function collectOutput(cmd) {
   if (cmd.length === 0) {
+    if (process.stdin.isTTY) usage('no command given and nothing piped to stdin');
     try {
       return readFileSync(0, 'utf8');
     } catch {
@@ -158,7 +159,12 @@ function collectOutput(cmd) {
   const how =
     res.signal != null ? `killed by ${res.signal}` : `exited ${res.status}`;
   process.stderr.write(`verify-capture: command ${how}\n`);
-  return [res.stdout, res.stderr].filter(Boolean).join('\n');
+  // Only insert a separator when stdout lacks a trailing newline; a
+  // console.log-terminated stdout already ends with \n, and join('\n') would
+  // add a phantom blank row that never appeared on the real terminal.
+  return res.stdout && res.stderr && !res.stdout.endsWith('\n')
+    ? res.stdout + '\n' + res.stderr
+    : res.stdout + res.stderr;
 }
 
 /** Parse ANSI into a cell grid, then emit it as SVG. */
