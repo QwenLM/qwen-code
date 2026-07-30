@@ -54,7 +54,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to view transcript': 'para ver a transcrição',
+  'to expand thinking': 'para expandir o pensamento',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',

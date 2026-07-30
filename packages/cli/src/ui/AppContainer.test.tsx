@@ -4733,6 +4733,63 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('Thinking expansion (Ctrl+O) integration', () => {
+    const makeKey = (overrides: Partial<Key>): Key =>
+      ({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '',
+        ...overrides,
+      }) as Key;
+
+    const getGlobalKeypress = () =>
+      mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
+        ) as ((key: Key) => void) | undefined;
+
+    const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
+
+    it('Ctrl+O is handled by the TOGGLE_THINKING_EXPANDED branch (calls refreshStatic)', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      // refreshStatic writes clearTerminal when not in VP mode — proves the
+      // TOGGLE_THINKING_EXPANDED branch executed (it calls setThoughtExpanded
+      // then refreshStatic). Without this branch the key would fall through
+      // to later handlers that do NOT call refreshStatic.
+      const writesBefore = mockStdout.write.mock.calls.length;
+      act(() => {
+        handleKeypress!(ctrlO);
+      });
+      expect(mockStdout.write.mock.calls.length).toBeGreaterThan(writesBefore);
+
+      // A second press also hits the same branch (toggle back).
+      const writesAfterFirst = mockStdout.write.mock.calls.length;
+      act(() => {
+        handleKeypress!(ctrlO);
+      });
+      expect(mockStdout.write.mock.calls.length).toBeGreaterThan(
+        writesAfterFirst,
+      );
+    });
+  });
+
   describe('Model Dialog Integration', () => {
     it('should provide isModelDialogOpen in the UIStateContext', () => {
       mockedUseModelCommand.mockReturnValue({

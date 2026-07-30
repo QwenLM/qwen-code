@@ -58,7 +58,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to view transcript': 'per veure la transcripció',
+  'to expand thinking': 'per expandir el pensament',
   'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",

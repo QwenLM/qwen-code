@@ -1911,7 +1911,7 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
-  'to view transcript': 'zum Anzeigen des Transkripts',
+  'to expand thinking': 'zum Erweitern der Gedanken',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

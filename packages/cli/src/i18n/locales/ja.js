@@ -1449,7 +1449,7 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'to view transcript': 'トランスクリプトを表示',
+  'to expand thinking': '思考を展開',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

@@ -276,7 +276,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to view transcript': 'to view transcript',
+  'to expand thinking': 'to expand thinking',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',

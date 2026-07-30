@@ -2045,7 +2045,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to view transcript': 'pour voir la transcription',
+  'to expand thinking': 'pour développer la réflexion',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',
