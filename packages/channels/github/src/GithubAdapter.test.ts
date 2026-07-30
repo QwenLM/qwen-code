@@ -9,6 +9,7 @@ import {
 } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1278,6 +1279,50 @@ describe('GithubChannel', () => {
   });
 
   describe('publication contract', () => {
+    function pendingPath(): string {
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-pending-deliveries.json',
+      );
+    }
+
+    function auditPath(): string {
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-audit.jsonl',
+      );
+    }
+
+    function pendingRecord(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'pending',
+        createdAt: '2026-07-30T00:00:00.000Z',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        fullText: 'Final reply',
+        sessionId: 'session-publication',
+        ...overrides,
+      };
+    }
+
+    function writePending(records: Array<Record<string, unknown>>): void {
+      mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
+      writeFileSync(pendingPath(), JSON.stringify(records));
+    }
+
+    async function retryPendingForTest(): Promise<void> {
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        abortableSleep: (ms: number) => Promise<void>;
+        retryPendingFinalDeliveries: () => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      privateChannel.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      await privateChannel.retryPendingFinalDeliveries();
+    }
+
     async function connectForPublication() {
       mockOctokit.paginate.mockResolvedValue([]);
       await channel.connect();
@@ -1526,12 +1571,7 @@ describe('GithubChannel', () => {
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
       ).rejects.toMatchObject({ message: 'rate limited', cause: error });
 
-      const pendingPath = join(
-        process.env.QWEN_HOME!,
-        'channels',
-        'test-github-github-pending-deliveries.json',
-      );
-      expect(JSON.parse(readFileSync(pendingPath, 'utf-8'))).toMatchObject([
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
         {
           chatId: 'owner/repo',
           threadId: 'issue:42',
@@ -1556,9 +1596,9 @@ describe('GithubChannel', () => {
       );
       await connectForPublication();
 
-      const current = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+      const current = JSON.parse(readFileSync(pendingPath(), 'utf-8'));
       writeFileSync(
-        pendingPath,
+        pendingPath(),
         JSON.stringify([
           ...current,
           {
@@ -1585,7 +1625,7 @@ describe('GithubChannel', () => {
         issue_number: 42,
         body: 'Final reply',
       });
-      expect(JSON.parse(readFileSync(pendingPath, 'utf-8'))).toMatchObject([
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
         {
           id: 'concurrent',
           threadId: 'issue:43',
@@ -1608,7 +1648,7 @@ describe('GithubChannel', () => {
         makeBridge(),
       );
       await connectForPublication();
-      writeFileSync(pendingPath, '{');
+      writeFileSync(pendingPath(), '{');
       resolveUnreadableRetry({
         data: {
           id: 2003,
@@ -1617,7 +1657,81 @@ describe('GithubChannel', () => {
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(readFileSync(pendingPath, 'utf-8')).toBe('{');
+      expect(readFileSync(pendingPath(), 'utf-8')).toBe('{');
+    });
+
+    it('keeps a pending final when retry still definitely did not write', async () => {
+      writePending([pendingRecord()]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('rate limited'), { status: 429 }),
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
+        { id: 'pending', attempts: 1 },
+      ]);
+    });
+
+    it('drops and audits an ambiguous pending final retry failure', async () => {
+      writePending([pendingRecord()]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('ambiguous'),
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+      expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
+        outcome: 'failed',
+        failurePhase: 'delivery',
+        failureError: 'ambiguous',
+      });
+    });
+
+    it('continues retrying pending finals when a per-record update fails', async () => {
+      writePending([
+        pendingRecord({ id: 'first' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          fullText: 'Second reply',
+        }),
+      ]);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      mockOctokit.rest.issues.createComment
+        .mockImplementationOnce(async () => {
+          writeFileSync(pendingPath(), '{');
+          throw new Error('ambiguous');
+        })
+        .mockResolvedValueOnce({
+          data: {
+            id: 2004,
+            html_url:
+              'https://github.com/owner/repo/issues/43#issuecomment-2004',
+          },
+        });
+
+      try {
+        await retryPendingForTest();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('failed to update pending GitHub deliveries'),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenNthCalledWith(2, {
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 43,
+        body: 'Second reply',
+      });
     });
 
     it('distinguishes pre-delivery validation from ambiguous failures', async () => {

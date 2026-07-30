@@ -564,10 +564,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // ponytail: GitHub has no createComment idempotency key without adding
         // a public marker to the verbatim final body; marker-upsert if that
         // contract changes.
-        const current = this.readPendingFinalDeliveries(true);
-        this.writePendingFinalDeliveries(
-          current.filter((item) => item.id !== record.id),
-        );
+        if (
+          !this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          continue;
+        }
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -578,8 +581,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         });
       } catch (err) {
         if (isDefiniteNoWriteGithubError(err)) {
-          const current = this.readPendingFinalDeliveries(true);
-          this.writePendingFinalDeliveries(
+          this.updatePendingFinalDeliveries((current) =>
             current.map((item) =>
               item.id === record.id
                 ? { ...item, attempts: (item.attempts ?? 0) + 1 }
@@ -588,10 +590,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           );
           continue;
         }
-        const current = this.readPendingFinalDeliveries(true);
-        this.writePendingFinalDeliveries(
-          current.filter((item) => item.id !== record.id),
-        );
+        if (
+          !this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          continue;
+        }
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -604,6 +609,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ),
         });
       }
+    }
+  }
+
+  private updatePendingFinalDeliveries(
+    update: (records: PendingFinalDelivery[]) => PendingFinalDelivery[],
+  ): boolean {
+    try {
+      this.writePendingFinalDeliveries(
+        update(this.readPendingFinalDeliveries(true)),
+      );
+      return true;
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to update pending GitHub deliveries: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+      return false;
     }
   }
 
