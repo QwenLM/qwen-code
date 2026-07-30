@@ -827,4 +827,53 @@ describe('auto-skill curator', () => {
       restoreArchivedAutoSkill(projectRoot, 'auto-skill-absent', now),
     ).rejects.toThrow('Archived auto-skill not found');
   });
+
+  it('clamps a future manifest mtime so the skill remains curatable', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 180 * DAY_MS);
+    const future = new Date(now.getTime() + 10 * 365 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-future', 'auto-skill', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'future', level: 'project', filePath: manifest },
+      old,
+    );
+    // Stamp the manifest far in the future (clock skew, backup restore).
+    await fs.utimes(manifest, future, future);
+
+    const result = await runAutoSkillCurator(projectRoot, { now });
+
+    expect(result.archived).toEqual(['auto-skill-future']);
+  });
+
+  it('does not double-list a directory present in both live and archived roots', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-dup', 'auto-skill', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'dup', level: 'project', filePath: manifest },
+      old,
+    );
+    await runAutoSkillCurator(projectRoot, { now });
+
+    // Recreate the same directory name in the live library.
+    await writeSkill('auto-skill-dup', 'auto-skill', now);
+
+    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+
+    const allNames = [
+      ...status.active,
+      ...status.stale,
+      ...status.archived,
+    ].map((entry) => entry.directoryName);
+    const dupCount = allNames.filter((n) => n === 'auto-skill-dup').length;
+    expect(dupCount).toBe(1);
+    expect(status.active.map((e) => e.directoryName)).toContain(
+      'auto-skill-dup',
+    );
+    expect(status.archived.map((e) => e.directoryName)).not.toContain(
+      'auto-skill-dup',
+    );
+  });
 });

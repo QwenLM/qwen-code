@@ -72,9 +72,8 @@ async function readRegularFileNoFollow(
     if (stat.size > maxBytes) {
       throw new Error(`Auto-skill curator file too large at ${filePath}.`);
     }
-    const buffer = Buffer.allocUnsafe(stat.size);
-    const { bytesRead } = await handle.read(buffer, 0, stat.size, 0);
-    return { content: buffer.toString('utf8', 0, bytesRead), stat };
+    const content = await handle.readFile('utf8');
+    return { content, stat };
   } finally {
     await handle.close().catch(() => {});
   }
@@ -479,9 +478,11 @@ function recordForSkill(
 function lastActivityMs(
   skill: ManagedAutoSkill,
   record: AutoSkillRecord,
+  nowMs: number,
 ): number {
+  const mtimeMs = parseTimestamp(skill.modifiedAt) ?? 0;
   return Math.max(
-    parseTimestamp(skill.modifiedAt) ?? 0,
+    mtimeMs <= nowMs ? mtimeMs : 0,
     parseTimestamp(record.firstSeenAt) ?? 0,
     parseTimestamp(record.lastActivityAt) ?? 0,
     parseTimestamp(record.lastUsedAt) ?? 0,
@@ -492,12 +493,15 @@ function entryFor(
   skill: ManagedAutoSkill,
   record: AutoSkillRecord,
   state: AutoSkillState,
+  nowMs: number,
 ): AutoSkillCuratorEntry {
   return {
     directoryName: skill.directoryName,
     skillName: skill.skillName,
     state,
-    lastActivityAt: new Date(lastActivityMs(skill, record)).toISOString(),
+    lastActivityAt: new Date(
+      lastActivityMs(skill, record, nowMs),
+    ).toISOString(),
     useCount: record.useCount,
     pinned: record.pinned,
   };
@@ -545,14 +549,15 @@ async function runLocked(
         continue;
       }
       if (record.pinned) continue;
-      const inactivityMs = nowMs - lastActivityMs(scanned, record);
+      const inactivityMs = nowMs - lastActivityMs(scanned, record, nowMs);
       if (inactivityMs >= AUTO_SKILL_ARCHIVE_AFTER_MS) {
         const current = await readManagedSkill(
           paths.skillsRoot,
           scanned.directoryName,
         );
         if (!current) continue;
-        const currentInactivityMs = nowMs - lastActivityMs(current, record);
+        const currentInactivityMs =
+          nowMs - lastActivityMs(current, record, nowMs);
         if (currentInactivityMs < AUTO_SKILL_ARCHIVE_AFTER_MS) {
           if (currentInactivityMs >= AUTO_SKILL_STALE_AFTER_MS) {
             if (record.state !== 'stale') {
@@ -628,6 +633,7 @@ async function previewRun(
     archived: [],
     skippedCollisions: [],
   };
+  const nowMs = now.getTime();
   for (const skill of skills) {
     const existing = state.skills[skill.directoryName];
     if (!existing) {
@@ -636,7 +642,7 @@ async function previewRun(
     }
     const record = recordForSkill(state, skill);
     if (record.pinned) continue;
-    const inactivityMs = now.getTime() - lastActivityMs(skill, record);
+    const inactivityMs = nowMs - lastActivityMs(skill, record, nowMs);
     if (inactivityMs >= AUTO_SKILL_ARCHIVE_AFTER_MS) {
       try {
         await fs.lstat(path.join(paths.archiveRoot, skill.directoryName));
@@ -675,11 +681,21 @@ export async function maybeRunAutoSkillCurator(
   projectRoot: string,
   now: Date = new Date(),
 ): Promise<AutoSkillCuratorAutomaticResult> {
-  return withCuratorLock(projectRoot, async (paths) => {
-    const state = await readState(paths.statePath);
+  const paths = getCuratorPaths(projectRoot);
+  // Fast path: readState is safe unlocked (atomic-rename writes prevent torn
+  // reads), so most boots return not_due without paying for the lock.
+  const unlocked = await readState(paths.statePath);
+  if (unlocked.lastRunAt) {
+    const lastRunMs = parseTimestamp(unlocked.lastRunAt)!;
+    if (now.getTime() - lastRunMs < AUTO_SKILL_CURATOR_INTERVAL_MS) {
+      return { status: 'not_due' };
+    }
+  }
+  return withCuratorLock(projectRoot, async (lockedPaths) => {
+    const state = await readState(lockedPaths.statePath);
     if (!state.lastRunAt) {
       const nowIso = now.toISOString();
-      const skills = await scanManagedSkills(paths.skillsRoot);
+      const skills = await scanManagedSkills(lockedPaths.skillsRoot);
       for (const skill of skills) {
         const existing = state.skills[skill.directoryName];
         state.skills[skill.directoryName] = {
@@ -699,17 +715,21 @@ export async function maybeRunAutoSkillCurator(
         };
       }
       state.lastRunAt = nowIso;
-      await atomicWriteJSON(paths.statePath, state, {
+      await atomicWriteJSON(lockedPaths.statePath, state, {
         mode: 0o600,
         noFollow: true,
       });
       return { status: 'seeded', checked: skills.length };
     }
+    // Re-check under lock: another process may have run while we waited.
     const lastRunMs = parseTimestamp(state.lastRunAt)!;
     if (now.getTime() - lastRunMs < AUTO_SKILL_CURATOR_INTERVAL_MS) {
       return { status: 'not_due' };
     }
-    return { status: 'ran', result: await runLocked(paths, state, now) };
+    return {
+      status: 'ran',
+      result: await runLocked(lockedPaths, state, now),
+    };
   });
 }
 
@@ -791,9 +811,10 @@ export async function getAutoSkillCuratorStatus(
     stale: [],
     archived: [],
   };
+  const nowMs = now.getTime();
   for (const skill of liveSkills) {
     const record = recordForSkill(state, skill, now.toISOString());
-    const inactivityMs = now.getTime() - lastActivityMs(skill, record);
+    const inactivityMs = nowMs - lastActivityMs(skill, record, nowMs);
     const effectiveState: AutoSkillState = record.pinned
       ? record.state === 'stale'
         ? 'stale'
@@ -801,11 +822,13 @@ export async function getAutoSkillCuratorStatus(
       : inactivityMs >= AUTO_SKILL_STALE_AFTER_MS
         ? 'stale'
         : 'active';
-    status[effectiveState].push(entryFor(skill, record, effectiveState));
+    status[effectiveState].push(entryFor(skill, record, effectiveState, nowMs));
   }
+  const liveNames = new Set(liveSkills.map((s) => s.directoryName));
   for (const skill of archivedSkills) {
+    if (liveNames.has(skill.directoryName)) continue;
     const record = recordForSkill(state, skill);
-    status.archived.push(entryFor(skill, record, 'archived'));
+    status.archived.push(entryFor(skill, record, 'archived', nowMs));
   }
   return status;
 }
