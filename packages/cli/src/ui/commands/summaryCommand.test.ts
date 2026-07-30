@@ -11,6 +11,7 @@ import path from 'node:path';
 import { summaryCommand } from './summaryCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
+import { runSideQuery } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -76,6 +77,14 @@ describe('summaryCommand custom export path', () => {
     }
   };
 
+  const dirExists = async (p: string): Promise<boolean> => {
+    try {
+      return (await fs.stat(p)).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+
   it('defaults to .qwen/PROJECT_SUMMARY.md with no argument', async () => {
     const result = await run('');
     const fullPath = path.join(projectRoot, '.qwen', 'PROJECT_SUMMARY.md');
@@ -132,5 +141,12 @@ describe('summaryCommand custom export path', () => {
     const result = await run('/tmp/summary-escape/leak.md');
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect(result.content).toContain('within the project root');
+  });
+
+  it('does not create the target directory when generation fails', async () => {
+    vi.mocked(runSideQuery).mockRejectedValueOnce(new Error('rate limit'));
+    const result = await run('reports/2026/summary.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(await dirExists(path.join(projectRoot, 'reports'))).toBe(false);
   });
 });

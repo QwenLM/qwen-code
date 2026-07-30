@@ -145,7 +145,6 @@ export const summaryCommand: SlashCommand = {
 
       if (!customPath) {
         const qwenDir = path.join(projectRoot, '.qwen');
-        await fsPromises.mkdir(qwenDir, { recursive: true, mode: 0o700 });
         return {
           summaryPath: path.join(qwenDir, 'PROJECT_SUMMARY.md'),
           filePathForDisplay: '.qwen/PROJECT_SUMMARY.md',
@@ -172,11 +171,6 @@ export const summaryCommand: SlashCommand = {
         ? path.join(resolved, 'PROJECT_SUMMARY.md')
         : resolved;
 
-      await fsPromises.mkdir(path.dirname(summaryPath), {
-        recursive: true,
-        mode: 0o700,
-      });
-
       const filePathForDisplay = (
         path.isAbsolute(customPath)
           ? summaryPath
@@ -201,6 +195,10 @@ export const summaryCommand: SlashCommand = {
 **Update time**: ${new Date().toISOString()}
 `;
 
+      await fsPromises.mkdir(path.dirname(target.summaryPath), {
+        recursive: true,
+        mode: 0o700,
+      });
       await fsPromises.writeFile(target.summaryPath, summaryContent, 'utf8');
 
       return {
