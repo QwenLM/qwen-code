@@ -2376,6 +2376,7 @@ export class GeminiChat {
               this.lastPromptTokenCount,
               this.lastOutputTokenCount,
               imageTokenEstimate,
+              /* conservative= */ true,
             )
           : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
@@ -3104,6 +3105,7 @@ export class GeminiChat {
                     self.lastPromptTokenCount,
                     self.lastOutputTokenCount,
                     recoveryImageTokenEstimate,
+                    /* conservative= */ true,
                   )
                 : 0;
             self.history.push(recoveryUserContent);
