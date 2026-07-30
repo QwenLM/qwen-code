@@ -256,8 +256,6 @@ export default {
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
   Transcript: 'Transcription',
-  'to close': 'pour fermer',
-  'to scroll': 'pour défiler',
   'Read {{count}} file': 'Lu {{count}} fichier',
   'Read {{count}} files': 'Lu {{count}} fichiers',
   'Reading {{count}} file': 'Lecture de {{count}} fichier',

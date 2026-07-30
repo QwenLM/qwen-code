@@ -248,8 +248,6 @@ export default {
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
   Transcript: 'Transcrição',
-  'to close': 'para fechar',
-  'to scroll': 'para rolar',
   'Read {{count}} file': 'Leu {{count}} arquivo',
   'Read {{count}} files': 'Leu {{count}} arquivos',
   'Reading {{count}} file': 'Lendo {{count}} arquivo',

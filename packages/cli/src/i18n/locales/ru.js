@@ -255,8 +255,6 @@ export default {
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
   Transcript: 'Транскрипт',
-  'to close': 'закрыть',
-  'to scroll': 'прокрутить',
   'Read {{count}} file': 'Прочитано файлов: {{count}}',
   'Read {{count}} files': 'Прочитано файлов: {{count}}',
   'Reading {{count}} file': 'Чтение файлов: {{count}}',

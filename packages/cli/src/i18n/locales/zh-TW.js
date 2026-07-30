@@ -464,8 +464,6 @@ export default {
   'Unknown Step': '未知步驟',
   'Esc to close': '按 Esc 關閉',
   Transcript: '完整記錄',
-  'to close': '關閉',
-  'to scroll': '捲動',
   'Read {{count}} file': '讀取了 {{count}} 個檔案',
   'Read {{count}} files': '讀取了 {{count}} 個檔案',
   'Reading {{count}} file': '正在讀取 {{count}} 個檔案',

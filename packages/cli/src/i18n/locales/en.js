@@ -506,8 +506,6 @@ export default {
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
   Transcript: 'Transcript',
-  'to close': 'to close',
-  'to scroll': 'to scroll',
   'Read {{count}} file': 'Read {{count}} file',
   'Read {{count}} files': 'Read {{count}} files',
   'Reading {{count}} file': 'Reading {{count}} file',

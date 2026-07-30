@@ -458,6 +458,7 @@ describe('keyMatchers', () => {
         createKey('t'),
         createKey('t', { ctrl: true }),
         createKey('o'),
+        createKey('o', { meta: true }),
       ],
     },
   ];

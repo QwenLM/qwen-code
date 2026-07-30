@@ -489,8 +489,6 @@ export default {
   'Unknown Step': '未知步骤',
   'Esc to close': '按 Esc 关闭',
   Transcript: '完整记录',
-  'to close': '关闭',
-  'to scroll': '滚动',
   'Read {{count}} file': '读取了 {{count}} 个文件',
   'Read {{count}} files': '读取了 {{count}} 个文件',
   'Reading {{count}} file': '正在读取 {{count}} 个文件',

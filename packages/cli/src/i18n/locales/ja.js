@@ -208,8 +208,6 @@ export default {
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
   Transcript: 'トランスクリプト',
-  'to close': '閉じる',
-  'to scroll': 'スクロール',
   'Read {{count}} file': '{{count}} 件のファイルを読み込みました',
   'Read {{count}} files': '{{count}} 件のファイルを読み込みました',
   'Reading {{count}} file': '{{count}} 件のファイルを読み込み中',

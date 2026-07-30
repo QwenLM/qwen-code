@@ -252,8 +252,6 @@ export default {
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
   Transcript: 'Transcripció',
-  'to close': 'per tancar',
-  'to scroll': 'per desplaçar',
   'Read {{count}} file': 'Ha llegit {{count}} fitxer',
   'Read {{count}} files': 'Ha llegit {{count}} fitxers',
   'Reading {{count}} file': 'Llegint {{count}} fitxer',
