@@ -37,10 +37,13 @@ type AnthropicMessageParam = Anthropic.MessageParam;
 // the system text block).
 //
 // `ttl` is the Anthropic spec's extended-cache-tier field
-// (`ttl?: '5m' | '1h'`, gated behind the `extended-cache-ttl-2025-04-11`
-// beta). Omitting it means the spec default (5m). It composes freely with
-// `scope`: the two betas are independent and Anthropic accepts both on the
-// same cache_control entry.
+// (`ttl?: '5m' | '1h'`). Anthropic's current docs describe the 1h tier as
+// GA with no beta requirement; `extended-cache-ttl-2025-04-11` is sent
+// defensively for older Anthropic-compatible backends that may still gate
+// the field on it (see `hasExtendedCacheTtlOnWire` in
+// anthropicContentGenerator.ts). Omitting `ttl` means the spec default
+// (5m). It composes freely with `scope`: the two are independent and
+// Anthropic accepts both on the same cache_control entry.
 type AnthropicCacheControl = {
   type: 'ephemeral';
   scope?: 'global';
@@ -79,6 +82,13 @@ export type CacheRetention = 'ephemeral' | '1h';
  * single anchor; this converter marks only one trailing user message with
  * cache_control, not a sliding multi-turn window). Missing keys inherit
  * the top-level retention.
+ *
+ * These render on the wire in a fixed order — `tool` -> `system` ->
+ * `user.last` — and Anthropic requires cache entries with a longer TTL to
+ * appear before shorter ones. Resolution (see `resolveCacheRetention`)
+ * normalizes for this automatically: setting one anchor to `'1h'`
+ * promotes every anchor before it on the wire to `'1h'` as well, so any
+ * combination of overrides here produces a legal request body.
  */
 export type CacheRetentionByBlock = Partial<
   Record<'system' | 'tool' | 'user.last', CacheRetention>
@@ -770,6 +780,49 @@ export class AnthropicContentConverter {
   }
 
   /**
+   * Resolve the effective {@link CacheRetention} for one cache anchor,
+   * normalized so retention is monotonically non-increasing in wire order.
+   *
+   * Render order is `tools` -> `system` -> `messages`, so this converter's
+   * three anchors sit on the wire in exactly that order: `tool` -> `system`
+   * -> `user.last`. Anthropic requires "cache entries with longer TTL must
+   * appear before shorter TTLs" — an anchor at the spec's 5-minute default
+   * (no `ttl`) is a short-TTL entry for this rule's purposes, so a raw
+   * per-anchor override like `cacheRetentionByBlock: { system: '1h' }`
+   * would otherwise leave the (still 5m-default) `tool` anchor ahead of a
+   * 1h `system` anchor on the wire — an ordering violation Anthropic 400s
+   * on.
+   *
+   * Resolving with a scan instead of a straight per-anchor lookup avoids
+   * that: `anchor` resolves to `'1h'` if `anchor` itself OR any anchor
+   * later on the wire resolves to `'1h'`. That makes every
+   * `cacheRetentionByBlock` configuration legal — anchors before a `'1h'`
+   * anchor are promoted to `'1h'` too — without adding a new error surface
+   * or rejecting any input. `{ tool: '1h' }` alone is unaffected (nothing
+   * follows it that needs promoting); `{ system: '1h' }` alone now also
+   * promotes `tool` to `'1h'`, which is exactly the "cache my big system
+   * prompt for an hour" usage the per-anchor override exists for.
+   */
+  private resolveCacheRetention(
+    anchor: 'system' | 'tool' | 'user.last',
+    cacheRetention: CacheRetention,
+    cacheRetentionByBlock: CacheRetentionByBlock,
+  ): CacheRetention {
+    const wireOrder: ReadonlyArray<'tool' | 'system' | 'user.last'> = [
+      'tool',
+      'system',
+      'user.last',
+    ];
+    const anchorIndex = wireOrder.indexOf(anchor);
+    for (let i = wireOrder.length - 1; i >= anchorIndex; i--) {
+      if ((cacheRetentionByBlock[wireOrder[i]] ?? cacheRetention) === '1h') {
+        return '1h';
+      }
+    }
+    return 'ephemeral';
+  }
+
+  /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
    * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
@@ -794,19 +847,6 @@ export class AnthropicContentConverter {
    * The split only shapes the outgoing request; stored history and
    * non-Anthropic transports keep seeing a single system string.
    */
-  /**
-   * Resolve the effective {@link CacheRetention} for one cache anchor:
-   * the per-anchor override in `cacheRetentionByBlock` wins when present,
-   * otherwise the top-level `cacheRetention` applies.
-   */
-  private resolveCacheRetention(
-    anchor: 'system' | 'tool' | 'user.last',
-    cacheRetention: CacheRetention,
-    cacheRetentionByBlock: CacheRetentionByBlock,
-  ): CacheRetention {
-    return cacheRetentionByBlock[anchor] ?? cacheRetention;
-  }
-
   private buildSystemWithCacheControl(
     systemText: string,
     useGlobalCacheScope: boolean,

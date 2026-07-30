@@ -2712,7 +2712,13 @@ describe('AnthropicContentConverter', () => {
         ]);
       });
 
-      it('honors a per-anchor cacheRetentionByBlock override over the top-level default', async () => {
+      it('honors a per-anchor cacheRetentionByBlock override, promoting the earlier tool anchor to keep wire order legal', async () => {
+        // Anthropic requires cache entries with a longer TTL to appear
+        // before shorter ones on the wire (tools -> system -> messages).
+        // { system: '1h' } alone would otherwise leave a 5m-default tool
+        // anchor ahead of a 1h system anchor -- an ordering violation.
+        // resolveCacheRetention promotes every anchor before a '1h' one,
+        // so the tool anchor here also resolves to '1h'.
         const { system } = converter.convertGeminiRequestToAnthropic(
           {
             model: 'models/test',
@@ -2732,7 +2738,6 @@ describe('AnthropicContentConverter', () => {
           },
         ]);
 
-        // tool anchor falls back to the top-level 'ephemeral' (no ttl).
         const tools = await converter.convertGeminiToolsToAnthropic(
           [
             {
@@ -2746,7 +2751,105 @@ describe('AnthropicContentConverter', () => {
             cacheRetentionByBlock: { system: '1h' },
           },
         );
-        expect(tools[0]?.cache_control).toEqual({ type: 'ephemeral' });
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it("does not promote anchors after the overridden one -- { tool: '1h' } alone leaves system/user.last at the default", async () => {
+        // tool -> system -> user.last is already longest-to-shortest here,
+        // so nothing needs promoting; this is the one override shape that
+        // was always legal even before the ordering fix.
+        const { system, messages } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { tool: '1h' },
+          },
+        );
+        expect(system).toEqual([
+          { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral' },
+        });
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { tool: '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
+      });
+
+      it("promotes both tool and system when only 'user.last' is overridden to '1h'", async () => {
+        // { 'user.last': '1h' } alone would otherwise leave both the tool
+        // and system anchors at the 5m default ahead of a 1h trailing
+        // user message -- also an ordering violation, and one the
+        // reviewer's case analysis called out explicitly (case E).
+        const { system, messages } = converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: 'hi',
+            config: { systemInstruction: 'sys' },
+          },
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { 'user.last': '1h' },
+          },
+        );
+        expect(system).toEqual([
+          {
+            type: 'text',
+            text: 'sys',
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          },
+        ]);
+        const lastMsg = messages[messages.length - 1];
+        const content = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        expect(content[content.length - 1]).toEqual({
+          type: 'text',
+          text: 'hi',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        });
+
+        const tools = await converter.convertGeminiToolsToAnthropic(
+          [
+            {
+              functionDeclarations: [
+                { name: 'get_weather', description: 'Get weather' },
+              ],
+            },
+          ],
+          {
+            cacheRetention: 'ephemeral',
+            cacheRetentionByBlock: { 'user.last': '1h' },
+          },
+        );
+        expect(tools[0]?.cache_control).toEqual({
+          type: 'ephemeral',
+          ttl: '1h',
+        });
       });
 
       it('carries ttl on both halves of a split system prompt (staticSystemPrefix)', () => {
