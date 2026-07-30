@@ -1960,13 +1960,18 @@ describe('qwen-autofix workflow', () => {
     // one lost Chinese section against a duplicate elsewhere): engage,
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
-    // the non-main base refusal, the cap pause, and the scan-side
-    // first-pickup engage ack (fork label events carry no secrets, so the
-    // scan anchors the window itself).
+    // the label-path non-main base refusal, the command-path non-main base
+    // refusal, the cap pause, the command-path direct engage ack (the
+    // labeled event has been observed to not fire — #7999, #8002 — so the
+    // command acks itself), the command-path direct release acks (all three
+    // variants, mirroring the ack job — a loud add next to a mute stop
+    // would re-create the lost-event ambiguity on the release side), and
+    // the scan-side first-pickup engage ack (fork label events carry no
+    // secrets, so the scan anchors the window itself).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(12);
+    expect(ackBodies).toHaveLength(17);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -1979,6 +1984,26 @@ describe('qwen-autofix workflow', () => {
     // continues; only takeover mode (the raised cap) ends.
     expect(workflow).toContain('Takeover mode ended');
     expect(workflow).toContain('STANDARD bot management continues');
+    // The three release acks are duplicated VERBATIM between the command
+    // path (REL_BODY) and the ack job (BODY) — indentation and the variable
+    // name are the only differences. A wording change must land in BOTH, or
+    // users see divergent release messages depending on whether they used
+    // `/takeover stop` or removed the label. No other test guards this
+    // cross-site identity: pin that each of the three variants appears
+    // exactly twice and that the two copies are byte-identical.
+    const releaseBodies =
+      workflow.match(
+        /printf '👋[^']*takeover-ack released[^']*'(?: "\$\{[A-Z_]+\}")+/g,
+      ) ?? [];
+    expect(releaseBodies).toHaveLength(6);
+    const releaseCounts = new Map();
+    for (const body of releaseBodies) {
+      releaseCounts.set(body, (releaseCounts.get(body) ?? 0) + 1);
+    }
+    expect(releaseCounts.size).toBe(3);
+    for (const count of releaseCounts.values()) {
+      expect(count).toBe(2);
+    }
     // Commands are serialized per PR — an older /takeover can never land
     // after a newer /takeover stop read the unlabeled state.
     expect(workflow).toContain(
@@ -2269,9 +2294,65 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'DRY-RUN: would post engage ack on #${PR} (window key untouched)',
     );
-    // In-repo first-pickup defers to the label event's DEDICATED ack job
-    // within a short grace, so a concurrent ack job is never double-posted.
+    // First-pickup grace is keyed by WHO owns the missing ack (the label
+    // event's actor): a human in-repo label defers to the DEDICATED ack
+    // job (3m of job spin-up), a bot-applied label defers only to the
+    // COMMAND's own in-flight write (45s — fork or in-repo alike); past
+    // the grace the next scheduled scan heals a failed command ack
+    // (≤10 min), and an ic.json snapshot taken between
+    // the label write and the command's ack cannot double-post.
     expect(reviewScanJob).toContain('engage ack deferred for #${PR}');
+    // Behaviorally pin the LAST_LABELED_BY jq extraction — the load-bearing
+    // input to the actor-keyed grace — mirroring the labeledTs treatment
+    // above: regex-extract the program, exec it against a multi-event
+    // fixture, and assert the returned actor. A presence check alone
+    // survives any mutation to the jq body (.actor.login → .user.login,
+    // wrong source file, sort_by on the wrong field).
+    const labeledByProgram = reviewScanJob
+      .match(
+        /LAST_LABELED_BY="\$\(jq -rs --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {18}/g, '\n');
+    expect(labeledByProgram).toBeTruthy();
+    const labeledBy = execFileSync(
+      'jq',
+      ['-rs', '--arg', 'lb', 'autofix/takeover', labeledByProgram],
+      {
+        encoding: 'utf8',
+        input:
+          JSON.stringify([
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'wenshao' },
+              created_at: '2026-07-02T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'other' },
+              actor: { login: 'mallory' },
+              created_at: '2026-07-09T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              event: 'unlabeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-08T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-06T00:00:00Z',
+            },
+          ]),
+      },
+    ).trim();
+    expect(labeledBy).toBe('qwen-code-dev-bot');
+    expect(reviewScanJob).toContain('command-applied label <45s ago');
+    expect(reviewScanJob).toContain(`date -u -d '45 seconds ago'`);
     // A fork fetch failure (force-push/rename race) discards gracefully
     // instead of a red run, and a fork moved since the scan is discarded at
     // the live re-check rather than fetched/pushed at the stale path.
@@ -2322,8 +2403,12 @@ describe('qwen-autofix workflow', () => {
       'cap notice skipped: consent changed since the snapshot',
     );
     // The queued toggle re-verifies state and base, and author privilege is
-    // LIVE (triage+ today), never durable authorship alone.
-    expect(workflow).toContain('no longer an open main-targeting PR');
+    // LIVE (triage+ today), never durable authorship alone. A closed PR
+    // drops silently; a non-main base refuses out loud (engage side only).
+    expect(workflow).toContain('no longer an open PR');
+    expect(workflow).toContain(
+      `takeover command refused: PR #\${PR} targets '\${CMD_BASE_REF}' not 'main'`,
+    );
     expect(routeStep).toContain('admin|maintain|write|triage)');
     expect(reviewScanJob).toContain('"${ROUND}" -ge "${EFF_MAX_ROUNDS}"');
     // The effective cap travels in the matrix target and SHADOWS the
@@ -2422,13 +2507,14 @@ describe('qwen-autofix workflow', () => {
       authorPerm = 'write',
       state = 'OPEN',
       base = 'main',
+      author = 'fork-owner',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
         const prJson = JSON.stringify({
           isCrossRepository: fork,
           maintainerCanModify: canModify,
-          author: { login: 'fork-owner' },
+          author: { login: author },
           state,
           baseRefName: base,
           labels: labels.map((name) => ({ name })),
@@ -2440,7 +2526,7 @@ describe('qwen-autofix workflow', () => {
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
             `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
-            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $4" >> '${join(dir, 'writes.log')}'; cat > /dev/null <<< "$6";`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
         );
@@ -2459,6 +2545,7 @@ describe('qwen-autofix workflow', () => {
               TAKEOVER_LABEL: 'autofix/takeover',
               SKIP_LABEL: 'autofix/skip',
               TAKEOVER_COMMAND: '@qwen-code /takeover',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
             },
             encoding: 'utf8',
@@ -2473,11 +2560,16 @@ describe('qwen-autofix workflow', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    // add + absent → label applied, no ack from this job.
+    // add + absent → label applied AND the engage ack posted directly from
+    // this job: the labeled event has been observed to not fire at all
+    // (#7999, #8002), so the user-visible ack cannot depend on that
+    // round-trip. In-repo PRs get no fork note.
     const addAbsent = runToggle({ cmd: 'add' });
     expect(addAbsent.writes).toContain('EDIT pr edit 7165');
     expect(addAbsent.writes).toContain('--add-label');
-    expect(addAbsent.writes).not.toContain('COMMENT');
+    expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
+    expect(addAbsent.writes).not.toContain('next scheduled scan');
+    expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, label untouched.
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
@@ -2489,6 +2581,28 @@ describe('qwen-autofix workflow', () => {
       labels: ['autofix/takeover'],
     });
     expect(removePresent.writes).toContain('--remove-label');
+    // Release acks directly too — the exact mirror of the engage side: a
+    // loud add next to a mute stop re-creates the lost-event ambiguity on
+    // the release side (and fork/non-main releases have no other ack path
+    // at all). Human-authored PR → the plain released variant.
+    expect(removePresent.writes).toContain('<!-- takeover-ack released -->');
+    expect(removePresent.writes).toContain('Takeover released');
+    // Variant selection mirrors the ack job: bot-authored → standard
+    // management continues; bot-authored + skip → fully opted out.
+    const botRelease = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      author: 'qwen-code-dev-bot',
+    });
+    expect(botRelease.writes).toContain('STANDARD bot management continues');
+    const botSkipRelease = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover', 'autofix/skip'],
+      author: 'qwen-code-dev-bot',
+    });
+    expect(botSkipRelease.writes).toContain(
+      'opts it out of standard bot management entirely',
+    );
     // remove + absent → explicit no-op, no writes at all.
     const removeAbsent = runToggle({ cmd: 'remove' });
     expect(removeAbsent.writes.trim()).toBe('');
@@ -2504,7 +2618,21 @@ describe('qwen-autofix workflow', () => {
     expect(forkRefused.writes).not.toContain('EDIT');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
     expect(forkManaged.writes).toContain('--add-label');
-    expect(forkManaged.writes).not.toContain('COMMENT');
+    // Fork label events carry no secrets, so no other job could ever ack a
+    // fork engage — the command's own ack is the ONLY one, and it sets the
+    // expectation that the first round comes from the next scheduled scan.
+    // Assert each language's note in ITS OWN half of the body: a mutation
+    // swapping the EN/ZH printf args ships the Chinese sentence inside the
+    // English paragraph (and vice versa) while a whole-body toContain
+    // still passes.
+    expect(forkManaged.writes).toContain('<!-- takeover-ack engaged -->');
+    const [forkEn, forkZh] = forkManaged.writes.split(
+      '<summary>中文说明</summary>',
+    );
+    expect(forkEn).toContain('next scheduled scan (usually within minutes)');
+    expect(forkEn).not.toContain('定时扫描');
+    expect(forkZh).toContain('通常几分钟内');
+    expect(forkZh).not.toContain('next scheduled scan');
     // A below-write fork author would be a ghost engagement (label sticks,
     // nothing ever manages it) — the command refuses with the adoption ask.
     const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
@@ -2520,6 +2648,40 @@ describe('qwen-autofix workflow', () => {
       labels: ['autofix/takeover'],
     });
     expect(forkStop.writes).toContain('--remove-label');
+    // Fork unlabeled events carry no secrets, so this is the ONLY possible
+    // release ack for a fork — it must post here.
+    expect(forkStop.writes).toContain('<!-- takeover-ack released -->');
+    // A /takeover on a stacked PR refuses OUT LOUD (the silent drop made it
+    // indistinguishable from a lost event) and never applies the label.
+    const stacked = runToggle({ cmd: 'add', base: 'feat/base-pr' });
+    expect(stacked.writes).toContain('<!-- takeover-ack base-refused -->');
+    expect(stacked.writes).toContain('`feat/base-pr`');
+    expect(stacked.writes).not.toContain('EDIT');
+    // …but a stop on a non-main PR PROCEEDS: removing a stuck label is
+    // harmless and matches the latest intent (previously dropped, leaving a
+    // manually-applied label with no command able to remove it).
+    const stackedStop = runToggle({
+      cmd: 'remove',
+      base: 'feat/base-pr',
+      labels: ['autofix/takeover'],
+    });
+    expect(stackedStop.writes).toContain('--remove-label');
+    // A non-main release never reaches the ack job (route ignores it), so
+    // the command's own ack is the only voice here too.
+    expect(stackedStop.writes).toContain('<!-- takeover-ack released -->');
+    // A closed PR still drops silently for both directions.
+    const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
+    expect(closed.writes.trim()).toBe('');
+    expect(closed.log).toContain('no longer an open PR');
+    // Both ack posts keep their non-fatal fallback: under bash -e a failed
+    // gh pr comment would otherwise abort the step RED after the label was
+    // already toggled — a worse signal than the silence being fixed. A
+    // mutation to `|| true` must not survive either: the warning is what
+    // makes the failure diagnosable.
+    expect(workflow).toContain(
+      `engage ack comment failed on #\${PR}; the scan's first-pickup ack heals it`,
+    );
+    expect(workflow).toContain('release ack comment failed on #${PR}');
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
@@ -3058,6 +3220,7 @@ describe('qwen-autofix workflow', () => {
       action = 'labeled',
       headRepo = 'QwenLM/qwen-code',
       label = 'autofix/takeover',
+      sender = 'wenshao',
     }) =>
       // The block also logs its reasoning; only the trailing summary is asserted.
       execFileSync(
@@ -3085,7 +3248,8 @@ describe('qwen-autofix workflow', () => {
             PR_STATE: state,
             PR_BASE_REF: base,
             PR_NUMBER_EVENT: '7368',
-            SENDER_LOGIN: 'wenshao',
+            SENDER_LOGIN: sender,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
           },
           encoding: 'utf8',
         },
@@ -3102,6 +3266,11 @@ describe('qwen-autofix workflow', () => {
     // Unchanged: a main-targeting in-repo PR still engages, and engagement
     // carries no base (the field exists only to name a refusal).
     expect(run({})).toBe('ack=engaged base= review=true');
+    // A label applied BY THE BOT came from takeover-command, which posts the
+    // engage ack itself (the labeled event has been observed to not fire —
+    // #7999, #8002 — so the ack cannot depend on this round-trip). Only the
+    // ack is suppressed; the immediate scan still routes.
+    expect(run({ sender: 'qwen-code-dev-bot' })).toBe('ack= base= review=true');
     // Still deliberately silent — these were never engaged and a comment on
     // them would be noise, not information: a closed PR, a fork (whose label
     // event carries no secrets to comment with), a non-takeover label, and
@@ -3111,6 +3280,15 @@ describe('qwen-autofix workflow', () => {
       'ack= base= review=false',
     );
     expect(run({ label: 'kind/bug' })).toBe('ack= base= review=false');
+    // A label REMOVED by the bot came from a /takeover stop — the command
+    // posts the release ack itself, mirroring the engage-side suppression.
+    expect(run({ action: 'unlabeled', sender: 'qwen-code-dev-bot' })).toBe(
+      'ack= base= review=false',
+    );
+    // …while a human removing the label still gets the ack-job release ack.
+    expect(run({ action: 'unlabeled' })).toBe(
+      'ack=released base= review=false',
+    );
     expect(
       run({ action: 'unlabeled', base: 'ci/autofix-gate-crash-retry' }),
     ).toBe('ack= base= review=false');
