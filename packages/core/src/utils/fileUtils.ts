@@ -36,7 +36,11 @@ import {
 import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
 import { readNotebookWithMetadata } from './notebook.js';
-import { readTextRange, type ReadTextRangeResult } from './read-text-range.js';
+import {
+  readTextRange,
+  type ReadTextRangeResult,
+  detectLineEndingFromContent,
+} from './read-text-range.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
   TEXT_RANGE_FAST_PATH_MAX_SIZE,
@@ -372,7 +376,7 @@ export async function readFileWithLineAndLimit(params: {
     originalLineCount,
     originalLineCountExact: true,
     truncatedByBytes: false,
-    lineEnding: joined.includes('\r\n') ? 'crlf' : 'lf',
+    lineEnding: detectLineEndingFromContent(joined),
   };
 }
 
