@@ -742,9 +742,7 @@
   width: min(16rem, var(--radix-dropdown-menu-content-available-width));
   max-width: var(--radix-dropdown-menu-content-available-width);
   max-height: var(--radix-dropdown-menu-content-available-height);
-  min-width: 0;
   overflow: hidden auto;
-  padding: 12px;
 }
 
 .sessionDetailsIdRow {
@@ -776,7 +774,6 @@
   border-radius: 4px;
   background: transparent;
   color: var(--muted-foreground);
-  cursor: pointer;
 }
 
 .sessionDetailsCopyButton:hover,

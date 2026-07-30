@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { CheckIcon, CopyIcon, InfoIcon } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { useI18n } from '../../i18n';
 import {
   DropdownMenuItem,
@@ -92,7 +93,7 @@ export function SessionDetailsSubmenu({
         collisionBoundary={collisionBoundary ?? undefined}
         collisionPadding={COLLISION_PADDING}
         updatePositionStrategy="always"
-        className={styles.sessionDetailsContent}
+        className={cn(styles.sessionDetailsContent, 'min-w-0 p-3')}
       >
         <div className={styles.tooltipContent}>
           <div className={styles.tooltipTitle} title={label}>
@@ -120,7 +121,7 @@ export function SessionDetailsSubmenu({
               {session.sessionId}
             </span>
             <DropdownMenuItem
-              className={styles.sessionDetailsCopyButton}
+              className={cn(styles.sessionDetailsCopyButton, 'cursor-pointer')}
               aria-label={t('sidebar.copySessionId')}
               title={t('sidebar.copySessionId')}
               onSelect={(event) => {

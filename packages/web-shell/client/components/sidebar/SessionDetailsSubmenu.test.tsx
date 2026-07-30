@@ -379,4 +379,21 @@ describe('SessionDetailsSubmenu', () => {
     expect(portalRoot.querySelector('[role="status"]')).toBeNull();
     expect(onError).toHaveBeenCalledWith(error, 'Failed to copy session ID');
   });
+
+  it('reports an unavailable clipboard through the existing error path', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    render();
+    await openDetails();
+
+    await selectCopy();
+
+    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Clipboard API is unavailable' }),
+      'Failed to copy session ID',
+    );
+  });
 });

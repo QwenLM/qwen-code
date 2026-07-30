@@ -81,6 +81,7 @@ import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsSubmenu } from './SessionDetailsSubmenu';
+import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 import {
   isPrimaryCollapsedSectionId,
   readCollapsedSessionSectionIds,
@@ -2667,9 +2668,7 @@ export function WebShellSidebar({
   }, []);
 
   const getSessionDetailsCollisionBoundary = useCallback(
-    () =>
-      sidebarRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
-      sidebarRef.current,
+    () => resolveSessionDetailsCollisionBoundary(sidebarRef.current),
     [],
   );
 

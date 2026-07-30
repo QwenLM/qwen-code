@@ -151,6 +151,15 @@ describe('SessionDetailsSubmenu keyboard behavior', () => {
     await pressKey(details!, 'ArrowRight');
 
     const copy = getMenuItem('Copy session ID');
+    const detailsContent = document.body.querySelector<HTMLElement>(
+      '[data-slot="dropdown-menu-sub-content"]',
+    );
+    expect(detailsContent?.classList.contains('min-w-0')).toBe(true);
+    expect(detailsContent?.classList.contains('min-w-[96px]')).toBe(false);
+    expect(detailsContent?.classList.contains('p-3')).toBe(true);
+    expect(detailsContent?.classList.contains('p-1')).toBe(false);
+    expect(copy.classList.contains('cursor-pointer')).toBe(true);
+    expect(copy.classList.contains('cursor-default')).toBe(false);
     await focus(copy);
     expect(document.activeElement).toBe(copy);
     await pressKey(copy, 'Enter');
