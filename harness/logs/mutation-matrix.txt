@@ -1,0 +1,45 @@
+KILLED|M1 no writer lease acquired for daemon maintenance|suite went red|Tests  7 failed
+   × archiveDaemonSessions > does not archive while another writer holds the lease 33ms
+   × archiveDaemonSessions > keeps independent batch sessions moving when one writer conflicts 16ms
+   × archiveDaemonSessions > does not report success after release fails but reconciles the task to the applied archive 15ms
+   × unarchiveDaemonSessions > deduplicates ids and does not lock already active or missing ids 4ms
+   × unarchiveDaemonSessions > does not unarchive while another writer holds the lease 13ms
+   × deleteDaemonSessions > does not delete while another writer holds the lease 15ms
+   × deleteDaemonSessions > throws when the lease is held by another writer 20ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  src/serve/server/session-archive.test.ts > archiveDaemonSessions > does not archive while another writer holds the lease
+ FAIL  src/serve/server/session-archive.test.ts > archiveDaemonSessions > keeps independent batch sessions moving when one writer conflicts
+ FAIL  src/serve/server/session-archive.test.ts > archiveDaemonSessions > does not report success after release fails but reconciles the task to the applied archive
+ FAIL  src/serve/server/session-archive.test.ts > unarchiveDaemonSessions > deduplicates ids and does not lock already active or missing ids
+---
+SURVIVED|M2 maintenance not run inside the selected runtime storage context|suite stayed green|no failures
+      Tests  118 passed (118)
+---
+KILLED|M3 pinned runtime root downgraded to a reload-overridable one|suite went red|Tests  2 failed
+   × Storage – runtime base dir async context isolation > lets a resolved runtime pin override later process env changes 7ms
+   × Storage – runtime base dir async context isolation > keeps a resolved runtime pin across nested configurable contexts 0ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  src/config/storage.test.ts > Storage – runtime base dir async context isolation > lets a resolved runtime pin override later process env changes
+ FAIL  src/config/storage.test.ts > Storage – runtime base dir async context isolation > keeps a resolved runtime pin across nested configurable contexts
+      Tests  2 failed | 64 passed (66)
+---
+KILLED|M4 shutdown seals but does not wait for admitted maintenance|suite went red|Tests  1 failed
+   × SessionArchiveCoordinator > seals new maintenance and waits only for admitted exclusive work 6ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  src/serve/server/session-archive.test.ts > SessionArchiveCoordinator > seals new maintenance and waits only for admitted exclusive work
+      Tests  1 failed | 42 passed (43)
+---
+KILLED|M5 draining daemon still admits new maintenance|suite went red|Tests  4 failed
+   × SessionArchiveCoordinator > seals new maintenance and waits only for admitted exclusive work 6ms
+   × archiveDaemonSessions > rejects with DaemonDrainingError after the coordinator is sealed 19ms
+   × unarchiveDaemonSessions > rejects with DaemonDrainingError after the coordinator is sealed 15ms
+   × deleteDaemonSessions > rejects with DaemonDrainingError after the coordinator is sealed 14ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  src/serve/server/session-archive.test.ts > SessionArchiveCoordinator > seals new maintenance and waits only for admitted exclusive work
+ FAIL  src/serve/server/session-archive.test.ts > archiveDaemonSessions > rejects with DaemonDrainingError after the coordinator is sealed
+ FAIL  src/serve/server/session-archive.test.ts > unarchiveDaemonSessions > rejects with DaemonDrainingError after the coordinator is sealed
+ FAIL  src/serve/server/session-archive.test.ts > deleteDaemonSessions > rejects with DaemonDrainingError after the coordinator is sealed
+      Tests  4 failed | 876 passed (880)
+---
+SURVIVED|CONTROL unmutated source|suite stayed green|no failures
+      Tests  43 passed (43)

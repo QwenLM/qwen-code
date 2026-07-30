@@ -1,0 +1,117 @@
+{
+  "pass": 22,
+  "fail": 0,
+  "total": 22,
+  "rows": [
+    {
+      "name": "head/delete: contended session reported in errors[] as writer conflict",
+      "ok": true,
+      "detail": "[{\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"error\":\"This session is already open in another Qwen process.\"}]"
+    },
+    {
+      "name": "head/delete: contended transcript NOT mutated (same inode, same location)",
+      "ok": true,
+      "detail": "before={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038549},\"archived\":{\"exists\":false}} after={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038549},\"archived\":{\"exists\":false}}"
+    },
+    {
+      "name": "head/delete: uncontended session in the SAME batch still completed",
+      "ok": true,
+      "detail": "[\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"]"
+    },
+    {
+      "name": "head/delete: request still returns 200 (per-session error, not request-level)",
+      "ok": true,
+      "detail": "200"
+    },
+    {
+      "name": "head/delete: succeeds after the foreign lease is released",
+      "ok": true,
+      "detail": "{\"removed\":[\"11111111-1111-4111-8111-111111111111\"],\"notFound\":[],\"errors\":[]}"
+    },
+    {
+      "name": "head/delete: transcript actually moved/removed on the retry",
+      "ok": true,
+      "detail": "before={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038549},\"archived\":{\"exists\":false}} afterRetry={\"active\":{\"exists\":false},\"archived\":{\"exists\":false}}"
+    },
+    {
+      "name": "base/delete: CONTROL \u2014 base mutates the transcript despite the live lease (expected red)",
+      "ok": true,
+      "detail": "base reported {\"removed\":[\"11111111-1111-4111-8111-111111111111\",\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"],\"notFound\":[],\"errors\":[]} and file went {\"active\":{\"exists\":true,\"size\":360,\"ino\":3038643},\"archived\":{\"exists\":false}} -> {\"active\":{\"exists\":false},\"archived\":{\"exists\":false}}"
+    },
+    {
+      "name": "head/archive: contended session reported in errors[] as writer conflict",
+      "ok": true,
+      "detail": "[{\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"error\":\"This session is already open in another Qwen process.\"}]"
+    },
+    {
+      "name": "head/archive: contended transcript NOT mutated (same inode, same location)",
+      "ok": true,
+      "detail": "before={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038550},\"archived\":{\"exists\":false}} after={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038550},\"archived\":{\"exists\":false}}"
+    },
+    {
+      "name": "head/archive: uncontended session in the SAME batch still completed",
+      "ok": true,
+      "detail": "[\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"]"
+    },
+    {
+      "name": "head/archive: request still returns 200 (per-session error, not request-level)",
+      "ok": true,
+      "detail": "200"
+    },
+    {
+      "name": "head/archive: succeeds after the foreign lease is released",
+      "ok": true,
+      "detail": "{\"archived\":[\"22222222-2222-4222-8222-222222222222\"],\"alreadyArchived\":[],\"notFound\":[],\"errors\":[]}"
+    },
+    {
+      "name": "head/archive: transcript actually moved/removed on the retry",
+      "ok": true,
+      "detail": "before={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038550},\"archived\":{\"exists\":false}} afterRetry={\"active\":{\"exists\":false},\"archived\":{\"exists\":true,\"size\":360,\"ino\":3038550}}"
+    },
+    {
+      "name": "base/archive: CONTROL \u2014 base mutates the transcript despite the live lease (expected red)",
+      "ok": true,
+      "detail": "base reported {\"archived\":[\"22222222-2222-4222-8222-222222222222\",\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"],\"alreadyArchived\":[],\"notFound\":[],\"errors\":[]} and file went {\"active\":{\"exists\":true,\"size\":360,\"ino\":3038644},\"archived\":{\"exists\":false}} -> {\"active\":{\"exists\":false},\"archived\":{\"exists\":true,\"size\":360,\"ino\":3038644}}"
+    },
+    {
+      "name": "head/unarchive: contended session reported in errors[] as writer conflict",
+      "ok": true,
+      "detail": "[{\"sessionId\":\"33333333-3333-4333-8333-333333333333\",\"error\":\"This session is already open in another Qwen process.\"}]"
+    },
+    {
+      "name": "head/unarchive: contended transcript NOT mutated (same inode, same location)",
+      "ok": true,
+      "detail": "before={\"active\":{\"exists\":false},\"archived\":{\"exists\":true,\"size\":360,\"ino\":3038551}} after={\"active\":{\"exists\":false},\"archived\":{\"exists\":true,\"size\":360,\"ino\":3038551}}"
+    },
+    {
+      "name": "head/unarchive: uncontended session in the SAME batch still completed",
+      "ok": true,
+      "detail": "[\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\"]"
+    },
+    {
+      "name": "head/unarchive: request still returns 200 (per-session error, not request-level)",
+      "ok": true,
+      "detail": "200"
+    },
+    {
+      "name": "head/unarchive: succeeds after the foreign lease is released",
+      "ok": true,
+      "detail": "{\"unarchived\":[\"33333333-3333-4333-8333-333333333333\"],\"alreadyActive\":[],\"notFound\":[],\"errors\":[]}"
+    },
+    {
+      "name": "head/unarchive: transcript actually moved/removed on the retry",
+      "ok": true,
+      "detail": "before={\"active\":{\"exists\":false},\"archived\":{\"exists\":true,\"size\":360,\"ino\":3038551}} afterRetry={\"active\":{\"exists\":true,\"size\":360,\"ino\":3038551},\"archived\":{\"exists\":false}}"
+    },
+    {
+      "name": "base/unarchive: CONTROL \u2014 base mutates the transcript despite the live lease (expected red)",
+      "ok": true,
+      "detail": "base reported {\"unarchived\":[\"33333333-3333-4333-8333-333333333333\",\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\"],\"alreadyActive\":[],\"notFound\":[],\"errors\":[]} and file went {\"active\":{\"exists\":false},\"archived\":{\"exists\":true,\"size\":360,\"ino\":3038645}} -> {\"active\":{\"exists\":true,\"size\":360,\"ino\":3038645},\"archived\":{\"exists\":false}}"
+    },
+    {
+      "name": "both arms: foreign writer produced real lock files under <runtime>/tmp/session-writer-locks",
+      "ok": true,
+      "detail": "head=3 base=3"
+    }
+  ]
+}

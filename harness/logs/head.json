@@ -1,0 +1,285 @@
+{
+  "arm": "head",
+  "treeDir": "<PR-HEAD-TREE>",
+  "root": "<TMP>/pr7975-head-CVica9",
+  "ws": "<TMP>/pr7975-head-CVica9/ws",
+  "runtimeBaseDir": "<TMP>/pr7975-head-CVica9/home/.qwen",
+  "chatsDir": "<TMP>/pr7975-head-CVica9/home/.qwen/projects/-private-var-folders-cn-nhdg71c51tq27p1876r8r9rr0000gn-T-pr7975-head-CVica9-ws/chats",
+  "ids": {
+    "heldDelete": "11111111-1111-4111-8111-111111111111",
+    "heldArchive": "22222222-2222-4222-8222-222222222222",
+    "heldUnarchive": "33333333-3333-4333-8333-333333333333",
+    "freeDelete": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "freeArchive": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "freeUnarchive": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  },
+  "lockFilesHeld": [
+    "11111111-1111-4111-8111-111111111111.lock",
+    "22222222-2222-4222-8222-222222222222.lock",
+    "33333333-3333-4333-8333-333333333333.lock"
+  ],
+  "before": {
+    "11111111-1111-4111-8111-111111111111": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038549
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "22222222-2222-4222-8222-222222222222": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038550
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "33333333-3333-4333-8333-333333333333": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038551
+      }
+    },
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038552
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038553
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038554
+      }
+    }
+  },
+  "contended": {
+    "delete": {
+      "status": 200,
+      "json": {
+        "removed": [
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ],
+        "notFound": [],
+        "errors": [
+          {
+            "sessionId": "11111111-1111-4111-8111-111111111111",
+            "error": "This session is already open in another Qwen process."
+          }
+        ]
+      }
+    },
+    "archive": {
+      "status": 200,
+      "json": {
+        "archived": [
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        ],
+        "alreadyArchived": [],
+        "notFound": [],
+        "errors": [
+          {
+            "sessionId": "22222222-2222-4222-8222-222222222222",
+            "error": "This session is already open in another Qwen process."
+          }
+        ]
+      }
+    },
+    "unarchive": {
+      "status": 200,
+      "json": {
+        "unarchived": [
+          "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        ],
+        "alreadyActive": [],
+        "notFound": [],
+        "errors": [
+          {
+            "sessionId": "33333333-3333-4333-8333-333333333333",
+            "error": "This session is already open in another Qwen process."
+          }
+        ]
+      }
+    }
+  },
+  "afterContended": {
+    "11111111-1111-4111-8111-111111111111": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038549
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "22222222-2222-4222-8222-222222222222": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038550
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "33333333-3333-4333-8333-333333333333": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038551
+      }
+    },
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038553
+      }
+    },
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038554
+      },
+      "archived": {
+        "exists": false
+      }
+    }
+  },
+  "retried": {
+    "delete": {
+      "status": 200,
+      "json": {
+        "removed": [
+          "11111111-1111-4111-8111-111111111111"
+        ],
+        "notFound": [],
+        "errors": []
+      }
+    },
+    "archive": {
+      "status": 200,
+      "json": {
+        "archived": [
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        "alreadyArchived": [],
+        "notFound": [],
+        "errors": []
+      }
+    },
+    "unarchive": {
+      "status": 200,
+      "json": {
+        "unarchived": [
+          "33333333-3333-4333-8333-333333333333"
+        ],
+        "alreadyActive": [],
+        "notFound": [],
+        "errors": []
+      }
+    }
+  },
+  "afterRetry": {
+    "11111111-1111-4111-8111-111111111111": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "22222222-2222-4222-8222-222222222222": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038550
+      }
+    },
+    "33333333-3333-4333-8333-333333333333": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038551
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": false
+      }
+    },
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {
+      "active": {
+        "exists": false
+      },
+      "archived": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038553
+      }
+    },
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc": {
+      "active": {
+        "exists": true,
+        "size": 360,
+        "ino": 3038554
+      },
+      "archived": {
+        "exists": false
+      }
+    }
+  },
+  "daemonLogTail": "qwen serve: daemon log \u2192 <TMP>/pr7975-head-CVica9/home/.qwen/debug/daemon/daemon.log\nqwen serve listening on http://127.0.0.1:4171 (mode=http-bridge, workspace=<TMP>/pr7975-head-CVica9/ws)\nqwen serve: bound to workspace \"<TMP>/pr7975-head-CVica9/ws\"\nqwen serve: startup timing: processToListenMs=456 runQwenServeToListenMs=344\nqwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.\n2026-07-30T12:56:39.335Z [INFO] [DAEMON] deferred runtime: scheduling fallback start in 1000ms\n2026-07-30T12:56:39.383Z [INFO] [DAEMON] deferred runtime: health served, scheduling start in 50ms\n2026-07-30T12:56:39.465Z [INFO] [DAEMON] ideEnvPresent=false primary=<TMP>/pr7975-head-CVica9/ws secondary= daemon workspace roots initialized\nqwen serve: session reaper started (interval 60000ms, idle threshold 1800000ms)\nqwen serve: /acp WebSocket transport enabled on /acp\nqwen serve: removeSession failed for \"11111111-1111-4111-8111-111111111111\": \"This session is already open in another Qwen process.\"\n2026-07-30T12:56:39.517Z [INFO] [DAEMON] route=POST /sessions/delete durationMs=29 status=200 request completed\nqwen serve: sessions archive result requested=2 requestedIds=[\"22222222-2222-4222-8222-222222222222\",\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"] archived=1 archivedIds=[\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"] alreadyArchived=0 alreadyArchivedIds=[] notFound=0 notFoundIds=[] errors=1 errorIds=[\"22222222-2222-4222-8222-222222222222\":\"This session is already open in another Qwen process.\"]\n2026-07-30T12:56:39.541Z [INFO] [DAEMON] route=POST /sessions/archive durationMs=22 status=200 request completed\nqwen serve: sessions unarchive result requested=2 requestedIds=[\"33333333-3333-4333-8333-333333333333\",\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\"] unarchived=1 unarchivedIds=[\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\"] alreadyActive=0 alreadyActiveIds=[] notFound=0 notFoundIds=[] errors=1 errorIds=[\"33333333-3333-4333-8333-333333333333\":\"This session is already open in another Qwen process.\"]\n2026-07-30T12:56:39.563Z [INFO] [DAEMON] route=POST /sessions/unarchive durationMs=20 status=200 request completed\n2026-07-30T12:56:39.680Z [INFO] [DAEMON] route=POST /sessions/delete durationMs=13 status=200 request completed\nqwen serve: sessions archive result requested=1 requestedIds=[\"22222222-2222-4222-8222-222222222222\"] archived=1 archivedIds=[\"22222222-2222-4222-8222-222222222222\"] alreadyArchived=0 alreadyArchivedIds=[] notFound=0 notFoundIds=[] errors=0 errorIds=[]\n2026-07-30T12:56:39.693Z [INFO] [DAEMON] route=POST /sessions/archive durationMs=11 status=200 request completed\nqwen serve: sessions unarchive result requested=1 requestedIds=[\"33333333-3333-4333-8333-333333333333\"] unarchived=1 unarchivedIds=[\"33333333-3333-4333-8333-333333333333\"] alreadyActive=0 alreadyActiveIds=[] notFound=0 notFoundIds=[] errors=0 errorIds=[]\n2026-07-30T12:56:39.707Z [INFO] [DAEMON] route=POST /sessions/unarchive durationMs=11 status=200 request completed\n2026-07-30T12:56:39.707Z [WARN] [DAEMON] received SIGTERM, draining\n2026-07-30T12:56:49.493Z [WARN] [DAEMON] error=\"ACP child pid=96438 exited uncleanly during shutdown (code=none, signal=SIGTERM)\" reason=daemon_shutdown workspace=<TMP>/pr7975-head-CVica9/ws workspace bridge required forceful shutdown\nqwen serve: ACP preheat failed, will retry on first session: AcpSessionBridge initialize timed out after 10000ms\n2026-07-30T12:56:49.494Z [ERROR] [DAEMON] ACP process registry shutdown error\n  AggregateError: ACP child process shutdown failed\n      at file://<PR-HEAD-TREE>/packages/acp-bridge/dist/process-registry.js:49:23\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n2026-07-30T12:56:49.495Z [ERROR] [DAEMON] daemon shutdown incomplete\n  AggregateError: ACP child process shutdown failed\n      at file://<PR-HEAD-TREE>/packages/acp-bridge/dist/process-registry.js:49:23\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n2026-07-30T12:56:49.497Z [ERROR] [DAEMON] shutdown error\n  AggregateError: ACP child process shutdown failed\n      at file://<PR-HEAD-TREE>/packages/acp-bridge/dist/process-registry.js:49:23\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n"
+}

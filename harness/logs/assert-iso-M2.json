@@ -1,0 +1,52 @@
+{
+  "pass": 8,
+  "fail": 1,
+  "total": 9,
+  "rows": [
+    {
+      "name": "head/list: workspace-qualified listing reads the SELECTED runtime root",
+      "ok": false,
+      "detail": "[\"PRIMARY-RUNTIME-DECOY rt1 ffffffff-ffff-4fff-8fff-ffffffffffff\",\"PRIMARY-RUNTIME-DECOY rt1 eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"PRIMARY-RUNTIME-DECOY rt1 dddddddd-dddd-4ddd-8ddd-dddddddddddd\"]"
+    },
+    {
+      "name": "head/delete: removes the transcript in the selected runtime root",
+      "ok": true,
+      "detail": "{\"rt2\":{\"exists\":false},\"rt1decoy\":{\"exists\":true,\"size\":397,\"ino\":3274332}}"
+    },
+    {
+      "name": "head/delete: leaves the primary-runtime decoy untouched",
+      "ok": true,
+      "detail": "{\"exists\":true,\"size\":397,\"ino\":3274332}"
+    },
+    {
+      "name": "head/lock: a lease held in the SELECTED runtime root blocks the delete",
+      "ok": true,
+      "detail": "{\"removed\":[],\"notFound\":[],\"errors\":[{\"sessionId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"error\":\"This session is already open in another Qwen process.\"}]}"
+    },
+    {
+      "name": "head/lock: a lease held in the PRIMARY runtime root does not block ws2 work",
+      "ok": true,
+      "detail": "{\"removed\":[\"ffffffff-ffff-4fff-8fff-ffffffffffff\"],\"notFound\":[],\"errors\":[]}"
+    },
+    {
+      "name": "head: lock files landed in both roots, so the two roots were genuinely distinct",
+      "ok": true,
+      "detail": "{\"rt2\":[\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.lock\"],\"rt1\":[\"ffffffff-ffff-4fff-8fff-ffffffffffff.lock\"]}"
+    },
+    {
+      "name": "base/list: CONTROL \u2014 base listing reads the PRIMARY runtime root (expected red)",
+      "ok": true,
+      "detail": "[\"PRIMARY-RUNTIME-DECOY rt1 ffffffff-ffff-4fff-8fff-ffffffffffff\",\"PRIMARY-RUNTIME-DECOY rt1 eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"PRIMARY-RUNTIME-DECOY rt1 dddddddd-dddd-4ddd-8ddd-dddddddddddd\"]"
+    },
+    {
+      "name": "base/delete: CONTROL \u2014 base deletes the decoy and reports success while the real transcript survives (expected red)",
+      "ok": true,
+      "detail": "{\"rt2\":{\"exists\":true,\"size\":392,\"ino\":3038890},\"rt1decoy\":{\"exists\":false}}"
+    },
+    {
+      "name": "base/lock: CONTROL \u2014 a lease in the selected runtime root does not protect anything on base (expected red)",
+      "ok": true,
+      "detail": "{\"removed\":[\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\"],\"notFound\":[],\"errors\":[]}"
+    }
+  ]
+}

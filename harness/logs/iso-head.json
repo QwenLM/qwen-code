@@ -1,0 +1,210 @@
+{
+  "arm": "head",
+  "treeDir": "<PR-HEAD-TREE>",
+  "root": "<TMP>/pr7975-iso-head-CcKQNL",
+  "ws1": "<TMP>/pr7975-iso-head-CcKQNL/ws1",
+  "ws2": "<TMP>/pr7975-iso-head-CcKQNL/ws2",
+  "RT1": "<TMP>/pr7975-iso-head-CcKQNL/home/.qwen",
+  "RT2": "<TMP>/pr7975-iso-head-CcKQNL/rt2",
+  "realChats": "<TMP>/pr7975-iso-head-CcKQNL/rt2/projects/-private-var-folders-cn-nhdg71c51tq27p1876r8r9rr0000gn-T-pr7975-iso-head-CcKQNL-ws2/chats",
+  "decoyChats": "<TMP>/pr7975-iso-head-CcKQNL/home/.qwen/projects/-private-var-folders-cn-nhdg71c51tq27p1876r8r9rr0000gn-T-pr7975-iso-head-CcKQNL-ws2/chats",
+  "ids": {
+    "routing": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "lockRight": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "lockWrong": "ffffffff-ffff-4fff-8fff-ffffffffffff"
+  },
+  "lockDirs": {
+    "rt2": [
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.lock"
+    ],
+    "rt1": [
+      "ffffffff-ffff-4fff-8fff-ffffffffffff.lock"
+    ]
+  },
+  "workspaces": {
+    "status": 503,
+    "json": {
+      "error": "Daemon runtime is still starting",
+      "code": "daemon_runtime_starting"
+    }
+  },
+  "listing": {
+    "status": 200,
+    "json": {
+      "sessions": [
+        {
+          "sessionId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "workspaceCwd": "<TMP>/pr7975-iso-head-CcKQNL/ws2",
+          "createdAt": "2026-07-30T00:00:00.000Z",
+          "updatedAt": "2026-07-30T13:01:00.287Z",
+          "displayName": "SELECTED-RUNTIME rt2 ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "clientCount": 0,
+          "hasActivePrompt": false,
+          "isArchived": false
+        },
+        {
+          "sessionId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "workspaceCwd": "<TMP>/pr7975-iso-head-CcKQNL/ws2",
+          "createdAt": "2026-07-30T00:00:00.000Z",
+          "updatedAt": "2026-07-30T13:01:00.286Z",
+          "displayName": "SELECTED-RUNTIME rt2 eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "clientCount": 0,
+          "hasActivePrompt": false,
+          "isArchived": false
+        },
+        {
+          "sessionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "workspaceCwd": "<TMP>/pr7975-iso-head-CcKQNL/ws2",
+          "createdAt": "2026-07-30T00:00:00.000Z",
+          "updatedAt": "2026-07-30T13:01:00.286Z",
+          "displayName": "SELECTED-RUNTIME rt2 dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "clientCount": 0,
+          "hasActivePrompt": false,
+          "isArchived": false
+        }
+      ]
+    }
+  },
+  "before": {
+    "routing": {
+      "rt2": {
+        "exists": true,
+        "size": 392,
+        "ino": 3038818
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038819
+      }
+    },
+    "lockRight": {
+      "rt2": {
+        "exists": true,
+        "size": 392,
+        "ino": 3038820
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038821
+      }
+    },
+    "lockWrong": {
+      "rt2": {
+        "exists": true,
+        "size": 392,
+        "ino": 3038822
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038823
+      }
+    }
+  },
+  "deleteRouting": {
+    "status": 200,
+    "json": {
+      "removed": [
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+      ],
+      "notFound": [],
+      "errors": []
+    }
+  },
+  "afterRouting": {
+    "routing": {
+      "rt2": {
+        "exists": false
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038819
+      }
+    },
+    "lockRight": {
+      "rt2": {
+        "exists": true,
+        "size": 392,
+        "ino": 3038820
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038821
+      }
+    },
+    "lockWrong": {
+      "rt2": {
+        "exists": true,
+        "size": 392,
+        "ino": 3038822
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038823
+      }
+    }
+  },
+  "deleteLockRight": {
+    "status": 200,
+    "json": {
+      "removed": [],
+      "notFound": [],
+      "errors": [
+        {
+          "sessionId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "error": "This session is already open in another Qwen process."
+        }
+      ]
+    }
+  },
+  "deleteLockWrong": {
+    "status": 200,
+    "json": {
+      "removed": [
+        "ffffffff-ffff-4fff-8fff-ffffffffffff"
+      ],
+      "notFound": [],
+      "errors": []
+    }
+  },
+  "afterLocks": {
+    "routing": {
+      "rt2": {
+        "exists": false
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038819
+      }
+    },
+    "lockRight": {
+      "rt2": {
+        "exists": true,
+        "size": 392,
+        "ino": 3038820
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038821
+      }
+    },
+    "lockWrong": {
+      "rt2": {
+        "exists": false
+      },
+      "rt1decoy": {
+        "exists": true,
+        "size": 397,
+        "ino": 3038823
+      }
+    }
+  },
+  "daemonLogTail": "qwen serve: daemon log \u2192 <TMP>/pr7975-iso-head-CcKQNL/home/.qwen/debug/daemon/daemon.log\nqwen serve listening on http://127.0.0.1:4271 (mode=http-bridge, workspace=<TMP>/pr7975-iso-head-CcKQNL/ws1)\nqwen serve: bound to workspace \"<TMP>/pr7975-iso-head-CcKQNL/ws1\"\nqwen serve: startup timing: processToListenMs=536 runQwenServeToListenMs=12\nqwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.\n2026-07-30T13:01:01.421Z [INFO] [DAEMON] ideEnvPresent=false primary=<TMP>/pr7975-iso-head-CcKQNL/ws1 secondary= daemon workspace roots initialized\nqwen serve: session reaper started (interval 60000ms, idle threshold 1800000ms)\nqwen serve: session reaper started (interval 60000ms, idle threshold 1800000ms)\nqwen serve: /acp WebSocket transport enabled on /acp\n2026-07-30T13:01:01.454Z [INFO] [DAEMON] route=GET /workspaces/%2Fprivate%2Fvar%2Ffolders%2Fcn%2Fnhdg71c51tq27p1876r8r9rr0000gn%2FT%2Fpr7975-iso-head-CcKQNL%2Fws2/sessions durationMs=7 status=200 request completed\n2026-07-30T13:01:01.481Z [INFO] [DAEMON] route=POST /workspaces/%2Fprivate%2Fvar%2Ffolders%2Fcn%2Fnhdg71c51tq27p1876r8r9rr0000gn%2FT%2Fpr7975-iso-head-CcKQNL%2Fws2/sessions/delete durationMs=23 status=200 request completed\nqwen serve: removeSession failed for \"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\": \"This session is already open in another Qwen process.\"\n2026-07-30T13:01:01.497Z [INFO] [DAEMON] route=POST /workspaces/%2Fprivate%2Fvar%2Ffolders%2Fcn%2Fnhdg71c51tq27p1876r8r9rr0000gn%2FT%2Fpr7975-iso-head-CcKQNL%2Fws2/sessions/delete durationMs=14 status=200 request completed\n2026-07-30T13:01:01.510Z [INFO] [DAEMON] route=POST /workspaces/%2Fprivate%2Fvar%2Ffolders%2Fcn%2Fnhdg71c51tq27p1876r8r9rr0000gn%2FT%2Fpr7975-iso-head-CcKQNL%2Fws2/sessions/delete durationMs=11 status=200 request completed\n2026-07-30T13:01:01.511Z [WARN] [DAEMON] received SIGTERM, draining\n2026-07-30T13:01:11.448Z [WARN] [DAEMON] error=\"ACP child pid=96611 exited uncleanly during shutdown (code=none, signal=SIGTERM)\" reason=daemon_shutdown workspace=<TMP>/pr7975-iso-head-CcKQNL/ws1 workspace bridge required forceful shutdown\nqwen serve: ACP preheat failed, will retry on first session: AcpSessionBridge initialize timed out after 10000ms\n2026-07-30T13:01:11.449Z [ERROR] [DAEMON] ACP process registry shutdown error\n  AggregateError: ACP child process shutdown failed\n      at file://<PR-HEAD-TREE>/packages/acp-bridge/dist/process-registry.js:49:23\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n2026-07-30T13:01:11.450Z [ERROR] [DAEMON] daemon shutdown incomplete\n  AggregateError: ACP child process shutdown failed\n      at file://<PR-HEAD-TREE>/packages/acp-bridge/dist/process-registry.js:49:23\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n2026-07-30T13:01:11.452Z [ERROR] [DAEMON] shutdown error\n  AggregateError: ACP child process shutdown failed\n      at file://<PR-HEAD-TREE>/packages/acp-bridge/dist/process-registry.js:49:23\n      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n"
+}

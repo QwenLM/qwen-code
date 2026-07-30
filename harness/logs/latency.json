@@ -1,0 +1,9 @@
+{
+  "platform": "darwin",
+  "n": 100,
+  "leaseAcquireReleaseMs": 938,
+  "leasePerSessionMs": 9.38,
+  "psSpawnMs": 281,
+  "psPerCallMs": 2.81,
+  "psShareOfLease": 30
+}
