@@ -86,6 +86,12 @@ interface PKCEParams {
 }
 
 /**
+ * Map to track in-progress token refreshes per server to prevent race conditions.
+ * Key: serverName, Value: Promise that resolves to the new access token or null
+ */
+const refreshLocks: Map<string, Promise<string | null>> = new Map();
+
+/**
  * Provider for handling OAuth authentication for MCP servers.
  */
 export class MCPOAuthProvider {
@@ -850,46 +856,80 @@ export class MCPOAuthProvider {
       return token.accessToken;
     }
 
-    // Try to refresh if we have a refresh token
-    if (token.refreshToken && config.clientId && credentials.tokenUrl) {
-      try {
-        console.log(`Refreshing expired token for MCP server: ${serverName}`);
-
-        const newTokenResponse = await this.refreshAccessToken(
-          config,
-          token.refreshToken,
-          credentials.tokenUrl,
-          credentials.mcpServerUrl,
-        );
-
-        // Update stored token
-        const newToken: OAuthToken = {
-          accessToken: newTokenResponse.access_token,
-          tokenType: newTokenResponse.token_type,
-          refreshToken: newTokenResponse.refresh_token || token.refreshToken,
-          scope: newTokenResponse.scope || token.scope,
-        };
-
-        if (newTokenResponse.expires_in) {
-          newToken.expiresAt = Date.now() + newTokenResponse.expires_in * 1000;
-        }
-
-        await MCPOAuthTokenStorage.saveToken(
-          serverName,
-          newToken,
-          config.clientId,
-          credentials.tokenUrl,
-          credentials.mcpServerUrl,
-        );
-
-        return newToken.accessToken;
-      } catch (error) {
-        console.error(`Failed to refresh token: ${getErrorMessage(error)}`);
-        // Remove invalid token
-        await MCPOAuthTokenStorage.removeToken(serverName);
-      }
+    // Check if a refresh is already in progress for this server
+    const existingRefresh = refreshLocks.get(serverName);
+    if (existingRefresh) {
+      // Wait for the existing refresh to complete and return its result
+      return await existingRefresh;
     }
 
-    return null;
+    // Create a new refresh promise to prevent concurrent refreshes
+    const refreshPromise = (async (): Promise<string | null> => {
+      try {
+        // Try to refresh if we have a refresh token
+        if (token.refreshToken && config.clientId && credentials.tokenUrl) {
+          console.log(`Refreshing expired token for MCP server: ${serverName}`);
+
+          const newTokenResponse = await this.refreshAccessToken(
+            config,
+            token.refreshToken,
+            credentials.tokenUrl,
+            credentials.mcpServerUrl,
+          );
+
+          // Update stored token
+          const newToken: OAuthToken = {
+            accessToken: newTokenResponse.access_token,
+            tokenType: newTokenResponse.token_type,
+            refreshToken: newTokenResponse.refresh_token || token.refreshToken,
+            scope: newTokenResponse.scope || token.scope,
+          };
+
+          if (newTokenResponse.expires_in) {
+            newToken.expiresAt = Date.now() + newTokenResponse.expires_in * 1000;
+          }
+
+          await MCPOAuthTokenStorage.saveToken(
+            serverName,
+            newToken,
+            config.clientId,
+            credentials.tokenUrl,
+            credentials.mcpServerUrl,
+          );
+
+          return newToken.accessToken;
+        }
+        return null;
+      } catch (error) {
+        console.error(`Failed to refresh token: ${getErrorMessage(error)}`);
+        // CRITICAL FIX: Re-check if a valid token exists before deleting.
+        // Another concurrent operation might have successfully saved a token.
+        // Only remove the token if no valid token exists after the failure.
+        const currentCredentials = await MCPOAuthTokenStorage.getToken(serverName);
+        if (
+          !currentCredentials ||
+          MCPOAuthTokenStorage.isTokenExpired(currentCredentials.token)
+        ) {
+          await MCPOAuthTokenStorage.removeToken(serverName);
+        }
+        return null;
+      }
+    })();
+
+    // Store the promise to prevent concurrent refresh attempts
+    // NOTE: this must happen AFTER the promise is created but the cleanup is
+    // attached to the promise via .finally() (not inside the IIFE's finally)
+    // because a synchronous resolution inside the IIFE would cause the inner
+    // finally to run before refreshLocks.set(), leaving a stale lock.
+    refreshLocks.set(serverName, refreshPromise);
+
+    // Always clean up the lock after the refresh completes or fails,
+    // regardless of whether the IIFE resolved synchronously or asynchronously.
+    void refreshPromise.finally(() => {
+      refreshLocks.delete(serverName);
+    });
+
+    // Wait for and return the result of the refresh operation
+    return await refreshPromise;
   }
 }

@@ -746,6 +746,92 @@ describe('MCPOAuthProvider', () => {
 
       expect(result).toBeNull();
     });
+
+    it('should prevent concurrent refresh attempts and avoid deleting valid tokens', async () => {
+      // This test verifies the fix for the race condition where concurrent
+      // getValidToken calls could delete a valid token saved by another call.
+
+      const expiredCredentials = {
+        serverName: 'test-server',
+        token: { ...mockToken, expiresAt: Date.now() - 3600000 },
+        clientId: 'test-client-id',
+        tokenUrl: 'https://auth.example.com/token',
+        updatedAt: Date.now(),
+      };
+
+      // First call: getToken returns expired token
+      vi.mocked(MCPOAuthTokenStorage.getToken)
+        .mockResolvedValueOnce(expiredCredentials) // First call sees expired
+        .mockResolvedValueOnce(expiredCredentials); // Second call sees expired
+
+      // isTokenExpired returns true for the expired token
+      vi.mocked(MCPOAuthTokenStorage.isTokenExpired).mockReturnValue(true);
+
+      // Mock refreshAccessToken to succeed once, fail once
+      const refreshResponse = {
+        access_token: 'new_access_token',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: 'new_refresh_token',
+      };
+
+      mockFetch
+        .mockResolvedValueOnce(
+          createMockResponse({
+            ok: true,
+            contentType: 'application/json',
+            text: JSON.stringify(refreshResponse),
+            json: refreshResponse,
+          }),
+        )
+        .mockResolvedValueOnce(
+          createMockResponse({
+            ok: false,
+            status: 429,
+            contentType: 'application/json',
+            text: JSON.stringify({ error: 'rate_limited' }),
+            json: { error: 'rate_limited' },
+          }),
+        );
+
+      // Mock saveToken to track calls
+      vi.mocked(MCPOAuthTokenStorage.saveToken).mockResolvedValue(undefined);
+
+      // Mock getToken AFTER save to return the valid token
+      vi.mocked(MCPOAuthTokenStorage.getToken)
+        .mockResolvedValueOnce({
+          ...expiredCredentials,
+          token: {
+            ...mockToken,
+            accessToken: 'new_access_token',
+            expiresAt: Date.now() + 3600000,
+          },
+        }) // After first save, valid token exists
+        .mockResolvedValueOnce({
+          ...expiredCredentials,
+          token: {
+            ...mockToken,
+            accessToken: 'new_access_token',
+            expiresAt: Date.now() + 3600000,
+          },
+        }); // After second failure check, valid token still exists
+
+      // Start two concurrent getValidToken calls
+      const [result1, result2] = await Promise.all([
+        MCPOAuthProvider.getValidToken('test-server', mockConfig),
+        MCPOAuthProvider.getValidToken('test-server', mockConfig),
+      ]);
+
+      // Both should return the new valid token (second waits for first)
+      expect(result1).toBe('new_access_token');
+      expect(result2).toBe('new_access_token');
+
+      // saveToken should only be called once (first successful refresh)
+      expect(MCPOAuthTokenStorage.saveToken).toHaveBeenCalledTimes(1);
+
+      // removeToken should NOT be called because valid token exists after failure
+      expect(MCPOAuthTokenStorage.removeToken).not.toHaveBeenCalled();
+    });
   });
 
   describe('PKCE parameter generation', () => {
