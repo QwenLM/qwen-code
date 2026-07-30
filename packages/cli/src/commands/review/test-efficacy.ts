@@ -57,6 +57,7 @@ import {
   rmSync,
   lstatSync,
   existsSync,
+  statSync,
   symlinkSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -1000,7 +1001,8 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
     if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
     const sourceEntry = join(source, entry.name);
     const targetEntry = join(target, entry.name);
-    if (entry.name.startsWith('@') && entry.isDirectory()) {
+    if (!statSync(sourceEntry).isDirectory()) continue;
+    if (entry.name.startsWith('@')) {
       mkdirSync(targetEntry);
       for (const pkg of readdirSync(sourceEntry)) {
         symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);

@@ -1079,6 +1079,10 @@ process.stdout.write(JSON.stringify({
     const sourceBinDir = join(dependencyRoot, 'node_modules', '.bin');
     mkdirSync(sourceBinDir);
     writeFileSync(
+      join(dependencyRoot, 'node_modules', '.package-lock.json'),
+      '{}\n',
+    );
+    writeFileSync(
       join(sourceVitestDir, 'vitest.mjs'),
       `import '${join(probeTree, 'src/x.test.mjs')}';
 process.stdout.write(JSON.stringify({
