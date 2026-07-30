@@ -4609,6 +4609,285 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('cat > "${proxy_script}"');
   });
 
+  it('posts a takeover milestone digest as rounds accumulate, with a residual bucket', () => {
+    // The takeover cap (100) bounds runaway but says nothing about when a
+    // human should step in: #7469 ground to round 12 over 7 days with the
+    // only budget signal buried in Actions logs. Once 10+ rounds accumulate
+    // since the last digest, a window-scoped census lands on the PR itself.
+    // Digest fires only on takeover PRs and only for PUSHED rounds…
+    expect(pushAndReportStep).toContain('"${OUTCOME}" == "fixed"');
+    expect(pushAndReportStep).toContain(
+      '"${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}"',
+    );
+    // …on a CROSSING trigger, not an equality test: failure rounds also
+    // advance the counter, so `push@9, crash@10, push@11` would skip an
+    // exact %10 forever — on exactly the failure-heavy PR the digest
+    // exists for.
+    expect(pushAndReportStep).toContain('"${NEXT_ROUND}" -ge 10');
+    expect(pushAndReportStep).toContain('$(( NEXT_ROUND - MS_LAST ))');
+    // Its own marker, NOT autofix-eval: every census (round, consec,
+    // watermark) selects on autofix-eval, so the digest must stay
+    // invisible to all of them; the feedback filters drop bot comments,
+    // so the agent never reads it as feedback either.
+    expect(pushAndReportStep).toContain('<!-- autofix-milestone round=');
+    const milestone = pushAndReportStep.match(
+      /printf '[^']*autofix-milestone[^']*'/,
+    )?.[0];
+    expect(milestone).toBeTruthy();
+    expect(milestone).not.toContain('autofix-eval');
+    expect(milestone).toContain('<summary>中文说明</summary>');
+    // …and the marker inventory stays complete.
+    expect(workflow).toContain(
+      'autofix-base-updated|autofix-milestone|qwen-triage',
+    );
+
+    // Behavioral replay: extract the digest block and run it under bash
+    // with a stubbed gh against fixture ic.json histories. String pins
+    // alone cannot catch a census that silently zeroes.
+    const digestBlock = pushAndReportStep.match(
+      /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(digestBlock).toBeTruthy();
+    // Cross-pin: each census grep needle must match the actual headline
+    // emission site, so a reword that updates one but not the other fails
+    // here — not silently in production.
+    const emitPush = pushAndReportStep.match(
+      /echo "(🤖 Addressed the latest review feedback[^"]*)"/,
+    )?.[1];
+    const emitNoop = pushAndReportStep.match(
+      /echo "(🤖 Reviewed the latest feedback — no changes needed[^"]*)"/,
+    )?.[1];
+    const emitTimeout = reviewAddressReportStep.match(
+      /CAUSE="(ran out of time before finishing[^"]*)"/,
+    )?.[1];
+    const emitRejected = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 Could not (?:address the latest feedback|produce a passing fix)[^"]*)"/,
+    )?.[1];
+    expect(emitPush).toBeTruthy();
+    expect(emitNoop).toBeTruthy();
+    expect(emitTimeout).toBeTruthy();
+    expect(emitRejected).toBeTruthy();
+    const needlePushed = digestBlock.match(/N_PUSHED=.*grep -c '([^']*)'/)?.[1];
+    const needleNoop = digestBlock.match(/N_NOOP=.*grep -c '([^']*)'/)?.[1];
+    const needleTimeout = digestBlock.match(
+      /N_TIMEOUT=.*grep -c '([^']*)'/,
+    )?.[1];
+    const needleRejected = digestBlock.match(
+      /N_REJECTED=.*grep -cE '([^']*)'/,
+    )?.[1];
+    expect(needlePushed).toBeTruthy();
+    expect(needleNoop).toBeTruthy();
+    expect(needleTimeout).toBeTruthy();
+    expect(needleRejected).toBeTruthy();
+    expect(emitPush).toContain(needlePushed);
+    expect(emitNoop).toContain(needleNoop);
+    expect(`🤖 AutoFix ${emitTimeout}`).toContain(needleTimeout);
+    expect(emitRejected).toMatch(new RegExp(needleRejected));
+    const HEADS = {
+      push: '🤖 Addressed the latest review feedback (round 2/100). What changed…',
+      noop: '🤖 Reviewed the latest feedback — no changes needed. Why…',
+      timeout:
+        '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.',
+      rejectedOld:
+        '🤖 Could not address the latest feedback automatically (round 3/100). A human should take over this PR.',
+      rejectedNew:
+        '🤖 Could not produce a passing fix for this feedback (round 4/100) — the verification gate rejected the attempt.',
+      crash:
+        '🤖 AutoFix crashed before it could evaluate the feedback (attempt 2/100) — it will retry on the next scan.',
+      gate: '🤖 AutoFix hit a verification-gate error before reaching a verdict (attempt 3/100) — it will retry on the next scan.',
+    };
+    const K = '2026-07-01T00:00:00Z';
+    const evalC = (head, win, at, login = 'qwen-code-dev-bot') => ({
+      user: { login },
+      created_at: at,
+      body: `${head}\n<!-- autofix-eval ts=x acted=false round=1${win ? ` win=${win}` : ''} -->`,
+    });
+    const baseC = (at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: '🔀 Base updated: …\n<!-- autofix-base-updated -->',
+    });
+    const msC = (round, win, at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: `📊 …\n<!-- autofix-milestone round=${round} win=${win} -->`,
+    });
+    const runDigest = (
+      comments,
+      {
+        nextRound = 10,
+        window = K,
+        outcome = 'fixed',
+        maxRounds = '100',
+        commentExit = 0,
+      } = {},
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), 'milestone-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const commentBody =
+          commentExit === 0
+            ? `printf '%s' "$7" > ${JSON.stringify(join(dir, 'digest.md'))}; exit 0`
+            : `exit ${commentExit}`;
+        writeFileSync(
+          join(bin, 'gh'),
+          `#!/usr/bin/env bash\nif [[ "$1" == 'pr' && "$2" == 'comment' ]]; then ${commentBody}; fi\nexit 1\n`,
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const log = execFileSync(
+          'bash',
+          ['-c', `set -euo pipefail\n${digestBlock.replace(/\n {10}/g, '\n')}`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              WORKDIR: dir,
+              OUTCOME: outcome,
+              NEXT_ROUND: String(nextRound),
+              MAX_ROUNDS: maxRounds,
+              TAKEOVER_MAX_ROUNDS: '100',
+              WINDOW: window,
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              REPO: 'o/r',
+              PR: '1',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+            },
+            encoding: 'utf8',
+          },
+        );
+        const digestPath = join(dir, 'digest.md');
+        return {
+          log,
+          body: existsSync(digestPath) ? readFileSync(digestPath, 'utf8') : '',
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Mixed healthy history: counts land in the right buckets, an
+    // old-window push and a HUMAN quoting a marker verbatim are excluded,
+    // both rejection wordings count, base updates window by timestamp.
+    const mixed = runDigest([
+      evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-03T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-04T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-05T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-06T00:00:00Z'),
+      evalC(HEADS.noop, K, '2026-07-07T00:00:00Z'),
+      evalC(HEADS.timeout, K, '2026-07-08T00:00:00Z'),
+      evalC(HEADS.rejectedOld, K, '2026-07-09T00:00:00Z'),
+      evalC(HEADS.rejectedNew, K, '2026-07-10T00:00:00Z'),
+      evalC(HEADS.push, '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-11T00:00:00Z', 'some-human'),
+      baseC('2026-07-12T00:00:00Z'),
+      baseC('2026-05-02T00:00:00Z'),
+    ]);
+    expect(mixed.body).toContain(
+      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 2 rejected attempt(s), 0 other round(s)',
+    );
+    expect(mixed.body).toContain('1 base update(s)');
+    expect(mixed.body).toContain('round 10/100, in the current window');
+    expect(mixed.body).toContain(
+      '<!-- autofix-milestone round=10 win=2026-07-01T00:00:00Z -->',
+    );
+    expect(mixed.log).toContain('milestone digest posted');
+
+    // Failure-heavy window: crashes and gate errors land in the residual
+    // bucket and make it the LOUDEST line, not four zeros quieter than a
+    // healthy window.
+    const grim = runDigest([
+      evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-03T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-04T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-05T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-06T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-07T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-08T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-09T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-10T00:00:00Z'),
+    ]);
+    expect(grim.body).toContain(
+      '2 pushed fix(es), 0 no-change review(s), 0 timeout(s), 0 rejected attempt(s), 8 other round(s)',
+    );
+
+    // Crossing trigger: a digest at round 10 suppresses round 12 but not
+    // round 20; a failure at the exact multiple no longer loses the digest.
+    const suppressed = runDigest(
+      [
+        evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+        msC(10, K, '2026-07-03T00:00:00Z'),
+      ],
+      { nextRound: 12 },
+    );
+    expect(suppressed.body).toBe('');
+    const dueAgain = runDigest(
+      [
+        evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+        msC(10, K, '2026-07-03T00:00:00Z'),
+      ],
+      { nextRound: 20 },
+    );
+    expect(dueAgain.body).toContain('round 20/100');
+    // An old-window milestone marker does not suppress a fresh window.
+    const freshWindow = runDigest(
+      [
+        evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+        msC(11, '2026-05-01T00:00:00Z', '2026-07-03T00:00:00Z'),
+      ],
+      { nextRound: 11 },
+    );
+    expect(freshWindow.body).toContain('round 11/100');
+
+    // WINDOW=none says what it counts instead of claiming a window.
+    const noWindow = runDigest(
+      [evalC(HEADS.push, null, '2026-07-02T00:00:00Z')],
+      { window: 'none' },
+    );
+    expect(noWindow.body).toContain('since the PR opened');
+
+    // Non-pushing outcomes and non-takeover caps never digest.
+    expect(
+      runDigest([evalC(HEADS.push, K, '2026-07-02T00:00:00Z')], {
+        outcome: 'noop',
+      }).body,
+    ).toBe('');
+    expect(
+      runDigest([evalC(HEADS.push, K, '2026-07-02T00:00:00Z')], {
+        maxRounds: '10',
+      }).body,
+    ).toBe('');
+    // A census that parses zero window markers at round 10+ posts NOTHING
+    // rather than a fabricated all-zero digest.
+    const empty = runDigest([]);
+    expect(empty.body).toBe('');
+    expect(empty.log).toContain('skipping the digest');
+
+    // Best-effort is behavioral, not just string-pinned: when `gh pr
+    // comment` fails, the block must still return normally (no throw under
+    // the step's `set -e` lineage) and only warn — a good push must never
+    // go red over a failed digest.
+    const commentFailed = runDigest(
+      [evalC(HEADS.push, K, '2026-07-02T00:00:00Z')],
+      { commentExit: 1 },
+    );
+    expect(commentFailed.body).toBe('');
+    expect(commentFailed.log).toContain(
+      '::warning::milestone digest failed to post on PR #1',
+    );
+
+    // Best-effort stays pinned: the success log is chained to the post
+    // (no unconditional "posted" after a failed comment), the failure
+    // path only warns.
+    expect(pushAndReportStep).toMatch(
+      /then\n\s+echo "📊 milestone digest posted/,
+    );
+    expect(pushAndReportStep).toContain('milestone digest failed to post');
+  });
+
   it('pushes autofix branches without rewriting remote history', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
     // No bare -f / +refspec force forms either. (--no-verify is NOT a force
@@ -6191,13 +6470,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     expect(workflow).toContain('<!-- autofix-rearm -->');
     expect(workflow).toContain(
-      '<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|',
+      '<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|',
     );
     // Verify all four filter sites (scan + 3 address) include autofix-rearm;
-    // the scan site also carries autofix-base-updated.
+    // the scan site also carries autofix-base-updated + autofix-milestone.
     const filterMatches = [
       ...workflow.matchAll(
-        /autofix-eval\|autofix-rearm\|(autofix-base-updated\|)?qwen-triage/g,
+        /autofix-eval\|autofix-rearm\|(autofix-base-updated\|autofix-milestone\|)?qwen-triage/g,
       ),
     ];
     expect(filterMatches.length).toBeGreaterThanOrEqual(4);
