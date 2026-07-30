@@ -2512,6 +2512,45 @@ describe('qwen-autofix workflow', () => {
     expect(noticed('2026-07-18T11:00:00Z', '2026-07-18T10:00:00Z')).toBe('1');
     // No key yet (lifetime dedup, rt='') → any prior notice suppresses.
     expect(noticed('2026-07-18T09:00:00Z', '')).toBe('1');
+    // The consent gate is the core behavioral change: standard bot PRs now
+    // receive cap notices (they used to be takeover-only). Replay the gate
+    // VERBATIM under all four label/takeover permutations so a dropped
+    // HAS_TAKEOVER guard or a reverted skip-wins condition fails the test,
+    // not just a substring assertion.
+    const consentGate = reviewScanJob.match(
+      /(if \[\[ " \$\{LIVE_LABELS\} " == \*" \$\{SKIP_LABEL\} "\* \]\] \\\n[\s\S]*?continue\n {16}fi)/,
+    )?.[1];
+    expect(consentGate).toBeTruthy();
+    const gate = (liveLabels, hasTakeover) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `for _ in 1; do\n${consentGate.replace(/\n {16}/g, '\n')}\necho PROCEED\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            LIVE_LABELS: liveLabels,
+            HAS_TAKEOVER: hasTakeover,
+            SKIP_LABEL: 'autofix/skip',
+            TAKEOVER_LABEL: 'autofix/takeover',
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // Standard bot PR, no skip label → NOT skipped (the #7836 case).
+    expect(gate('autofix/managed', 'false')).toContain('PROCEED');
+    // Standard bot PR + skip label → skipped everywhere.
+    expect(gate('autofix/managed autofix/skip', 'false')).toContain(
+      'cap notice skipped',
+    );
+    // Takeover PR with its label removed → skipped (stale consent).
+    expect(gate('autofix/managed', 'true')).toContain('cap notice skipped');
+    // Takeover PR with the label still present → NOT skipped.
+    expect(gate('autofix/managed autofix/takeover', 'true')).toContain(
+      'PROCEED',
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
