@@ -4803,4 +4803,24 @@ describe('loadCliConfig skills.disabledLevels', () => {
 
     expect(config.getDisabledSkillLevels()).toEqual(new Set());
   });
+
+  it('ignores skills.disabledLevels in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = { skills: { disabledLevels: ['bundled'] } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getDisabledSkillLevels()).toEqual(new Set());
+  });
+
+  it('ignores skills.disabledLevels in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = { skills: { disabledLevels: ['bundled'] } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getDisabledSkillLevels()).toEqual(new Set());
+  });
 });
