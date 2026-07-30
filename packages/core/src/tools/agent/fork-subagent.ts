@@ -186,6 +186,7 @@ export function selectForkHistory(
 export function buildForkedMessages(
   directive: string,
   assistantMessage: Content,
+  executionAllowedTools?: readonly string[],
 ): Content[] {
   const toolUseParts =
     assistantMessage.parts?.filter((part) => part.functionCall) || [];
@@ -215,7 +216,7 @@ export function buildForkedMessages(
     parts: [
       ...toolResultParts,
       {
-        text: buildChildMessage(directive),
+        text: buildChildMessage(directive, executionAllowedTools),
       },
     ],
   };
@@ -264,7 +265,20 @@ export function buildPinnedWorktreeNotice(worktreeCwd: string): string {
   );
 }
 
-export function buildChildMessage(directive: string): string {
+export function buildChildMessage(
+  directive: string,
+  executionAllowedTools?: readonly string[],
+): string {
+  const executionRestriction =
+    executionAllowedTools === undefined
+      ? ''
+      : executionAllowedTools.length === 0
+        ? `\n\nTOOL EXECUTION RESTRICTION:
+You may not execute any tools, even though tool declarations remain visible. Do not attempt tool calls.`
+        : `\n\nTOOL EXECUTION RESTRICTION:
+You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)}.
+Other visible tool declarations are unavailable to you. Do not call them.`;
+
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
 
@@ -291,5 +305,5 @@ Output format (plain text labels, not markdown headers):
   Issues: <list — include only if there are issues to flag>
 </${FORK_BOILERPLATE_TAG}>
 
-${FORK_DIRECTIVE_PREFIX}${directive}`;
+${FORK_DIRECTIVE_PREFIX}${directive}${executionRestriction}`;
 }

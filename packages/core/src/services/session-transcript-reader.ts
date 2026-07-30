@@ -122,6 +122,7 @@ interface UuidIndexEntry {
   parentUuid: string | null;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
+  inherited: boolean;
   segments: RecordSegment[];
 }
 
@@ -846,6 +847,7 @@ async function buildIndex(params: {
   let sequence = 0;
   let leafUuid: string | undefined;
   let startTime: string | undefined;
+  let sideTaskSourceUuid: string | undefined;
 
   await forEachLineInSnapshot(
     filePath,
@@ -858,6 +860,14 @@ async function buildIndex(params: {
         const record = validateTranscriptRecord(value).record;
         if (!record || !isTranscriptConversationRecord(record)) {
           continue;
+        }
+        if (
+          record.type === 'system' &&
+          record.subtype === 'session_source' &&
+          isObjectRecord(record.systemPayload) &&
+          record.systemPayload['sourceType'] === 'side_task'
+        ) {
+          sideTaskSourceUuid = record.uuid;
         }
         if (record.timestamp) startTime ??= record.timestamp;
         leafUuid = record.uuid;
@@ -878,6 +888,7 @@ async function buildIndex(params: {
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
+            inherited: record.forkedFrom !== undefined,
             segments: [segment],
           });
         }
@@ -905,7 +916,15 @@ async function buildIndex(params: {
         }
       : undefined;
   });
-  const activeUuids = [...chain.uuids];
+  const sourceBoundary = sideTaskSourceUuid
+    ? chain.uuids.indexOf(sideTaskSourceUuid)
+    : -1;
+  const activeUuids =
+    sourceBoundary >= 0
+      ? chain.uuids
+          .slice(sourceBoundary)
+          .filter((uuid) => byUuid.get(uuid)?.inherited !== true)
+      : [...chain.uuids];
   const goalStatePositions: number[] = [];
   for (let position = 0; position < activeUuids.length; position++) {
     const uuid = activeUuids[position]!;
