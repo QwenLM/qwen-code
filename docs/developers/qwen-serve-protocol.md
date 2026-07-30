@@ -29,12 +29,12 @@ Matched origins receive the standard CORS response headers on every request:
 Access-Control-Allow-Origin: <echoed origin>
 Vary: Origin
 Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
-Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch, If-None-Match
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID
 Access-Control-Max-Age: 86400
-Access-Control-Expose-Headers: Retry-After, X-Qwen-Event-Epoch, ETag
+Access-Control-Expose-Headers: Retry-After
 ```
 
-`Access-Control-Allow-Origin` echoes the request's origin verbatim (lowercase / uppercase as the browser sent it) rather than the literal `*`, even under the `*` pattern — browser caches key responses on it paired with `Vary: Origin`, and echoing leaves room to add `Access-Control-Allow-Credentials` in a later release without a schema change. The exposed headers let browser webuis honor daemon retry hints, reject stale SSE cursors, and conditionally validate workspace snapshots. `Access-Control-Allow-Credentials` is **NOT** sent today: the daemon authenticates via bearer-in-`Authorization`, which works cross-origin without `credentials: 'include'`.
+`Access-Control-Allow-Origin` echoes the request's origin verbatim (lowercase / uppercase as the browser sent it) rather than the literal `*`, even under the `*` pattern — browser caches key responses on it paired with `Vary: Origin`, and echoing leaves room to add `Access-Control-Allow-Credentials` in a later release without a schema change. `Access-Control-Expose-Headers: Retry-After` lets browser webuis honor daemon retry hints from `429` / `503` responses. `Access-Control-Allow-Credentials` is **NOT** sent today: the daemon authenticates via bearer-in-`Authorization`, which works cross-origin without `credentials: 'include'`.
 
 OPTIONS preflight requests (OPTIONS with `Access-Control-Request-Method` or `Access-Control-Request-Headers`) short-circuit with `204 No Content` plus the headers above. This is the conventional CORS pattern and is safe — the preflight only confirms which methods/headers the daemon will accept; the actual subsequent request still runs the full chain (host allowlist → bearer auth → routes), so anti-DNS-rebinding and bearer enforcement still fire before any state is read or mutated. Plain OPTIONS requests from matched origins keep flowing downstream with CORS headers attached.
 
@@ -1287,11 +1287,14 @@ tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
 
-The response includes an `ETag`. Clients may send it back in
-`If-None-Match`; an unchanged snapshot returns `304 Not Modified` with no
-body. Repeated reads use the last committed workspace snapshot, periodically
-revalidated against the child's in-memory cache, and do not refresh extensions
-or reparse skill files.
+Repeated reads are served from the last committed workspace snapshot,
+periodically revalidated against the child's in-memory cache. A read never
+scans skill directories or reparses `SKILL.md` files. The child does verify
+that its extension sources are unchanged — one `readdir` of the extensions
+directory plus a `stat` per entry, the enablement file, and the store's
+activation state — and refreshes only when they moved, so an extension
+installed or toggled outside the daemon is still picked up on the next read.
+Safe and bare mode skip the check, matching their exclusion of extensions.
 
 ### `GET /workspace/providers`
 

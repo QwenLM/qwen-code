@@ -4246,12 +4246,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const extensionRefreshCache = vi.fn().mockResolvedValue(undefined);
     const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
     const getCachedSkills = vi.fn().mockReturnValue(cachedSkills);
+    const refreshCacheIfSourcesChanged = vi.fn().mockResolvedValue(false);
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
       getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
       getExtensionManager: vi.fn().mockReturnValue({
         refreshCache: extensionRefreshCache,
+        refreshCacheIfSourcesChanged,
       }),
       getMcpServers: vi.fn().mockReturnValue({
         docs: {
@@ -4564,6 +4568,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).toHaveLength(1);
     expect(skillsAgain).toEqual(skills);
     expect(getCachedSkills).toHaveBeenCalledTimes(2);
+    // Each read validates that the extension sources have not moved, but an
+    // unchanged answer must not cascade into an extension or skill refresh.
+    expect(refreshCacheIfSourcesChanged).toHaveBeenCalledTimes(2);
     expect(extensionRefreshCache).not.toHaveBeenCalled();
     expect(skillRefreshCache).not.toHaveBeenCalled();
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
@@ -4615,8 +4622,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
       getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
       getExtensionManager: vi.fn().mockReturnValue({
         refreshCache: extensionRefreshCache,
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
       }),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
@@ -4648,6 +4658,142 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(extensionRefreshCache).not.toHaveBeenCalled();
     expect(skillRefreshCache).not.toHaveBeenCalled();
     expect(listSkills).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports an uninitialized snapshot when the config has no skill manager', async () => {
+    // The daemon latches any `initialized: true` answer and then prefers it over
+    // its own local enumeration, so a config that can never enumerate must not
+    // claim to be initialized with an empty list.
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+      }),
+      getSkillManager: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+    ).resolves.toEqual({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: false,
+      skills: [],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('refreshes the skill cache when extension sources moved under a read', async () => {
+    // Extensions have no watcher, so this is the only path by which an
+    // extension installed outside the daemon reaches the snapshot. Extension
+    // skills are derived from the extension set, so the skill cache has to
+    // follow.
+    const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
+    const refreshCacheIfSourcesChanged = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged,
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: skillRefreshCache,
+        getCachedSkills: vi.fn().mockReturnValue([]),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {});
+    expect(skillRefreshCache).toHaveBeenCalledOnce();
+
+    // Sources settled — the second read must not refresh again.
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {});
+    expect(refreshCacheIfSourcesChanged).toHaveBeenCalledTimes(2);
+    expect(skillRefreshCache).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    ['safe mode', { isSafeMode: true, getBareMode: false }],
+    ['bare mode', { isSafeMode: false, getBareMode: true }],
+  ])('does not revalidate extension sources in %s', async (_label, modes) => {
+    // These modes never populate the extension cache, and the snapshot derives
+    // extension skills from getExtensions() — so revalidating here would load
+    // the extensions the mode exists to exclude.
+    const refreshCacheIfSourcesChanged = vi.fn().mockResolvedValue(true);
+    const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(modes.isSafeMode),
+      getBareMode: vi.fn().mockReturnValue(modes.getBareMode),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged,
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: skillRefreshCache,
+        getCachedSkills: vi.fn().mockReturnValue([]),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {});
+
+    expect(refreshCacheIfSourcesChanged).not.toHaveBeenCalled();
+    expect(skillRefreshCache).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -603,10 +603,6 @@ export class DaemonClient {
   private readonly fetchTimeoutMs: number;
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
-  private readonly conditionalJsonCache = new Map<
-    string,
-    { etag: string; body: string }
-  >();
   /**
    * Pluggable transport layer. Defaults to `RestSseTransport` when
    * no explicit transport is supplied — preserving the pre-abstraction
@@ -885,47 +881,6 @@ export class DaemonClient {
       `/workspaces/${workspaceSelector}${path}`,
       label,
       opts,
-    );
-  }
-
-  /** @internal */
-  async workspaceConditionalJsonRequest<T>(
-    workspaceSelector: string,
-    path: string,
-    label: string,
-  ): Promise<T> {
-    return await this.conditionalJsonRequest<T>(
-      `/workspaces/${workspaceSelector}${path}`,
-      label,
-    );
-  }
-
-  private async conditionalJsonRequest<T>(
-    path: string,
-    label: string,
-  ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
-    const cached = this.conditionalJsonCache.get(url);
-    return await this.fetchWithTimeout(
-      url,
-      {
-        headers: this.headers(cached ? { 'If-None-Match': cached.etag } : {}),
-      },
-      async (res) => {
-        if (res.status === 304 && cached) {
-          return JSON.parse(cached.body) as T;
-        }
-        if (!res.ok) throw await this.failOnError(res, label);
-        const body = await res.text();
-        const value = JSON.parse(body) as T;
-        const etag = res.headers.get('etag');
-        if (etag) {
-          this.conditionalJsonCache.set(url, { etag, body });
-        } else {
-          this.conditionalJsonCache.delete(url);
-        }
-        return value;
-      },
     );
   }
 
@@ -1304,9 +1259,15 @@ export class DaemonClient {
   }
 
   async workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
-    return await this.conditionalJsonRequest<DaemonWorkspaceSkillsStatus>(
-      '/workspace/skills',
-      'GET /workspace/skills',
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/skills');
+        }
+        return (await res.json()) as DaemonWorkspaceSkillsStatus;
+      },
     );
   }
 
@@ -5073,11 +5034,7 @@ export class WorkspaceDaemonClient {
   }
 
   workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
-    return this.client.workspaceConditionalJsonRequest<DaemonWorkspaceSkillsStatus>(
-      this.workspaceSelector,
-      '/skills',
-      'GET /workspaces/:workspace/skills',
-    );
+    return this.get('/skills', 'GET /workspaces/:workspace/skills');
   }
 
   workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {

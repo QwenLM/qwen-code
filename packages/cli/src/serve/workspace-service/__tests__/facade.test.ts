@@ -890,6 +890,76 @@ describe('createDaemonWorkspaceService', () => {
       }
     });
 
+    it('does not let a superseded read extend the freshness window', async () => {
+      // A read that started before an invalidation still serves the snapshot a
+      // later read committed, but must not push that snapshot's TTL out —
+      // otherwise a post-mutation snapshot goes unrevalidated for longer than
+      // the window.
+      let now = 10_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const stale = deferred<ServeWorkspaceSkillsStatus>();
+      const skill = (name: string) =>
+        ({
+          kind: 'skill',
+          status: 'ok',
+          name,
+          description: name,
+          level: 'bundled',
+          modelInvocable: true,
+        }) as ServeWorkspaceSkillsStatus['skills'][number];
+      const fresh: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [skill('review')],
+      };
+      const later: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [skill('plan')],
+      };
+      const query = vi
+        .fn()
+        .mockImplementationOnce(() => stale.promise)
+        .mockResolvedValueOnce(fresh)
+        .mockResolvedValueOnce(later);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      try {
+        const supersededRead = svc.getWorkspaceSkillsStatus(makeCtx());
+        svc.invalidateWorkspaceSkillsStatus();
+        await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+          fresh,
+        );
+
+        now += 4_000;
+        // The superseded read answers late and uninitialized, so it falls back
+        // to the committed snapshot.
+        stale.resolve({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: false,
+          skills: [],
+        });
+        await expect(supersededRead).resolves.toEqual(fresh);
+
+        // 5_001ms after `fresh` was committed: the window is over regardless of
+        // when the superseded read happened to finish.
+        now += 1_001;
+        await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+          later,
+        );
+        expect(query).toHaveBeenCalledTimes(3);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
     it('shares one workspace skills query between concurrent readers', async () => {
       const pending = deferred<ServeWorkspaceSkillsStatus>();
       const query = vi.fn(() => pending.promise);

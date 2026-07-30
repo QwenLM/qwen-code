@@ -292,7 +292,13 @@ export function createDaemonWorkspaceService(
     // Live child unavailable. Prefer the last answer it produced (keeps the
     // full, extension-aware list available across a reap)...
     if (lastWorkspaceSkillsStatus) {
-      lastWorkspaceSkillsStatusAt = Date.now();
+      // Only extend the freshness window when this read still owns the current
+      // generation. A read that started before an invalidation must not push out
+      // the TTL of the snapshot some later read committed — that would let a
+      // post-mutation snapshot go unrevalidated for longer than the window.
+      if (generation === workspaceSkillsGeneration) {
+        lastWorkspaceSkillsStatusAt = Date.now();
+      }
       return lastWorkspaceSkillsStatus;
     }
     // ...then fall back to daemon-local enumeration, so a child that has not
@@ -351,10 +357,19 @@ export function createDaemonWorkspaceService(
     invalidateWorkspaceSkillsSnapshot();
     if (!(isChannelLive?.() ?? false)) return;
     try {
-      await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
-        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: boundWorkspace, reason: 'content' },
-      );
+      const refreshed =
+        await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { cwd: boundWorkspace, reason: 'content' },
+        );
+      // `content` is the only reason that refreshes skill caches, so this is
+      // the one path where a non-zero count is meaningful. The mutation itself
+      // still succeeded; surface the partial refresh rather than dropping it.
+      if ((refreshed.configsFailed ?? 0) > 0) {
+        writeStderrLine(
+          `qwen serve: ${refreshed.configsFailed} skill cache refresh(es) failed after mutation`,
+        );
+      }
     } catch (err) {
       if (
         !(err instanceof SessionNotFoundError) &&
@@ -853,8 +868,10 @@ export function createDaemonWorkspaceService(
               );
             assertActiveGeneration();
             sessionsRefreshed = refreshed.sessionsRefreshed;
-            sessionsFailed =
-              refreshed.sessionsFailed + (refreshed.configsFailed ?? 0);
+            // `reason: 'settings'` never touches skill caches, so
+            // `configsFailed` is structurally 0 here — folding it in would only
+            // conflate two different failures behind one count.
+            sessionsFailed = refreshed.sessionsFailed;
             if (sessionsFailed > 0) activation = 'partial';
           } catch (err) {
             if (

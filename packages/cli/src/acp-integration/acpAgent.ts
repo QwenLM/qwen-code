@@ -5854,18 +5854,57 @@ class QwenAgent implements Agent {
     };
   }
 
+  /**
+   * Keeps the extension-derived half of the skill snapshot self-healing.
+   *
+   * Skills have a watcher (`SkillManager.startWatching`); extensions do not, so
+   * without this the child would never notice an extension installed, removed,
+   * enabled, or disabled outside the daemon — and extension-level skills are
+   * derived from that set, so a skill-watcher tick alone cannot recover it.
+   *
+   * The check is one `readdir` plus a bounded number of `stat`s, and refreshes
+   * only when the sources actually moved, so a steady-state read still parses
+   * no manifest and no `SKILL.md`. Failures are logged and swallowed: a status
+   * read must not fail because revalidation could not run.
+   *
+   * Skipped in safe and bare mode. Those modes deliberately never populate the
+   * extension cache (`Config.initialize` omits the refresh), and the snapshot
+   * derives extension skills from `getExtensions()` — so revalidating here
+   * would load the extensions those modes exist to exclude.
+   */
+  private async revalidateExtensionSources(config: Config): Promise<void> {
+    // Everything here is inside the boundary, mode check included: this must not
+    // be able to fail a status read no matter which accessor misbehaves.
+    try {
+      if (config.isSafeMode() || config.getBareMode()) return;
+      const changed = await config
+        .getExtensionManager()
+        .refreshCacheIfSourcesChanged();
+      if (!changed) return;
+      await config.getSkillManager()?.refreshCache();
+    } catch (error) {
+      debugLogger.warn('Extension source revalidation failed:', error);
+    }
+  }
+
   private async buildWorkspaceSkillsStatus(
     config: Config,
   ): Promise<ServeWorkspaceSkillsStatus> {
     const skillManager = config.getSkillManager();
     if (!skillManager) {
+      // No manager means nothing has been enumerated and nothing ever will be
+      // on this config — report that rather than an empty "initialized" list,
+      // which the daemon would latch as a valid snapshot and then keep serving
+      // in preference to its own local enumeration.
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
-        initialized: true,
+        initialized: false,
         skills: [],
       };
     }
+
+    await this.revalidateExtensionSources(config);
 
     try {
       const skills = skillManager.getCachedSkills();

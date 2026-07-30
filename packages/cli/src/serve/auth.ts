@@ -140,9 +140,9 @@ export function allowOriginCors(
   // (DAEMON-001): it must survive preflight AND be readable from the
   // response, or cross-origin clients silently lose stale-cursor detection.
   const allowedHeaders =
-    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch, If-None-Match';
+    'Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch';
   const maxAgeSeconds = '86400';
-  const exposedHeaders = 'Retry-After, X-Qwen-Event-Epoch, ETag';
+  const exposedHeaders = 'Retry-After, X-Qwen-Event-Epoch';
   return (req: Request, res: Response, next: NextFunction) => {
     const origin = req.headers.origin;
     if (!origin) {
