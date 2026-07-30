@@ -418,6 +418,13 @@ export interface BridgePendingUserQuestionInteraction {
   options: BridgePendingInteractionOption[];
 }
 
+export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+  activeWork: boolean;
+}
+
 export type BridgePendingInteraction =
   | BridgePendingPermissionInteraction
   | BridgePendingUserQuestionInteraction;
@@ -1580,6 +1587,13 @@ export interface AcpSessionBridge {
    */
   isChannelLive(): boolean;
 
+  /**
+   * Atomic physical lifecycle snapshot. Optional only for compatibility with
+   * older injected/embedded Bridge implementations; hosts must not advertise
+   * workspace runtime control when it is absent.
+   */
+  getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
@@ -1645,7 +1659,7 @@ export interface AcpSessionBridge {
    * cold-start latency. Fire-and-forget; failures are logged and the
    * first session falls back to lazy spawn.
    */
-  preheat(): Promise<void>;
+  preheat(options?: { keepAliveMs?: number }): Promise<void>;
 }
 
 export interface BridgeShutdownOptions {

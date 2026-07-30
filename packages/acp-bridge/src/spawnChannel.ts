@@ -122,7 +122,12 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
-  return async (workspaceCwd, childEnvOverrides) => {
+  return async (workspaceCwd, childEnvOverrides, signal) => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('ACP channel spawn was aborted');
+    }
     const sourceEnv = options.sourceEnv ?? process.env;
     const cliEntry = sourceEnv['QWEN_CLI_ENTRY'] || process.argv[1];
     if (!cliEntry) {
@@ -162,6 +167,24 @@ export function createSpawnChannelFactory(
       throw error;
     }
     const trackedChild = reservation.attach(child);
+    const abortSpawn = () => {
+      try {
+        trackedChild.killSync();
+      } catch {
+        // The child may have exited between the abort and the signal.
+      }
+    };
+    signal?.addEventListener('abort', abortSpawn, { once: true });
+    void trackedChild.exited.then(
+      () => signal?.removeEventListener('abort', abortSpawn),
+      () => signal?.removeEventListener('abort', abortSpawn),
+    );
+    if (signal?.aborted) {
+      abortSpawn();
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('ACP channel spawn was aborted');
+    }
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can

@@ -27,7 +27,7 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `--allow-private-auth-base-url`         | boolean                    | `false`                                          | Allows `/workspace/auth/provider` to install localhost / private-network auth provider `baseUrl`; use only in trusted local development.                                            |
 | `--prompt-deadline-ms <n>`              | positive integer           | unset                                            | Server-side prompt wallclock limit in ms. Timeout aborts and returns an error.                                                                                                      |
 | `--writer-idle-timeout-ms <n>`          | positive integer           | unset                                            | Per-SSE-connection idle timeout in ms. The daemon closes the SSE connection when no event is sent for this duration.                                                                |
-| `--channel-idle-timeout-ms <n>`         | non-negative integer       | `0`                                              | How long to keep the ACP child alive after the last session closes. `0` means reclaim immediately.                                                                                  |
+| `--channel-idle-timeout-ms <n>`         | non-negative integer       | `0`                                              | ACP child auto-reap delay after the last session and workspace operation drain. Unset or `0` reaps immediately.                                                                     |
 | `--initialize-timeout-ms <n>`           | positive integer           | `10000`                                          | ACP child request timeout, including the initialize handshake (ms).                                                                                                                 |
 | `--session-reap-interval-ms <n>`        | non-negative integer       | `60000`                                          | Session reaper scan interval; `0` disables it.                                                                                                                                      |
 | `--session-idle-timeout-ms <n>`         | non-negative integer       | `1800000`                                        | Disconnected-session idle reaping time; `0` disables it.                                                                                                                            |
@@ -101,7 +101,7 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 | `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required. |
 | `promptDeadlineMs`            | Prompt wallclock limit.                                                                       |
 | `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                      |
-| `channelIdleTimeoutMs`        | How long to keep the ACP child warm after the last session closes.                            |
+| `channelIdleTimeoutMs`        | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.          |
 | `initializeTimeoutMs`         | ACP child request timeout, including the initialize handshake.                                |
 | `sessionReapIntervalMs`       | Session reaper scan interval.                                                                 |
 | `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                       |
@@ -122,7 +122,7 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 | `statusProvider`                                                                                                        | Daemon-host preflight cells.                                                                  |
 | `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                 |
 | `contextFilename`                                                                                                       | Overrides `getCurrentGeminiMdFilename()`.                                                     |
-| `channelIdleTimeoutMs`                                                                                                  | How long to keep the ACP child alive after the last session closes, in ms; default `0`.       |
+| `channelIdleTimeoutMs`                                                                                                  | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.          |
 
 ## Important defaults
 
