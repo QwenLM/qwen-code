@@ -22,6 +22,24 @@ interface GithubConfig extends ChannelConfig {
   reasonFilter?: unknown;
 }
 
+const KNOWN_NOTIFICATION_REASONS = new Set([
+  'mention',
+  'review_requested',
+  'assign',
+  'author',
+  'comment',
+  'ci_activity',
+  'manual',
+  'state_change',
+  'subscribed',
+  'team_mention',
+  'security_alert',
+  'approval_requested',
+  'invitation',
+  'member_feature_requested',
+  'security_advisory_credit',
+]);
+
 interface GithubCursor {
   lastProcessedAt: string;
   metaFloor?: string;
@@ -85,13 +103,34 @@ interface NotificationContext {
   reason: string;
 }
 
-function normalizeReasonFilter(config: GithubConfig): Set<string> | null {
-  if (!Array.isArray(config.reasonFilter)) return null;
+function normalizeReasonFilter(
+  config: GithubConfig,
+  channelName: string,
+): Set<string> | null {
+  if (config.reasonFilter === undefined) return null;
+  if (!Array.isArray(config.reasonFilter)) {
+    throw new Error(
+      `reasonFilter for channel ${channelName} must be an array of GitHub notification reasons.`,
+    );
+  }
+  if (config.reasonFilter.some((reason) => typeof reason !== 'string')) {
+    throw new Error(
+      `reasonFilter entries for channel ${channelName} must be strings.`,
+    );
+  }
   const reasons = config.reasonFilter
     .filter((reason): reason is string => typeof reason === 'string')
     .map((reason) => reason.trim().toLowerCase())
     .filter((reason) => reason.length > 0);
-  return new Set(reasons);
+  const unknownReasons = reasons.filter(
+    (reason) => !KNOWN_NOTIFICATION_REASONS.has(reason),
+  );
+  if (unknownReasons.length > 0) {
+    throw new Error(
+      `Unrecognized reasonFilter values for channel ${channelName}: ${unknownReasons.join(', ')}`,
+    );
+  }
+  return reasons.length > 0 ? new Set(reasons) : null;
 }
 
 interface PostedGithubComment {
@@ -212,7 +251,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
-    this.reasonFilter = normalizeReasonFilter(cfg);
+    this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
@@ -444,6 +483,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const lastReadAt = notification.last_read_at;
       const reason = String(notification.reason ?? '').toLowerCase();
       if (this.reasonFilter && !this.reasonFilter.has(reason)) {
+        process.stderr.write(
+          `[Channel:${this.name}] skipping notification (reason=${reason} not in reasonFilter, subject=${notification.subject.url})\n`,
+        );
         this.logDebugPayload('Github', {
           event: 'reasonFilter.skip',
           chatId,

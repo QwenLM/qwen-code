@@ -922,7 +922,7 @@ describe('GithubChannel', () => {
 
     it('normalizes configured reasonFilter entries before matching', async () => {
       await initWithoutLoop({
-        reasonFilter: [' COMMENT ', 123, ''],
+        reasonFilter: [' COMMENT ', ''],
       });
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1115,6 +1115,117 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001']);
+    });
+  });
+
+  describe('reasonFilter', () => {
+    function connectWithReasonFilter(reasonFilter: unknown): Promise<void> {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ reasonFilter }),
+        makeBridge(),
+      );
+      return channel.connect();
+    }
+
+    it('skips notifications whose reason is not in the allowlist', async () => {
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      await initWithoutLoop({
+        reasonFilter: ['mention'],
+      });
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({
+              reason: 'comment',
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+            makeNotification({
+              reason: 'mention',
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+          ])
+          .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+          'Trigger: mention.',
+        );
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledWith({
+          last_read_at: '2026-07-02T10:00:00.000Z',
+          read: true,
+        });
+        expect(stderrWrite).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'skipping notification (reason=comment not in reasonFilter, subject=https://api.github.com/repos/owner/repo/issues/42)',
+          ),
+        );
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
+    it('rejects unrecognized reasonFilter values', async () => {
+      await expect(connectWithReasonFilter(['mentions'])).rejects.toThrow(
+        'Unrecognized reasonFilter values for channel test-github: mentions',
+      );
+    });
+
+    it('rejects non-array reasonFilter values', async () => {
+      await expect(connectWithReasonFilter('mention')).rejects.toThrow(
+        'reasonFilter for channel test-github must be an array of GitHub notification reasons.',
+      );
+    });
+
+    it('rejects non-string reasonFilter entries', async () => {
+      await expect(connectWithReasonFilter([42])).rejects.toThrow(
+        'reasonFilter entries for channel test-github must be strings.',
+      );
+    });
+
+    it('accepts documented security notification reasons', async () => {
+      await expect(
+        connectWithReasonFilter(['security_alert']),
+      ).resolves.toBeUndefined();
+      channel.disconnect();
+    });
+
+    it('processes all reasons when filter is empty or unset', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'subscribed',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'plain comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('processes all reasons when filter is an empty array', async () => {
+      await initWithoutLoop({ reasonFilter: [] });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'subscribed',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'plain comment' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
     });
   });
 
