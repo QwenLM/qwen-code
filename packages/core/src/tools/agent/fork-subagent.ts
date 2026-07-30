@@ -66,6 +66,25 @@ export const FORK_PLACEHOLDER_RESULT =
 export type ForkTurns = 'all' | `${number}`;
 export type NormalizedForkTurns = 'all' | number;
 
+export function isValidForkToolWildcard(toolName: string): boolean {
+  if (!toolName.includes('*')) {
+    return true;
+  }
+  if (toolName === 'mcp__*') {
+    return true;
+  }
+  if (
+    !toolName.startsWith('mcp__') ||
+    !toolName.endsWith('*') ||
+    toolName.slice(0, -1).includes('*')
+  ) {
+    return false;
+  }
+
+  const patternBody = toolName.slice('mcp__'.length, -1);
+  return patternBody.lastIndexOf('__') > 0;
+}
+
 export function normalizeForkTurns(
   forkTurns: ForkTurns | undefined,
 ): NormalizedForkTurns {
@@ -187,6 +206,7 @@ export function buildForkedMessages(
   directive: string,
   assistantMessage: Content,
   executionAllowedTools?: readonly string[],
+  promptHint?: string,
 ): Content[] {
   const toolUseParts =
     assistantMessage.parts?.filter((part) => part.functionCall) || [];
@@ -216,7 +236,7 @@ export function buildForkedMessages(
     parts: [
       ...toolResultParts,
       {
-        text: buildChildMessage(directive, executionAllowedTools),
+        text: buildChildMessage(directive, executionAllowedTools, promptHint),
       },
     ],
   };
@@ -268,6 +288,7 @@ export function buildPinnedWorktreeNotice(worktreeCwd: string): string {
 export function buildChildMessage(
   directive: string,
   executionAllowedTools?: readonly string[],
+  promptHint?: string,
 ): string {
   const executionRestriction =
     executionAllowedTools === undefined
@@ -278,6 +299,12 @@ You may not execute any tools, even though tool declarations remain visible. Do 
         : `\n\nTOOL EXECUTION RESTRICTION:
 You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)}.
 Other visible tool declarations are unavailable to you. Do not call them.`;
+  const profileGuidance = promptHint
+    ? `FORK PROFILE GUIDANCE:
+${promptHint}
+
+`
+    : '';
 
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
@@ -305,5 +332,5 @@ Output format (plain text labels, not markdown headers):
   Issues: <list — include only if there are issues to flag>
 </${FORK_BOILERPLATE_TAG}>
 
-${FORK_DIRECTIVE_PREFIX}${directive}${executionRestriction}`;
+${profileGuidance}${FORK_DIRECTIVE_PREFIX}${directive}${executionRestriction}`;
 }
