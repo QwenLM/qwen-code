@@ -238,6 +238,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
       : [
           { key: 'v', ctrl: true },
           { key: 'v', command: true },
+          // Option/Alt+V: macOS terminals intercept Cmd+V for text paste,
+          // so Option+V is the most reliable alternative (#8118).
+          { key: 'v', meta: true },
         ],
 
   // App level bindings
