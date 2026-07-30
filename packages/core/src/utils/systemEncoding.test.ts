@@ -21,6 +21,7 @@ import {
   windowsCodePageToEncoding,
   detectEncodingFromBuffer,
   resetEncodingCache,
+  decodeProcessOutput,
 } from './systemEncoding.js';
 
 describe('Shell Command Processor - Encoding Functions', () => {
@@ -492,6 +493,49 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const buffer = Buffer.from(unicodeText, 'utf8');
       const result = getCachedEncodingForBuffer(buffer);
       expect(result).toBe('utf-8');
+    });
+  });
+
+  describe('decodeProcessOutput', () => {
+    it('detects UTF-8 for pure ASCII buffer', () => {
+      const buf = Buffer.from('Error: (none)\n');
+      expect(getCachedEncodingForBuffer(buf)).toBe('utf-8');
+    });
+
+    it('detects UTF-8 for valid UTF-8 buffer with Cyrillic', () => {
+      const buf = Buffer.from('Ошибка при создании файла', 'utf-8');
+      expect(getCachedEncodingForBuffer(buf)).toBe('utf-8');
+    });
+
+    it('does NOT detect utf-8 for CP-866 bytes outside ASCII range', () => {
+      const cp866Buf = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0, 0x20]);
+      mockedChardetDetect.mockReturnValue('ISO-8859-5');
+      const encoding = getCachedEncodingForBuffer(cp866Buf);
+      expect(encoding).not.toBe('utf-8');
+      expect(() => decodeProcessOutput(cp866Buf)).not.toThrow();
+    });
+
+    it('decodes complete mixed buffer correctly (ASCII prefix + CP-866)', () => {
+      const asciiChunk = Buffer.from('Status: OK\n');
+      const cp866Chunk = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
+      const fullBuffer = Buffer.concat([asciiChunk, cp866Chunk]);
+      mockedChardetDetect.mockReturnValue('ISO-8859-5');
+
+      const decoded = decodeProcessOutput(fullBuffer);
+
+      expect(decoded.startsWith('Status: OK\n')).toBe(true);
+      expect(decoded).not.toContain('\uFFFD');
+    });
+
+    it('Buffer.concat of empty array does not throw', () => {
+      expect(() => Buffer.concat([])).not.toThrow();
+    });
+
+    it('falls back to utf-8 when TextDecoder rejects the encoding label', () => {
+      mockedChardetDetect.mockReturnValue('CP437');
+      const buffer = Buffer.from([0x80, 0x81]);
+      expect(() => decodeProcessOutput(buffer)).not.toThrow();
+      expect(typeof decodeProcessOutput(buffer)).toBe('string');
     });
   });
 });

@@ -1436,6 +1436,9 @@ export class ShellExecutionService {
           // detection on the full output. This fixes the mojibake bug
           // where per-chunk detection on an ASCII-only first chunk
           // locked the decoder to UTF-8, garbling subsequent OEM bytes.
+          // Deliberate extra concat: whole-buffer encoding detection
+          // requires one additional full-output-sized allocation at
+          // cleanup peak (bounded, GC-eligible after return).
           if (stdoutChunks.length > 0) {
             stdout = decodeProcessOutput(Buffer.concat(stdoutChunks));
           }
