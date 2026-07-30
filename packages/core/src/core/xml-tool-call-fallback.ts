@@ -9,6 +9,7 @@ import type { Part } from '@google/genai';
 const INVOKE_PATTERN = /<invoke\s+name="([^"]+)">([\s\S]*?)<\/invoke>/g;
 const PARAMETER_PATTERN =
   /<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>/g;
+const FENCE_PATTERN = /^ {0,3}(?:```|~~~)/gm;
 
 export interface ExtractedToolCall {
   name: string;
@@ -41,6 +42,24 @@ function parseParameterValue(value: string): unknown {
 }
 
 /**
+ * Strips a single newline immediately after the open tag and immediately
+ * before the close tag — the convention this XML dialect follows — while
+ * preserving the remaining whitespace that tools treat as significant (e.g.
+ * the indentation that makes an `edit` old_string unique). A blanket trim
+ * corrupted such arguments. See #8003.
+ */
+function stripDelimitingNewlines(value: string): string {
+  let result = value;
+  if (result.startsWith('\n')) {
+    result = result.slice(1);
+  }
+  if (result.endsWith('\n')) {
+    result = result.slice(0, -1);
+  }
+  return result;
+}
+
+/**
  * Extracts XML-style tool calls from plain text content.
  * Returns an array of extracted tool calls, or an empty array if none found.
  */
@@ -64,7 +83,7 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
     let paramMatch: RegExpExecArray | null;
     while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
       const paramName = paramMatch[1];
-      const paramValue = paramMatch[2].trim();
+      const paramValue = stripDelimitingNewlines(paramMatch[2]);
       args[paramName] = parseParameterValue(paramValue);
     }
 
@@ -74,6 +93,23 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
   }
 
   return results;
+}
+
+/**
+ * Detects whether the first invoke block sits inside an unclosed fenced code
+ * block (``` or ~~~). A fenced invoke example means the model is documenting
+ * the format rather than emitting a tool call, so recovery must be vetoed to
+ * keep documentation from being executed. See #8003.
+ */
+function firstInvokeInsideFence(text: string): boolean {
+  INVOKE_PATTERN.lastIndex = 0;
+  const first = INVOKE_PATTERN.exec(text);
+  if (!first) {
+    return false;
+  }
+  const before = text.slice(0, first.index);
+  const fences = before.match(FENCE_PATTERN);
+  return fences !== null && fences.length % 2 === 1;
 }
 
 /**
@@ -91,6 +127,13 @@ export function tryRecoverXmlToolCalls(text: string): {
   const extracted = extractXmlToolCalls(text);
 
   if (extracted.length === 0) {
+    return { recovered: false, functionCallParts: [], remainingText: text };
+  }
+
+  // Intent guard: a fenced code block around the invoke example signals the
+  // model is documenting the format, not calling a tool. Veto so documented
+  // examples are never executed.
+  if (firstInvokeInsideFence(text)) {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 

@@ -12871,5 +12871,53 @@ describe('GeminiChat', async () => {
         lastEntry.parts?.some((p) => p.text && p.text.includes('<invoke')),
       ).toBe(true);
     });
+
+    it('records the recovered functionCall in the JSONL turn (--resume fidelity)', async () => {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter>' +
+        '</invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield xmlChunk(xml, 'STOP');
+        })(),
+      );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-recording',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+      expect(chunks.length).toBeGreaterThan(0);
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recorded = recordAssistantTurn.mock.calls[0][0] as {
+        message: Array<{ text?: string; functionCall?: { name?: string } }>;
+      };
+      // The recovered tool call must be persisted, not the raw XML text.
+      expect(
+        recorded.message.some((p) => p.functionCall?.name === 'read_file'),
+      ).toBe(true);
+      expect(recorded.message.some((p) => p.text?.includes('<invoke'))).toBe(
+        false,
+      );
+    });
   });
 });

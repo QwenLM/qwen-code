@@ -116,6 +116,30 @@ describe('extractXmlToolCalls', () => {
     ]);
   });
 
+  it('extracts tool calls with multi-line parameter values (issue #8003 shape)', () => {
+    const text = invoke(
+      'edit',
+      param('file_path', '/some/path/file.tsx') +
+        param('old_string', 'line1,\nline2,\nline3,'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'edit',
+        args: {
+          file_path: '/some/path/file.tsx',
+          old_string: 'line1,\nline2,\nline3,',
+        },
+      },
+    ]);
+  });
+
+  it('strips only delimiting newlines, preserving significant whitespace', () => {
+    const text = invoke('edit', param('old_string', '\n    return null;\n'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'edit', args: { old_string: '    return null;' } },
+    ]);
+  });
+
   it('does not crash on malformed or nested XML', () => {
     expect(extractXmlToolCalls('<invoke name="x"><invoke')).toEqual([]);
     expect(extractXmlToolCalls('</invoke><invoke>')).toEqual([]);
@@ -200,5 +224,16 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(result.recovered).toBe(true);
     expect(result.functionCallParts).toHaveLength(1);
     expect(result.remainingText).toContain(parameterless);
+  });
+
+  it('does not recover an invoke example inside a fenced code block', () => {
+    const text =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
   });
 });
