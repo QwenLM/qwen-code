@@ -72,11 +72,17 @@ For GitHub Enterprise Server, set `baseUrl`:
 | `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
 | `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
 | `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
-| `reasonFilter`            | all reasons              | Optional list of GitHub notification reasons to process before dispatch                       |
 | `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
 | `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
 | `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
 | `blockStreaming`          | `"off"`                  | Keep GitHub final-only. Enable only when raw intermediate model text is acceptable to publish |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                  |
+
+Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
+
+Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author`, `comment`, `ci_activity`, `manual`, `state_change`, `subscribed`, `team_mention`, `security_alert`, `approval_requested`, `invitation`, `member_feature_requested`, and `security_advisory_credit`.
+
+Filtered notifications are still marked read before they are skipped. Removing the filter later will not replay notifications the channel already skipped.
 
 ## ⚠️ Security
 
