@@ -452,6 +452,7 @@ describe('InputPrompt', () => {
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
       invalidateSubmittedPromptProvenance,
+      handleToggleKeypress: vi.fn(() => false),
     } as unknown as ReturnType<typeof useUIActions>);
     props.buffer.setText('repeat prompt');
     vi.mocked(props.buffer.setText).mockClear();
@@ -1270,6 +1271,7 @@ describe('InputPrompt', () => {
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
       invalidateSubmittedPromptProvenance,
+      handleToggleKeypress: vi.fn(() => false),
     } as unknown as ReturnType<typeof useUIActions>);
     vi.mocked(mockShellHistory.getPreviousCommand).mockReturnValue(
       'previous command',
@@ -4045,6 +4047,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
         invalidateSubmittedPromptProvenance,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion
       const mockHandleAutocomplete = vi.fn(() => {
@@ -4102,6 +4105,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
         invalidateSubmittedPromptProvenance,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion to return suggestions
       mockedUseReverseSearchCompletion.mockReturnValue({
@@ -4297,6 +4301,7 @@ describe('InputPrompt', () => {
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
         invalidateSubmittedPromptProvenance,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
       vi.mocked(useReverseSearchCompletion).mockImplementation(
         (_buffer, _data, isActive) => ({
