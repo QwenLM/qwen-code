@@ -43,8 +43,8 @@ describe('buffered output encoding detection', () => {
 
     // The ASCII part should always be correct
     expect(decoded.startsWith('Status: OK\n')).toBe(true);
-    // The full decoded string should not be empty after the ASCII part
-    expect(decoded.length).toBeGreaterThan(asciiChunk.length);
+    // The decoded non-ASCII bytes must not become replacement characters
+    expect(decoded).not.toContain('\uFFFD');
   });
 
   it('Buffer.concat of empty array does not throw', () => {

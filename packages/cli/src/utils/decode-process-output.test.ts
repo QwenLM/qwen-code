@@ -26,10 +26,6 @@ describe('decodeProcessOutput', () => {
     const result = decodeProcessOutput(cp866Bytes);
     // Should NOT contain replacement characters ( mojibake )
     expect(result).not.toContain('\uFFFD');
-    // On non-Windows systems getCachedEncodingForBuffer may fall back to
-    // UTF-8, producing replacement chars — that's acceptable. The key
-    // assertion is that on Windows with CP-866 the result is correct.
-    // We verify the function doesn't throw and returns a string.
     expect(typeof result).toBe('string');
     expect(result.length).toBeGreaterThan(0);
   });
