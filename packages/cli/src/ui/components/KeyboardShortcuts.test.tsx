@@ -8,8 +8,12 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
 
+// A narrow width forces the single-column layout so each shortcut renders on
+// its own line. ink-testing-library hard-codes stdout to 100 columns, so a
+// multi-column layout chosen from a wider mock can still wrap physically and
+// break these assertions for reasons unrelated to the hint text.
 vi.mock('../hooks/useTerminalSize.js', () => ({
-  useTerminalSize: vi.fn(() => ({ columns: 120, rows: 24 })),
+  useTerminalSize: vi.fn(() => ({ columns: 40, rows: 24 })),
 }));
 
 const originalPlatform = process.platform;
@@ -27,21 +31,18 @@ describe('KeyboardShortcuts', () => {
   });
 
   it.each([
-    ['darwin', 'ctrl+v / option+v'],
-    ['win32', 'alt+v'],
-    ['linux', 'ctrl+v'],
+    ['darwin', 'ctrl+v / option+v to paste images', ['alt+v']],
+    ['win32', 'alt+v to paste images', ['option+v']],
+    ['linux', 'ctrl+v to paste images', ['option+v', 'alt+v']],
   ] as const)(
     'advertises the %s image-paste key',
-    (platform, expectedPasteKey) => {
+    (platform, expectedPasteCell, absentKeys) => {
       stubPlatform(platform);
       const { lastFrame } = render(<KeyboardShortcuts />);
       const frame = lastFrame() ?? '';
-      expect(frame).toContain(expectedPasteKey);
-      if (platform !== 'darwin') {
-        expect(frame).not.toContain('option+v');
-      }
-      if (platform !== 'win32') {
-        expect(frame).not.toContain('alt+v');
+      expect(frame).toContain(expectedPasteCell);
+      for (const absent of absentKeys) {
+        expect(frame).not.toContain(absent);
       }
     },
   );
