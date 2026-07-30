@@ -26,6 +26,7 @@ Make GitHub-channel replies safe to publish automatically and traceable after th
 
 - This does not retry ambiguous publication failures, create status comments, or enable response streaming. Those are separate parts of issue #8012.
 - The instruction against direct `gh`/API publication is an operational boundary for the agent, not sandbox enforcement. Enforcing tool-level GitHub write restrictions belongs to the runtime permission model.
+- Pending-delivery retention policy, including max attempts, max age, size caps, stale-reply handling, and orphan temporary file cleanup, is tracked separately in #8142.
 
 ## Verification
 

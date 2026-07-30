@@ -1627,7 +1627,8 @@ describe('GithubChannel', () => {
         makeConfig(),
         makeBridge(),
       );
-      await connectForPublication();
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
 
       const current = JSON.parse(readFileSync(pendingPath(), 'utf-8'));
       writeFileSync(
@@ -1652,12 +1653,14 @@ describe('GithubChannel', () => {
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
-        owner: 'owner',
-        repo: 'repo',
-        issue_number: 42,
-        body: 'Final reply',
-      });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          owner: 'owner',
+          repo: 'repo',
+          issue_number: 42,
+          body: 'Final reply',
+        }),
+      );
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
         {
           id: 'concurrent',
@@ -1666,6 +1669,7 @@ describe('GithubChannel', () => {
         },
       ]);
 
+      channel.disconnect();
       mockOctokit.rest.issues.createComment.mockReset();
       let resolveUnreadableRetry!: (value: {
         data: { id: number; html_url: string };
@@ -1680,7 +1684,8 @@ describe('GithubChannel', () => {
         makeConfig(),
         makeBridge(),
       );
-      await connectForPublication();
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
       writeFileSync(pendingPath(), '{');
       resolveUnreadableRetry({
         data: {
@@ -1691,6 +1696,7 @@ describe('GithubChannel', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(readFileSync(pendingPath(), 'utf-8')).toBe('{');
+      channel.disconnect();
     });
 
     it('keeps a pending final when retry still definitely did not write', async () => {
@@ -1771,32 +1777,95 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('does not duplicate a pending final retry across reconnects', async () => {
+    it('cancels a pending final retry before reconnecting', async () => {
       writePending([pendingRecord()]);
-      let resolveRetry!: (value: {
-        data: { id: number; html_url: string };
-      }) => void;
-      mockOctokit.rest.issues.createComment.mockReturnValue(
-        new Promise((resolve) => {
-          resolveRetry = resolve;
-        }),
-      );
+      let firstSignal: AbortSignal | undefined;
+      mockOctokit.rest.issues.createComment
+        .mockImplementationOnce(
+          (input: { request?: { signal?: AbortSignal } }) =>
+            new Promise((_resolve, reject) => {
+              firstSignal = input.request?.signal;
+              firstSignal?.addEventListener(
+                'abort',
+                () => reject(new Error('aborted')),
+                { once: true },
+              );
+            }),
+        )
+        .mockResolvedValueOnce({
+          data: {
+            id: 2002,
+            html_url:
+              'https://github.com/owner/repo/issues/42#issuecomment-2002',
+          },
+        });
       mockOctokit.paginate.mockResolvedValue([]);
 
       await channel.connect();
       channel.disconnect();
       await channel.connect();
-
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      resolveRetry({
-        data: {
-          id: 2002,
-          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
-        },
-      });
       await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(firstSignal?.aborted).toBe(true);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      expect(existsSync(pendingPath())).toBe(false);
+      channel.disconnect();
+    });
+
+    it('does not burn retry budget when reconnect aborts cooldown', async () => {
+      writePending([pendingRecord()]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('rate limited'), {
+          status: 429,
+          response: {
+            headers: {
+              'x-ratelimit-remaining': '0',
+              'x-ratelimit-reset': `${Math.ceil(Date.now() / 1000) + 3600}`,
+            },
+          },
+        }),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       channel.disconnect();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await channel.connect();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      channel.disconnect();
+    });
+
+    it('does not treat a same-body posted audit as a different pending retry', async () => {
+      writePending([pendingRecord({ id: 'second-pending' })]);
+      mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        `${JSON.stringify({
+          at: '2026-07-30T00:01:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: 'session-publication',
+          threadId: 'issue:42',
+          bodySha256: createHash('sha256').update('Final reply').digest('hex'),
+          bodyChars: 'Final reply'.length,
+        })}\n`,
+      );
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2005,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2005',
+        },
+      });
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
     });
 
     it('skips a pending final already recorded as posted', async () => {
@@ -1813,6 +1882,7 @@ describe('GithubChannel', () => {
           number: 42,
           sessionId: 'session-publication',
           threadId: 'issue:42',
+          pendingId: 'pending',
           bodySha256: createHash('sha256').update('Final reply').digest('hex'),
           bodyChars: 'Final reply'.length,
         })}\n`,
