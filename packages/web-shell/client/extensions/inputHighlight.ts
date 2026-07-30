@@ -35,7 +35,7 @@ class SlashArgumentHintWidget extends WidgetType {
   }
 }
 
-function buildDecorations(
+export function buildInputHighlightDecorations(
   view: EditorView,
   getCommands: () => CommandInfo[],
   getLanguage: () => WebShellLanguage,
@@ -43,55 +43,65 @@ function buildDecorations(
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
   const ranges: Array<{ from: number; to: number; deco: Decoration }> = [];
+  let lastProcessedLine = 0;
+  let commands: CommandInfo[] | null = null;
+  let language: WebShellLanguage | null = null;
 
-  for (let i = 1; i <= doc.lines; i++) {
-    const line = doc.line(i);
-    const text = line.text;
-    const offset = line.from;
+  for (const visibleRange of view.visibleRanges) {
+    const firstLine = doc.lineAt(visibleRange.from).number;
+    const lastLine = doc.lineAt(visibleRange.to).number;
+    for (let i = firstLine; i <= lastLine; i++) {
+      if (i <= lastProcessedLine) continue;
+      lastProcessedLine = i;
+      const line = doc.line(i);
+      const text = line.text;
+      const offset = line.from;
 
-    // /command at start of line
-    if (text.startsWith('/')) {
-      const end = text.indexOf(' ');
-      const slashEnd = end === -1 ? text.length : end;
-      ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
-    }
+      // /command at start of line
+      if (text.startsWith('/')) {
+        const end = text.indexOf(' ');
+        const slashEnd = end === -1 ? text.length : end;
+        ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
+        commands ??= getCommands();
+        language ??= getLanguage();
+        const argumentHint = getSlashCommandArgumentHint(
+          text,
+          commands,
+          language,
+        );
+        if (argumentHint) {
+          const prefix = text.endsWith(' ') ? '' : ' ';
+          ranges.push({
+            from: offset + text.length,
+            to: offset + text.length,
+            deco: Decoration.widget({
+              widget: new SlashArgumentHintWidget(`${prefix}${argumentHint}`),
+              side: 1,
+            }),
+          });
+        }
+      }
 
-    const argumentHint = getSlashCommandArgumentHint(
-      text,
-      getCommands(),
-      getLanguage(),
-    );
-    if (argumentHint) {
-      const prefix = text.endsWith(' ') ? '' : ' ';
-      ranges.push({
-        from: offset + text.length,
-        to: offset + text.length,
-        deco: Decoration.widget({
-          widget: new SlashArgumentHintWidget(`${prefix}${argumentHint}`),
-          side: 1,
-        }),
-      });
-    }
+      // @path tokens
+      const atRe = /@[^\s]+/g;
+      let m: RegExpExecArray | null;
+      while ((m = atRe.exec(text)) !== null) {
+        ranges.push({
+          from: offset + m.index,
+          to: offset + m.index + m[0].length,
+          deco: atDeco,
+        });
+      }
 
-    // @path tokens
-    const atRe = /@[^\s]+/g;
-    let m: RegExpExecArray | null;
-    while ((m = atRe.exec(text)) !== null) {
-      ranges.push({
-        from: offset + m.index,
-        to: offset + m.index + m[0].length,
-        deco: atDeco,
-      });
-    }
-
-    // `inline code`
-    const codeRe = /`[^`]+`/g;
-    while ((m = codeRe.exec(text)) !== null) {
-      ranges.push({
-        from: offset + m.index,
-        to: offset + m.index + m[0].length,
-        deco: backtickDeco,
-      });
+      // `inline code`
+      const codeRe = /`[^`]+`/g;
+      while ((m = codeRe.exec(text)) !== null) {
+        ranges.push({
+          from: offset + m.index,
+          to: offset + m.index + m[0].length,
+          deco: backtickDeco,
+        });
+      }
     }
   }
 
@@ -111,11 +121,15 @@ export function inputHighlight(
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, getCommands, getLanguage);
+        this.decorations = buildInputHighlightDecorations(
+          view,
+          getCommands,
+          getLanguage,
+        );
       }
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged) {
-          this.decorations = buildDecorations(
+          this.decorations = buildInputHighlightDecorations(
             update.view,
             getCommands,
             getLanguage,

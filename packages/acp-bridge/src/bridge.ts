@@ -94,7 +94,10 @@ import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from './workspacePaths.js';
-import { parseSessionSource } from './session-source.js';
+import {
+  parseSessionSource,
+  SESSION_SOURCE_META_KEY,
+} from './session-source.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -213,6 +216,20 @@ const MAX_BULK_REPLAY_UPDATES = 10_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sessionSourceRequestMeta(
+  sourceType: string | undefined,
+  sourceId: string | undefined,
+): Record<string, unknown> {
+  return sourceType
+    ? {
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType,
+          ...(sourceId !== undefined ? { sourceId } : {}),
+        },
+      }
+    : {};
 }
 
 function isDefinitiveAcpRequestError(error: unknown): boolean {
@@ -2635,10 +2652,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 telemetry.injectPromptContext({
                   cwd: boundWorkspace,
                   mcpServers: [],
-                  ...(requestedSessionId
+                  ...(requestedSessionId || sourceType
                     ? {
                         _meta: {
-                          [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                          ...sessionSourceRequestMeta(sourceType, sourceId),
+                          ...(requestedSessionId
+                            ? {
+                                [REQUESTED_SESSION_ID_META_KEY]:
+                                  requestedSessionId,
+                              }
+                            : {}),
                         },
                       }
                     : {}),
@@ -4571,14 +4594,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // intentionally has no `mcpServers` field for the
                 // same reason.
                 mcpServers: [],
-                ...(historyReplay === 'response'
+                ...(historyReplay === 'response' || req.sourceType
                   ? {
                       _meta: {
-                        [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
-                        ...(req.historyPageSize !== undefined
+                        ...sessionSourceRequestMeta(
+                          req.sourceType,
+                          req.sourceId,
+                        ),
+                        ...(historyReplay === 'response'
                           ? {
-                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
-                                req.historyPageSize,
+                              [LOAD_REPLAY_MODE_META_KEY]:
+                                LOAD_REPLAY_BULK_MODE,
+                              ...(req.historyPageSize !== undefined
+                                ? {
+                                    [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
+                                      req.historyPageSize,
+                                  }
+                                : {}),
                             }
                           : {}),
                       },
@@ -4597,6 +4629,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
                 mcpServers: [],
+                ...(req.sourceType
+                  ? {
+                      _meta: sessionSourceRequestMeta(
+                        req.sourceType,
+                        req.sourceId,
+                      ),
+                    }
+                  : {}),
               }),
               initTimeoutMs,
               'resumeSession',

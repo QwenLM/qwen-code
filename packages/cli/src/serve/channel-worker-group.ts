@@ -826,7 +826,13 @@ export function createChannelWorkerGroup(
     async deliverChannelMessage(request, workspaceCwd) {
       const entry = routeEntry(request.channelName, workspaceCwd);
       const deliver = entry?.supervisor.deliverChannelMessage;
-      if (!entry || drainingWorkspaces.has(entry.workspaceCwd) || !deliver) {
+      if (entry && drainingWorkspaces.has(entry.workspaceCwd)) {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          `Channel worker for channel "${request.channelName}" is unavailable while its workspace is draining.`,
+        );
+      }
+      if (!entry || !deliver) {
         const hint = workspaceCwd
           ? `No channel worker for the selected workspace owns channel "${request.channelName}".`
           : `No channel worker owns channel "${request.channelName}".`;
@@ -836,7 +842,13 @@ export function createChannelWorkerGroup(
     },
     async enqueueWebhookTask(task) {
       const entry = routeEntry(task.channelName);
-      if (!entry || drainingWorkspaces.has(entry.workspaceCwd)) {
+      if (entry && drainingWorkspaces.has(entry.workspaceCwd)) {
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          `Channel worker for channel "${task.channelName}" is unavailable while its workspace is draining.`,
+        );
+      }
+      if (!entry) {
         throw new ChannelWebhookEnqueueError(
           'channel_worker_unavailable',
           `No channel worker owns channel "${task.channelName}".`,

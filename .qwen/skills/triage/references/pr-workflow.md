@@ -246,7 +246,7 @@ If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs 
 
 - For non-maintainer PRs: do not skip any Stage 2 enrichment (2a-bis); require Stage 2b CI evidence before approving.
 - Flag the high-risk paths in the Stage 1 comment so the reviewer knows where to focus.
-- If the PR author has write access, name a sandboxed lane before approval per 2b-bis — `@qwen-code /verify` for a behavioural claim, `@qwen-code /tmux` for a TUI surface. These are the paths where a green suite that does not pin the change is most expensive, so the 2b-bis line is least optional here. If the author lacks write access, the sandboxed lanes are unavailable — recommend that a maintainer check the PR out in a disposable container or reproduce the specific behavioural claim by hand.
+- If the PR author has write access, name a sandboxed lane before approval per 2b-bis — `@qwen-code /verify` for a behavioural claim, `@qwen-code /tmux` for a TUI surface. These are the paths where a green suite that does not pin the change is most expensive, so the 2b-bis line is least optional here. If the author lacks write access, `/verify` is still available as a **sponsored run**: a maintainer's `@qwen-code /verify` comment approves the head it was written against, and that run carries a pre-execution risk screen and a full workspace wipe — say so, and remind the maintainer to read the resulting report with the same skepticism as a fork's CI logs.
 
 This signal is NOT a terminal gate — it does not stop the review or close the PR. It escalates review depth and flags risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 
@@ -513,17 +513,23 @@ this rule exists for: a serve-side bounded-read change whose own Stage 2
 comment said "author tested on macOS only" and never named a lane — the
 gap was written down and the remedy was not.)
 
-**Skip it — explicitly — in exactly two cases:**
+**Skip it — explicitly — in one case, and adjust it in another:**
 
 - **No behavioural claim to settle**: docs, types, pure refactor with an
   unchanged public surface, or a change 2b already substantiates. Say nothing;
   do not pad the comment.
-- **The author lacks write access.** Both lanes execute the PR author's code,
-  so both require the **AUTHOR** to have write — recommending them on an
-  external contributor's PR sends the maintainer into a guaranteed denial.
-  Say the sandboxed lanes are unavailable for this PR and name what a
-  maintainer can do instead (check the PR out in a disposable container, or
-  reproduce the specific behavioural claim by hand).
+- **The author lacks write access.** `/tmux` is unavailable (it executes the
+  author's code and gates on the author). `/verify` is still available as a
+  **sponsored run**: a maintainer's `@qwen-code /verify` comment approves
+  the head it was written against, and that run additionally carries a
+  pre-execution risk screen (npm lifecycle scripts, off-registry dependency
+  resolutions, package-manager config, plus a model screen — all failing
+  closed) and a full workspace wipe before any of the PR's code executes.
+  Name the trigger as usual, say it is a sponsored run, and remind the
+  maintainer to read the resulting report with the same skepticism as the
+  fork's own CI logs: the code under verification is adversarial input, and
+  a crafted PR can shape what the report _says_ even though the sandbox
+  bounds what it can _do_.
 
 #### 2c. Real-Scenario Testing — local invocation ONLY
 
