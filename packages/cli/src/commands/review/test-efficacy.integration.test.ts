@@ -1076,6 +1076,8 @@ process.stdout.write(JSON.stringify({
       join(sourceVitestDir, 'package.json'),
       JSON.stringify({ bin: { vitest: './vitest.mjs' } }),
     );
+    const sourceBinDir = join(dependencyRoot, 'node_modules', '.bin');
+    mkdirSync(sourceBinDir);
     writeFileSync(
       join(sourceVitestDir, 'vitest.mjs'),
       `import '${join(probeTree, 'src/x.test.mjs')}';
@@ -1095,10 +1097,11 @@ process.stdout.write(JSON.stringify({
       join(sourceDependencyDir, 'index.mjs'),
       'export default 1;\n',
     );
+    writeFileSync(join(sourceBinDir, 'probe-tool'), 'available');
     writeFileSync(join(probeTree, 'src/x.ts'), 'gone.clear();\n');
     writeFileSync(
       join(probeTree, 'src/x.test.mjs'),
-      "import value from 'probe-dependency'; if (value !== 1) throw new Error('bad dependency');\n",
+      "import fs from 'node:fs'; import value from 'probe-dependency'; if (value !== 1 || fs.readFileSync('node_modules/.bin/probe-tool', 'utf8') !== 'available') throw new Error('bad dependency');\n",
     );
 
     const result = runOneMutant(

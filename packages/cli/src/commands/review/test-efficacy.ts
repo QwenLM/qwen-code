@@ -997,7 +997,7 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
   mkdirSync(target);
   const linkType = process.platform === 'win32' ? 'junction' : 'dir';
   for (const entry of readdirSync(source, { withFileTypes: true })) {
-    if (entry.name.startsWith('.')) continue;
+    if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
     const sourceEntry = join(source, entry.name);
     const targetEntry = join(target, entry.name);
     if (entry.name.startsWith('@') && entry.isDirectory()) {
