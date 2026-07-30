@@ -628,6 +628,13 @@ export {
 } from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
+export {
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
+  wrapUserPromptSubmitContext,
+  isUserPromptSubmitContextPartText,
+  stripTrailingUserPromptSubmitContextPart,
+} from './hooks/user-prompt-submit-context.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

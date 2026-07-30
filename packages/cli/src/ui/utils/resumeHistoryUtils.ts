@@ -15,10 +15,12 @@ import type {
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
   HistoryGap,
+  UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
   parseGoalStateRecordPayloadV2,
+  stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -34,6 +36,28 @@ import {
   indexGapsByChild,
 } from './history-gap-notice.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
+
+/**
+ * Projects a plain user record to its display text.
+ *
+ * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
+ * the model-bound parts. For records that carry the reserved tag but no
+ * payload (written by other/newer writers), drops a trailing part that is
+ * entirely a tagged hook-context block. Legacy records with bare injected
+ * text fall back to the raw part concatenation.
+ */
+function extractUserRecordDisplayText(
+  record: ConversationRecord['messages'][number],
+): string {
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText) {
+    return payload.displayText;
+  }
+  const parts = (record.message?.parts as Part[] | undefined) ?? [];
+  return extractTextFromParts([
+    ...stripTrailingUserPromptSubmitContextPart(parts),
+  ]);
+}
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -376,9 +400,7 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
-          const text =
-            payload.userText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+          const text = payload.userText || extractUserRecordDisplayText(record);
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -401,7 +423,7 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractTextFromParts(record.message?.parts as Part[]);
+        const text = extractUserRecordDisplayText(record);
         if (text) {
           items.push({ type: 'user', text });
         }
