@@ -1,0 +1,46 @@
+{
+  "pass": 7,
+  "fail": 0,
+  "total": 7,
+  "rows": [
+    {
+      "name": "head/drain: SIGTERM landed inside the admitted batch (measured, not assumed)",
+      "ok": true,
+      "detail": "natural=549ms sigtermAt=+192ms sigtermToRaceDone=235ms"
+    },
+    {
+      "name": "head/drain: the admitted batch still completed after SIGTERM",
+      "ok": true,
+      "detail": "{\"status\":200,\"json\":{\"archived\":{\"count\":100,\"sample\":[\"0000bb00-0000-4000-8000-000000000000\",\"0000bb00-0000-4000-8000-000000000001\"]},\"alreadyArchived\":{\"count\":0,\"sample\":[]},\"notFound\":{\"count\":0,\"sample\":[]},\"errors\":{\"count\":0,\"sample\":[]}}}"
+    },
+    {
+      "name": "head/drain: its 100 transcripts really reached the archive directory",
+      "ok": true,
+      "detail": "moved=100 stillActive=0"
+    },
+    {
+      "name": "head/drain: maintenance admitted after SIGTERM is refused 503 daemon_draining",
+      "ok": true,
+      "detail": "{\"status\":503,\"json\":{\"error\":\"The daemon is draining and no longer accepts session maintenance.\",\"code\":\"daemon_draining\",\"errorKind\":\"daemon_draining\"}}"
+    },
+    {
+      "name": "head/drain: the refused request mutated nothing",
+      "ok": true,
+      "detail": "transcript still active = true"
+    },
+    {
+      "name": "head/drain: the process exited only after the admitted batch responded",
+      "ok": true,
+      "detail": "{\"raceStart\":1785427218868,\"sigtermAt\":1785427219061,\"lateAt\":1785427219095,\"raceDoneAt\":1785427219296,\"daemonExitedAt\":1785427228441,\"sigtermToRaceDoneMs\":235,\"raceDoneBeforeExit\":true}"
+    },
+    {
+      "name": "base/drain: CONTROL \u2014 base accepts maintenance after SIGTERM and deletes the transcript (expected red)",
+      "ok": true,
+      "detail": "{\"status\":200,\"json\":{\"removed\":[\"0000cc00-0000-4000-8000-000000000000\"],\"notFound\":[],\"errors\":[]}}"
+    }
+  ],
+  "latency": {
+    "headMs": 549,
+    "baseMs": 149
+  }
+}
