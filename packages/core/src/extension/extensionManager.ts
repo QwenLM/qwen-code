@@ -4,22 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  MCPServerConfig,
-  ExtensionInstallMetadata,
-  SkillConfig,
-  SubagentConfig,
-  ClaudeMarketplaceConfig,
-} from '../index.js';
+import type { MCPServerConfig, ExtensionInstallMetadata } from '../config/config.js';
+import { Config } from '../config/config.js';
+import type { SkillConfig } from '../skills/types.js';
+import type { SubagentConfig } from '../subagents/types.js';
+import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
+import { Storage } from '../config/storage.js';
 import {
-  Storage,
-  Config,
   logExtensionEnable,
   logExtensionInstallEvent,
   logExtensionUninstall,
   logExtensionDisable,
-} from '../index.js';
+} from '../telemetry/loggers.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
