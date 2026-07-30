@@ -89,6 +89,9 @@ describe('summaryCommand custom export path', () => {
     const result = await run('');
     const fullPath = path.join(projectRoot, '.qwen', 'PROJECT_SUMMARY.md');
     expect(await fileExists(fullPath)).toBe(true);
+    const written = await fs.readFile(fullPath, 'utf8');
+    expect(written).toContain('SUMMARY BODY');
+    expect(written).toContain('## Summary Metadata');
     expect(result).toMatchObject({ type: 'message', messageType: 'info' });
     expect(result.content).toContain('.qwen/PROJECT_SUMMARY.md');
   });
@@ -128,7 +131,7 @@ describe('summaryCommand custom export path', () => {
     const target = path.join(projectRoot, 'abs', 'out.md');
     const result = await run(target);
     expect(await fileExists(target)).toBe(true);
-    expect(result.content).toContain(target);
+    expect(result.content).toContain(target.replaceAll(path.sep, '/'));
   });
 
   it('rejects a relative path that escapes the project root', async () => {
