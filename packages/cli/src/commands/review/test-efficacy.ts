@@ -56,6 +56,7 @@ import {
   rmSync,
   lstatSync,
   existsSync,
+  symlinkSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, sep } from 'node:path';
@@ -987,6 +988,18 @@ export function probeCleanupFailureDetail(
  * runs share a window that reserves the revert probe's full slot, and the
  * revert probe gets the remainder of the whole budget.
  */
+function exposeDependencies(probeTree: string, dependencyRoot: string): void {
+  if (probeTree === dependencyRoot) return;
+  const source = join(dependencyRoot, 'node_modules');
+  const target = join(probeTree, 'node_modules');
+  if (!existsSync(source) || existsSync(target)) return;
+  symlinkSync(
+    source,
+    target,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+}
+
 function runProbeSuite(
   probeTree: string,
   probes: string[],
@@ -1002,6 +1015,7 @@ function runProbeSuite(
     deadlineAt !== undefined
       ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
       : PROBE_RUN_TIMEOUT_MS;
+  exposeDependencies(probeTree, dependencyRoot);
   const r = spawnSync(
     process.execPath,
     [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],

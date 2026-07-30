@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   parseSessionRef,
   buildSessionRef,
@@ -34,7 +34,28 @@ describe('sessionMentionRef', () => {
 
   it('preserves the already-normalized title passed by the command parser', () => {
     expect(parseSessionRef('session:My Chat')).toEqual({ title: 'My Chat' });
-    expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a\\&b' });
+  });
+
+  it('unescapes Windows session titles exactly once', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a&b' });
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('does not unescape an already-normalized POSIX title again', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
+    try {
+      expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a\\&b' });
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it('treats an empty remainder as null (lone prefix)', () => {

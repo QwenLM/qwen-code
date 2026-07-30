@@ -1058,33 +1058,58 @@ process.stdout.write(JSON.stringify({
     expect(readFileSync(join(repo, 'src/x.ts'), 'utf8')).toBe(before);
   });
 
-  it('runs a mutant with dependencies from the source worktree', () => {
+  it('runs tests with dependencies from the source worktree', () => {
     const dependencyRoot = join(repo, 'source-worktree');
     const probeTree = join(repo, 'separate-probe');
     mkdirSync(dependencyRoot);
     mkdirSync(join(probeTree, 'src'), { recursive: true });
     const sourceVitestDir = join(dependencyRoot, 'node_modules', 'vitest');
+    const sourceDependencyDir = join(
+      dependencyRoot,
+      'node_modules',
+      'probe-dependency',
+    );
     mkdirSync(sourceVitestDir, { recursive: true });
+    mkdirSync(sourceDependencyDir);
     writeFileSync(
       join(sourceVitestDir, 'package.json'),
       JSON.stringify({ bin: { vitest: './vitest.mjs' } }),
     );
     writeFileSync(
       join(sourceVitestDir, 'vitest.mjs'),
-      'process.stdout.write(JSON.stringify({ testResults: [] }));\n',
+      `import '${join(probeTree, 'src/x.test.mjs')}';
+process.stdout.write(JSON.stringify({
+  testResults: [{
+    name: ${JSON.stringify(join(probeTree, 'src/x.test.mjs'))},
+    assertionResults: [{ status: 'passed' }],
+  }],
+}));
+`,
+    );
+    writeFileSync(
+      join(sourceDependencyDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: './index.mjs' }),
+    );
+    writeFileSync(
+      join(sourceDependencyDir, 'index.mjs'),
+      'export default 1;\n',
     );
     writeFileSync(join(probeTree, 'src/x.ts'), 'gone.clear();\n');
+    writeFileSync(
+      join(probeTree, 'src/x.test.mjs'),
+      "import value from 'probe-dependency'; if (value !== 1) throw new Error('bad dependency');\n",
+    );
 
-    expect(() =>
-      runOneMutant(
-        probeTree,
-        { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
-        ['src/x.test.ts'],
-        undefined,
-        Date.now,
-        dependencyRoot,
-      ),
-    ).not.toThrow(/vitest not found/);
+    const result = runOneMutant(
+      probeTree,
+      { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+      ['src/x.test.mjs'],
+      undefined,
+      Date.now,
+      dependencyRoot,
+    );
+
+    expect(result.verdict).toBe('survived');
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {
