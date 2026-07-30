@@ -359,7 +359,7 @@ describe('Permission Control (E2E)', () => {
 
         (async () => {
           for await (const message of q) {
-            if (isSDKAssistantMessage(message) || isSDKResultMessage(message)) {
+            if (isSDKResultMessage(message)) {
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
@@ -367,8 +367,6 @@ describe('Permission Control (E2E)', () => {
                 secondResponseReceived = true;
                 resolvers.second?.();
               }
-            }
-            if (isSDKResultMessage(message)) {
               resultWaiter.notifyResult();
             }
           }
@@ -440,7 +438,7 @@ describe('Permission Control (E2E)', () => {
 
         (async () => {
           for await (const message of q) {
-            if (isSDKAssistantMessage(message) || isSDKResultMessage(message)) {
+            if (isSDKResultMessage(message)) {
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
@@ -448,8 +446,6 @@ describe('Permission Control (E2E)', () => {
                 secondResponseReceived = true;
                 resolvers.second?.();
               }
-            }
-            if (isSDKResultMessage(message)) {
               resultWaiter.notifyResult();
             }
           }
@@ -521,7 +517,7 @@ describe('Permission Control (E2E)', () => {
 
         (async () => {
           for await (const message of q) {
-            if (isSDKAssistantMessage(message) || isSDKResultMessage(message)) {
+            if (isSDKResultMessage(message)) {
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
@@ -529,8 +525,6 @@ describe('Permission Control (E2E)', () => {
                 secondResponseReceived = true;
                 resolvers.second?.();
               }
-            }
-            if (isSDKResultMessage(message)) {
               resultWaiter.notifyResult();
             }
           }
