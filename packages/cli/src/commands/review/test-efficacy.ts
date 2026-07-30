@@ -287,6 +287,10 @@ interface FileScan {
   /** Per line: its code portion — comments stripped, literal contents blanked
    *  (delimiters kept), trimmed. */
   codeLines: string[];
+  /** The scanner's state at EOF. A non-`code` end means a regex literal or
+   *  similar shape derailed the scan — every later line's `inLiteral` is
+   *  suspect, so the caller discards the file's candidates. */
+  endState: 'code' | 'template' | 'comment';
 }
 
 /**
@@ -427,7 +431,7 @@ function scanFileLines(content: string): FileScan {
     }
   }
   endLine(content.length);
-  return { inLiteral, codeLines };
+  return { inLiteral, codeLines, endState: state };
 }
 
 /**
@@ -533,7 +537,8 @@ export function selectMutants(
   const rest: MutantCandidate[] = [];
   for (const f of files) {
     const lines = f.content.split('\n');
-    const { inLiteral, codeLines } = scanFileLines(f.content);
+    const { inLiteral, codeLines, endState } = scanFileLines(f.content);
+    if (endState !== 'code') continue;
     for (const n of [...f.addedLines].sort((a, b) => a - b)) {
       const raw = lines[n - 1];
       if (raw === undefined) continue;
@@ -1120,9 +1125,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         const added = parseAddedLines(
           gitCapture(
             worktree,
+            '-c',
+            'core.quotePath=false',
             'diff',
             '--unified=0',
             '--no-color',
+            '--src-prefix=a/',
+            '--dst-prefix=b/',
+            '--no-ext-diff',
+            '--no-textconv',
             base,
             headSha,
             '--',
@@ -1196,6 +1207,8 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // did not cause, and a file that collected nothing proves nothing. Gate
         // PER FILE, not on the whole suite — one unrelated quarantined (all-skip)
         // file is `inconclusive`, not red, and must not take the whole probe down.
+        // (`inert` here is the baseline's "all passed" — the same verdict the
+        // revert probe reads as "still passed with the source reverted".)
         const greenProbes = baseline.perFile
           .filter((r) => r.verdict === 'inert')
           .map((r) => r.file);
@@ -1358,6 +1371,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     writeStdoutLine(
       `  ${mutantsSkippedForBudget} mutant(s) skipped: the remaining budget cannot fit another suite run`,
     );
+  }
+  if (mutantsNote) {
+    writeStdoutLine(`  ${mutantsNote}`);
   }
   if (cleanupFailure) {
     // A leftover probe worktree does not corrupt the shared tree — it is swept

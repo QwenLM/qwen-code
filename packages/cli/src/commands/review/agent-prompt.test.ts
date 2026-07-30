@@ -1870,6 +1870,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('`kind: "mutant-survived"`');
     expect(p).toContain('mutants.skippedForBudget');
     expect(p).toContain('mutants.skippedForCap');
+    expect(p).toContain('mutants.skippedForBaseline');
+    expect(p).toContain('mutants.note');
     // No bare executable `qwen` anywhere in this brief. Agent 7 is the one
     // SUBAGENT that shells out to the review CLI — the one call site neither the
     // SKILL.md sweep nor check-coverage's stderr hints can reach — and its shell

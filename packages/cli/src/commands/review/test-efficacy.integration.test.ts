@@ -488,12 +488,23 @@ process.stdout.write(JSON.stringify({
     // The unmutated suite is NOT green: the fake runner reports a failure.
     installFailingVitest();
 
-    await runHandler({
-      report: join(repo, 'report.json'),
-      worktree: wt,
-      base,
-      out: join(repo, 'out.json'),
-    });
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      stdoutSpy.mockRestore();
+    }
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
     expect(out.mutants.probed).toEqual([]);
@@ -504,6 +515,11 @@ process.stdout.write(JSON.stringify({
         (f) => f.kind === 'mutant-survived',
       ),
     ).toBe(false);
+    const stdout = stdoutChunks.join('');
+    expect(stdout).toContain(
+      '1 mutant(s) skipped: no probe file was green in the unmutated baseline',
+    );
+    expect(stdout).toContain('mutants not run: no probe file was green');
   });
 
   it('still probes when an UNRELATED probe file is all-skipped (per-file gate)', async () => {

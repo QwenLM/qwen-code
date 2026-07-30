@@ -883,8 +883,9 @@ export function buildRoleBrief(
           'test in this diff that would catch its removal. **`inconclusive` is not a ' +
           'finding** — for probes and mutants alike, ' +
           "reverting or mutating the source often breaks the test's own compile, and that is " +
-          'not the test catching anything. Mutants counted in `mutants.skippedForBudget` ' +
-          'or `mutants.skippedForCap` never ran — not findings either. Note them and move on.',
+          'not the test catching anything. Mutants counted in `mutants.skippedForBudget`, ' +
+          '`mutants.skippedForCap`, or `mutants.skippedForBaseline` never ran — not findings ' +
+          'either. `mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }

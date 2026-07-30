@@ -910,6 +910,23 @@ describe('selectMutants', () => {
     ]);
   });
 
+  it('discards ALL candidates from a file whose scan derails', () => {
+    // A backtick inside a regex literal flips the scanner into template state
+    // through to EOF. Even the valid candidate before the derailment is
+    // discarded — the scan is untrustworthy past it, and over-rejecting is the
+    // cheap error.
+    const content = src([
+      'state.clear();',
+      'const re = /`/;',
+      'other.clear();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: [1, 2, 3], hasNewTests: false },
+    ]);
+    expect(got).toEqual([]);
+  });
+
   it('caps at MAX_MUTANTS, preferring files that also have new tests', () => {
     const line = (i: number) => `store${i}.clear();`;
     const content = src([...all(5).map(line), '']);
