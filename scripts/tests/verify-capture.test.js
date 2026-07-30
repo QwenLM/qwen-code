@@ -146,6 +146,19 @@ describe('verify-capture helper', () => {
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
 
+  // 256-colour and truecolor sequences produce getFgColor() values >= 16,
+  // which the bounds guard maps to FG_DEFAULT. Exercise that branch so a
+  // future simplification to ANSI[cell.fg] cannot ship fill="undefined".
+  it('renders 256-colour and truecolor via the default-grey fallback', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'fallback.png');
+      const res = run(['--out', out], {
+        input: `${ESC}[38;5;200mFAIL${ESC}[0m ${ESC}[38;2;255;100;0mFAIL${ESC}[0m\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+    }));
+
   // A bare LF leaves xterm's cursor in the old column, so line 2 renders
   // indented by line 1's width and the capture looks like a staircase. The
   // helper normalises to CRLF; assert the rendered height matches the line
@@ -201,7 +214,7 @@ describe('verify-capture helper', () => {
       expect(isPng(out)).toBe(true);
     }));
 
-  // scrollback: 0 keeps only the last --rows lines, so a taller input loses its
+  // scrollback: 0 keeps only the last --rows rows, so a taller input loses its
   // header with no visible sign. The helper must say so on stderr rather than
   // ship an image that looks complete but starts halfway down.
   it('warns when input is taller than --rows', () =>
@@ -212,7 +225,22 @@ describe('verify-capture helper', () => {
       });
       expect(res.status).toBe(0);
       expect(isPng(out)).toBe(true);
-      expect(res.stderr).toContain('warning: input has 6 lines');
+      expect(res.stderr).toContain('warning: input occupies 6 terminal rows');
+      expect(res.stderr).toContain('dropped the top 2');
+    }));
+
+  // A line wider than --cols wraps into ceil(len / cols) terminal rows, so
+  // the top can be dropped even when the newline count is under --rows.
+  it('warns when wrapped lines exceed --rows', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'wrapped.png');
+      const longLine = 'a'.repeat(20);
+      const res = run(['--out', out, '--cols', '10', '--rows', '4'], {
+        input: `${longLine}\n${longLine}\n${longLine}\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      expect(res.stderr).toContain('warning: input occupies 6 terminal rows');
       expect(res.stderr).toContain('dropped the top 2');
     }));
 

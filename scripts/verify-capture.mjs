@@ -240,15 +240,27 @@ async function render(raw, opts) {
   const info = await sharp(Buffer.from(svg))
     .png({ compressionLevel: 9 })
     .toFile(out);
-  // scrollback: 0 keeps only the last --rows lines, so a taller input loses its
+  // scrollback: 0 keeps only the last --rows rows, so a taller input loses its
   // top — often the header — with no visible sign; say so rather than shipping
-  // an image that looks complete but starts halfway down.
-  const inputLines = raw.replace(/\r?\n$/, '').split(/\r?\n/).length;
-  if (inputLines > opts.rows) {
+  // an image that looks complete but starts halfway down. Count wrapped rows
+  // (a line wider than --cols occupies ceil(len / cols) terminal rows) so the
+  // warning also fires when wrapping, not just newlines, pushes past --rows.
+  const ESC = String.fromCharCode(27);
+  const stripAnsi = (s) =>
+    s.replace(new RegExp(`${ESC}\\[[0-9;]*[a-zA-Z]`, 'g'), '');
+  const wrappedRows = raw
+    .replace(/\r?\n$/, '')
+    .split(/\r?\n/)
+    .reduce(
+      (sum, line) =>
+        sum + Math.max(1, Math.ceil(stripAnsi(line).length / opts.cols)),
+      0,
+    );
+  if (wrappedRows > opts.rows) {
     process.stderr.write(
-      `verify-capture: warning: input has ${inputLines} lines; ` +
+      `verify-capture: warning: input occupies ${wrappedRows} terminal rows; ` +
         `--rows ${opts.rows} kept the last ${opts.rows} and dropped the top ` +
-        `${inputLines - opts.rows}\n`,
+        `${wrappedRows - opts.rows}\n`,
     );
   }
   process.stdout.write(
