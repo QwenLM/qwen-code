@@ -217,7 +217,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         await this.skipTodo(todo);
         continue;
       }
-      const raw = todo.target as { iid?: number; title?: string };
+      const raw = (todo.target || {}) as { iid?: number; title?: string };
       if (!raw.iid) {
         await this.skipTodo(todo);
         continue;
@@ -352,9 +352,8 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
     try {
       await this.handleInbound(envelope);
-    } catch (err) {
+    } finally {
       this.reactions.delete(messageId);
-      throw err;
     }
   }
 
