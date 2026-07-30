@@ -41,6 +41,14 @@ interface ErrorBoundaryProps {
   fallback?: (error: Error, reset: () => void) => ReactNode;
   /** Optional side-effecting hook for logging the error. */
   onError?: (error: Error, info: ErrorInfo) => void;
+  /**
+   * When true, the caught error is stored in the module-level
+   * `lastRenderError` so the cleanup chain in startInteractiveUI.tsx can
+   * echo it to stderr after leaving the alternate screen. Only the fatal
+   * top-level boundary should set this; non-fatal boundaries (e.g. the
+   * transcript view) recover and the app continues.
+   */
+  recordForExitEcho?: boolean;
 }
 
 interface ErrorBoundaryState {
@@ -66,12 +74,7 @@ export class ErrorBoundary extends Component<
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
     const normalized = normalizeError(error);
-    // Only boundaries that report the error (via onError) feed the exit-time
-    // echo. A boundary with no onError — e.g. the inline ThinkBody fallback —
-    // handles the error itself and the app continues; recording it would print
-    // a spurious "Rendering error (logged to debug file)" on a normal /quit
-    // even though nothing was ever logged.
-    if (this.props.onError) {
+    if (this.props.recordForExitEcho) {
       lastRenderError = normalized;
     }
     this.props.onError?.(normalized, info);

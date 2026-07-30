@@ -131,7 +131,7 @@ describe('ErrorBoundary', () => {
 
     const onError = vi.fn();
     render(
-      <ErrorBoundary onError={onError}>
+      <ErrorBoundary recordForExitEcho onError={onError}>
         <Thrower message="vp crash" />
       </ErrorBoundary>,
     );
@@ -144,18 +144,20 @@ describe('ErrorBoundary', () => {
     expect(consumeLastRenderError()).toBeUndefined();
   });
 
-  it('does not store the error when no onError is provided (inline boundary)', () => {
-    // A boundary that handles the error inline (no onError) must not feed the
-    // exit-time echo: the app continues normally, so a later /quit should not
-    // print a spurious "Rendering error" for an already-handled failure.
+  it('does not store the error without recordForExitEcho (non-fatal boundary)', () => {
+    // A boundary that handles the error itself (e.g. the transcript view)
+    // must not feed the exit-time echo: the app continues normally, so a
+    // later /quit should not print a spurious "Rendering error".
     consumeLastRenderError();
 
+    const onError = vi.fn();
     render(
-      <ErrorBoundary>
-        <Thrower message="inline handled" />
+      <ErrorBoundary onError={onError}>
+        <Thrower message="handled inline" />
       </ErrorBoundary>,
     );
 
+    expect(onError).toHaveBeenCalledTimes(1);
     expect(consumeLastRenderError()).toBeUndefined();
   });
 });

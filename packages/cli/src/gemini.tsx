@@ -169,29 +169,32 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 import { loadSandboxConfig } from './config/sandboxConfig.js';
 import { handleUncaughtException, isExpectedPtyRaceError } from './cli.js';
 
-let uncaughtExceptionHandler: ((error: Error) => void) | undefined;
+let uncaughtExceptionHandler: ((error: unknown) => void) | undefined;
 
 export function setupUncaughtExceptionHandler(sessionId: string) {
   // runCliEntryPoint() registered the basic handleUncaughtException at startup,
   // before the session ID existed. Replace it now: two listeners conflict — the
   // first calls process.exit(1) so the second never runs — and the basic one
-  // lacks both the PTY-race guard (so it would crash the session on a benign
-  // teardown error) and the alternate-screen handling below. Also drop any
-  // handler a previous call installed so exactly one listener is ever active.
+  // lacks the debug-log write and the alternate-screen handling below. Also drop
+  // any handler a previous call installed so exactly one listener is ever active.
   process.removeListener('uncaughtException', handleUncaughtException);
   if (uncaughtExceptionHandler) {
     process.removeListener('uncaughtException', uncaughtExceptionHandler);
   }
-  uncaughtExceptionHandler = (error) => {
-    if (isExpectedPtyRaceError(error)) {
+  uncaughtExceptionHandler = (rawError) => {
+    if (isExpectedPtyRaceError(rawError)) {
       return;
     }
+    const error =
+      rawError instanceof Error ? rawError : new Error(String(rawError));
     const timestamp = new Date().toISOString();
     const line = `${timestamp} [ERROR] [STARTUP] [UNCAUGHT_EXCEPTION] ${error.message}\n${error.stack ?? ''}\n`;
     // debugLogger.error() uses async fs.appendFile — the write would be
     // abandoned by the process.exit() below. Write synchronously instead.
+    let logged = false;
     try {
       fs.appendFileSync(Storage.getDebugLogPath(sessionId), line, 'utf8');
+      logged = true;
     } catch {
       // Best-effort: if the debug dir doesn't exist yet or the disk is
       // full, the stderr output below is the fallback record.
@@ -209,7 +212,7 @@ export function setupUncaughtExceptionHandler(sessionId: string) {
       }
     }
     writeStderrLineSafe(
-      `\nFatal: uncaught exception (logged to debug file)\n${error.stack ?? error.message}`,
+      `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${error.stack ?? error.message}`,
     );
     process.exit(1);
   };

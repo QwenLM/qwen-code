@@ -30,6 +30,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
@@ -2271,6 +2272,17 @@ describe('startInteractiveUI', () => {
     render: vi.fn().mockReturnValue({ unmount: vi.fn() }),
   }));
 
+  vi.mock('./ui/components/shared/ErrorBoundary.js', async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('./ui/components/shared/ErrorBoundary.js')
+      >();
+    return {
+      ...original,
+      consumeLastRenderError: mockConsumeLastRenderError,
+    };
+  });
+
   let initialExitListeners: NodeJS.ExitListener[] = [];
   let originalStdoutIsTTY: boolean | undefined;
   let restoreCiEnv = () => {};
@@ -2654,6 +2666,70 @@ describe('startInteractiveUI', () => {
     expect(
       vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
     ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
+  });
+
+  it('echoes a stored render error to stderr on cleanup (VP exit-time echo)', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    mockConsumeLastRenderError.mockReturnValue(new Error('render boom'));
+    mockWriteStderrLine.mockClear();
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(unmount).toHaveBeenCalledTimes(1);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '\nRendering error (logged to debug file): render boom',
+    );
+  });
+
+  it('does not echo when no render error was stored', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    mockConsumeLastRenderError.mockReturnValue(undefined);
+    mockWriteStderrLine.mockClear();
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    await cleanupFn?.();
+
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Rendering error'),
+    );
   });
 
   describe('periodic memory-pressure check', () => {
