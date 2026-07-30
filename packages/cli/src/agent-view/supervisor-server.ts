@@ -72,22 +72,19 @@ export function createAgentViewSupervisorServer(
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
     socket.on('error', () => {});
-    socket.setEncoding('utf8');
-    let buffer = '';
+    let buffer = Buffer.alloc(0);
 
-    socket.on('data', (chunk) => {
-      buffer += chunk;
-      if (
-        Buffer.byteLength(buffer, 'utf8') > MAX_SUPERVISOR_REQUEST_LINE_BYTES
-      ) {
+    socket.on('data', (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.byteLength > MAX_SUPERVISOR_REQUEST_LINE_BYTES) {
         socket.destroy();
         return;
       }
-      const newline = buffer.indexOf('\n');
+      const newline = buffer.indexOf(0x0a);
       if (newline === -1) return;
 
-      const line = buffer.slice(0, newline);
-      const remaining = buffer.slice(newline + 1);
+      const line = buffer.subarray(0, newline).toString('utf8');
+      const remaining = buffer.subarray(newline + 1);
       socket.pause();
       void respondToLine(line, handler, socket, options.authToken, remaining);
     });
@@ -215,7 +212,7 @@ async function respondToLine(
   handler: AgentViewSupervisorHandler,
   socket: net.Socket,
   authToken: string | undefined,
-  remaining = '',
+  remaining: Buffer,
 ): Promise<void> {
   const request = parseRequestLine(line);
   if (
@@ -229,7 +226,7 @@ async function respondToLine(
       authToken,
       remaining,
       'attachStream',
-      handler.attachStream,
+      handler.attachStream.bind(handler),
       'Attach stream failed.',
     );
     return;
@@ -246,7 +243,7 @@ async function respondToLine(
       authToken,
       remaining,
       'subscribe',
-      handler.subscribe,
+      handler.subscribe.bind(handler),
       'Subscribe failed.',
     );
     return;
@@ -269,7 +266,7 @@ async function handleStreamingOp<Op extends 'attachStream' | 'subscribe'>(
   request: ParsedRequest,
   socket: net.Socket,
   authToken: string | undefined,
-  remaining: string,
+  remaining: Buffer,
   op: Op,
   method: (
     params: AgentViewSupervisorRequestMap[Op],
@@ -303,7 +300,7 @@ async function handleStreamingOp<Op extends 'attachStream' | 'subscribe'>(
     return;
   }
   socket.removeAllListeners('data');
-  if (remaining.length > 0) {
+  if (remaining.byteLength > 0) {
     // Preserve terminal bytes that arrived in the same packet as the request.
     socket.unshift(remaining);
   }

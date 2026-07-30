@@ -14,6 +14,7 @@ import {
   requestAgentViewSupervisor,
   subscribeAgentViewSupervisor,
 } from './supervisor-client.js';
+import { createAgentViewSupervisorHandler } from './supervisor-process.js';
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
 
 const cleanupPaths: string[] = [];
@@ -444,6 +445,95 @@ describe('Agent View supervisor server', () => {
         })}\nhello`,
       );
       await waitFor(() => attachedBytes === 'hello');
+      socket.destroy();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('binds class-based streaming handlers so subscribe succeeds', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = createAgentViewSupervisorHandler({ globalDir: dir });
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+    await server.listen();
+    try {
+      const socket = net.createConnection(socketPath);
+      socket.setEncoding('utf8');
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      socket.write(
+        `${JSON.stringify({ id: 'subscribe-request', op: 'subscribe' })}\n`,
+      );
+      const line = await new Promise<string>((resolve) => {
+        let buffered = '';
+        socket.on('data', (chunk) => {
+          buffered += String(chunk);
+          const newline = buffered.indexOf('\n');
+          if (newline !== -1) resolve(buffered.slice(0, newline));
+        });
+      });
+      // The shipped handler is a class whose subscribe() touches `this`; an
+      // unbound invocation throws and answers internal_error instead.
+      expect(JSON.parse(line)).toMatchObject({
+        ok: true,
+        result: { subscribed: true },
+      });
+      socket.destroy();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('delivers attach stream bytes without utf8 transcoding', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const received: Buffer[] = [];
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      attachStream: vi.fn(
+        (_params, socket: import('node:net').Socket, requestId: string) => {
+          socket.write(
+            `${JSON.stringify({
+              id: requestId,
+              ok: true,
+              result: { attached: true },
+            })}\n`,
+          );
+          socket.on('data', (chunk) => {
+            received.push(
+              Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+            );
+          });
+        },
+      ),
+    };
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+    await server.listen();
+    try {
+      const socket = net.createConnection(socketPath);
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      // 0x80 and 0xff are invalid UTF-8 lead bytes; a utf8-decoded stream
+      // would replace each with U+FFFD (ef bf bd).
+      const payload = Buffer.from([
+        0x41, 0x42, 0xe4, 0xbd, 0xa0, 0x80, 0xff, 0x43,
+      ]);
+      const requestLine = Buffer.from(
+        `${JSON.stringify({
+          id: 'attach-request',
+          op: 'attachStream',
+          params: { sessionId: 'session-1' },
+        })}\n`,
+        'utf8',
+      );
+      socket.write(Buffer.concat([requestLine, payload]));
+      await waitFor(
+        () => Buffer.concat(received).byteLength >= payload.byteLength,
+      );
+      expect(Buffer.concat(received).subarray(0, payload.byteLength)).toEqual(
+        payload,
+      );
       socket.destroy();
     } finally {
       await server.close();
