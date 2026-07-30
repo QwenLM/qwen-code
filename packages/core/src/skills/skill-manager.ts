@@ -945,7 +945,7 @@ export class SkillManager {
       return [];
     }
 
-    if (this.config.getDisabledSkillLevels().has(level)) {
+    if (this.config.getDisabledSkillLevels?.().has(level)) {
       debugLogger.debug(`Skipping disabled ${level} skill level`);
       return [];
     }
