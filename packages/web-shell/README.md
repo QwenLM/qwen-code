@@ -368,5 +368,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/init`          | ACP 透传            | 分析项目并创建定制的 `QWEN.md`。                                                                                        |
 | `/stats`         | ACP 透传            | 显示统计信息，包含 `model`、`tools` 子命令。                                                                            |
 | `/summary`       | ACP 透传            | 生成当前会话摘要。                                                                                                      |
-| `/tasks`         | ACP 透传            | 列出后台任务。                                                                                                          |
+| `/tasks`         | 本地实现            | 打开环境信息面板并刷新后台任务。                                                                                        |
+| `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
+| `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
