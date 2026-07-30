@@ -22,6 +22,7 @@ import {
   validateTranscriptRecord,
   walkTranscriptUuidChain,
 } from '../utils/transcript-records.js';
+import { resolveBranchPoints } from './branch-points.js';
 
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
@@ -104,6 +105,7 @@ export interface SessionTranscriptRecordPage {
   replay?: unknown;
   startTime: string;
   lastUpdated: string;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
 }
 
 interface SessionTranscriptFileIdentity {
@@ -137,6 +139,7 @@ interface TranscriptIndex {
   startTime: string;
   lastUpdated: string;
   byUuid: Map<string, UuidIndexEntry>;
+  branchPointsByAssistantUuid?: ReadonlyMap<string, string>;
 }
 
 interface CacheEntry {
@@ -1132,6 +1135,24 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
+    if (index.branchPointsByAssistantUuid === undefined) {
+      const activeRecords = await readAggregatedRecords(
+        index,
+        index.activeUuids,
+      );
+      index.branchPointsByAssistantUuid = new Map(
+        [...resolveBranchPoints(activeRecords).values()].map((point) => [
+          point.assistantRecordUuid,
+          point.checkpointUuid,
+        ]),
+      );
+    }
+    const pageRecordUuids = new Set(records.map((record) => record.uuid));
+    const pageBranchPoints = Object.fromEntries(
+      [...index.branchPointsByAssistantUuid].filter(([assistantUuid]) =>
+        pageRecordUuids.has(assistantUuid),
+      ),
+    );
     const backwardGoalState =
       direction === 'backward'
         ? await readGoalStateBeforePosition(index, nextPosition)
@@ -1177,6 +1198,9 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
+      ...(Object.keys(pageBranchPoints).length > 0
+        ? { branchPointsByAssistantUuid: pageBranchPoints }
+        : {}),
     };
   }
 }

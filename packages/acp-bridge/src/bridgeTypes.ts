@@ -302,6 +302,7 @@ export interface BridgeBranchSessionRequest {
   sourceType?: string;
   sourceId?: string;
   replayInheritedHistory?: boolean;
+  atRecordId?: string;
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {

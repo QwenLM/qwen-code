@@ -14523,6 +14523,71 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/branch', () => {
+    it('forwards the durable checkpoint id to the bridge', async () => {
+      const bridge = fakeBridge();
+      const atRecordId = '11111111-1111-4111-8111-111111111111';
+      const branchSession = vi.fn(async () => ({
+        sessionId: 'branch-session',
+        workspaceCwd: WS_BOUND,
+        attached: true,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Branch',
+        forkedFrom: { sessionId: 'session-A', displayName: 'Source' },
+      }));
+      bridge.branchSession = branchSession;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId });
+
+      expect(res.status).toBe(201);
+      expect(branchSession).toHaveBeenCalledWith(
+        'session-A',
+        { name: undefined, atRecordId },
+        { clientId: undefined },
+      );
+    });
+
+    it('returns 409 when the checkpoint is no longer active', async () => {
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async () => {
+        throw Object.assign(new Error('Invalid or inactive branch point'), {
+          data: { errorKind: 'branch_point_invalid' },
+        });
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: '11111111-1111-4111-8111-111111111111' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'branch_point_invalid',
+        errorKind: 'branch_point_invalid',
+      });
+    });
+
+    it('rejects a non-string checkpoint id before calling the bridge', async () => {
+      const bridge = fakeBridge();
+      const branchSession = vi.fn();
+      bridge.branchSession = branchSession;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: 42 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_branch_point');
+      expect(branchSession).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['removes', true, 1],
       ['preserves', false, 0],

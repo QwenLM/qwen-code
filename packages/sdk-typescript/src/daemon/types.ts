@@ -831,6 +831,12 @@ export interface DaemonRestoredSession extends DaemonSession {
 
 export interface BranchSessionRequest {
   name?: string;
+  atRecordId?: string;
+}
+
+export interface DaemonBranchPoint {
+  assistantRecordUuid: string;
+  checkpointUuid: string;
 }
 
 export interface DaemonBranchedSession extends DaemonRestoredSession {
@@ -3363,6 +3369,7 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 

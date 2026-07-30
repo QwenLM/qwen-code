@@ -104,6 +104,7 @@ describe('SessionTranscriptReader', () => {
       sessionId: targetSessionId,
       timestamp: new Date(RECORD_BASE_MS + recordSeq++ * 1000).toISOString(),
       type: uuid.startsWith('a') ? 'assistant' : 'user',
+      provenance: uuid.startsWith('a') ? 'assistant_output' : 'real_user',
       cwd: workspaceDir,
       version: '1.0.0',
       message: {
@@ -565,6 +566,33 @@ describe('SessionTranscriptReader', () => {
       't1',
       'a1',
     ]);
+  });
+
+  it('projects validated branch points for Assistant records in the page', async () => {
+    const user = record('u1', null, 'prompt');
+    const assistant = record('a1', 'u1', 'answer');
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([user, assistant, checkpoint]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toContain('a1');
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
   });
 
   it('keeps a long user turn complete when it exceeds the record limit', async () => {

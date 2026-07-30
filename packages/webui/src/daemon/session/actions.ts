@@ -1254,7 +1254,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async branchSession(name?: string) {
+    async branchSession(name?: string, atRecordId?: string) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -1265,7 +1265,7 @@ export function createDaemonSessionActions({
         const result = await withActionTimeout(
           session.client.branchSession(
             session.sessionId,
-            { name },
+            { name, atRecordId },
             session.clientId,
           ),
           'Branch session timed out',

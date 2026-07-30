@@ -6967,6 +6967,78 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('serializes rewind behind an admitted branch', async () => {
+      const calls: string[] = [];
+      const branchGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === 'qwen/control/session/branch') {
+            calls.push('branch');
+            await branchGate.promise;
+            return { newSessionId: 'branch-before-rewind', title: 'Branch' };
+          }
+          if (method === 'qwen/control/session/rewind') {
+            calls.push('rewind');
+            return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = bridge.branchSession(session.sessionId, {
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      });
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'prompt-1',
+      });
+      await vi.waitFor(() => expect(calls).toEqual(['branch']));
+
+      branchGate.resolve(undefined);
+      await branch;
+      await rewind;
+      expect(calls).toEqual(['branch', 'rewind']);
+      await bridge.shutdown();
+    });
+
+    it('serializes branch behind an admitted rewind', async () => {
+      const calls: string[] = [];
+      const rewindGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === 'qwen/control/session/rewind') {
+            calls.push('rewind');
+            await rewindGate.promise;
+            return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
+          }
+          if (method === 'qwen/control/session/branch') {
+            calls.push('branch');
+            return { newSessionId: 'branch-after-rewind', title: 'Branch' };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'prompt-1',
+      });
+      const branch = bridge.branchSession(session.sessionId, {
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      });
+      await vi.waitFor(() => expect(calls).toEqual(['rewind']));
+
+      rewindGate.resolve(undefined);
+      await rewind;
+      await branch;
+      expect(calls).toEqual(['rewind', 'branch']);
+      await bridge.shutdown();
+    });
+
     it('publishes session_branched only on the new session stream', async () => {
       const factory: ChannelFactory = async () =>
         makeChannel({
@@ -7117,6 +7189,85 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('pendingPromptList', () => {
+    it('publishes a validated completed-turn branch point', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel({
+        promptImpl: () =>
+          ({
+            stopReason: 'end_turn',
+            _meta: {
+              'qwen.branchPoint': {
+                assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+                checkpointUuid: '22222222-2222-4222-8222-222222222222',
+              },
+            },
+          }) as PromptResponse,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'branchable' }],
+      });
+
+      await vi.waitFor(() =>
+        expect(
+          events.find((event) => event.type === 'turn_complete'),
+        ).toMatchObject({
+          data: {
+            branchPoint: {
+              assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+              checkpointUuid: '22222222-2222-4222-8222-222222222222',
+            },
+          },
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('drops malformed completed-turn branch metadata', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel({
+        promptImpl: () =>
+          ({
+            stopReason: 'end_turn',
+            _meta: {
+              'qwen.branchPoint': {
+                assistantRecordUuid: 'not-a-uuid',
+                checkpointUuid: '22222222-2222-4222-8222-222222222222',
+              },
+            },
+          }) as PromptResponse,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'not branchable' }],
+      });
+
+      await vi.waitFor(() => {
+        const complete = events.find((event) => event.type === 'turn_complete');
+        expect(complete).toBeDefined();
+        expect(complete?.data).not.toHaveProperty('branchPoint');
+      });
+      await bridge.shutdown();
+    });
+
     it('tracks a single prompt without publishing a pending_prompt_added event', async () => {
       const events: BridgeEvent[] = [];
       const handle = makeChannel({

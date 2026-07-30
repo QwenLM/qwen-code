@@ -52,6 +52,19 @@ function userRecord(): ChatRecord {
   };
 }
 
+function assistantRecord(): ChatRecord {
+  return {
+    ...userRecord(),
+    uuid: 'assistant-record',
+    parentUuid: 'user-record',
+    type: 'assistant',
+    message: {
+      role: 'model',
+      parts: [{ text: 'answer' }],
+    },
+  };
+}
+
 function cursorState(): SessionTranscriptCursorState {
   return {
     v: 1,
@@ -98,6 +111,29 @@ describe('history replay page', () => {
         timestamp: Date.parse(TIMESTAMP),
       }),
     ]);
+  });
+
+  it('attaches the checkpoint from the frozen page catalog to Assistant replay', async () => {
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [assistantRecord()],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const assistantUpdate = result.updates.find(
+      (update) => update.sessionUpdate === 'agent_message_chunk',
+    ) as { _meta?: Record<string, unknown> } | undefined;
+    expect(assistantUpdate?._meta).toMatchObject({
+      qwenTranscript: {
+        sourceRecordIds: ['assistant-record'],
+        branchRecordId: 'checkpoint-record',
+      },
+    });
   });
 
   it('filters malformed replay state before encoding the next cursor', async () => {

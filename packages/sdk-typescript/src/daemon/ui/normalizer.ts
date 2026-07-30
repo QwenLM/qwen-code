@@ -559,10 +559,12 @@ function createBase(
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
   const sourceRecordIds = extractSourceRecordIds(event);
+  const branchRecordId = extractBranchRecordId(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
+    ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -570,6 +572,18 @@ function createBase(
       ? { rawEvent: { ...event, data: redactSensitiveFields(event.data) } }
       : {}),
   };
+}
+
+function extractBranchRecordId(event: DaemonEvent): string | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  return transcript ? getString(transcript, 'branchRecordId') : undefined;
 }
 
 /**

@@ -431,6 +431,8 @@ type QueueToolResultRecord = (
   record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
 ) => void;
 
+type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
+
 type DaemonToolLoopState = {
   totalToolCalls: number;
   invalidToolParamErrors: Map<string, number>;
@@ -1356,6 +1358,9 @@ export class Session implements SessionContext {
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
+    private readonly runExclusiveAutomaticHistoryMutation: HistoryMutationRunner = (
+      operation,
+    ) => operation(),
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
@@ -2497,6 +2502,12 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    const recording = this.config.getChatRecordingService();
+    const branchTurnStartRecordUuid =
+      typeof recording?.getTranscriptCursor === 'function'
+        ? recording.getTranscriptCursor().recordId
+        : null;
+
     if (todoStopGuardPreparation.startsWorkChain) {
       this.#clearTodoStopGuardQueuedPromptWait();
       this.todoStopGuard.startOrdinaryPrompt();
@@ -2522,12 +2533,31 @@ export class Session implements SessionContext {
         channelDeliveryCapture,
         invocationContext,
       );
+      const branchPoint =
+        typeof recording?.recordBranchCheckpointTransaction === 'function'
+          ? await recording.recordBranchCheckpointTransaction({
+              startExclusiveRecordUuid: branchTurnStartRecordUuid,
+              stopReason: result.stopReason,
+            })
+          : undefined;
+      const completedResult: PromptResponse = branchPoint
+        ? {
+            ...result,
+            _meta: {
+              ...result._meta,
+              'qwen.branchPoint': {
+                assistantRecordUuid: branchPoint.assistantRecordUuid,
+                checkpointUuid: branchPoint.checkpointUuid,
+              },
+            },
+          }
+        : result;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
-      this.#maybeEmitFollowupSuggestion(result);
-      if (channelDelivery && result.stopReason === 'end_turn') {
+      this.#maybeEmitFollowupSuggestion(completedResult);
+      if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
           sessionId: this.sessionId,
           deliveryId: channelDelivery.deliveryId,
@@ -2539,7 +2569,7 @@ export class Session implements SessionContext {
           promptId: channelDelivery.deliveryId,
         });
       }
-      return result;
+      return completedResult;
     } catch (error) {
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
@@ -5216,6 +5246,16 @@ export class Session implements SessionContext {
     if (this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainCronQueueExclusive(),
+    );
+  }
+
+  async #drainCronQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingPrompt || this.notificationProcessing) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.#nextCronQueueIndex() < 0) return;
     try {
       await this.assertCanStartTurn();
     } catch (error) {
@@ -5893,6 +5933,20 @@ export class Session implements SessionContext {
     if (this.disposed) return;
     if (this.closing) return;
     if (this.notificationProcessing) return;
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.notificationQueue.length === 0) return;
+    if (this.#nextNotificationQueueIndex() < 0) return;
+
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainNotificationQueueExclusive(),
+    );
+  }
+
+  async #drainNotificationQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.notificationProcessing) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }

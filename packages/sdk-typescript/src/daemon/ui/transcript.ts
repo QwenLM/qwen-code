@@ -277,6 +277,19 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'assistant.done':
+      if (event.branchRecordId && event.reason === 'end_turn') {
+        const activeAssistant = getWritableBlockById(
+          next,
+          next.activeAssistantBlockId,
+        );
+        if (activeAssistant?.kind === 'assistant') {
+          activeAssistant.branchRecordId = event.branchRecordId;
+          activeAssistant.sourceRecordIds = unionStrings(
+            activeAssistant.sourceRecordIds,
+            event.sourceRecordIds,
+          );
+        }
+      }
       finishAssistant(next, event);
       // PR-E cancellation propagation: when the assistant turn ENDS
       // abnormally, any in-flight tool block whose status the daemon
@@ -651,6 +664,9 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
+    if (kind === 'assistant' && event.branchRecordId) {
+      existing.branchRecordId = event.branchRecordId;
+    }
     if (kind !== 'user') existing.streaming = true;
     return;
   }
@@ -668,6 +684,9 @@ function appendTextDelta(
     'meta' in event ? event.meta : undefined,
     event.sourceRecordIds,
   );
+  if (kind === 'assistant' && event.branchRecordId) {
+    block.branchRecordId = event.branchRecordId;
+  }
   if (kind !== 'user') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {

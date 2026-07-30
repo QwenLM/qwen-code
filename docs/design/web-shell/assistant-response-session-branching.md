@@ -1,0 +1,791 @@
+# Branching a Web Shell Session from a Completed Assistant Response
+
+## Document Status
+
+- Status: Proposed
+- Date: 2026-07-30
+- Scope: Web Shell, daemon session protocol, ACP bridge, session recording,
+  transcript replay, and session persistence
+- Review status: design v6 passed strict review with no Critical, High, or
+  Medium findings
+
+## 1. Summary
+
+Web Shell currently branches only from the latest active session state. This
+design lets a user branch from the final Assistant response of any successfully
+completed interactive user turn recorded after this feature is introduced.
+
+The design uses four rules:
+
+1. A durable `branch_checkpoint` record is the only authority that a response
+   is branchable.
+2. The recorder creates that checkpoint in an exclusive topology transaction,
+   so asynchronous metadata writers cannot create siblings or dangling
+   parents.
+3. The UI displays only checkpoints projected from the same frozen transcript
+   snapshot as the corresponding Assistant response, and Core validates the
+   checkpoint again when the user branches.
+4. A fork is prepared outside the visible session namespace and becomes
+   discoverable only after its transcript, title, referenced file-history
+   backups, and checkpoint topology are complete.
+
+Branching truncates conversation history. It does not rewind or replace the
+current working directory, Git state, or working files.
+
+## 2. Motivation
+
+The existing path is:
+
+```text
+Web Shell
+  -> WebUI session actions
+  -> TypeScript SDK
+  -> POST /session/:id/branch
+  -> ACP session bridge
+  -> qwen/control/session/branch
+  -> SessionService.forkSession()
+  -> restore and attach the new session
+```
+
+`SessionService` already stores records as a `uuid`/`parentUuid` tree and can
+reconstruct history from an explicit leaf. Replay blocks also retain persisted
+record identities. These are useful primitives, but an arbitrary Assistant
+record is not automatically a safe branch point:
+
+- an Assistant record can contain an intermediate tool call;
+- a cancelled or token-limited turn may still contain visible Assistant text;
+- cron, notification, title, telemetry, artifact, and file-history records can
+  be appended around an interactive turn;
+- a rewind can make a previously displayed record inactive;
+- paged replay can place the Assistant and its later checkpoint on different
+  pages;
+- a process failure can otherwise expose a transcript before all referenced
+  backups exist.
+
+The feature therefore needs a durable completion boundary rather than a UI
+heuristic such as "the latest visible Assistant message."
+
+## 3. Goals
+
+1. Show a Branch action on every eligible final Assistant response produced by
+   a successful interactive user turn after rollout.
+2. Create a new session whose active conversation ends at the selected turn.
+3. Preserve the source session unchanged.
+4. Keep the new session's working directory and files at their current state.
+5. Preserve retained file-history snapshots so `/rewind` remains usable in the
+   new session.
+6. Make branch eligibility authoritative in Core and identical for recording,
+   replay, and fork validation.
+7. Serialize branch, rewind, prompt, continuation, and automatic transcript
+   mutation so their ordering is deterministic.
+8. Never expose a partially created session.
+9. Keep the existing no-anchor branch behavior for branching from the latest
+   state.
+
+## 4. Non-goals
+
+- Rewinding working files, Git state, or a worktree to the selected turn.
+- Inferring branchability for legacy transcripts that lack durable terminal
+  evidence.
+- Branching from intermediate Assistant narration or tool-call messages.
+- Providing exactly-once HTTP delivery. Once a complete session is published,
+  it remains recoverable from the session picker even if the response socket
+  fails.
+- Changing the semantics of `/fork`, which launches a background agent and is
+  separate from session branching.
+- Selecting or recovering arbitrary sibling leaves from a multi-writer
+  transcript. That is a separate topology-recovery concern.
+
+## 5. Product Semantics
+
+A response is branchable only when all of the following are true:
+
+- it belongs to an interactive user prompt, not a cron or notification turn;
+- the prompt completed with `stopReason === 'end_turn'`;
+- it is the unique final visible, non-thought Assistant record in that turn;
+- the Assistant record itself contains no `functionCall`;
+- it occurs after the turn's final `tool_result`;
+- every tool call in the turn is closed;
+- a durable checkpoint was written successfully; and
+- the checkpoint remains on the source session's current active chain when the
+  branch request executes.
+
+No checkpoint is created for cancelled, errored, partial, or `max_tokens`
+turns. Legacy responses without a checkpoint do not display the action.
+
+## 6. End-to-end Flow
+
+```mermaid
+flowchart TD
+  A["User submits an interactive prompt"] --> B["Agent acquires the history mutation lock"]
+  B --> C["Recorder captures startExclusiveRecordUuid"]
+  C --> D["Execute model, tools, and stop hooks"]
+  D --> E{"stopReason is end_turn?"}
+  E -- "No" --> F["Return without a branch point"]
+  E -- "Yes" --> G["Recorder starts a topology transaction"]
+  G --> H["Fence later transcript appends"]
+  H --> I["Validate the exact active-chain interval"]
+  I --> J{"Unique eligible final Assistant?"}
+  J -- "No" --> K["Release the fence without a checkpoint"]
+  J -- "Yes" --> L["Strictly append and flush branch_checkpoint"]
+  L --> M["Release buffered appends as checkpoint descendants"]
+  M --> N["Emit turn_complete.branchPoint"]
+  N --> O["WebUI attaches branchRecordId to the final Assistant block"]
+  O --> P["User selects Branch"]
+  P --> Q["POST /session/:id/branch with atRecordId"]
+  Q --> R["Bridge and Agent serialize the history mutation"]
+  R --> S["Core revalidates the active checkpoint"]
+  S --> T{"Still valid?"}
+  T -- "No" --> U["409 branch_point_invalid"]
+  T -- "Yes" --> V["Physically truncate raw records at the checkpoint"]
+  V --> W["Build titled transcript and referenced backups in staging"]
+  W --> X["Validate, fsync, and publish backups"]
+  X --> Y["Atomically publish transcript last"]
+  Y --> Z["Session ownership transfers to the user"]
+  Z --> AA["Restore and attach the new session"]
+  AA --> AB["Web Shell switches sessions"]
+  AA -. "Restore or attach failure" .-> AC["Keep the complete session in the picker"]
+```
+
+## 7. Durable Branch Checkpoint
+
+### 7.1 Record schema
+
+Add `branch_checkpoint` to the `ChatRecord` system subtype union and add a
+versioned payload:
+
+```ts
+export interface BranchCheckpointRecordPayloadV1 {
+  v: 1;
+  startExclusiveRecordUuid: string | null;
+  assistantRecordUuid: string;
+  /** Diagnostic correlation only. Never used as authorization. */
+  promptId?: string;
+}
+```
+
+The stored record is:
+
+```ts
+const checkpoint: ChatRecord = {
+  uuid: checkpointUuid,
+  parentUuid: endInclusiveRecordUuid,
+  sessionId,
+  type: 'system',
+  subtype: 'branch_checkpoint',
+  timestamp,
+  cwd,
+  version,
+  systemPayload: {
+    v: 1,
+    startExclusiveRecordUuid,
+    assistantRecordUuid,
+    promptId,
+  },
+};
+```
+
+The checkpoint record's own `uuid` is the branch leaf sent to the branch API.
+Using the checkpoint rather than the Assistant UUID retains all required
+records through the completed turn while excluding later records.
+
+`startExclusiveRecordUuid` persists the exact boundary captured before the
+turn. Core must not attempt to reconstruct this boundary by looking for the
+nearest user record: retry and continuation paths do not always produce a new
+ordinary user record, and automatic turns also use user-role records.
+
+### 7.2 Shared eligibility helper and resolver
+
+Keep the structural turn test in one pure Core helper:
+
+```ts
+resolveCompletedTurnBranchCandidate(input: {
+  activeChain: readonly ChatRecord[];
+  startExclusiveRecordUuid: string | null;
+  endInclusiveRecordUuid: string;
+}): BranchCandidate | undefined;
+```
+
+The recorder calls this helper before a checkpoint exists. The persisted
+checkpoint resolver calls the same helper when it authenticates stored
+evidence:
+
+```ts
+resolveBranchPoints(
+  activeChain: readonly ChatRecord[],
+): ReadonlyMap<string, BranchPoint>;
+```
+
+The map is keyed by checkpoint UUID. Each `BranchPoint` contains the referenced
+Assistant UUID and the exact validated turn interval.
+
+For each checkpoint, the resolver verifies:
+
+1. The payload version and identifiers are valid.
+2. `startExclusiveRecordUuid` is `null` for an initial boundary or is a strict
+   ancestor of `checkpoint.parentUuid` on the supplied active chain.
+3. `assistantRecordUuid` lies inside
+   `(startExclusiveRecordUuid, checkpoint.parentUuid]`.
+4. `resolveCompletedTurnBranchCandidate()` finds one eligible final Assistant
+   in the interval according to the product semantics in section 5.
+5. The eligible Assistant is exactly the Assistant referenced by the payload.
+
+Malformed checkpoints are ignored during replay. A requested checkpoint that
+is missing from the current catalog is rejected by the mutation path.
+
+The recorder must use the shared eligibility helper. The transcript reader and
+session fork must use `resolveBranchPoints()`. No layer may maintain a second
+approximation of branchability.
+
+## 8. Recorder Topology Transaction
+
+### 8.1 Why a normal barrier is insufficient
+
+`ChatRecordingService` currently has a serialized writer, but append admission
+also advances the in-memory tail. Assistant recording can asynchronously start
+auto-title generation, and title or other metadata can append after a flush
+barrier. A separate "read tail, validate, append checkpoint" sequence can
+therefore create siblings:
+
+```text
+end record
+  +-- custom_title
+  `-- branch_checkpoint
+```
+
+If the checkpoint becomes the physical leaf, reconstructing its chain drops the
+other sibling. The checkpoint operation must reserve transcript topology, not
+only wait for bytes to flush.
+
+### 8.2 Central append coordinator
+
+All transcript append paths must pass through one coordinator, including:
+
+- user, Assistant, and tool-result records;
+- strict and best-effort appends;
+- auto and manual title records;
+- telemetry and attribution records;
+- artifact and file-history records; and
+- future system metadata writers.
+
+Add:
+
+```ts
+recordBranchCheckpointTransaction(input: {
+  startExclusiveRecordUuid: string | null;
+  stopReason: PromptResponse['stopReason'];
+  promptId?: string;
+}): Promise<BranchPoint | undefined>;
+```
+
+For an `end_turn`, the method installs a synchronous topology fence before its
+first `await`. Appends arriving while the fence is active are stored as ordered
+intents; they do not advance `lastRecordUuid` or write to disk.
+
+The transaction then:
+
+1. waits for append work admitted before the fence;
+2. reads the recorder's real active tail and active chain;
+3. invokes `resolveCompletedTurnBranchCandidate()` for the exact start/tail
+   interval;
+4. strictly appends and flushes the checkpoint with the current tail as parent;
+5. advances the tail only after the checkpoint is accepted by the writer; and
+6. releases buffered intents in arrival order, assigning their parent UUIDs
+   from the new live tail.
+
+If the candidate is ineligible, no checkpoint is written and buffered intents
+continue from the original tail. If validation or writing fails, `finally`
+must safely release or fail buffered intents according to their existing
+strict or best-effort contract. No child may reference a checkpoint that was
+not durably written.
+
+Auto-title generation may continue outside the fence. Its eventual append is
+still ordered by the central coordinator.
+
+### 8.3 Session timing
+
+`Session.prompt()` captures `startExclusiveRecordUuid` after admission and
+after the previous prompt, cron turn, and notification turn have settled, but
+before `#executePrompt()` writes anything for the new turn.
+
+After `#executePrompt()` and stop hooks finish, Session immediately awaits the
+checkpoint transaction before starting cron or notification drains and before
+emitting the completed branch point. The prompt holds the Agent history
+mutation lock for this entire interval.
+
+## 9. Live Protocol
+
+### 9.1 Agent response
+
+When checkpoint creation succeeds, the Agent includes namespaced metadata:
+
+```ts
+{
+  stopReason: 'end_turn',
+  _meta: {
+    'qwen.branchPoint': {
+      assistantRecordUuid,
+      checkpointUuid,
+    },
+  },
+}
+```
+
+### 9.2 Bridge and SSE
+
+The bridge validates both UUIDs and forwards the value only when the result is
+an `end_turn`:
+
+```ts
+turn_complete.data.branchPoint = {
+  assistantRecordUuid,
+  checkpointUuid,
+};
+```
+
+The typed daemon event, SSE ring replay, event compaction, and restored pending
+prompt result must preserve this optional field. Unknown or malformed values
+are dropped rather than repaired.
+
+### 9.3 SDK and WebUI
+
+Add an explicit optional `branchPoint` field to `DaemonTurnCompleteData` and
+`PromptResult`. `matchTurnEvent()` must retain it.
+
+The WebUI reducer uses `promptId` to find the unique final Assistant block for
+the completed active prompt. It verifies that the block is the final visible
+Assistant shape for the turn, then stores:
+
+- `assistantRecordUuid` as its persisted record identity/source record; and
+- `checkpointUuid` as `branchRecordId`.
+
+If the active prompt or final block cannot be matched uniquely, the reducer
+does not guess and the Branch action remains hidden. A transcript refresh can
+later project the durable checkpoint.
+
+## 10. Paged Transcript Replay
+
+An Assistant record and its checkpoint can fall on different pages. Emitting a
+metadata update only when the checkpoint is replayed is incorrect because each
+page creates an independent `HistoryReplayer`, and backward pagination does not
+retain pending state for the missing Assistant page.
+
+Extend `SessionTranscriptReader` so branch-point discovery uses the same frozen
+`TranscriptIndex` as the requested page:
+
+- same file identity;
+- same snapshot size;
+- same selected leaf UUID; and
+- same active-chain view.
+
+The reader returns only the `assistantUuid -> checkpointUuid` entries relevant
+to Assistant records in that page. `HistoryReplayer` attaches
+`branchRecordId` while projecting the Assistant record itself. Checkpoint
+system records are not rendered as standalone blocks.
+
+The catalog must not come from a separate `SessionService.loadSession()` read.
+That would race with append or rewind and mix a frozen old page with the latest
+active chain.
+
+Old cursors continue to use their frozen transcript snapshot. A displayed old
+checkpoint can still become inactive before the user clicks it; mutation-time
+validation handles that case with a typed conflict.
+
+## 11. API and UI
+
+### 11.1 HTTP request
+
+Extend the existing endpoint without replacing its latest-branch behavior:
+
+```http
+POST /session/:sessionId/branch
+Content-Type: application/json
+
+{
+  "name": "Optional branch title",
+  "atRecordId": "branch-checkpoint-uuid"
+}
+```
+
+The TypeScript SDK surface becomes conceptually:
+
+```ts
+branchSession(name?: string, atRecordId?: string): Promise<BranchResult>;
+```
+
+If `atRecordId` is omitted, the endpoint retains the current latest-state
+branch behavior. If it is present, Core requires it to be a checkpoint in the
+source session's current active branch catalog.
+
+An invalid, inactive, malformed, or stale checkpoint returns:
+
+```json
+{
+  "code": "branch_point_invalid",
+  "error": "The selected response is no longer in the active session history"
+}
+```
+
+with HTTP status `409`. There is no fallback to the current session tail.
+
+### 11.2 UI behavior
+
+Add optional `branchRecordId` metadata to the Assistant transcript/message
+model. The Branch action is rendered only when this field exists.
+
+While a branch request is pending, disable the selected action. On success,
+switch to the returned session. On `branch_point_invalid`, refresh the source
+transcript and explain that the response is no longer on the active history
+path.
+
+Legacy Assistant responses and automatic turns have no field and therefore no
+action.
+
+## 12. History Mutation Serialization
+
+Branch validation and fork creation must not race with rewind or another
+prompt.
+
+### 12.1 Bridge queue
+
+Each live session owns a `historyMutationQueue` covering:
+
+- prompt and trusted continuation;
+- branch;
+- rewind; and
+- close/drain coordination.
+
+Closing first marks the session as closing, rejects new mutations, and drains
+accepted work before teardown. Read-only attach and load operations do not join
+the queue but must reject a session that is already closing where appropriate.
+
+### 12.2 Agent lock
+
+The Agent also owns a non-reentrant `runExclusiveHistoryMutation` boundary
+covering:
+
+- the complete interactive prompt and checkpoint transaction;
+- branch read, validation, and creation;
+- rewind; and
+- cron and notification transcript writers.
+
+The checkpoint helper runs as an already-locked operation and must not acquire
+the Agent lock again. Automatic writers acquire the same lock independently
+after the prompt releases it.
+
+The Bridge queue provides request ordering and lifecycle coordination. The
+Agent lock protects transcript ownership even for callers that bypass the HTTP
+route.
+
+## 13. Historical Fork Construction
+
+### 13.1 Source selection
+
+Inside the Agent lock, flush the source recorder and read the source transcript.
+Resolve its current active chain and validate `atRecordId` against the shared
+branch-point catalog.
+
+Find the checkpoint at one unique physical index and first truncate the raw
+record array:
+
+```ts
+const boundedRecords = records.slice(0, checkpointIndex + 1);
+```
+
+Only then reconstruct the checkpoint chain and call the side-artifact
+selector. Passing the complete raw record array to the selector can otherwise
+copy artifact records appended after the historical checkpoint.
+
+### 13.2 Record rewrite
+
+The target transcript:
+
+- contains only the bounded active chain and eligible side artifacts;
+- excludes inherited `parent_session` and `session_source` creation metadata;
+- rewrites `sessionId` and `cwd` to the new top-level session;
+- preserves origin through `forkedFrom`;
+- remaps session-scoped artifact identifiers; and
+- rebuilds a clean target parent chain.
+
+When a retained checkpoint's `startExclusiveRecordUuid` points to a filtered
+creation record, rewrite it to `null`. Otherwise rewrite it to the retained
+target predecessor that represents the same exclusive turn boundary. Run
+`resolveBranchPoints()` on the completed target chain before publication so
+earlier Assistant responses remain branchable from the new session.
+
+### 13.3 File-history snapshots
+
+Historical branch construction must not top up snapshots from the source
+session's current full snapshot list. Only snapshot payloads retained before
+the selected checkpoint belong in the target.
+
+Collect the unique `trackedFileBackups[*].backupFileName` values referenced by
+those retained snapshots. Do not derive backup names from `promptId` and do not
+copy the complete source backup directory.
+
+For each referenced name:
+
+1. validate it as a filename, not an arbitrary path;
+2. resolve source and destination paths and verify their directory boundary;
+3. require the source file to exist;
+4. copy or link it into staging; and
+5. treat any missing or partially copied backup as a fork failure.
+
+The branch operation does not restore these backups into the working tree.
+They exist only so a later explicit rewind in the new session remains valid.
+
+## 14. Crash-safe Publication
+
+### 14.1 Visibility rule
+
+The session picker discovers a session from its published transcript. The
+target `<newSessionId>.jsonl` must therefore be the last resource published.
+
+Before creating target resources, compute and sanitize the final title. The
+Core fork input includes that title, and Core appends its `custom_title` record
+inside the staged transcript. There is no post-publication rename transaction.
+
+### 14.2 Staging and claim
+
+For a randomly generated `newSessionId`, create an exclusive branch claim with
+a random owner token. If the claim cannot be acquired or any target resource
+already exists, stop without deleting anything under that session ID.
+
+Use invisible staging locations on the same filesystems as their destinations:
+
+- transcript staging below the chats filesystem; and
+- backup staging beside the file-history backup destination.
+
+A manifest and backup owner marker bind both staging locations to the owner
+token. Staged transcript and backup files use restrictive permissions.
+
+### 14.3 Commit sequence
+
+1. Write the complete titled transcript to staging.
+2. Copy or link every referenced backup to backup staging.
+3. Re-run target branch-point validation.
+4. Flush staged files and relevant staging directories.
+5. Publish the complete backup directory with claim-guarded, no-overwrite
+   semantics and flush its parent directory.
+6. Atomically publish the transcript last with a same-filesystem no-overwrite
+   primitive, such as `link(temp, target)` or a platform
+   `RENAME_NOREPLACE` equivalent.
+7. Flush the chats directory.
+
+The transcript publication is the commit point. Before it, the session is not
+discoverable. After it, the session is complete, titled, and owns every backup
+it references.
+
+### 14.4 Ownership after commit
+
+Once the transcript is published, persisted-session ownership transfers
+immediately and irreversibly to the user. Agent and Bridge failures after that
+point must not delete it.
+
+If restore, attach, a generation guard, or HTTP response delivery fails:
+
+- release partial live state and reservations;
+- include `newSessionId` in the error or structured log; and
+- leave the complete session available in the picker.
+
+This rule prevents a title or restore compensation path from deleting a
+session that another client has already discovered and attached.
+
+## 15. Cleanup and Garbage Collection
+
+Pre-commit failures use a token-aware purge primitive. It independently
+attempts to clean:
+
+- transcript staging;
+- backup staging;
+- a backup directory published before the transcript commit;
+- branch claim and owner markers; and
+- staging organization metadata.
+
+The result reports status per resource and is idempotent. Cleanup failure does
+not replace the original operation error, but logs the session ID, owner token
+fingerprint, and resource statuses.
+
+At startup and on a bounded periodic schedule, garbage collection scans stale
+branch claims and staging manifests:
+
+- if the final transcript exists, preserve the session and formal backup
+  directory and remove only stale staging, claim, and owner markers;
+- if the transcript does not exist, remove operation resources only when the
+  claim and every relevant marker match the manifest's owner token; and
+- if ownership is ambiguous or a token does not match, preserve the data and
+  emit a warning.
+
+An age threshold prevents garbage collection from touching a live creation.
+Normal session deletion remains separate from this pre-commit cleanup path.
+
+## 16. Failure Semantics
+
+| Failure point                                                       | Visible session? | Required result                                 |
+| ------------------------------------------------------------------- | ---------------- | ----------------------------------------------- |
+| Invalid or inactive checkpoint                                      | No new session   | `409 branch_point_invalid`                      |
+| Title computation                                                   | No               | Return error; create no target resources        |
+| Staged transcript write                                             | No               | Token-aware pre-commit cleanup                  |
+| Referenced backup missing                                           | No               | Fail and clean staging                          |
+| Backup partially copied                                             | No               | Fail and clean staging                          |
+| Target checkpoint revalidation                                      | No               | Fail and clean staging                          |
+| Process exits before backup publication                             | No               | Startup GC reclaims owned staging               |
+| Process exits after backup publication but before transcript commit | No               | Startup GC removes token-owned orphan backup    |
+| Process exits after transcript commit                               | Yes, complete    | Preserve session; GC removes stale markers only |
+| Restore or attach fails after commit                                | Yes, complete    | Keep session in picker; clean only live state   |
+| HTTP response fails after commit                                    | Yes, complete    | Detach requesting client; never delete session  |
+
+## 17. Implementation Map
+
+| Area                                                              | Primary responsibility                                                                    |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `packages/core/src/services/chatRecordingService.ts`              | Checkpoint schema, central append coordinator, topology transaction                       |
+| `packages/core/src/services/sessionService.ts`                    | Shared resolver integration, bounded fork, backup whitelist, staging, commit, cleanup, GC |
+| `packages/core/src/services/session-transcript-reader.ts`         | Same-snapshot branch-point catalog for paged replay                                       |
+| `packages/cli/src/acp-integration/session/Session.ts`             | Turn start capture and checkpoint transaction timing                                      |
+| `packages/cli/src/acp-integration/session/history-replay-page.ts` | Attach branch metadata while projecting Assistant records                                 |
+| `packages/cli/src/acp-integration/acpAgent.ts`                    | Agent history lock, branch parameters, titled fork invocation                             |
+| `packages/acp-bridge/src/bridge.ts`                               | Per-session mutation queue and live branch-point forwarding                               |
+| `packages/cli/src/serve/routes/session.ts`                        | Optional `atRecordId`, validation, and typed HTTP error mapping                           |
+| `packages/sdk-typescript`                                         | Branch request and live/replay metadata types                                             |
+| `packages/webui/src/daemon/session`                               | Preserve metadata and expose the extended action                                          |
+| `packages/web-shell/client`                                       | Branch action on every block with `branchRecordId`                                        |
+
+## 18. Verification Plan
+
+### 18.1 Core resolver and recording
+
+- Accept a normal text-only `end_turn`.
+- Accept a final response after a closed tool loop.
+- Reject an intermediate Assistant containing a function call.
+- Reject cancelled, errored, partial, and `max_tokens` turns.
+- Reject malformed, duplicate, non-ancestor, and inactive checkpoints.
+- Cover retry and trusted continuation boundaries.
+- Race auto title, manual title, telemetry, artifact, and file-history appends
+  against the topology fence.
+- Verify continuous parent chains for checkpoint success, ineligibility, and
+  writer failure.
+
+### 18.2 Replay and protocol
+
+- Assistant and checkpoint on the same page.
+- Assistant and checkpoint on different pages.
+- Append after an old cursor is issued.
+- Rewind after an old cursor is issued.
+- SSE disconnect and ring replay retain `branchPoint`.
+- Event compaction and prompt-result matching retain the field.
+- A malformed live branch point is dropped.
+- A prompt with no uniquely matching final block shows no action.
+
+### 18.3 Mutation ordering
+
+- Branch enters before rewind.
+- Rewind enters before branch.
+- Prompt or continuation enters around branch.
+- Close rejects new work and drains admitted work.
+- Automatic turns cannot mutate the transcript inside an interactive prompt's
+  checkpoint boundary.
+
+### 18.4 Fork contents
+
+- Branch from the first of three completed turns.
+- Source session remains unchanged.
+- Target session contains only the first turn and required side records.
+- Artifact records after the checkpoint are excluded.
+- Abandoned rewind branches are excluded.
+- Retained checkpoints remain valid after creation-metadata filtering.
+- Only referenced backup filenames are copied.
+- Shared backup references are copied once.
+- Missing and partial backup copies leave no visible target session.
+- Current working files remain unchanged.
+- Rewind in the fork can consume retained backups.
+
+### 18.5 Crash and lifecycle injection
+
+Terminate creation after:
+
+- transcript staging;
+- the first of multiple backup copies;
+- complete backup staging;
+- formal backup publication;
+- transcript commit; and
+- commit before restore/attach.
+
+Verify picker visibility, backup completeness, claim ownership, and GC behavior
+at every boundary. Also verify that a restore failure cannot remove a committed
+session already attached by another client.
+
+### 18.6 Web Shell E2E
+
+1. Complete three interactive turns.
+2. Confirm that each durable final Assistant response shows Branch.
+3. Branch from the first response.
+4. Confirm the old session still has all three turns.
+5. Confirm the new session ends at the first turn.
+6. Confirm the workspace files still have their latest contents.
+7. Resume the new session and send another prompt.
+8. Refresh history and confirm the same earlier branch points remain available.
+
+## 19. Compatibility and Rollout
+
+The request field, response metadata, transcript block metadata, and event
+metadata are optional, preserving compatibility with older clients and
+servers. A newer UI simply does not render historical Branch actions until it
+receives a validated anchor.
+
+Roll out in dependency order:
+
+1. Core schema, resolver, recorder transaction, and persistence transaction.
+2. Agent and Bridge locking plus optional protocol metadata.
+3. SDK and WebUI metadata preservation.
+4. Web Shell action and error UX.
+5. Crash-injection and full Web Shell E2E coverage before enabling the UI by
+   default.
+
+No migration synthesizes checkpoints for legacy records. New successful turns
+in an old resumed session become branchable as they receive new checkpoints.
+
+## 20. Alternatives Rejected
+
+### Use the Assistant UUID directly
+
+Rejected because an Assistant record can be an intermediate tool-call message,
+and its UUID does not prove a successful turn boundary.
+
+### Infer final responses during replay
+
+Rejected because legacy records do not persist enough terminal evidence to
+distinguish every cancelled or partial response reliably.
+
+### Attach checkpoint metadata when the checkpoint page is replayed
+
+Rejected because the Assistant may be on another independently replayed page.
+
+### Flush and append the checkpoint as two operations
+
+Rejected because asynchronous title and metadata writers can append between
+them and create sibling topology.
+
+### Copy every source backup
+
+Rejected because it leaks future history into a historical fork and makes a
+partially copied target appear successful.
+
+### Publish the transcript before backups or title
+
+Rejected because the session picker could discover an incomplete session.
+
+### Delete a committed fork when restore or HTTP delivery fails
+
+Rejected because another client may already have discovered or attached the
+session. A committed fork is retained and recoverable instead.
+
+## 21. Review Record
+
+The design was revised through six strict review rounds. Earlier rounds found
+and closed issues in final-Assistant authority, branch/rewind TOCTOU, automatic
+turn contamination, side-artifact bounds, backup filename selection, cleanup
+ownership, legacy inference, pagination, live metadata propagation, exact turn
+boundaries, crash-safe publication, post-commit ownership, and recorder writer
+topology. The v6 review reported no remaining Critical, High, or Medium
+findings.

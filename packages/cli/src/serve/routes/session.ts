@@ -2417,11 +2417,22 @@ export function registerSessionRoutes(
             name = name.slice(0, 200);
           }
         }
+        const atRecordId = body?.['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          res.status(400).json({
+            error: '`atRecordId` must be a string',
+            code: 'invalid_branch_point',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const result = await runtime.bridge.branchSession(
           sessionId,
-          { name },
+          {
+            name,
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+          },
           { clientId },
         );
         try {

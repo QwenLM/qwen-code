@@ -133,11 +133,34 @@ function assistantDoneFromTurnEvent(
   reason: string,
 ): DaemonUiEvent {
   const serverTimestamp = extractServerTimestamp(event);
+  const data = isRecord(event.data) ? event.data : undefined;
+  const rawBranchPoint =
+    event.type === 'turn_complete' &&
+    reason === 'end_turn' &&
+    isRecord(data?.['branchPoint'])
+      ? data['branchPoint']
+      : undefined;
+  const assistantRecordUuid =
+    typeof rawBranchPoint?.['assistantRecordUuid'] === 'string'
+      ? rawBranchPoint['assistantRecordUuid']
+      : undefined;
+  const checkpointUuid =
+    typeof rawBranchPoint?.['checkpointUuid'] === 'string'
+      ? rawBranchPoint['checkpointUuid']
+      : undefined;
+  const branchPointValid =
+    assistantRecordUuid !== undefined && checkpointUuid !== undefined;
   return {
     type: 'assistant.done',
     reason,
     eventId: event.id,
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(branchPointValid
+      ? {
+          sourceRecordIds: [assistantRecordUuid],
+          branchRecordId: checkpointUuid,
+        }
+      : {}),
   };
 }
 

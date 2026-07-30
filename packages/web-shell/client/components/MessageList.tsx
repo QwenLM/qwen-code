@@ -112,6 +112,7 @@ interface MessageListProps {
   failedPromptMessageId?: string;
   onRetryFailedPrompt?: () => void;
   onBranchSession?: () => void;
+  onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
@@ -2307,26 +2308,6 @@ export const MessageList = memo(
         ? (sessionTimelineEntries[sessionTimelineRange.currentIndex]?.id ??
           fallbackCurrentTimelineTurnId)
         : fallbackCurrentTimelineTurnId;
-    const lastCompletedAssistantId = useMemo(() => {
-      if (isResponding) return null;
-      for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
-        const message = mergedMessages[i];
-        if (
-          message &&
-          (message.role === 'tool_group' || message.role === 'plan')
-        ) {
-          return null;
-        }
-        if (
-          message?.role === 'assistant' &&
-          !message.isStreaming &&
-          message.content?.trim()
-        ) {
-          return message.id;
-        }
-      }
-      return null;
-    }, [isResponding, mergedMessages]);
     const finalAssistantTurnIdByAssistantId = useMemo(
       () => collectFinalAssistantTurnIds(displayItems, isResponding),
       [displayItems, isResponding],
@@ -3691,6 +3672,10 @@ export const MessageList = memo(
               },
             };
           }
+          const branchRecordId =
+            displayItem.message.role === 'assistant'
+              ? displayItem.message.branchRecordId
+              : undefined;
 
           return (
             <MessageItem
@@ -3706,14 +3691,18 @@ export const MessageList = memo(
                 displayItem.message.id === failedPromptMessageId
               }
               onRetrySend={onRetryFailedPrompt}
-              onBranchSession={onBranchSession}
+              onBranchSession={
+                onBranchSession && branchRecordId
+                  ? () => onBranchSession(branchRecordId)
+                  : undefined
+              }
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
                 finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
-                displayItem.message.id === lastCompletedAssistantId
+                branchRecordId !== undefined
               }
               isLocateFlashing={displayItemMatchesLocateTarget(
                 displayItem,
@@ -3752,7 +3741,6 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
-        lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
         onRetryClick,

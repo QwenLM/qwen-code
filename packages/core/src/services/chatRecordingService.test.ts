@@ -364,6 +364,110 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordBranchCheckpointTransaction', () => {
+    beforeEach(() => {
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession: vi.fn(async () => ({
+          conversation: {
+            messages: vi
+              .mocked(mockLease.appendJsonLine)
+              .mock.calls.map((call) => call[0] as ChatRecord),
+          },
+        })),
+      } as unknown as ReturnType<Config['getSessionService']>);
+    });
+
+    it('durably records a checkpoint for a completed text turn', async () => {
+      const start = chatRecordingService.getTranscriptCursor().recordId;
+      chatRecordingService.recordUserMessage([{ text: 'hello' }]);
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'hi' }],
+      });
+
+      const point =
+        await chatRecordingService.recordBranchCheckpointTransaction({
+          startExclusiveRecordUuid: start,
+          stopReason: 'end_turn',
+          promptId: 'prompt-1',
+        });
+
+      expect(point).toEqual({
+        startExclusiveRecordUuid: null,
+        endInclusiveRecordUuid: '00000000-0000-0000-0000-000000000002',
+        assistantRecordUuid: '00000000-0000-0000-0000-000000000002',
+        checkpointUuid: '00000000-0000-0000-0000-000000000003',
+      });
+      const checkpoint = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.at(-1)?.[0] as ChatRecord;
+      expect(checkpoint).toMatchObject({
+        uuid: point?.checkpointUuid,
+        parentUuid: point?.assistantRecordUuid,
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: point?.assistantRecordUuid,
+          promptId: 'prompt-1',
+        },
+      });
+    });
+
+    it('orders metadata arriving during validation after the checkpoint', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'hello' }]);
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'hi' }],
+      });
+
+      const checkpoint = chatRecordingService.recordBranchCheckpointTransaction(
+        {
+          startExclusiveRecordUuid: null,
+          stopReason: 'end_turn',
+        },
+      );
+      const title = chatRecordingService.recordCustomTitle('Title', 'manual');
+      const point = await checkpoint;
+      await title;
+
+      const records = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord);
+      expect(records.map((record) => record.subtype)).toEqual([
+        undefined,
+        undefined,
+        'branch_checkpoint',
+        'custom_title',
+      ]);
+      expect(records.at(-1)?.parentUuid).toBe(point?.checkpointUuid);
+    });
+
+    it.each(['cancelled', 'max_tokens'])(
+      'does not record a checkpoint for a %s turn',
+      async (stopReason) => {
+        chatRecordingService.recordUserMessage([{ text: 'hello' }]);
+        chatRecordingService.recordAssistantTurn({
+          model: 'gemini-pro',
+          message: [{ text: 'partial' }],
+        });
+        await chatRecordingService.flush();
+        const writesBeforeCheckpoint = vi.mocked(mockLease.appendJsonLine).mock
+          .calls.length;
+
+        await expect(
+          chatRecordingService.recordBranchCheckpointTransaction({
+            startExclusiveRecordUuid: null,
+            stopReason,
+          }),
+        ).resolves.toBeUndefined();
+        expect(vi.mocked(mockLease.appendJsonLine)).toHaveBeenCalledTimes(
+          writesBeforeCheckpoint,
+        );
+      },
+    );
+  });
+
   describe('Goal records', () => {
     const goalPayload: GoalStateRecordPayloadV2 = {
       v: 2,

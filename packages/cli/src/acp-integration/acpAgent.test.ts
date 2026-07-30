@@ -183,6 +183,11 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  BranchPointInvalidError: class BranchPointInvalidError extends Error {
+    constructor(readonly recordId: string) {
+      super(`Invalid or inactive branch point: ${recordId}`);
+    }
+  },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
@@ -816,6 +821,7 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
+  BranchPointInvalidError,
   SessionEndReason,
   MCPServerConfig,
   SessionService,
@@ -12901,12 +12907,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
+      { title: 'Source session (Branch)' },
     );
-    expect(sessionService.renameSession).toHaveBeenCalledWith(
-      expect.any(String),
-      'Source session (Branch)',
-      'manual',
-    );
+    expect(sessionService.renameSession).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       title: 'Source session (Branch)',
       displayName: 'Source session (Branch)',
@@ -12960,6 +12963,86 @@ describe('QwenAgent extMethod renameSession routing', () => {
       title: 'Side task',
       displayName: 'Side task',
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps an inactive durable checkpoint to branch_point_invalid', async () => {
+    const checkpoint = '11111111-1111-4111-8111-111111111111';
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(new BranchPointInvalidError(checkpoint)),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        atRecordId: checkpoint,
+      }),
+    ).rejects.toMatchObject({
+      code: -32009,
+      data: { errorKind: 'branch_point_invalid', recordId: checkpoint },
+    });
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
+      expect.any(String),
+      { title: 'Source session (Branch)', atRecordId: checkpoint },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not finalize the source recorder while a branch mutation is active', async () => {
+    let releaseFork!: () => void;
+    let markForkStarted!: () => void;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    const forkStarted = new Promise<void>((resolve) => {
+      markForkStarted = resolve;
+    });
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn(async () => {
+        markForkStarted();
+        await forkGate;
+      }),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const branch = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+      cwd: '/tmp',
+      sessionId: liveSessionId,
+    });
+    await forkStarted;
+    const close = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: liveSessionId,
+    });
+    await Promise.resolve();
+
+    expect(recording.finalize).not.toHaveBeenCalled();
+    releaseFork();
+    await branch;
+    await close;
+    expect(recording.finalize).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

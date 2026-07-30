@@ -29,6 +29,21 @@ function textBlock(
   };
 }
 
+describe('Assistant branch anchors', () => {
+  it('preserves the checkpoint on the rendered Assistant message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'answer', 1, false, {
+        branchRecordId: 'checkpoint-1',
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      branchRecordId: 'checkpoint-1',
+    });
+  });
+});
+
 function statusBlock(
   id: string,
   text: string,

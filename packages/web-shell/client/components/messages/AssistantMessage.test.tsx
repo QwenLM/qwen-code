@@ -434,6 +434,36 @@ describe('AssistantMessage streaming markdown', () => {
   });
 });
 
+describe('AssistantMessage branch action', () => {
+  it('disables the selected action while the branch request is pending', async () => {
+    let resolveBranch!: () => void;
+    const onBranchSession = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveBranch = resolve;
+        }),
+    );
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showBranchAction
+        onBranchSession={onBranchSession}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="Branch"]',
+    );
+
+    act(() => button?.click());
+    expect(button?.disabled).toBe(true);
+    expect(onBranchSession).toHaveBeenCalledOnce();
+
+    await act(async () => resolveBranch());
+    expect(button?.disabled).toBe(false);
+  });
+});
+
 describe('AssistantMessage markdown tables', () => {
   const tableMarkdown = [
     '| Team | Score |',

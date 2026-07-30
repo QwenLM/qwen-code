@@ -26,6 +26,8 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      showAssistantBranch,
+      onBranchSession,
       isLocateFlashing,
       assistantTurnFooterInfo,
       sendFailed,
@@ -33,6 +35,8 @@ vi.mock('./MessageItem', async () => {
     }: {
       message: Message;
       showAssistantActions?: boolean;
+      showAssistantBranch?: boolean;
+      onBranchSession?: () => void | Promise<void>;
       isLocateFlashing?: boolean;
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
@@ -65,6 +69,12 @@ vi.mock('./MessageItem', async () => {
           ? React.createElement('button', {
               'aria-expanded': 'false',
               'data-testid': `disclosure-${message.id}`,
+            })
+          : null,
+        showAssistantBranch
+          ? React.createElement('button', {
+              'data-testid': `branch-${message.id}`,
+              onClick: onBranchSession,
             })
           : null,
         assistantTurnFooter,
@@ -246,6 +256,7 @@ function mount(
       cachedTokens?: number;
     };
     includeSubagentToolUsageInMetrics?: boolean;
+    onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     failedPromptMessageId?: string;
@@ -280,6 +291,7 @@ function mount(
             includeSubagentToolUsageInMetrics={
               opts.includeSubagentToolUsageInMetrics
             }
+            onBranchSession={opts.onBranchSession}
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
             failedPromptMessageId={opts.failedPromptMessageId}
             onRetryFailedPrompt={opts.onRetryFailedPrompt}
@@ -1912,6 +1924,23 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows branch only for anchored replies and forwards the checkpoint', () => {
+    const onBranchSession = vi.fn();
+    const anchored = {
+      ...asstMsg('anchored'),
+      branchRecordId: 'checkpoint-1',
+    };
+    const c = mount(
+      [userMsg('u1'), anchored, userMsg('u2'), asstMsg('unanchored')],
+      undefined,
+      { onBranchSession },
+    );
+
+    expect(c.querySelector('[data-testid="branch-unanchored"]')).toBeNull();
+    click(c.querySelector('[data-testid="branch-anchored"]')!);
+    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
   });
 
   it('reports when the user has scrolled away from the bottom', async () => {

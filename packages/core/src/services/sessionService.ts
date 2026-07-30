@@ -51,8 +51,24 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
+import {
+  parseBranchCheckpointPayload,
+  resolveBranchPoints,
+} from './branch-points.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+export class BranchPointInvalidError extends Error {
+  constructor(readonly recordId: string) {
+    super(`Invalid or inactive branch point: ${recordId}`);
+    this.name = 'BranchPointInvalidError';
+  }
+}
+
+export interface ForkSessionOptions {
+  atRecordId?: string;
+  title?: string;
+}
 
 /**
  * Session item for list display.
@@ -260,56 +276,170 @@ const MAX_PROMPT_SCAN_LINES = 10;
  * Used by readLastRecordUuid which still does its own tail read.
  */
 const TAIL_READ_SIZE = 64 * 1024;
+const BRANCH_STAGING_STALE_MS = 24 * 60 * 60 * 1000;
+const BRANCH_CREATION_MANIFEST_VERSION = 1;
 
-async function copyFileHistoryBackups(
+interface BranchCreationManifestV1 {
+  v: typeof BRANCH_CREATION_MANIFEST_VERSION;
+  sessionId: string;
+  ownerToken: string;
+  transcriptStagingName: string;
+  backupStagingName: string;
+  backupNames: string[];
+  createdAt: string;
+}
+
+interface BranchOwnerMarkerV1 {
+  v: typeof BRANCH_CREATION_MANIFEST_VERSION;
+  sessionId: string;
+  ownerToken: string;
+}
+
+function branchTranscriptStagingName(
+  sessionId: string,
+  ownerToken: string,
+): string {
+  return `${sessionId}.${ownerToken}.jsonl`;
+}
+
+function branchBackupStagingName(
+  sessionId: string,
+  ownerToken: string,
+): string {
+  return `.${sessionId}.${ownerToken}.staging`;
+}
+
+function parseBranchCreationManifest(
+  value: string,
+  expectedSessionId: string,
+): BranchCreationManifestV1 | undefined {
+  try {
+    const parsed = JSON.parse(value) as Partial<BranchCreationManifestV1>;
+    if (
+      parsed.v !== BRANCH_CREATION_MANIFEST_VERSION ||
+      parsed.sessionId !== expectedSessionId ||
+      typeof parsed.ownerToken !== 'string' ||
+      !SESSION_FILE_PATTERN.test(`${parsed.ownerToken}.jsonl`) ||
+      parsed.transcriptStagingName !==
+        branchTranscriptStagingName(expectedSessionId, parsed.ownerToken) ||
+      parsed.backupStagingName !==
+        branchBackupStagingName(expectedSessionId, parsed.ownerToken) ||
+      !Array.isArray(parsed.backupNames) ||
+      !parsed.backupNames.every(
+        (name) =>
+          typeof name === 'string' &&
+          name.length > 0 &&
+          path.basename(name) === name,
+      ) ||
+      typeof parsed.createdAt !== 'string'
+    ) {
+      return undefined;
+    }
+    return parsed as BranchCreationManifestV1;
+  } catch {
+    return undefined;
+  }
+}
+
+function serializeBranchOwnerMarker(
+  sessionId: string,
+  ownerToken: string,
+): string {
+  return JSON.stringify({
+    v: BRANCH_CREATION_MANIFEST_VERSION,
+    sessionId,
+    ownerToken,
+  } satisfies BranchOwnerMarkerV1);
+}
+
+function branchOwnerMarkerMatches(
+  markerPath: string,
+  manifest: BranchCreationManifestV1,
+): boolean {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(markerPath, 'utf8'),
+    ) as Partial<BranchOwnerMarkerV1>;
+    return (
+      parsed.v === BRANCH_CREATION_MANIFEST_VERSION &&
+      parsed.sessionId === manifest.sessionId &&
+      parsed.ownerToken === manifest.ownerToken
+    );
+  } catch {
+    return false;
+  }
+}
+
+function fsyncPath(filePath: string): void {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function fsyncDirectoryBestEffort(directory: string): void {
+  try {
+    fsyncPath(directory);
+  } catch (error) {
+    if (process.platform !== 'win32') throw error;
+  }
+}
+
+function validatedBackupPath(directory: string, name: string): string {
+  if (name.length === 0 || path.basename(name) !== name) {
+    throw new Error(`Invalid file-history backup name: ${name}`);
+  }
+  const resolvedDirectory = path.resolve(directory);
+  const resolved = path.resolve(directory, name);
+  if (path.dirname(resolved) !== resolvedDirectory) {
+    throw new Error(`File-history backup escapes its directory: ${name}`);
+  }
+  return resolved;
+}
+
+function copyFileHistoryBackupsToStaging(
   sourceSessionId: string,
   targetSessionId: string,
-): Promise<void> {
-  const fsPromises = await import('node:fs/promises');
+  targetDirectory: string,
+  backupNames: ReadonlySet<string>,
+  ownerToken: string,
+): void {
+  if (backupNames.size === 0) return;
   const sourceDir = path.join(
     Storage.getGlobalQwenDir(),
     FILE_HISTORY_DIR,
     sourceSessionId,
   );
-  const targetDir = path.join(
-    Storage.getGlobalQwenDir(),
-    FILE_HISTORY_DIR,
-    targetSessionId,
+  fs.mkdirSync(targetDirectory, { recursive: false, mode: 0o700 });
+  const ownerMarker = path.join(targetDirectory, '.branch-owner');
+  fs.writeFileSync(
+    ownerMarker,
+    serializeBranchOwnerMarker(targetSessionId, ownerToken),
+    { encoding: 'utf8', mode: 0o600, flag: 'wx' },
   );
-
-  let entries: string[];
-  try {
-    entries = await fsPromises.readdir(sourceDir);
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
-    debugLogger.warn(`copyFileHistoryBackups: readdir failed: ${e}`);
-    return;
+  fsyncPath(ownerMarker);
+  for (const name of backupNames) {
+    const source = validatedBackupPath(sourceDir, name);
+    const target = validatedBackupPath(targetDirectory, name);
+    let sourceIsRegularFile = false;
+    try {
+      sourceIsRegularFile = fs.lstatSync(source).isFile();
+    } catch {
+      sourceIsRegularFile = false;
+    }
+    if (!sourceIsRegularFile) {
+      throw new Error(`Missing file-history backup: ${name}`);
+    }
+    try {
+      fs.linkSync(source, target);
+    } catch {
+      fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+    }
+    fsyncPath(target);
   }
-  if (entries.length === 0) return;
-
-  try {
-    await fsPromises.mkdir(targetDir, { recursive: true });
-  } catch (e) {
-    debugLogger.warn(`copyFileHistoryBackups: mkdir failed: ${e}`);
-    return;
-  }
-  await Promise.all(
-    entries.map(async (name) => {
-      const src = path.join(sourceDir, name);
-      const dst = path.join(targetDir, name);
-      try {
-        await fsPromises.link(src, dst);
-      } catch {
-        try {
-          await fsPromises.copyFile(src, dst);
-        } catch (copyErr) {
-          debugLogger.warn(
-            `copyFileHistoryBackups: failed to copy ${name}: ${copyErr}`,
-          );
-        }
-      }
-    }),
-  );
+  fsyncDirectoryBestEffort(targetDirectory);
 }
 
 /**
@@ -324,6 +454,7 @@ async function copyFileHistoryBackups(
  * File location: ~/.qwen/tmp/<project_id>/chats/
  */
 export class SessionService {
+  private static readonly branchGcLastRunAt = new Map<string, number>();
   private readonly storage: Storage;
   private readonly projectHash: string;
   private readonly projectRoot: string;
@@ -334,6 +465,112 @@ export class SessionService {
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
     this.onWarning = options.onWarning;
+    this.maybeCleanupStaleBranchCreations();
+  }
+
+  // SessionService is short-lived in several callers, so an owned interval
+  // would leak timers. Constructor startup plus active list/fork entry points
+  // provide an at-most-hourly, activity-triggered GC schedule instead.
+  private maybeCleanupStaleBranchCreations(): void {
+    const now = Date.now();
+    const gcKey = this.getChatsDir();
+    const lastRunAt = SessionService.branchGcLastRunAt.get(gcKey) ?? 0;
+    if (now - lastRunAt < 60 * 60 * 1000) return;
+    SessionService.branchGcLastRunAt.set(gcKey, now);
+    this.cleanupStaleBranchCreations();
+  }
+
+  private cleanupStaleBranchCreations(): void {
+    const chatsDir = this.getChatsDir();
+    const claimsDir = path.join(chatsDir, '.branch-claims');
+    let claims: string[];
+    try {
+      claims = fs.readdirSync(claimsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      this.warn(`branch staging GC failed to list claims: ${error}`);
+      return;
+    }
+    for (const claimName of claims) {
+      if (!claimName.endsWith('.claim')) continue;
+      const sessionId = claimName.slice(0, -'.claim'.length);
+      if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) continue;
+      const claimPath = path.join(claimsDir, claimName);
+      try {
+        if (
+          Date.now() - fs.statSync(claimPath).mtimeMs <
+          BRANCH_STAGING_STALE_MS
+        ) {
+          continue;
+        }
+        const manifest = parseBranchCreationManifest(
+          fs.readFileSync(claimPath, 'utf8'),
+          sessionId,
+        );
+        if (!manifest) {
+          this.warn(
+            `branch staging GC preserved ambiguous resources for ${sessionId}: invalid manifest`,
+          );
+          continue;
+        }
+        const stagedTranscript = path.join(
+          chatsDir,
+          '.branch-staging',
+          manifest.transcriptStagingName,
+        );
+        const backupRoot = path.join(
+          Storage.getGlobalQwenDir(),
+          FILE_HISTORY_DIR,
+        );
+        const stagedBackup = path.join(backupRoot, manifest.backupStagingName);
+        const targetBackup = path.join(backupRoot, sessionId);
+        const stagedOwnerMarker = path.join(stagedBackup, '.branch-owner');
+        const targetOwnerMarker = path.join(targetBackup, '.branch-owner');
+        const targetTranscript = this.getSessionFilePath(sessionId, 'active');
+
+        const stagedBackupExists = fs.existsSync(stagedBackup);
+        const targetBackupExists = fs.existsSync(targetBackup);
+        const targetTranscriptExists = fs.existsSync(targetTranscript);
+        if (
+          (stagedBackupExists &&
+            !branchOwnerMarkerMatches(stagedOwnerMarker, manifest)) ||
+          (targetBackupExists &&
+            !targetTranscriptExists &&
+            !branchOwnerMarkerMatches(targetOwnerMarker, manifest)) ||
+          (targetTranscriptExists &&
+            fs.existsSync(targetOwnerMarker) &&
+            !branchOwnerMarkerMatches(targetOwnerMarker, manifest))
+        ) {
+          this.warn(
+            `branch staging GC preserved ambiguous resources for ${sessionId}: owner marker mismatch`,
+          );
+          continue;
+        }
+
+        this.removeFileIfExists(stagedTranscript);
+        if (stagedBackupExists) {
+          fs.rmSync(stagedBackup, { recursive: true, force: true });
+        }
+        if (targetTranscriptExists) {
+          if (branchOwnerMarkerMatches(targetOwnerMarker, manifest)) {
+            this.removeFileIfExists(targetOwnerMarker);
+          }
+        } else if (targetBackupExists) {
+          fs.rmSync(targetBackup, { recursive: true, force: true });
+        }
+        const currentManifest = parseBranchCreationManifest(
+          fs.readFileSync(claimPath, 'utf8'),
+          sessionId,
+        );
+        if (currentManifest?.ownerToken === manifest.ownerToken) {
+          this.removeFileIfExists(claimPath);
+        }
+      } catch (error) {
+        this.warn(
+          `branch staging GC preserved ambiguous resources for ${sessionId}: ${error}`,
+        );
+      }
+    }
   }
 
   /** The workspace root this service is bound to (the cwd it was constructed
@@ -943,6 +1180,7 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
+    this.maybeCleanupStaleBranchCreations();
     const { cursor, size = 20, archiveState = 'active' } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
@@ -1694,6 +1932,7 @@ export class SessionService {
       source?: { sourceType: string; sourceId?: string };
     } = {},
   ): Promise<{ filePath: string; copiedCount: number }> {
+    this.maybeCleanupStaleBranchCreations();
     if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
       throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
     }
@@ -1722,11 +1961,36 @@ export class SessionService {
       );
     }
 
-    // Copy only the active branch. Rewind leaves old records in the JSONL as
-    // abandoned parentUuid branches; copying raw records would resurrect them.
-    const { messages: activeMessages } = this.reconstructHistory(records);
+    const { messages: currentActiveMessages } =
+      this.reconstructHistory(records);
+    let boundedRecords = records;
+    let activeMessages = currentActiveMessages;
+    if (options.atRecordId !== undefined) {
+      const point = resolveBranchPoints(currentActiveMessages).get(
+        options.atRecordId,
+      );
+      if (!point) throw new BranchPointInvalidError(options.atRecordId);
+      const matchingIndexes = records.flatMap((record, index) =>
+        record.uuid === options.atRecordId ? [index] : [],
+      );
+      if (matchingIndexes.length !== 1) {
+        throw new BranchPointInvalidError(options.atRecordId);
+      }
+      boundedRecords = records.slice(0, matchingIndexes[0]! + 1);
+      activeMessages = this.reconstructHistory(boundedRecords, {
+        leafUuid: options.atRecordId,
+      }).messages;
+      if (activeMessages.at(-1)?.uuid !== options.atRecordId) {
+        throw new BranchPointInvalidError(options.atRecordId);
+      }
+    }
+
+    // Copy only the selected active branch. Rewind leaves old records in the
+    // JSONL as abandoned parentUuid branches; copying raw records would
+    // resurrect them. The raw input is physically bounded first so side
+    // artifacts after a historical checkpoint cannot leak into the fork.
     const sourceRecords = includeActiveSideArtifactRecords(
-      records,
+      boundedRecords,
       activeMessages,
     ).filter(
       // A fork is a fresh top-level session with its own creation metadata.
@@ -1800,7 +2064,10 @@ export class SessionService {
     // records may still point at the source session's prompt ids. Remap and
     // top up snapshots explicitly so /branch sessions expose /rewind/snapshots
     // immediately after they become live.
-    const sourceSession = await this.loadSession(sourceSessionId);
+    const sourceSession =
+      options.atRecordId === undefined
+        ? await this.loadSession(sourceSessionId)
+        : undefined;
     const existingSnapshotPromptIds =
       collectFileHistorySnapshotPromptIds(forked);
     const remappedSnapshots = sourceSession?.fileHistorySnapshots
@@ -1823,50 +2090,215 @@ export class SessionService {
         },
       };
       forked.push(snapshotRecord);
+      prevUuid = snapshotRecord.uuid;
     }
 
-    fs.mkdirSync(chatsDir, { recursive: true });
-    const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
+    if (options.title !== undefined) {
+      const titleRecord: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid: prevUuid,
+        sessionId: newSessionId,
+        type: 'system',
+        subtype: 'custom_title',
+        timestamp: new Date().toISOString(),
+        cwd: this.projectRoot,
+        version: records[0].version,
+        systemPayload: {
+          customTitle: options.title,
+          titleSource: 'manual',
+        },
+      };
+      forked.push(titleRecord);
+    }
 
-    // Exclusive create: one syscall that both asserts "file doesn't exist"
-    // and opens for writing, eliminating the TOCTOU window between a
-    // separate existsSync check and writeFileSync. Also guarantees we
-    // never silently overwrite an existing session file.
-    let fd: number;
+    const validateTargetBranchPoint = () => {
+      if (options.atRecordId === undefined) return;
+      const targetActive = this.reconstructHistory(forked).messages;
+      if (!resolveBranchPoints(targetActive).has(options.atRecordId)) {
+        throw new BranchPointInvalidError(options.atRecordId);
+      }
+    };
+    validateTargetBranchPoint();
+
+    const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
+    const ownerToken = randomUUID();
+    const claimsDir = path.join(chatsDir, '.branch-claims');
+    const transcriptStagingDir = path.join(chatsDir, '.branch-staging');
+    const claimPath = path.join(claimsDir, `${newSessionId}.claim`);
+    const transcriptStagingName = branchTranscriptStagingName(
+      newSessionId,
+      ownerToken,
+    );
+    const stagedTranscriptPath = path.join(
+      transcriptStagingDir,
+      transcriptStagingName,
+    );
+    const backupRoot = path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR);
+    const backupStagingName = branchBackupStagingName(newSessionId, ownerToken);
+    const stagedBackupPath = path.join(backupRoot, backupStagingName);
+    const targetBackupPath = path.join(backupRoot, newSessionId);
+    const backupOwnerMarker = path.join(targetBackupPath, '.branch-owner');
+    const backupNames = collectReferencedFileHistoryBackupNames(forked);
+    const manifest: BranchCreationManifestV1 = {
+      v: BRANCH_CREATION_MANIFEST_VERSION,
+      sessionId: newSessionId,
+      ownerToken,
+      transcriptStagingName,
+      backupStagingName,
+      backupNames: [...backupNames].sort(),
+      createdAt: new Date().toISOString(),
+    };
+
+    fs.mkdirSync(chatsDir, { recursive: true });
+    fs.mkdirSync(claimsDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(transcriptStagingDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+
+    let claimFd: number;
     try {
-      fd = fs.openSync(targetPath, 'wx', 0o600);
+      claimFd = fs.openSync(claimPath, 'wx', 0o600);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error(`Target session file already exists: ${newSessionId}`);
+        throw new Error(
+          `Target session is already being created: ${newSessionId}`,
+        );
       }
       throw err;
     }
-    let targetComplete = false;
+    let backupPublished = false;
+    let committed = false;
+    let claimReady = false;
+    let transcriptStagingCreated = false;
     try {
       try {
-        fs.writeFileSync(fd, body, { encoding: 'utf8' });
+        fs.writeFileSync(claimFd, JSON.stringify(manifest), 'utf8');
+        fs.fsyncSync(claimFd);
+        claimReady = true;
       } finally {
-        fs.closeSync(fd);
+        fs.closeSync(claimFd);
+      }
+      fsyncDirectoryBestEffort(claimsDir);
+
+      if (fs.existsSync(targetPath) || fs.existsSync(targetBackupPath)) {
+        throw new Error(`Target session already exists: ${newSessionId}`);
       }
 
-      await copyFileHistoryBackups(sourceSessionId, newSessionId);
-      targetComplete = true;
+      const stagedFd = fs.openSync(stagedTranscriptPath, 'wx', 0o600);
+      transcriptStagingCreated = true;
+      try {
+        fs.writeFileSync(stagedFd, body, { encoding: 'utf8' });
+        fs.fsyncSync(stagedFd);
+      } finally {
+        fs.closeSync(stagedFd);
+      }
+      fsyncDirectoryBestEffort(transcriptStagingDir);
+
+      if (backupNames.size > 0) {
+        copyFileHistoryBackupsToStaging(
+          sourceSessionId,
+          newSessionId,
+          stagedBackupPath,
+          backupNames,
+          ownerToken,
+        );
+        fsyncDirectoryBestEffort(stagedBackupPath);
+        if (fs.existsSync(targetBackupPath)) {
+          throw new Error(`Target session already exists: ${newSessionId}`);
+        }
+        fs.renameSync(stagedBackupPath, targetBackupPath);
+        backupPublished = true;
+        for (const name of backupNames) {
+          if (!fs.existsSync(validatedBackupPath(targetBackupPath, name))) {
+            throw new Error(
+              `Published file-history backup is missing: ${name}`,
+            );
+          }
+        }
+        fsyncDirectoryBestEffort(backupRoot);
+      }
+
+      validateTargetBranchPoint();
+
+      fs.linkSync(stagedTranscriptPath, targetPath);
+      committed = true;
+      fsyncDirectoryBestEffort(chatsDir);
+    } catch (error) {
+      if (committed) {
+        this.warn(
+          `branch committed session=${newSessionId} but final durability confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      throw error;
     } finally {
-      if (!targetComplete) {
+      const cleanupFailures: string[] = [];
+      const cleanupStatuses: string[] = [];
+      let ownershipAmbiguous = false;
+      const cleanup = (resource: string, operation: () => void) => {
         try {
-          this.removeFileIfExists(targetPath);
-        } catch (cleanupError) {
-          this.warn(
-            `forkSession: failed to clean up incomplete target ${newSessionId}: ${cleanupError}`,
-          );
+          operation();
+          cleanupStatuses.push(`${resource}=ok`);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          cleanupFailures.push(`${resource}: ${reason}`);
+          cleanupStatuses.push(`${resource}=failed(${reason})`);
         }
-        try {
-          this.removeFileHistoryBackups(newSessionId);
-        } catch (cleanupError) {
-          this.warn(
-            `forkSession: failed to clean up file history for incomplete target ${newSessionId}: ${cleanupError}`,
-          );
+      };
+      cleanup('transcript staging', () => {
+        if (!fs.existsSync(stagedTranscriptPath)) return;
+        if (!transcriptStagingCreated) {
+          ownershipAmbiguous = true;
+          throw new Error('staging ownership ambiguous; preserved');
         }
+        this.removeFileIfExists(stagedTranscriptPath);
+      });
+      cleanup('backup staging', () => {
+        if (!fs.existsSync(stagedBackupPath)) return;
+        if (
+          !branchOwnerMarkerMatches(
+            path.join(stagedBackupPath, '.branch-owner'),
+            manifest,
+          )
+        ) {
+          ownershipAmbiguous = true;
+          throw new Error('owner token mismatch; preserved');
+        }
+        fs.rmSync(stagedBackupPath, { recursive: true, force: true });
+      });
+      cleanup('published backup ownership', () => {
+        if (!fs.existsSync(backupOwnerMarker)) return;
+        if (!branchOwnerMarkerMatches(backupOwnerMarker, manifest)) {
+          ownershipAmbiguous = true;
+          throw new Error('owner token mismatch; preserved');
+        }
+        if (committed) {
+          this.removeFileIfExists(backupOwnerMarker);
+        } else if (backupPublished && !fs.existsSync(targetPath)) {
+          fs.rmSync(targetBackupPath, { recursive: true, force: true });
+        }
+      });
+      cleanup('branch claim', () => {
+        if (!fs.existsSync(claimPath)) return;
+        if (ownershipAmbiguous || cleanupFailures.length > 0) {
+          throw new Error('resource cleanup incomplete; preserved for GC');
+        }
+        if (!claimReady) {
+          this.removeFileIfExists(claimPath);
+          return;
+        }
+        if (
+          parseBranchCreationManifest(
+            fs.readFileSync(claimPath, 'utf8'),
+            newSessionId,
+          )?.ownerToken !== ownerToken
+        ) {
+          throw new Error('owner token mismatch; preserved');
+        }
+        this.removeFileIfExists(claimPath);
+      });
+      if (cleanupFailures.length > 0) {
+        this.warn(
+          `branch cleanup incomplete session=${newSessionId} owner=${ownerToken.slice(0, 8)} resources=${cleanupStatuses.join('; ')}`,
+        );
       }
     }
 
@@ -2421,6 +2853,43 @@ function collectFileHistorySnapshotPromptIds(
     }
   }
   return ids;
+}
+
+function collectReferencedFileHistoryBackupNames(
+  records: readonly ChatRecord[],
+): Set<string> {
+  const names = new Set<string>();
+  for (const record of records) {
+    if (
+      record.type !== 'system' ||
+      record.subtype !== 'file_history_snapshot' ||
+      !record.systemPayload
+    ) {
+      continue;
+    }
+    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
+    if (!Array.isArray(payload.snapshots)) continue;
+    for (const snapshot of payload.snapshots) {
+      if (
+        !snapshot ||
+        typeof snapshot !== 'object' ||
+        !snapshot.trackedFileBackups ||
+        typeof snapshot.trackedFileBackups !== 'object'
+      ) {
+        continue;
+      }
+      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+        if (
+          backup &&
+          backup.failed !== true &&
+          typeof backup.backupFileName === 'string'
+        ) {
+          names.add(backup.backupFileName);
+        }
+      }
+    }
+  }
+  return names;
 }
 
 /**

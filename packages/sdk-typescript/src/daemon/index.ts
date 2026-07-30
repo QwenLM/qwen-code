@@ -479,6 +479,7 @@ export type {
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,
+  DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,

@@ -2972,6 +2972,9 @@ describe('SessionService', () => {
       vi.mocked(path.dirname).mockImplementation(
         realPath.dirname as unknown as typeof path.dirname,
       );
+      vi.mocked(path.basename).mockImplementation(
+        realPath.basename as unknown as typeof path.basename,
+      );
       // Storage.resolveRuntimeBaseDir uses isAbsolute and resolve; both are
       // auto-mocked to return undefined, which silently falls back to
       // `~/.qwen` and makes the fork write outside the tmp sandbox.
@@ -2995,6 +2998,7 @@ describe('SessionService', () => {
       vi.mocked(readdirSyncSpy).mockRestore?.();
       vi.mocked(statSyncSpy).mockRestore?.();
       vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(renameSyncSpy).mockRestore?.();
       vi.mocked(rmSyncSpy).mockRestore?.();
 
       realTmpDir = fs.mkdtempSync(
@@ -3034,6 +3038,7 @@ describe('SessionService', () => {
           parentUuid: null,
           sessionId,
           type: 'user',
+          provenance: 'real_user',
           timestamp: '2026-04-22T00:00:00.000Z',
           cwd: sessionCwd,
           version: 'test',
@@ -3044,6 +3049,7 @@ describe('SessionService', () => {
           parentUuid: 'u1',
           sessionId,
           type: 'assistant',
+          provenance: 'assistant_output',
           timestamp: '2026-04-22T00:00:01.000Z',
           cwd: sessionCwd,
           version: 'test',
@@ -3055,6 +3061,121 @@ describe('SessionService', () => {
         lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
       );
       return { file, lines };
+    };
+
+    const seedStaleBranchCreation = (
+      sessionId: string,
+      ownerToken: string,
+      options: {
+        committed?: boolean;
+        publishBackup?: boolean;
+        markerOwnerToken?: string;
+      } = {},
+    ) => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      const claimsDir = realPath.join(chatsDir, '.branch-claims');
+      const transcriptStagingDir = realPath.join(chatsDir, '.branch-staging');
+      const transcriptStagingName = `${sessionId}.${ownerToken}.jsonl`;
+      const backupStagingName = `.${sessionId}.${ownerToken}.staging`;
+      const claimPath = realPath.join(claimsDir, `${sessionId}.claim`);
+      const stagedTranscriptPath = realPath.join(
+        transcriptStagingDir,
+        transcriptStagingName,
+      );
+      const targetTranscriptPath = realPath.join(
+        chatsDir,
+        `${sessionId}.jsonl`,
+      );
+      const targetBackupPath = realPath.join(
+        realTmpDir,
+        'file-history',
+        sessionId,
+      );
+      fs.mkdirSync(claimsDir, { recursive: true });
+      fs.mkdirSync(transcriptStagingDir, { recursive: true });
+      fs.writeFileSync(
+        claimPath,
+        JSON.stringify({
+          v: 1,
+          sessionId,
+          ownerToken,
+          transcriptStagingName,
+          backupStagingName,
+          backupNames: ['backup-a'],
+          createdAt: '2026-04-22T00:00:00.000Z',
+        }),
+      );
+      fs.writeFileSync(stagedTranscriptPath, 'staged transcript');
+      if (options.committed) {
+        fs.writeFileSync(targetTranscriptPath, 'committed transcript');
+      }
+      if (options.publishBackup) {
+        fs.mkdirSync(targetBackupPath, { recursive: true });
+        fs.writeFileSync(realPath.join(targetBackupPath, 'backup-a'), 'data');
+        fs.writeFileSync(
+          realPath.join(targetBackupPath, '.branch-owner'),
+          JSON.stringify({
+            v: 1,
+            sessionId,
+            ownerToken: options.markerOwnerToken ?? ownerToken,
+          }),
+        );
+      }
+      const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      fs.utimesSync(claimPath, stale, stale);
+      return {
+        claimPath,
+        stagedTranscriptPath,
+        targetTranscriptPath,
+        targetBackupPath,
+      };
+    };
+
+    const appendFileHistorySnapshot = (
+      sessionId: string,
+      file: string,
+      lines: Array<Record<string, unknown>>,
+      backupNames: string[],
+    ) => {
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'snapshot-branch',
+            parentUuid: 'u2',
+            sessionId,
+            type: 'system',
+            subtype: 'file_history_snapshot',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              snapshots: [
+                {
+                  promptId: `${sessionId}########0`,
+                  timestamp: '2026-04-22T00:00:00.000Z',
+                  trackedFileBackups: Object.fromEntries(
+                    backupNames.map((backupFileName, index) => [
+                      `file-${index}.txt`,
+                      {
+                        backupFileName,
+                        version: 1,
+                        backupTime: '2026-04-22T00:00:00.000Z',
+                      },
+                    ]),
+                  ),
+                },
+              ],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
     };
 
     it('rewrites sessionId, rebuilds parentUuid, and stamps forkedFrom on every record', async () => {
@@ -3157,6 +3278,198 @@ describe('SessionService', () => {
           messageUuid: 'u1',
         },
       });
+    });
+
+    it('forks from a validated historical Assistant checkpoint', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111113';
+      const newId = '22222222-2222-2222-2222-222222222224';
+      const { file, lines } = seedSession(oldId);
+      const checkpoint = {
+        uuid: 'checkpoint-1',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:02.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+          promptId: `${oldId}########0`,
+        },
+      };
+      const laterRecords = [
+        {
+          uuid: 'u3',
+          parentUuid: 'checkpoint-1',
+          sessionId: oldId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:03.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'later' }] },
+        },
+        {
+          uuid: 'u4',
+          parentUuid: 'u3',
+          sessionId: oldId,
+          type: 'assistant',
+          timestamp: '2026-04-22T00:00:04.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'later answer' }] },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        [...lines, checkpoint, ...laterRecords]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: 'checkpoint-1',
+        title: 'Historical branch',
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written.map((record) => record.uuid)).toEqual([
+        'u1',
+        'u2',
+        'checkpoint-1',
+        expect.any(String),
+      ]);
+      expect(written.at(-1)).toMatchObject({
+        subtype: 'custom_title',
+        systemPayload: { customTitle: 'Historical branch' },
+      });
+      expect(
+        fs
+          .readFileSync(file, 'utf8')
+          .split('\n')
+          .some((line) => line.includes('later answer')),
+      ).toBe(true);
+    });
+
+    it('keeps a checkpoint valid when its creation-metadata boundary is filtered', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111115';
+      const newId = '22222222-2222-2222-2222-222222222226';
+      const nestedId = '33333333-3333-3333-3333-333333333337';
+      const { file, lines } = seedSession(oldId);
+      const creationRecord = {
+        uuid: 'creation-metadata',
+        parentUuid: null,
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_source',
+        timestamp: '2026-04-22T00:00:00.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: { sourceType: 'web-shell' },
+      };
+      lines[0]!['parentUuid'] = 'creation-metadata';
+      const checkpoint = {
+        uuid: 'checkpoint-after-creation',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:02.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: 'creation-metadata',
+          assistantRecordUuid: 'u2',
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [creationRecord, ...lines, checkpoint]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const first = await service.forkSession(oldId, newId, {
+        atRecordId: checkpoint.uuid,
+      });
+      const written = fs
+        .readFileSync(first.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(
+        written.some((record) => record.uuid === creationRecord.uuid),
+      ).toBe(false);
+      expect(
+        written.find((record) => record.uuid === checkpoint.uuid)
+          ?.systemPayload,
+      ).toMatchObject({ startExclusiveRecordUuid: null });
+      await expect(
+        service.forkSession(newId, nestedId, {
+          atRecordId: checkpoint.uuid,
+        }),
+      ).resolves.toMatchObject({ copiedCount: 3 });
+    });
+
+    it('rejects a checkpoint that is no longer on the active chain', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111114';
+      const newId = '22222222-2222-2222-2222-222222222225';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'inactive-checkpoint',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'branch_checkpoint',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              v: 1,
+              startExclusiveRecordUuid: null,
+              assistantRecordUuid: 'u2',
+            },
+          },
+          {
+            uuid: 'active-sibling',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'user',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'user', parts: [{ text: 'active sibling' }] },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      await expect(
+        service.forkSession(oldId, newId, {
+          atRecordId: 'inactive-checkpoint',
+        }),
+      ).rejects.toMatchObject({ name: 'BranchPointInvalidError' });
+      expect(
+        fs.existsSync(
+          realPath.join(
+            service['storage'].getProjectDir(),
+            'chats',
+            `${newId}.jsonl`,
+          ),
+        ),
+      ).toBe(false);
     });
 
     it('copies artifact side records from the active branch', async () => {
@@ -3511,6 +3824,9 @@ describe('SessionService', () => {
         [...lines, snapshotRecord].map((l) => JSON.stringify(l)).join('\n') +
           '\n',
       );
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-a'), 'content');
 
       await service.forkSession(oldId, newId);
       const loaded = await service.loadSession(newId);
@@ -3521,14 +3837,112 @@ describe('SessionService', () => {
       );
     });
 
+    it('publishes only backups referenced by the bounded transcript', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313133';
+      const newId = '41414141-4141-4141-4141-414141414143';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, ['backup-a', 'backup-a']);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-a'), 'kept');
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'unreferenced-backup'),
+        'not copied',
+      );
+
+      await service.forkSession(oldId, newId);
+
+      expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-a']);
+    });
+
+    it('leaves no visible target after a partial backup copy fails', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313134';
+      const newId = '41414141-4141-4141-4141-414141414144';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, [
+        'backup-present',
+        'backup-missing',
+      ]);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      const targetTranscript = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        `${newId}.jsonl`,
+      );
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-present'),
+        'copied first',
+      );
+
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+        'Missing file-history backup: backup-missing',
+      );
+
+      expect(fs.existsSync(targetTranscript)).toBe(false);
+      expect(fs.existsSync(targetBackupDir)).toBe(false);
+      const claimsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        '.branch-claims',
+      );
+      const stagingDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        '.branch-staging',
+      );
+      expect(fs.readdirSync(claimsDir)).toEqual([]);
+      expect(fs.readdirSync(stagingDir)).toEqual([]);
+      expect(
+        fs
+          .readdirSync(realPath.join(realTmpDir, 'file-history'))
+          .some((name) => name.includes(newId)),
+      ).toBe(false);
+    });
+
     it('removes copied file-history backups when deleting a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313132';
       const newId = '41414141-4141-4141-4141-414141414142';
-      seedSession(oldId);
+      const { file, lines } = seedSession(oldId);
       const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
       const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
       fs.mkdirSync(sourceBackupDir, { recursive: true });
       fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-a'), 'content');
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'snapshot-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'file_history_snapshot',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              snapshots: [
+                {
+                  promptId: `${oldId}########0`,
+                  timestamp: '2026-04-22T00:00:00.000Z',
+                  trackedFileBackups: {
+                    'a.txt': {
+                      backupFileName: 'backup-a',
+                      version: 1,
+                      backupTime: '2026-04-22T00:00:00.000Z',
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
 
       await service.forkSession(oldId, newId);
       expect(fs.existsSync(realPath.join(targetBackupDir, 'backup-a'))).toBe(
@@ -3663,6 +4077,162 @@ describe('SessionService', () => {
       expect(fs.existsSync(targetPath)).toBe(false);
     });
 
+    it('preserves a committed titled session when final directory fsync fails', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555557';
+      const newId = '66666666-6666-6666-6666-666666666671';
+      const warnings: string[] = [];
+      service = new SessionService(cwd, {
+        onWarning: (message) => warnings.push(message),
+      });
+      seedSession(oldId);
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
+      const realOpenSync = fs.openSync;
+      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
+        filePath: fs.PathLike,
+        flags: fs.OpenMode,
+        mode?: fs.Mode,
+      ) => {
+        if (
+          filePath === chatsDir &&
+          flags === 'r' &&
+          fs.existsSync(targetPath)
+        ) {
+          throw new Error('directory fsync failed');
+        }
+        return realOpenSync(filePath, flags, mode);
+      }) as typeof fs.openSync);
+
+      try {
+        await expect(
+          service.forkSession(oldId, newId, { title: 'Durable branch' }),
+        ).rejects.toThrow('directory fsync failed');
+      } finally {
+        openSpy.mockRestore();
+      }
+
+      expect(fs.existsSync(targetPath)).toBe(true);
+      expect(service.getSessionTitle(newId)).toBe('Durable branch');
+      expect(warnings).toEqual([
+        expect.stringContaining(`branch committed session=${newId}`),
+      ]);
+    });
+
+    it('retains the claim when cleanup fails so garbage collection can retry', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555558';
+      const newId = '66666666-6666-6666-6666-666666666672';
+      const warnings: string[] = [];
+      service = new SessionService(cwd, {
+        onWarning: (message) => warnings.push(message),
+      });
+      seedSession(oldId);
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      const claimsDir = realPath.join(chatsDir, '.branch-claims');
+      const stagingDir = realPath.join(chatsDir, '.branch-staging');
+      const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
+      const realUnlinkSync = fs.unlinkSync;
+      const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(((
+        filePath: fs.PathLike,
+      ) => {
+        if (
+          String(filePath).includes(
+            `${realPath.sep}.branch-staging${realPath.sep}`,
+          )
+        ) {
+          throw new Error('staging cleanup failed');
+        }
+        return realUnlinkSync(filePath);
+      }) as typeof fs.unlinkSync);
+
+      try {
+        await service.forkSession(oldId, newId);
+      } finally {
+        unlinkSpy.mockRestore();
+      }
+
+      const claimPath = realPath.join(claimsDir, `${newId}.claim`);
+      expect(fs.existsSync(targetPath)).toBe(true);
+      expect(fs.existsSync(claimPath)).toBe(true);
+      expect(fs.readdirSync(stagingDir)).toHaveLength(1);
+      expect(warnings).toEqual([
+        expect.stringContaining('branch cleanup incomplete'),
+      ]);
+
+      const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      fs.utimesSync(claimPath, stale, stale);
+      service['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(claimPath)).toBe(false);
+      expect(fs.readdirSync(stagingDir)).toEqual([]);
+      expect(fs.existsSync(targetPath)).toBe(true);
+    });
+
+    it('garbage-collects an owned backup published before transcript commit', () => {
+      const newId = '66666666-6666-6666-6666-666666666668';
+      const ownerToken = '77777777-7777-7777-7777-777777777778';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        publishBackup: true,
+      });
+
+      service['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
+      expect(fs.existsSync(paths.targetBackupPath)).toBe(false);
+      expect(fs.existsSync(paths.targetTranscriptPath)).toBe(false);
+    });
+
+    it('preserves committed branch resources while removing stale markers', () => {
+      const newId = '66666666-6666-6666-6666-666666666669';
+      const ownerToken = '77777777-7777-7777-7777-777777777779';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        committed: true,
+        publishBackup: true,
+      });
+      const ownerMarker = realPath.join(
+        paths.targetBackupPath,
+        '.branch-owner',
+      );
+
+      service['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.targetTranscriptPath)).toBe(true);
+      expect(
+        fs.existsSync(realPath.join(paths.targetBackupPath, 'backup-a')),
+      ).toBe(true);
+      expect(fs.existsSync(ownerMarker)).toBe(false);
+      expect(fs.existsSync(paths.claimPath)).toBe(false);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
+    });
+
+    it('preserves stale resources when a backup owner marker mismatches', () => {
+      const newId = '66666666-6666-6666-6666-666666666670';
+      const ownerToken = '77777777-7777-7777-7777-777777777780';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        publishBackup: true,
+        markerOwnerToken: '88888888-8888-8888-8888-888888888880',
+      });
+      const warnings: string[] = [];
+
+      const gcService = new SessionService(cwd, {
+        onWarning: (message) => warnings.push(message),
+      });
+      gcService['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(true);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
+      expect(fs.existsSync(paths.targetBackupPath)).toBe(true);
+      expect(warnings).toEqual([
+        expect.stringContaining('owner marker mismatch'),
+      ]);
+    });
+
     it('throws when the source session belongs to a different project', async () => {
       // Defensive guard: a file can physically sit in this project's chats
       // dir but carry a record whose cwd hashes to a different project
@@ -3791,6 +4361,46 @@ describe('SessionService', () => {
           sourceId: 'task-123',
         },
       });
+      const artifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/after-source-metadata',
+      );
+      lines.splice(3, 0, {
+        uuid: 'artifact-after-source',
+        parentUuid: 'us',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.800Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.800Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Retained artifact',
+                url: 'https://example.com/after-source-metadata',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.800Z',
+                updatedAt: '2026-04-22T00:00:00.800Z',
+                persistedAt: '2026-04-22T00:00:00.800Z',
+              },
+            },
+          ],
+        },
+      });
       fs.writeFileSync(
         srcFile,
         lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
@@ -3822,6 +4432,11 @@ describe('SessionService', () => {
         sourceId: 'task-123',
       });
       expect(await service.readCreationMetadata(newId)).toEqual({});
+      await expect(service.loadSession(newId)).resolves.toMatchObject({
+        artifactSnapshot: {
+          artifacts: [expect.objectContaining({ title: 'Retained artifact' })],
+        },
+      });
     });
   });
 

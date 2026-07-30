@@ -2467,6 +2467,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           ...(req.name !== undefined ? { name: req.name } : {}),
+          atRecordId: req.atRecordId,
         }),
       },
       async (res) => {
@@ -5883,9 +5884,33 @@ export function matchTurnEvent(
   promptId: string,
 ): PromptResult | undefined {
   if (event.type === 'turn_complete') {
-    const data = event.data as { promptId?: string; stopReason?: string };
+    const data = event.data as {
+      promptId?: string;
+      stopReason?: string;
+      branchPoint?: {
+        assistantRecordUuid?: unknown;
+        checkpointUuid?: unknown;
+      };
+    };
     if (data.promptId === promptId) {
-      return { stopReason: data.stopReason ?? 'end_turn' };
+      const stopReason = data.stopReason ?? 'end_turn';
+      const recordUuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const branchPoint =
+        stopReason === 'end_turn' &&
+        typeof data.branchPoint?.assistantRecordUuid === 'string' &&
+        recordUuidPattern.test(data.branchPoint.assistantRecordUuid) &&
+        typeof data.branchPoint.checkpointUuid === 'string' &&
+        recordUuidPattern.test(data.branchPoint.checkpointUuid)
+          ? {
+              assistantRecordUuid: data.branchPoint.assistantRecordUuid,
+              checkpointUuid: data.branchPoint.checkpointUuid,
+            }
+          : undefined;
+      return {
+        stopReason,
+        ...(branchPoint ? { branchPoint } : {}),
+      };
     }
   }
   if (event.type === 'turn_error') {

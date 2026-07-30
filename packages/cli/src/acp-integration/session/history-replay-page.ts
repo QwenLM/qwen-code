@@ -281,6 +281,31 @@ export async function replayTranscriptRecordPage({
     replayError = 'Replay conversion failed for this page';
   }
 
+  if (page.branchPointsByAssistantUuid) {
+    for (const update of updates) {
+      const value = update as unknown as Record<string, unknown>;
+      const meta =
+        value['_meta'] && typeof value['_meta'] === 'object'
+          ? (value['_meta'] as Record<string, unknown>)
+          : undefined;
+      const transcript =
+        meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      const sourceRecordIds = transcript?.['sourceRecordIds'];
+      if (!Array.isArray(sourceRecordIds)) continue;
+      const branchRecordId = sourceRecordIds
+        .filter((id): id is string => typeof id === 'string')
+        .map((id) => page.branchPointsByAssistantUuid?.[id])
+        .find((id): id is string => typeof id === 'string');
+      if (!branchRecordId) continue;
+      value['_meta'] = {
+        ...meta,
+        qwenTranscript: { ...transcript, branchRecordId },
+      };
+    }
+  }
+
   const nextCursor =
     page.nextCursorState && replayError === undefined
       ? encodeCursor({

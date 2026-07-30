@@ -5881,10 +5881,10 @@ export function App({
   }, [showContextUsage]);
 
   const branchCurrentSession = useCallback(
-    (name?: string) => {
+    (name?: string, atRecordId?: string) => {
       if (!requireActiveSessionForLocalCommand()) return;
-      sessionActions
-        .branchSession(name || undefined)
+      return sessionActions
+        .branchSession(name || undefined, atRecordId)
         .then((result) => {
           store.dispatch([
             {
@@ -5895,21 +5895,49 @@ export function App({
             },
           ]);
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
+          if (
+            error instanceof DaemonHttpError &&
+            error.status === 409 &&
+            isRecord(error.body) &&
+            error.body['code'] === 'branch_point_invalid'
+          ) {
+            let refreshed = false;
+            if (transcriptReloadSupported) {
+              try {
+                await sessionActions.reloadSession(
+                  new AbortController().signal,
+                );
+                refreshed = true;
+              } catch {
+                refreshed = false;
+              }
+            }
+            pushToast(
+              'error',
+              t(refreshed ? 'branch.stale' : 'branch.staleRefreshFailed'),
+            );
+            return;
+          }
           reportError(error, t('branch.failed'));
         });
     },
     [
       reportError,
+      pushToast,
       requireActiveSessionForLocalCommand,
       sessionActions,
       store,
       t,
+      transcriptReloadSupported,
     ],
   );
-  const handleBranchCurrentSession = useCallback(() => {
-    branchCurrentSession();
-  }, [branchCurrentSession]);
+  const handleBranchCurrentSession = useCallback(
+    (atRecordId?: string) => {
+      return branchCurrentSession(undefined, atRecordId);
+    },
+    [branchCurrentSession],
+  );
 
   const composerFocusRequestRef = useRef(0);
   const scheduleComposerFocus = useCallback((sessionId?: string) => {
