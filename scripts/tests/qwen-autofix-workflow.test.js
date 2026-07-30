@@ -3205,6 +3205,162 @@ describe('qwen-autofix workflow', () => {
     expect(broken.body).toBe('');
   });
 
+  it('narrows the agent prompt after a timeout since the last successful round', () => {
+    // Re-running the identical address-everything prompt after a timeout
+    // walks straight into the same wall (#7929 burned three 50-minute
+    // timeouts that way, #7846 two). From the second attempt on, the
+    // feedback file ends with an explicit narrowing instruction: smallest
+    // blocking subset first, commit early, and defer through the SKILL
+    // contract (out of resolved-comments.txt, into comment-replies.json)
+    // — never only into the summary, which is exactly the cheap path a
+    // budget-pressured agent would otherwise take.
+    expect(prepareBranchAndFeedbackStep).toContain('PRIOR_TIMEOUTS=');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Budget warning: previous round(s) ran out of time',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'commit as soon as that subset is done',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'record each deferral in comment-replies.json',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'decline refactors and nice-to-haves with a one-line reason',
+    );
+    // The trigger threshold itself is pinned — a `-ge 99` mutation would
+    // otherwise leave the feature inert with every string pin green.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]',
+    );
+
+    // Behavioral replay of the census (the string pins alone cannot catch
+    // a broken filter): extract the real jq and run it against fixture
+    // ic.json shapes.
+    const censusSrc = prepareBranchAndFeedbackStep.match(
+      /PRIOR_TIMEOUTS="\$\(jq -r[\s\S]*?ic\.json" 2> \/dev\/null \|\| true\)"/,
+    )?.[0];
+    expect(censusSrc).toBeTruthy();
+    const TIMEOUT_HEADLINE =
+      '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
+    const PUSH_HEADLINE =
+      '🤖 Addressed the latest review feedback (round 2/100). What changed…';
+    const NOOP_HEADLINE =
+      '🤖 Reviewed the latest feedback — no changes needed. Why, point by point:…';
+    const mk = (headline, win, at, login = 'qwen-code-dev-bot') => ({
+      user: { login },
+      created_at: at,
+      body: `${headline}\n<!-- autofix-eval ts=x acted=false round=1${win ? ` win=${win}` : ''} -->`,
+    });
+    const runCensus = (comments, key) => {
+      const dir = mkdtempSync(join(tmpdir(), 'timeout-census-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `WORKDIR='${dir}'`,
+              "AUTOFIX_BOT='qwen-code-dev-bot'",
+              `LIVE_REARM_KEY='${key}'`,
+              censusSrc,
+              'printf %s "${PRIOR_TIMEOUTS}"',
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const K = '2026-07-29T03:00:00Z';
+    // A push RESETS the narrowing (the breaker stays cumulative — this
+    // census feeds only the prompt): timeout, push, timeout → 1.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(PUSH_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('1');
+    // A no-op round RESETS the narrowing too: the reset alternation has a
+    // `no changes needed` branch the push case above never touches, so a
+    // no-op between two timeouts must also collapse the count to the single
+    // trailing timeout.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(NOOP_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('1');
+    // Two trailing timeouts count as two.
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('2');
+    // Legacy pre-takeover markers (no win= field) count under key 'none' —
+    // the common real case: a PR that timed out before any re-arm.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, null, '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, null, '2026-07-29T05:00:00Z'),
+        ],
+        'none',
+      ),
+    ).toBe('2');
+    // Old-window timeouts do not leak into a fresh window (re-arm clears).
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, 'old-window', '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, 'old-window', '2026-07-29T05:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    // Non-timeout rounds and a HUMAN quoting the timeout headline verbatim
+    // both count zero (author-filtered like every census).
+    expect(runCensus([mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z')], K)).toBe(
+      '0',
+    );
+    expect(
+      runCensus(
+        [mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z', 'some-human')],
+        K,
+      ),
+    ).toBe('0');
+
+    // The census needle matches the emitted headline VERBATIM — first
+    // lines can embed provider error text (API_ERROR_DETAIL), so a loose
+    // phrase could count a model error message as a timeout.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'contains("AutoFix ran out of time before finishing")',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
+    );
+    // Pin the template that JOINS them: a mutation to the prefix (e.g.
+    // adding a colon) breaks the census while both pins above stay green.
+    expect(reviewAddressReportStep).toContain(
+      'HEADLINE="🤖 AutoFix ${CAUSE} (attempt',
+    );
+  });
+
   it('switches to Critical-only feedback after five change rounds', () => {
     // ROUND counts change-producing rounds, so 4 still starts the fifth
     // suggestion-capable change while 5 starts the first Critical-only round.
@@ -5240,7 +5396,7 @@ describe('qwen-autofix workflow', () => {
       repairDeterministicRejectionStep.match(
         /rm -f \\\n([\s\S]*?)\n {10}rm -rf "\$\{QWEN_HOME\}"/,
       )?.[1] ?? '';
-    expect(repairCleanup).not.toContain('gate-rejection.md');
+    expect(repairCleanup).toContain('gate-rejection.md');
     expect(repairDeterministicRejectionStep).not.toContain(
       '"${WORKDIR}/resolved-comments.txt"',
     );
@@ -5426,7 +5582,16 @@ describe('qwen-autofix workflow', () => {
       'for f in failure.md handoff.md address-summary.md no-action.md',
     );
     expect(reviewAddressReportStep).toContain(
-      'Could not address the latest feedback automatically',
+      'Could not produce a passing fix for this feedback',
+    );
+    // The handoff must not read as a full release: the loop stays engaged
+    // for NEW feedback (#7929 posted "a human should take over" and then
+    // kept pushing rounds — a contradiction to anyone reading the thread).
+    expect(reviewAddressReportStep).toContain(
+      'the loop stays engaged and still picks up new feedback',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'will not retry this item on its own',
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
     expect(reviewAddressReportStep).toContain(
@@ -5693,13 +5858,18 @@ describe('qwen-autofix workflow', () => {
     expect(decision).toBeTruthy();
     const SENTINEL = '9999-12-31T23:59:59Z';
     const NEWEST = '2026-07-20T10:00:00Z';
-    const run = (env) => {
+    const run = (env, { gateRejection = false } = {}) => {
       // The gate-rejection branch (OUTCOME=failed, no crash/timeout) now probes
       // whether the PR is behind main and, if so, updates the base — so stub gh:
       // commits/<main> → a SHA, compare → CMP_STATUS_STUB (default 'ahead', i.e.
       // NOT behind, so the existing rejection cases still hand off), and
       // update-branch → UPDATE_OK_STUB (default success).
       const dir = mkdtempSync(join(tmpdir(), 'decision-'));
+      // reject_fix is the ONLY writer of gate-rejection.md, so its presence is
+      // the exact "the gate actually ran" discriminator the headline keys on.
+      if (gateRejection) {
+        writeFileSync(join(dir, 'gate-rejection.md'), '**build failed**');
+      }
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
@@ -5725,6 +5895,7 @@ describe('qwen-autofix workflow', () => {
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
             REPO: 'o/r',
             PR: '1',
             REPORT_HEAD: 'prhead123',
@@ -5747,9 +5918,24 @@ describe('qwen-autofix workflow', () => {
 
     // Declared rejection, PR up to date ('ahead') -> a genuine fix failure ->
     // advance the watermark and hand off to a human.
-    const rejected = run({ OUTCOME: 'failed' });
+    // A genuine gate rejection: reject_fix wrote gate-rejection.md, so the
+    // headline names the gate.
+    const rejected = run({ OUTCOME: 'failed' }, { gateRejection: true });
     expect(rejected.split('|')[0]).toBe(NEWEST);
-    expect(rejected).toContain('Could not address the latest feedback');
+    expect(rejected).toContain('Could not produce a passing fix');
+    expect(rejected).toContain('the verification gate rejected the attempt');
+    expect(rejected).toContain('stays engaged');
+    // outcome=failed WITHOUT a gate decision (failure.md abort, dirty tree,
+    // unchanged branch, or missing summary) must NOT claim the gate rejected:
+    // gate-rejection.md is written only by reject_fix, so its absence is the
+    // exact discriminator. A blanket clause would repeat the
+    // wording-doesn't-match-behaviour bug this PR fixes.
+    const failedNoGate = run({ OUTCOME: 'failed' });
+    expect(failedNoGate.split('|')[0]).toBe(NEWEST);
+    expect(failedNoGate).toContain('Could not produce a passing fix');
+    expect(failedNoGate).not.toContain(
+      'the verification gate rejected the attempt',
+    );
 
     // #7471: the gate rejected the fix, but the PR was BEHIND main — the build
     // failed on a stale base (a dependency main already removed), not the fix.
@@ -5774,7 +5960,7 @@ describe('qwen-autofix workflow', () => {
       UPDATE_OK_STUB: '0',
     });
     expect(staleConflict.split('|')[0]).toBe(NEWEST);
-    expect(staleConflict).toContain('Could not address the latest feedback');
+    expect(staleConflict).toContain('Could not produce a passing fix');
 
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
@@ -5974,6 +6160,12 @@ describe('qwen-autofix workflow', () => {
       workflow.match(/TAKEOVER_MAX_ROUNDS: '(\d+)'/)?.[1],
     );
     expect(cap).toBeLessThan(takeoverCap);
+    // Cumulative timeout sub-cap: same constraints as the consecutive one.
+    const timeoutCap = Number(
+      workflow.match(/TIMEOUT_WINDOW_CAP: '(\d+)'/)?.[1],
+    );
+    expect(timeoutCap).toBeGreaterThan(0);
+    expect(timeoutCap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
       /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
@@ -5982,7 +6174,7 @@ describe('qwen-autofix workflow', () => {
     const script = block.replace(/^ {12}/gm, '');
 
     const FAIL =
-      '🤖 Could not address the latest feedback automatically (round 3/100).';
+      '🤖 Could not produce a passing fix for this feedback (round 3/100) — the verification gate rejected the attempt.';
     const FAIL_TIMEOUT = '🤖 AutoFix could not reach the model (attempt 2/3)';
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
@@ -6004,6 +6196,7 @@ describe('qwen-autofix workflow', () => {
         apiErrorKind = '',
         prepareOutcome = 'success',
         staleBaseRetry = false,
+        agentTimeout = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
@@ -6032,7 +6225,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -6142,6 +6335,81 @@ describe('qwen-autofix workflow', () => {
       terminal: true,
       headline: 'orig',
     });
+
+    // CUMULATIVE timeout breaker: pushes in between reset CONSEC_FAIL but
+    // must NOT reset this one — #7929's exact shape (timeout, push, timeout,
+    // push, timeout) never tripped the consecutive cap while burning a full
+    // agent budget each time.
+    const TIMEOUT_HEAD =
+      '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
+    const interleaved = run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH], {
+      agentTimeout: 'timeout (3000000ms)',
+    });
+    expect(interleaved.terminal).toBe(true);
+    expect(interleaved.headline).toContain('time-budget exhaustions');
+    expect(interleaved.headline).toContain('/retry');
+    // One short of the cap keeps retrying (current round not a timeout).
+    expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
+      terminal: false,
+    });
+    // Window-scoped like every other census: pre-re-arm timeouts don't count.
+    expect(
+      run(
+        [
+          { headline: TIMEOUT_HEAD, win: 'old-window' },
+          { headline: TIMEOUT_HEAD, win: 'old-window' },
+        ],
+        { window: 'new-window', agentTimeout: 'timeout (3000000ms)' },
+      ),
+    ).toMatchObject({ terminal: false });
+    // A NON-timeout failure landing on an already-capped window still
+    // trips it — the #7929/#7846 rollout state the headline's
+    // parenthetical describes. A plausible "only count when this round
+    // timed out" cleanup (wrapping the block in an AGENT_TIMEOUT check)
+    // would silently delete this documented case.
+    expect(
+      run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD]),
+    ).toMatchObject({ terminal: true });
+    // Inherited from the outer guard, pinned so a refactor that hoists the
+    // timeout block out of it cannot mass-terminate every in-flight PR
+    // during a provider outage.
+    expect(
+      run(Array(5).fill(TIMEOUT_HEAD), {
+        apiErrorDetail: '429 rate limited',
+        apiErrorKind: 'transient',
+      }),
+    ).toMatchObject({ terminal: false });
+    // The timeout breaker ALSO inherits the stale-base exemption from the
+    // outer guard: a stale-base retry on a window already carrying the
+    // timeout cap must not terminate (the base was just updated, the next
+    // round builds fresh). Pinned so the same hoist that would delete the
+    // API-error exemption above cannot silently delete this one either.
+    expect(
+      run(Array(5).fill(TIMEOUT_HEAD), { staleBaseRetry: true }),
+    ).toMatchObject({ terminal: false });
+    // When BOTH breakers would fire, the consecutive one (evaluated first)
+    // keeps its headline — a terminal round is never overridden.
+    const bothCapped = run(Array(cap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout: 'timeout (3000000ms)',
+    });
+    expect(bothCapped.terminal).toBe(true);
+    // 'consecutive' alone is satisfied by EITHER branch; assert the
+    // consecutive breaker's own phrase AND the absence of the timeout one
+    // — an `if true` mutation on the timeout guard flips the headline and
+    // must fail here.
+    expect(bothCapped.headline).toContain(
+      'consecutive rounds that failed to push',
+    );
+    expect(bothCapped.headline).not.toContain('time-budget exhaustions');
+    // Pin the census greps to the actual emit line: the timeout CAUSE text
+    // and the breaker's grep needle must stay in lockstep, or the census
+    // silently counts zero.
+    expect(reviewAddressReportStep).toContain(
+      'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
+    );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
     // the streak reset in production.
