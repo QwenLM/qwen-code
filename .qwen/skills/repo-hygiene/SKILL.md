@@ -92,8 +92,11 @@ nothing worth fixing is a valid, silent outcome.
 
 - No cap on the number of fixes per run. Every finding whose minimal fix
   fits the per-commit threshold below should be committed.
-- Each fix: production diff ≤ 20 lines. Tests or docs may exceed slightly, but
-  the change must stay a small, single-root-cause fix.
+- Each fix: aim for a production diff ≤ 20 lines. Tests or docs may exceed
+  slightly, but the change must stay a small, single-root-cause fix. This is a
+  target, not a hard cap — the hard cap is the report-only threshold below, so
+  a single-root-cause fix that stays under it may be committed even past 20
+  lines.
 - Any finding whose minimal fix spans more than three production files or
   more than one hundred lines of production code (tests and docs excluded
   from both counts) is report-only, regardless of how certain
@@ -124,7 +127,7 @@ nothing worth fixing is a valid, silent outcome.
       "evidence": "...",
       "whyReal": "...",
       "minimalFix": "...",
-      "status": "dropped | dropped-gate | reverted-verify"
+      "status": "dropped | dropped-gate | reverted-verify | failed-verify"
     }
   ]
 }

@@ -552,6 +552,27 @@ jobs:
               exit 0
             fi
           fi
+          # Mirror the revert path above: if a post-typecheck check (build,
+          # lint, settings schema, or tests) fails, no PR opens, yet the
+          # surviving committed findings must still surface in the consolidated
+          # report-only issue instead of vanishing when the artifact expires.
+          # Under `bash -e` any failing command below trips this ERR trap, which
+          # moves every remaining fix to reportOnly before the step exits
+          # non-zero.
+          move_surviving_to_report_only() {
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const moved = f.fixes.splice(0, f.fixes.length);
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (CI verification failed after typecheck)", status: "failed-verify" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log(`Moved ${moved.length} surviving finding(s) to reportOnly (verify failed).`);
+            '
+          }
+          trap move_surviving_to_report_only ERR
+
           npm run build
           npm run lint
           bash "${RUNNER_TEMP}/check-settings-schema.sh"
