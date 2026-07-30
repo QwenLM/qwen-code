@@ -80,19 +80,24 @@ describe('modelCommand', () => {
           authType: AuthType.USE_OPENAI,
         },
         {
-          id: 'voice-model',
+          id: 'qw-voice-model',
           authType: AuthType.USE_OPENAI,
           voiceOnly: true,
         },
         {
-          id: 'image-model',
+          id: 'qw-image-model',
           authType: AuthType.USE_OPENAI,
           imageOnly: true,
         },
         {
-          id: 'vision-model',
+          id: 'qw-vision-model',
           authType: AuthType.USE_OPENAI,
           visionOnly: true,
+        },
+        {
+          id: 'qw-fast-model',
+          authType: AuthType.USE_OPENAI,
+          fastOnly: true,
         },
       ]),
     } as unknown as Config;
@@ -1976,7 +1981,7 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'info',
         content:
-          'Current compaction model: not set (falls back to fast model, then main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+          'Current compaction model: not set (falls back to the main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
       });
     });
 

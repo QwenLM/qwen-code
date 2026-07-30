@@ -1698,8 +1698,7 @@ export default {
   audio: '音频',
   video: '视频',
   'not set': '未设置',
-  'not set (falls back to fast model, then main model)':
-    '未设置（回退到快速模型，然后是主模型）',
+  'not set (falls back to the main model)': '未设置（回退到主模型）',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':

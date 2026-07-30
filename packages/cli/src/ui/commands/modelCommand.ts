@@ -802,7 +802,7 @@ export const modelCommand: SlashCommand = {
         if (context.executionMode !== 'interactive') {
           const compactionModel =
             context.services.settings?.merged?.compactionModel?.trim() ||
-            t('not set (falls back to fast model, then main model)');
+            t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',

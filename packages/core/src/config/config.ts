@@ -1258,7 +1258,7 @@ export interface ConfigParameters {
   visionModel?: string;
   /**
    * Dedicated model for chat compression (auto-compaction). Falls back to
-   * fastModel, then the main model. Corresponds to the `compactionModel` setting
+   * the main model. Corresponds to the `compactionModel` setting
    * (configurable via `/model --compaction`).
    */
   compactionModel?: string;

@@ -518,7 +518,10 @@ export class ChatCompressionService {
 
     // Guard: if the compaction model's context window is too small for the
     // slimmed payload, fall back to the main model for this compression only.
-    let effectiveCompactionModel = config.getCompactionModel?.();
+    // Coalesce to the main model so an undefined getCompactionModel() (e.g.
+    // validation failure) never leaks to the fast model via resolveDefaultModel.
+    let effectiveCompactionModel =
+      config.getCompactionModel?.() ?? config.getModel();
     let compactionWarning: string | undefined;
     if (effectiveCompactionModel) {
       const resolved = resolveModelId(effectiveCompactionModel);
@@ -528,10 +531,13 @@ export class ChatCompressionService {
           : config.getAllConfiguredModels();
         const entry = models.find((m) => m.id === resolved.modelId);
         const window = entry?.contextWindowSize;
-        const slimmedTokenEstimate = estimateContentTokens(
-          slim.slimmedHistory,
-          slimmingConfig.imageTokenEstimate,
-        );
+        // Include the output reserve: most providers count it against the
+        // same context window as the input.
+        const slimmedTokenEstimate =
+          estimateContentTokens(
+            slim.slimmedHistory,
+            slimmingConfig.imageTokenEstimate,
+          ) + COMPACT_MAX_OUTPUT_TOKENS;
         if (window && window > 0 && slimmedTokenEstimate > window) {
           compactionWarning =
             `Compaction model "${resolved.modelId}" context window ` +

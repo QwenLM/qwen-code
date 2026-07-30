@@ -1528,8 +1528,8 @@ export default {
   'Compaction model override cleared': 'Compaction model override cleared',
   'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
     'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
-  'not set (falls back to fast model, then main model)':
-    'not set (falls back to fast model, then main model)',
+  'not set (falls back to the main model)':
+    'not set (falls back to the main model)',
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.',
   'Voice Model': 'Voice Model',
