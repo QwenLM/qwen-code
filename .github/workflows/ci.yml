@@ -178,12 +178,13 @@ jobs:
               || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
           done
 
-      # Remove .qwen/ (and any .qwen.stale.* renamed aside above) so
-      # actions/checkout doesn't trip on restrictive permissions.
+      # Remove .qwen/ and any .qwen.stale.* / .git.stale.* dirs renamed
+      # aside above so actions/checkout doesn't trip on restrictive
+      # permissions and stale root-owned dirs don't accumulate on the runner.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          for d in .qwen .qwen.stale.*; do
+          for d in .qwen .qwen.stale.* .git.stale.*; do
             [ -d "$d" ] || continue
             chmod -R u+w "$d" 2>/dev/null || true
             rm -rf "$d" 2>/dev/null || true

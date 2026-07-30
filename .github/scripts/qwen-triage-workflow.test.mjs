@@ -37,8 +37,8 @@ const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
 const verifyJob = doc.jobs.verify;
-const verifyCleanupStep = verifyJob.steps.find(
-  (s) => s.name === 'Clean up runner workspace',
+const verifyOwnershipStep = verifyJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
 );
 
 describe('qwen-triage: agent tool/permission settings', () => {
@@ -284,17 +284,17 @@ describe('qwen-triage: git exec-vector cleanup', () => {
 
 describe('qwen-triage: verify workspace cleanup', () => {
   it('restores write permission before returning the workspace to the runner', () => {
-    assert.ok(verifyCleanupStep, 'verify cleanup step must exist');
+    assert.ok(verifyOwnershipStep, 'verify ownership-restore step must exist');
     assert.match(
-      verifyCleanupStep.run,
+      verifyOwnershipStep.run,
       /chmod -R u\+rwX "\$GITHUB_WORKSPACE\/\.qwen"/,
       'verify makes .qwen read-only before the agent runs, so cleanup must restore its owner write bits',
     );
 
-    const chmodIndex = verifyCleanupStep.run.indexOf(
+    const chmodIndex = verifyOwnershipStep.run.indexOf(
       'chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"',
     );
-    const chownIndex = verifyCleanupStep.run.indexOf(
+    const chownIndex = verifyOwnershipStep.run.indexOf(
       'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
     );
     assert.ok(

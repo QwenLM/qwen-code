@@ -380,6 +380,13 @@ jobs:
               && echo "::warning::renamed unwriteable ${stale} aside to ${stale}.stale.$$" \
               || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
           done
+          # The 'Clean stale agent state' step below exits early once .git
+          # has been renamed aside, so nothing else removes the renamed-aside
+          # dirs; clean them here so they don't accumulate on the reused runner.
+          for d in "$GITHUB_WORKSPACE"/.qwen.stale.* "$GITHUB_WORKSPACE"/.git.stale.*; do
+            [ -d "$d" ] || continue
+            rm -rf "$d" 2>/dev/null || sudo -n rm -rf "$d" 2>/dev/null || true
+          done
 
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
