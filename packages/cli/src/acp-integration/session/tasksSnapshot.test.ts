@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { AgentTask, Config } from '@qwen-code/qwen-code-core';
+import type { AgentTask, Config, MonitorTask } from '@qwen-code/qwen-code-core';
 import { buildSessionTasksStatus } from './tasksSnapshot.js';
 import type { ServeSessionAgentTaskStatus } from '@qwen-code/acp-bridge/status';
 
@@ -31,6 +31,25 @@ function configWith(agents: AgentTask[]): Config {
     getBackgroundShellRegistry: () => ({ getAll: () => [] }),
     getMonitorRegistry: () => ({ getAll: () => [] }),
   } as unknown as Config;
+}
+
+function serializedMonitor(
+  monitor: MonitorTask,
+): Extract<
+  ReturnType<typeof buildSessionTasksStatus>['tasks'][number],
+  { kind: 'monitor' }
+> {
+  const config = {
+    getBackgroundTaskRegistry: () => ({ getAll: () => [] }),
+    getBackgroundShellRegistry: () => ({ getAll: () => [] }),
+    getMonitorRegistry: () => ({ getAll: () => [monitor] }),
+  } as unknown as Config;
+  return buildSessionTasksStatus('session-1', config, 2_000).tasks.find(
+    (task) => task.kind === 'monitor',
+  ) as Extract<
+    ReturnType<typeof buildSessionTasksStatus>['tasks'][number],
+    { kind: 'monitor' }
+  >;
 }
 
 function serializedAgents(agents: AgentTask[]): ServeSessionAgentTaskStatus[] {
@@ -85,5 +104,24 @@ describe('buildSessionTasksStatus agent lineage', () => {
   it('exposes the parent tool call that launched an agent', () => {
     const [task] = serializedAgents([agentTask({ toolUseId: 'call-1' })]);
     expect(task.toolUseId).toBe('call-1');
+  });
+});
+
+describe('buildSessionTasksStatus monitor correlation', () => {
+  it('exposes the tool call that launched a monitor', () => {
+    const task = serializedMonitor({
+      kind: 'monitor',
+      id: 'mon_0123456789abcdef',
+      description: 'watch logs',
+      status: 'running',
+      startTime: 1_000,
+      command: 'tail -f app.log',
+      eventCount: 0,
+      lastEventTime: 1_000,
+      droppedLines: 0,
+      toolUseId: 'monitor-call-1',
+    } as MonitorTask);
+
+    expect(task.toolUseId).toBe('monitor-call-1');
   });
 });

@@ -144,6 +144,55 @@ export class SubagentManager {
     return { ...config, model: exploreModel };
   }
 
+  resolveModelGrade(
+    grade: string | undefined,
+    agentConfig: SubagentConfig,
+  ): string | undefined {
+    const configuredModel = agentConfig.model?.trim();
+    if (
+      !agentConfig.isBuiltin &&
+      configuredModel &&
+      configuredModel !== 'inherit'
+    ) {
+      return undefined;
+    }
+
+    if (!grade) {
+      return undefined;
+    }
+
+    return this.getAvailableModelGrades().get(grade);
+  }
+
+  getAvailableModelGrades(): Map<string, string> {
+    const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
+    if (
+      !modelGrades ||
+      typeof modelGrades !== 'object' ||
+      Array.isArray(modelGrades) ||
+      (allowedGrades !== undefined && !Array.isArray(allowedGrades))
+    ) {
+      return new Map();
+    }
+
+    return new Map(
+      Object.entries(modelGrades).flatMap(([grade, model]) => {
+        const normalizedGrade = grade.trim();
+        return normalizedGrade !== '' &&
+          typeof model === 'string' &&
+          model.trim() !== '' &&
+          (allowedGrades === undefined ||
+            allowedGrades.some(
+              (allowedGrade) =>
+                typeof allowedGrade === 'string' &&
+                allowedGrade.trim() === normalizedGrade,
+            ))
+          ? [[normalizedGrade, model.trim()] as const]
+          : [];
+      }),
+    );
+  }
+
   private getBuiltinAgent(name: string): SubagentConfig | null {
     const config = BuiltinAgentRegistry.getBuiltinAgent(name);
     return config ? this.applyBuiltinSettings(config) : null;
@@ -327,6 +376,14 @@ export class SubagentManager {
     if (existing.level === 'session') {
       throw new SubagentError(
         `Cannot update session-level subagent "${name}"`,
+        SubagentErrorCode.INVALID_CONFIG,
+        name,
+      );
+    }
+
+    if (existing.level === 'extension') {
+      throw new SubagentError(
+        `Cannot update extension-provided subagent "${name}"`,
         SubagentErrorCode.INVALID_CONFIG,
         name,
       );

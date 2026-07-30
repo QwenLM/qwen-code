@@ -61,12 +61,19 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
+import { approvedPlanRedactionText } from './geminiChat.js';
+import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -162,9 +169,15 @@ import {
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
 import {
+  isImagePart,
+  normalizeParts,
+} from '../services/visionBridge/image-part-utils.js';
+import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
+import {
   getInvocationContext,
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
+import { goalTurnContext } from '../goals/goal-turn-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -186,6 +199,15 @@ function dedupeRequestsByCallId(
     deduped.push(request);
   }
   return deduped;
+}
+
+function runInRequestGoalContext<T>(
+  request: ToolCallRequestInfo,
+  callback: () => T,
+): T {
+  return request.goalContext
+    ? goalTurnContext.run(request.goalContext, callback)
+    : goalTurnContext.exit(callback);
 }
 
 // Gap between the persistence gate and per-tool truncation thresholds.
@@ -489,6 +511,7 @@ export type CompletedToolCall =
  */
 const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.READ_FILE,
+  ToolNames.ZOOM_IMAGE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
   ToolNames.GREP,
@@ -571,7 +594,7 @@ function pushLspPathCandidate(out: string[], v: unknown): void {
  * Pull the filesystem path-bearing fields out of a tool's input.
  * Per-tool dispatcher because the field name and shape differ:
  *
- *  - read_file / edit / write_file → `file_path`
+ *  - read_file / zoom_image / edit / write_file → `file_path`
  *  - notebook_edit → `notebook_path`
  *  - list_directory → `path` (search root)
  *  - glob → `path` (search root, optional) + `pattern` (path-shaped
@@ -690,6 +713,7 @@ export function extractToolFilePaths(
       return out;
 
     case ToolNames.READ_FILE:
+    case ToolNames.ZOOM_IMAGE:
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
       push(obj['file_path']);
@@ -954,6 +978,9 @@ function serializeToolResponse(
     error: response.error?.message,
     error_type: response.errorType,
     content_length: response.contentLength,
+    ...(response.visionBridgeNotice !== undefined
+      ? { vision_bridge_notice: response.visionBridgeNotice }
+      : {}),
   };
 }
 
@@ -1150,6 +1177,7 @@ interface CoreToolSchedulerOptions {
    * Aggregating runtimes record at their outer boundary instead.
    */
   chatRecordingService?: ChatRecordingService;
+  onToolResultFullTurnModel?: (model: string) => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1267,6 +1295,7 @@ export class CoreToolScheduler {
   private config: Config;
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
+  private onToolResultFullTurnModel?: (model: string) => boolean;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
@@ -1332,6 +1361,7 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+    this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -1345,6 +1375,34 @@ export class CoreToolScheduler {
       this.config.isInteractive()
       ? compactToolResultDisplayForHistory(resultDisplay)
       : resultDisplay;
+  }
+
+  private async processToolResultImages(
+    responseParts: Part[],
+    signal: AbortSignal,
+  ): Promise<{
+    responseParts: Part[];
+    modelOverride?: string;
+    visionBridgeNotice?: string;
+  }> {
+    let modelOverride: string | undefined;
+    const notices: string[] = [];
+    const processedParts = await bridgeToolResultImages({
+      config: this.config,
+      responseParts,
+      signal,
+      onFullTurnModel: (model) => {
+        if (!this.onToolResultFullTurnModel?.(model)) return false;
+        modelOverride = model;
+        return true;
+      },
+      onVisionBridgeNotice: (notice) => notices.push(notice),
+    });
+    return {
+      responseParts: processedParts,
+      ...(modelOverride !== undefined ? { modelOverride } : {}),
+      ...(notices.length > 0 ? { visionBridgeNotice: notices.join('\n') } : {}),
+    };
   }
 
   private setStatusInternal(
@@ -1557,11 +1615,13 @@ export class CoreToolScheduler {
         return call;
       }
 
-      const invocationOrError = this.buildInvocation(
-        call.tool,
-        args as Record<string, unknown>,
-        targetCallId,
-        call.request.prompt_id,
+      const invocationOrError = runInRequestGoalContext(call.request, () =>
+        this.buildInvocation(
+          call.tool,
+          args as Record<string, unknown>,
+          targetCallId,
+          call.request.prompt_id,
+        ),
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -2185,10 +2245,14 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = await this.toolRegistry.ensureTool(canonicalName);
+        const toolInstance = await runInRequestGoalContext(reqInfo, () =>
+          this.toolRegistry.ensureTool(canonicalName),
+        );
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
-          const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
+          const errorMessage = await runInRequestGoalContext(reqInfo, () =>
+            this.getToolNotFoundMessage(reqInfo.name),
+          );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -2228,11 +2292,13 @@ export class CoreToolScheduler {
           continue;
         }
 
-        const invocationOrError = this.buildInvocation(
-          toolInstance,
-          reqInfo.args,
-          reqInfo.callId,
-          reqInfo.prompt_id,
+        const invocationOrError = runInRequestGoalContext(reqInfo, () =>
+          this.buildInvocation(
+            toolInstance,
+            reqInfo.args,
+            reqInfo.callId,
+            reqInfo.prompt_id,
+          ),
         );
         if (invocationOrError instanceof Error) {
           const displayError = reqInfo.wasOutputTruncated
@@ -2330,6 +2396,7 @@ export class CoreToolScheduler {
             tool_name: canonicalName,
           },
           toolCall.tool.description,
+          reqInfo.prompt_id,
         );
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchState.callIds.add(reqInfo.callId);
@@ -2354,11 +2421,13 @@ export class CoreToolScheduler {
 
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
-          const flowResult = await evaluatePermissionFlow(
-            this.config,
-            invocation,
-            canonicalName,
-            toolParams,
+          const flowResult = await runInRequestGoalContext(reqInfo, () =>
+            evaluatePermissionFlow(
+              this.config,
+              invocation,
+              canonicalName,
+              toolParams,
+            ),
           );
           const {
             defaultPermission,
@@ -2479,15 +2548,17 @@ export class CoreToolScheduler {
           }
 
           const planShellDecision = isPlanShellCall
-            ? await evaluatePlanModeShellPolicy({
-                config: this.config,
-                toolName: canonicalName,
-                requestArgs: reqInfo.args,
-                invocationParams: toolParams,
-                permissionContext: pmCtx,
-                ambientWorkingDirectory: planShellAmbientWorkingDirectory,
-                signal,
-              })
+            ? await runInRequestGoalContext(reqInfo, () =>
+                evaluatePlanModeShellPolicy({
+                  config: this.config,
+                  toolName: canonicalName,
+                  requestArgs: reqInfo.args,
+                  invocationParams: toolParams,
+                  permissionContext: pmCtx,
+                  ambientWorkingDirectory: planShellAmbientWorkingDirectory,
+                  signal,
+                }),
+              )
             : ({ classification: 'not-applicable' } as const);
           const rejectPlanShell = (message: string) => {
             this.setStatusInternal(reqInfo.callId, 'error', {
@@ -2507,13 +2578,20 @@ export class CoreToolScheduler {
           };
 
           if (planShellDecision.classification !== 'not-applicable') {
-            const initialPlanShellError = await validatePlanModeShellContext({
-              config: this.config,
-              decision: planShellDecision,
-              requestArgs: reqInfo.args,
-              invocationParams: invocation.params as Record<string, unknown>,
-              signal,
-            });
+            const initialPlanShellError = await runInRequestGoalContext(
+              reqInfo,
+              () =>
+                validatePlanModeShellContext({
+                  config: this.config,
+                  decision: planShellDecision,
+                  requestArgs: reqInfo.args,
+                  invocationParams: invocation.params as Record<
+                    string,
+                    unknown
+                  >,
+                  signal,
+                }),
+            );
             if (initialPlanShellError) {
               rejectPlanShell(initialPlanShellError);
               continue;
@@ -2574,17 +2652,19 @@ export class CoreToolScheduler {
               this.config
                 .getGeminiClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
-            const decision = await evaluateAutoMode({
-              ctx: pmCtx,
-              pmForcedAsk,
-              toolParams,
-              messages,
-              config: this.config,
-              signal,
-              skipClassifierReason: fallback.fallback
-                ? fallback.reason
-                : undefined,
-            });
+            const decision = await runInRequestGoalContext(reqInfo, () =>
+              evaluateAutoMode({
+                ctx: pmCtx,
+                pmForcedAsk,
+                toolParams,
+                messages,
+                config: this.config,
+                signal,
+                skipClassifierReason: fallback.fallback
+                  ? fallback.reason
+                  : undefined,
+              }),
+            );
 
             const outcome = applyAutoModeDecision(
               decision,
@@ -2596,16 +2676,18 @@ export class CoreToolScheduler {
               shouldFirePermissionDeniedForAutoMode(decision, outcome)
             ) {
               try {
-                await this.config
-                  .getHookSystem?.()
-                  ?.firePermissionDeniedEvent(
-                    canonicalName,
-                    toolParams,
-                    reqInfo.callId,
-                    getAutoModePermissionDeniedReason(decision),
-                    signal,
-                    reqInfo.callId,
-                  );
+                await runInRequestGoalContext(reqInfo, () =>
+                  this.config
+                    .getHookSystem?.()
+                    ?.firePermissionDeniedEvent(
+                      canonicalName,
+                      toolParams,
+                      reqInfo.callId,
+                      getAutoModePermissionDeniedReason(decision),
+                      signal,
+                      reqInfo.callId,
+                    ),
+                );
               } catch (hookError) {
                 debugLogger.warn(
                   `PermissionDenied hook failed for tool ${reqInfo.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
@@ -2681,8 +2763,9 @@ export class CoreToolScheduler {
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
           } else {
-            confirmationDetails =
-              await invocation.getConfirmationDetails(signal);
+            confirmationDetails = await runInRequestGoalContext(reqInfo, () =>
+              invocation.getConfirmationDetails(signal),
+            );
 
             if (autoModeFallbackMessage) {
               confirmationDetails = decorateClassifierUnavailableConfirmation(
@@ -2692,17 +2775,20 @@ export class CoreToolScheduler {
             }
 
             if (planShellDecision.classification !== 'not-applicable') {
-              const preDisplayPlanShellError =
-                await validatePlanModeShellContext({
-                  config: this.config,
-                  decision: planShellDecision,
-                  requestArgs: reqInfo.args,
-                  invocationParams: invocation.params as Record<
-                    string,
-                    unknown
-                  >,
-                  signal,
-                });
+              const preDisplayPlanShellError = await runInRequestGoalContext(
+                reqInfo,
+                () =>
+                  validatePlanModeShellContext({
+                    config: this.config,
+                    decision: planShellDecision,
+                    requestArgs: reqInfo.args,
+                    invocationParams: invocation.params as Record<
+                      string,
+                      unknown
+                    >,
+                    signal,
+                  }),
+              );
               if (preDisplayPlanShellError) {
                 rejectPlanShell(preDisplayPlanShellError);
                 continue;
@@ -2815,6 +2901,8 @@ export class CoreToolScheduler {
               continue;
             }
 
+            const preparedConfirmationDetails = confirmationDetails;
+
             // Fire PermissionRequest hook before showing the permission dialog.
             // Hooks run before the background-agent auto-deny so they can
             // override the denial with policy-based decisions.
@@ -2825,13 +2913,15 @@ export class CoreToolScheduler {
 
             if (hooksEnabled && messageBus) {
               const permissionMode = String(this.config.getApprovalMode());
-              const hookResult = await firePermissionRequestHook(
-                messageBus,
-                canonicalName,
-                (reqInfo.args as Record<string, unknown>) || {},
-                permissionMode,
-                undefined,
-                signal,
+              const hookResult = await runInRequestGoalContext(reqInfo, () =>
+                firePermissionRequestHook(
+                  messageBus,
+                  canonicalName,
+                  (reqInfo.args as Record<string, unknown>) || {},
+                  permissionMode,
+                  undefined,
+                  signal,
+                ),
               );
 
               if (
@@ -2840,24 +2930,30 @@ export class CoreToolScheduler {
               ) {
                 if (hookResult.shouldAllow) {
                   if (planShellDecision.classification !== 'not-applicable') {
-                    const approval = await validatePlanModeShellApproval({
-                      config: this.config,
-                      decision: planShellDecision,
-                      requestArgs: reqInfo.args,
-                      invocationParams: invocation.params as Record<
-                        string,
-                        unknown
-                      >,
-                      signal,
-                      outcome: ToolConfirmationOutcome.ProceedOnce,
-                      payload: hookResult.updatedInput
-                        ? { updatedInput: hookResult.updatedInput }
-                        : undefined,
-                    });
+                    const approval = await runInRequestGoalContext(
+                      reqInfo,
+                      () =>
+                        validatePlanModeShellApproval({
+                          config: this.config,
+                          decision: planShellDecision,
+                          requestArgs: reqInfo.args,
+                          invocationParams: invocation.params as Record<
+                            string,
+                            unknown
+                          >,
+                          signal,
+                          outcome: ToolConfirmationOutcome.ProceedOnce,
+                          payload: hookResult.updatedInput
+                            ? { updatedInput: hookResult.updatedInput }
+                            : undefined,
+                        }),
+                    );
                     if (approval.outcome === ToolConfirmationOutcome.Cancel) {
-                      await confirmationDetails.onConfirm(
-                        approval.outcome,
-                        approval.payload,
+                      await runInRequestGoalContext(reqInfo, () =>
+                        preparedConfirmationDetails.onConfirm(
+                          approval.outcome,
+                          approval.payload,
+                        ),
                       );
                       rejectPlanShell(
                         approval.payload?.cancelMessage ??
@@ -2865,9 +2961,11 @@ export class CoreToolScheduler {
                       );
                       continue;
                     }
-                    await confirmationDetails.onConfirm(
-                      approval.outcome,
-                      approval.payload,
+                    await runInRequestGoalContext(reqInfo, () =>
+                      preparedConfirmationDetails.onConfirm(
+                        approval.outcome,
+                        approval.payload,
+                      ),
                     );
                     this.recordAutoModeFallbackResolution(
                       reqInfo.callId,
@@ -2887,8 +2985,10 @@ export class CoreToolScheduler {
                       hookResult.updatedInput,
                     );
                   }
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.ProceedOnce,
+                  await runInRequestGoalContext(reqInfo, () =>
+                    preparedConfirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    ),
                   );
                   this.recordAutoModeFallbackResolution(
                     reqInfo.callId,
@@ -2904,9 +3004,11 @@ export class CoreToolScheduler {
                   const cancelPayload = hookResult.denyMessage
                     ? { cancelMessage: hookResult.denyMessage }
                     : undefined;
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.Cancel,
-                    cancelPayload,
+                  await runInRequestGoalContext(reqInfo, () =>
+                    preparedConfirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.Cancel,
+                      cancelPayload,
+                    ),
                   );
                   this.recordAutoModeFallbackResolution(
                     reqInfo.callId,
@@ -2990,16 +3092,18 @@ export class CoreToolScheduler {
 
             if (planShellDecision.classification !== 'not-applicable') {
               const finalPreDisplayPlanShellError =
-                await validatePlanModeShellContext({
-                  config: this.config,
-                  decision: planShellDecision,
-                  requestArgs: reqInfo.args,
-                  invocationParams: invocation.params as Record<
-                    string,
-                    unknown
-                  >,
-                  signal,
-                });
+                await runInRequestGoalContext(reqInfo, () =>
+                  validatePlanModeShellContext({
+                    config: this.config,
+                    decision: planShellDecision,
+                    requestArgs: reqInfo.args,
+                    invocationParams: invocation.params as Record<
+                      string,
+                      unknown
+                    >,
+                    signal,
+                  }),
+                );
               if (finalPreDisplayPlanShellError) {
                 rejectPlanShell(finalPreDisplayPlanShellError);
                 continue;
@@ -3034,43 +3138,43 @@ export class CoreToolScheduler {
                 payload?: ToolConfirmationPayload,
               ) =>
                 runWithInvocationContext(invocationContext, async () => {
-                  if (planShellDecision.classification !== 'not-applicable') {
-                    if (planShellResponseClaimed) return;
-                    planShellResponseClaimed = true;
-                    const currentCall = this.toolCalls.find(
-                      (call) =>
-                        call.request.callId === reqInfo.callId &&
-                        call.status === 'awaiting_approval',
-                    ) as WaitingToolCall | undefined;
-                    if (!currentCall) return;
-                    const approval = await validatePlanModeShellApproval({
-                      config: this.config,
-                      decision: planShellDecision,
-                      requestArgs: currentCall.request.args,
-                      invocationParams: currentCall.invocation.params as Record<
-                        string,
-                        unknown
-                      >,
-                      signal,
-                      outcome,
-                      payload,
-                    });
+                  await runInRequestGoalContext(reqInfo, async () => {
+                    if (planShellDecision.classification !== 'not-applicable') {
+                      if (planShellResponseClaimed) return;
+                      planShellResponseClaimed = true;
+                      const currentCall = this.toolCalls.find(
+                        (call) =>
+                          call.request.callId === reqInfo.callId &&
+                          call.status === 'awaiting_approval',
+                      ) as WaitingToolCall | undefined;
+                      if (!currentCall) return;
+                      const approval = await validatePlanModeShellApproval({
+                        config: this.config,
+                        decision: planShellDecision,
+                        requestArgs: currentCall.request.args,
+                        invocationParams: currentCall.invocation
+                          .params as Record<string, unknown>,
+                        signal,
+                        outcome,
+                        payload,
+                      });
+                      await this.handleConfirmationResponse(
+                        reqInfo.callId,
+                        originalOnConfirm,
+                        approval.outcome,
+                        signal,
+                        approval.payload,
+                      );
+                      return;
+                    }
                     await this.handleConfirmationResponse(
                       reqInfo.callId,
                       originalOnConfirm,
-                      approval.outcome,
+                      outcome,
                       signal,
-                      approval.payload,
+                      payload,
                     );
-                    return;
-                  }
-                  await this.handleConfirmationResponse(
-                    reqInfo.callId,
-                    originalOnConfirm,
-                    outcome,
-                    signal,
-                    payload,
-                  );
+                  });
                 }),
             };
             this.setStatusInternal(
@@ -3209,6 +3313,18 @@ export class CoreToolScheduler {
     // another confirmation path, e.g. IDE vs CLI race), skip to avoid double
     // processing and potential re-execution.
     if (!toolCall) return;
+
+    if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
+      return runInRequestGoalContext(toolCall.request, () =>
+        this.handleConfirmationResponse(
+          callId,
+          originalOnConfirm,
+          outcome,
+          signal,
+          payload,
+        ),
+      );
+    }
 
     try {
       await this._handleConfirmationResponseInner(
@@ -3683,6 +3799,12 @@ export class CoreToolScheduler {
   ): Promise<void> {
     if (toolCall.status !== 'scheduled') return;
 
+    if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
+      return runInRequestGoalContext(toolCall.request, () =>
+        this.executeSingleToolCall(toolCall, signal),
+      );
+    }
+
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
     const runtimeView = this.runtimeContentGeneratorViews.get(callId);
@@ -3711,6 +3833,7 @@ export class CoreToolScheduler {
           tool_name: canonical, // legacy alias — see _schedule for context
         },
         scheduledCall.tool.description,
+        scheduledCall.request.prompt_id,
       );
       this.toolSpans.set(callId, toolSpan);
     }
@@ -4098,6 +4221,15 @@ export class CoreToolScheduler {
         }
       }
 
+      const inheritedTodoWorkChainId = todoWorkChainContext.getStore();
+      const todoWorkChainId =
+        this.config.getActiveTodoWorkChainOwner?.(
+          scheduledCall.request.prompt_id,
+          inheritedTodoWorkChainId,
+        ) ??
+        inheritedTodoWorkChainId ??
+        scheduledCall.request.prompt_id;
+
       if (invocation instanceof ShellToolInvocation) {
         const setPidCallback = (pid: number) => {
           this.toolCalls = this.toolCalls.map((tc) =>
@@ -4131,20 +4263,28 @@ export class CoreToolScheduler {
           );
         };
         this.safelyAddToolArgumentsAttributes(span, invocation.params);
-        promise = invocation.execute(
-          execSignal,
-          liveOutputCallback,
-          shellExecutionConfig,
-          setPidCallback,
-          setPromoteAbortControllerCallback,
-          canPromoteForegroundShell,
+        promise = todoWorkChainContext.run(todoWorkChainId, () =>
+          promptIdContext.run(scheduledCall.request.prompt_id, () =>
+            invocation.execute(
+              execSignal,
+              liveOutputCallback,
+              shellExecutionConfig,
+              setPidCallback,
+              setPromoteAbortControllerCallback,
+              canPromoteForegroundShell,
+            ),
+          ),
         );
       } else {
         this.safelyAddToolArgumentsAttributes(span, invocation.params);
-        promise = invocation.execute(
-          execSignal,
-          liveOutputCallback,
-          shellExecutionConfig,
+        promise = todoWorkChainContext.run(todoWorkChainId, () =>
+          promptIdContext.run(scheduledCall.request.prompt_id, () =>
+            invocation.execute(
+              execSignal,
+              liveOutputCallback,
+              shellExecutionConfig,
+            ),
+          ),
         );
       }
 
@@ -4586,7 +4726,22 @@ export class CoreToolScheduler {
         contentLength =
           typeof content === 'string' ? content.length : undefined;
 
-        const response = convertToFunctionResponse(toolName, callId, content);
+        const convertedResponse = convertToFunctionResponse(
+          toolName,
+          callId,
+          content,
+        );
+        const processedImages = await this.processToolResultImages(
+          convertedResponse,
+          signal,
+        );
+        const response = processedImages.responseParts;
+        if (response !== convertedResponse) {
+          contentLength = response.reduce(
+            (total, part) => total + extractTextFromPartListUnion(part).length,
+            0,
+          );
+        }
         const artifacts = [
           ...(toolResult.artifacts ?? []),
           ...(postToolUseArtifacts ?? []),
@@ -4605,11 +4760,70 @@ export class CoreToolScheduler {
             : {}),
           // Propagate modelOverride from skill tools. Use `in` to distinguish
           // "skill returned undefined (inherit)" from "non-skill tool (no field)".
-          ...('modelOverride' in toolResult
-            ? { modelOverride: toolResult.modelOverride }
+          ...(processedImages.modelOverride !== undefined
+            ? { modelOverride: processedImages.modelOverride }
+            : 'modelOverride' in toolResult
+              ? { modelOverride: toolResult.modelOverride }
+              : {}),
+          ...(processedImages.visionBridgeNotice !== undefined
+            ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
+        // After an APPROVED exit_plan_mode, swap the large `plan` argument
+        // still sitting in the model turn's functionCall for a pointer to the
+        // saved plan file. The blob otherwise stays in the model's attention
+        // window and gets regurgitated into later responses (#6237). Keyed off
+        // the approval llmContent prefixes (not just tool success) so
+        // rejected/no-action results keep their plan text for revision. Must
+        // run BEFORE setStatusInternal: completion callbacks may submit the
+        // continuation turn synchronously, and it should already see the
+        // sanitized history.
+        if (
+          canonicalName === ToolNames.EXIT_PLAN_MODE &&
+          typeof toolResult.llmContent === 'string' &&
+          PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES.some((prefix) =>
+            (toolResult.llmContent as string).startsWith(prefix),
+          )
+        ) {
+          try {
+            const planPath = this.config.getPlanFilePath();
+            // Gate on the on-disk plan actually matching the in-history
+            // text: savePlanBestEffort swallows filesystem errors, and the
+            // pointer must never claim a save that failed or reference a
+            // file holding a different plan. A missing/unreadable file
+            // throws here and skips the redaction entirely.
+            const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
+            const redacted = this.config
+              .getGeminiClient?.()
+              ?.getChat()
+              .redactApprovedPlanFromHistory(
+                callId,
+                approvedPlanRedactionText(planPath),
+                savedPlan,
+              );
+            // The rewrite declines silently on a no-match call id, a
+            // non-string plan argument, or in-history text differing from
+            // the saved file — trace those so a "plan still in history"
+            // report can tell a skipped rewrite from a run one.
+            if (redacted === false) {
+              debugLogger.debug(
+                `Approved-plan redaction left history unchanged for ` +
+                  `${callId}: no matching exit_plan_mode call, or its ` +
+                  `plan text does not match ${planPath}.`,
+              );
+            }
+          } catch (redactErr) {
+            debugLogger.warn(
+              `Skipping approved-plan redaction for ${callId} (plan file ` +
+                `unavailable?): ${
+                  redactErr instanceof Error
+                    ? redactErr.message
+                    : String(redactErr)
+                }`,
+            );
+          }
+        }
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
         // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
@@ -4690,6 +4904,11 @@ export class CoreToolScheduler {
               failureHookAdditionalContext,
             );
           }
+          const processedImages = await this.processToolResultImages(
+            responseParts,
+            signal,
+          );
+          responseParts = processedImages.responseParts;
 
           const contentLength = responseParts.reduce((total, part) => {
             const error = part.functionResponse?.response?.['error'];
@@ -4720,6 +4939,12 @@ export class CoreToolScheduler {
             contentLength,
             ...(timeoutPersistedOutputFiles !== undefined
               ? { persistedOutputFiles: timeoutPersistedOutputFiles }
+              : {}),
+            ...(processedImages.modelOverride !== undefined
+              ? { modelOverride: processedImages.modelOverride }
+              : {}),
+            ...(processedImages.visionBridgeNotice !== undefined
+              ? { visionBridgeNotice: processedImages.visionBridgeNotice }
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
           });
@@ -4754,7 +4979,7 @@ export class CoreToolScheduler {
         }
 
         const error = new Error(errorMessage);
-        const errorResponse = createErrorResponse(
+        let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
           toolResult.error.type,
@@ -4769,6 +4994,54 @@ export class CoreToolScheduler {
           errorResponse.persistedOutputFiles = Array.from(
             new Set(errorPersistedOutputFiles),
           );
+        }
+        const imageParts = normalizeParts(toolResult.llmContent).flatMap(
+          (part) => {
+            const nestedImages = (part.functionResponse?.parts ?? [])
+              .filter((nested) => isImagePart(nested as Part))
+              .map((nested) => nested as Part);
+            return isImagePart(part) ? [part, ...nestedImages] : nestedImages;
+          },
+        );
+        if (imageParts.length > 0) {
+          const basePart = errorResponse.responseParts[0];
+          const functionResponse = basePart?.functionResponse;
+          const imageErrorParts = functionResponse
+            ? [
+                {
+                  ...basePart,
+                  functionResponse: {
+                    ...functionResponse,
+                    parts: imageParts,
+                  },
+                },
+              ]
+            : errorResponse.responseParts;
+          const processedImages = await this.processToolResultImages(
+            imageErrorParts,
+            signal,
+          );
+          const bridgedErrorParts = processedImages.responseParts;
+          if (
+            bridgedErrorParts !== imageErrorParts ||
+            this.config.getEffectiveInputModalities?.()?.image === true
+          ) {
+            errorResponse = {
+              ...errorResponse,
+              responseParts: bridgedErrorParts,
+              contentLength: bridgedErrorParts.reduce((total, part) => {
+                const response = part.functionResponse?.response;
+                const text = response?.['error'] ?? response?.['output'];
+                return total + (typeof text === 'string' ? text.length : 0);
+              }, 0),
+              ...(processedImages.modelOverride !== undefined
+                ? { modelOverride: processedImages.modelOverride }
+                : {}),
+              ...(processedImages.visionBridgeNotice !== undefined
+                ? { visionBridgeNotice: processedImages.visionBridgeNotice }
+                : {}),
+            };
+          }
         }
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -5110,13 +5383,38 @@ export class CoreToolScheduler {
     if (!this.chatRecordingService) return;
 
     for (const call of completedCalls) {
-      this.chatRecordingService.recordToolResult(call.response.responseParts, {
+      const result = {
         callId: call.request.callId,
         status: call.status,
         resultDisplay: call.response.resultDisplay,
+        ...(call.response.visionBridgeNotice !== undefined
+          ? { visionBridgeNotice: call.response.visionBridgeNotice }
+          : {}),
         error: call.response.error,
         errorType: call.response.errorType,
-      });
+      };
+      const goalContext = call.request.goalContext;
+      if (!goalContext) {
+        this.chatRecordingService.recordToolResult(
+          call.response.responseParts,
+          result,
+        );
+      } else if (
+        call.request.name === ToolNames.GET_GOAL ||
+        call.request.name === ToolNames.UPDATE_GOAL
+      ) {
+        this.chatRecordingService.recordToolResult(
+          call.response.responseParts,
+          result,
+          { goalContext: { ...goalContext }, provenance: 'goal_runtime' },
+        );
+      } else {
+        this.chatRecordingService.recordToolResult(
+          call.response.responseParts,
+          result,
+          { goalContext: { ...goalContext } },
+        );
+      }
     }
   }
 
@@ -5161,11 +5459,15 @@ export class CoreToolScheduler {
           string,
           unknown
         >;
-        const flowResult = await evaluatePermissionFlow(
-          this.config,
-          pendingTool.invocation,
-          pendingTool.request.name,
-          toolParams,
+        const flowResult = await runInRequestGoalContext(
+          pendingTool.request,
+          () =>
+            evaluatePermissionFlow(
+              this.config,
+              pendingTool.invocation,
+              pendingTool.request.name,
+              toolParams,
+            ),
         );
         const { finalPermission, pmForcedAsk, pmCtx, requiresUserInteraction } =
           flowResult;
@@ -5192,17 +5494,21 @@ export class CoreToolScheduler {
             this.config
               .getGeminiClient?.()
               ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
-          const decision = await evaluateAutoMode({
-            ctx: pmCtx,
-            pmForcedAsk,
-            toolParams,
-            messages,
-            config: this.config,
-            signal,
-            skipClassifierReason: fallback.fallback
-              ? fallback.reason
-              : undefined,
-          });
+          const decision = await runInRequestGoalContext(
+            pendingTool.request,
+            () =>
+              evaluateAutoMode({
+                ctx: pmCtx,
+                pmForcedAsk,
+                toolParams,
+                messages,
+                config: this.config,
+                signal,
+                skipClassifierReason: fallback.fallback
+                  ? fallback.reason
+                  : undefined,
+              }),
+          );
 
           const outcome = applyAutoModeDecision(
             decision,
@@ -5214,16 +5520,18 @@ export class CoreToolScheduler {
             shouldFirePermissionDeniedForAutoMode(decision, outcome)
           ) {
             try {
-              await this.config
-                .getHookSystem?.()
-                ?.firePermissionDeniedEvent(
-                  pendingTool.request.name,
-                  toolParams,
-                  pendingTool.request.callId,
-                  getAutoModePermissionDeniedReason(decision),
-                  signal,
-                  pendingTool.request.callId,
-                );
+              await runInRequestGoalContext(pendingTool.request, () =>
+                this.config
+                  .getHookSystem?.()
+                  ?.firePermissionDeniedEvent(
+                    pendingTool.request.name,
+                    toolParams,
+                    pendingTool.request.callId,
+                    getAutoModePermissionDeniedReason(decision),
+                    signal,
+                    pendingTool.request.callId,
+                  ),
+              );
             } catch (hookError) {
               debugLogger.warn(
                 `PermissionDenied hook failed for pending tool ${pendingTool.request.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,

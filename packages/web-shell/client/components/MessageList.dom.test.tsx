@@ -182,6 +182,13 @@ const systemMsg = (id: string): SystemMessage => ({
   variant: 'warning',
   source: 'prompt_cancelled',
 });
+const backgroundNotificationMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'background task completed',
+  variant: 'info',
+  source: 'background_notification',
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -203,6 +210,7 @@ function mount(
     hasOlderHistory?: boolean;
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
+    historyPaginationError?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
     transcriptBlockCount?: number;
     transcriptActivity?: {
@@ -243,6 +251,7 @@ function mount(
             hasOlderHistory={opts.hasOlderHistory}
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
+            historyPaginationError={opts.historyPaginationError}
             onLoadOlderHistory={opts.onLoadOlderHistory}
             transcriptBlockCount={opts.transcriptBlockCount}
             transcriptActivity={opts.transcriptActivity}
@@ -448,6 +457,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'a1')).toBe(true);
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('collapses a background notification before the final assistant content', () => {
+    const c = mount([
+      userMsg('u1'),
+      backgroundNotificationMsg('bg1'),
+      asstMsg('a1'),
+    ]);
+
+    expect(has(c, 'bg1')).toBe(false);
+    expect(has(c, 'a1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'bg1')).toBe(true);
+  });
+
+  it('keeps a background notification when it is the final content', () => {
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg1'),
+    ]);
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'a1')).toBe(true);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
@@ -1576,6 +1611,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[role="status"]')?.textContent).toBe(
       'History display limit reached. Earlier messages remain saved.',
     );
+  });
+
+  it('shows a persistent error when history pagination fails', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+    });
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Earlier history could not be loaded.',
+    );
+  });
+
+  it('does not auto-load older history when a pagination error is present', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // historyPaginationError is true, hasOlderHistory is true
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    // It should NOT call loadMore because paginationError blocks it
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {

@@ -1043,10 +1043,10 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',
         category: 'UI',
-        requiresRestart: false,
-        default: false,
+        requiresRestart: true,
+        default: true,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       showScrollbar: {
@@ -1225,6 +1225,11 @@ const SETTINGS_SCHEMA = {
     jsonSchemaOverride: {
       type: 'object',
       properties: {
+        userId: {
+          description:
+            'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+          type: 'string',
+        },
         includeSensitiveSpanAttributes: {
           description:
             'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
@@ -1999,6 +2004,32 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      defaultDisabled: {
+        type: 'array',
+        label: 'Default Disabled Skills',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Skill names disabled by default unless explicitly enabled through ' +
+          'skills.enabled. Matched case-insensitively and UNION-merged across ' +
+          'settings scopes. skills.disabled always wins.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      enabled: {
+        type: 'array',
+        label: 'Enabled Skills',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Explicit opt-ins that override matching skills.defaultDisabled ' +
+          'entries. Matched case-insensitively and UNION-merged across settings ' +
+          'scopes. Cannot override skills.disabled.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
       directories: {
         type: 'array',
         label: 'Skill Directories',
@@ -2328,6 +2359,26 @@ const SETTINGS_SCHEMA = {
             description:
               'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
             showInDialog: true,
+          },
+          threshold: {
+            type: 'number',
+            label: 'Deferred Tool Preload Threshold (%)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: 10,
+            description:
+              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
+            showInDialog: true,
+            // A percentage of the context window: values above 100 would set a
+            // budget larger than the window and unconditionally preload every
+            // deferred tool, defeating the point of the threshold. Bound it the
+            // way autoCompactThreshold bounds its fraction.
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              maximum: 100,
+              default: 10,
+            },
           },
         },
       },
@@ -2823,6 +2874,16 @@ const SETTINGS_SCHEMA = {
           description: 'URL pattern (supports * wildcard)',
         },
       },
+      allowPrivateNetworkHooks: {
+        type: 'boolean',
+        label: 'Allow Private Network Hooks',
+        category: 'Security',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.',
+        showInDialog: false,
+      },
     },
   },
 
@@ -2920,6 +2981,32 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
           },
         },
+      },
+      modelGrades: {
+        type: 'object',
+        label: 'Model Grades',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as Record<string, string> | undefined,
+        description:
+          'Maps semantic model grade names exposed to the Agent tool to concrete model selectors.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+      },
+      allowedGrades: {
+        type: 'array',
+        label: 'Allowed Model Grades',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Optional whitelist of model grade names the Agent tool may use.',
+        showInDialog: false,
+        items: { type: 'string' },
       },
       maxParallelAgents: {
         type: 'number',
@@ -3298,6 +3385,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
         showInDialog: false,
+      },
+      sessionWriterLease: {
+        type: 'boolean',
+        label: 'Enable ACP Session Writer Lease',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.',
+        showInDialog: true,
       },
       cronRecurringMaxAgeDays: {
         type: 'number',

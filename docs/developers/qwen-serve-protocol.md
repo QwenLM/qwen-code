@@ -172,7 +172,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -791,9 +791,15 @@ Pairing management is available only for instances configured with the
 
 - `GET .../channels/:name/pairing-requests`
 - `POST .../channels/:name/pairing-requests/approve` with `{ "code": "..." }`
+- `GET .../channels/:name/pairing-approvals`
+- `DELETE .../channels/:name/pairing-approvals` with
+  `{ "senderId": "..." }`
 
-Both pairing routes require a bearer token and use `Cache-Control: no-store`.
-Approval is scoped to the selected Channel instance and workspace.
+All pairing routes require a bearer token and use `Cache-Control: no-store`.
+Requests, approvals, and revocations are scoped to the selected Channel
+instance and workspace. The approvals snapshot contains sender IDs because the
+allowlist does not persist sender display names. Revoking an unknown sender
+returns `404 channel_pairing_approval_not_found`.
 
 ### Channel delivery and Notify
 
@@ -1063,6 +1069,8 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_monitor_tool_correlation` → monitor entries from `GET /session/:id/tasks`
+  include `toolUseId` for transcript-to-task correlation
 - `session_status` → `GET /session/:id/status`
 - `session_info` → `GET /workspace/:id/session-info` and `GET /workspaces/:workspace/session-info`
 - `session_transcript` → `GET /session/:id/transcript`
@@ -1571,9 +1579,23 @@ Filesystem errors use this JSON shape:
 #### `GET /file`
 
 Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
-`limit`. The daemon rejects binary files and files above the text read cap.
-The response includes `hash`, a SHA-256 digest over the raw on-disk bytes for
-the whole file, even when `line`, `limit`, or `maxBytes` returned a slice.
+`limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
+cap require a finite `limit`; no-limit, line-only, and maxBytes-only requests
+remain `file_too_large`. A finite large-file window is streamed and its returned
+UTF-8 content remains capped at 256 KiB. `maxBytes` always applies to the UTF-8
+response bytes after decoding, including when the source uses another supported
+encoding within the full-snapshot cap.
+
+For files within the full-snapshot cap, the response includes `hash`, a SHA-256
+digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,
+or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
+complete `sizeBytes`, set `truncated: true`, and return
+`originalLineCount: null` when the stream stops before EOF. A streamed result
+is returned only when the file remains stable. Concurrent changes detected by
+the post-read device/inode, size, modification-time, and change-time checks
+return `hash_mismatch`, including when the same mutation also causes decoding
+to fail. Stable binary content remains `binary_file`, and path replacement
+retains the existing `symlink_escape` protection.
 
 ```json
 {
@@ -2557,9 +2579,9 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_skill_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Toggle a loaded, user-invocable skill through the workspace `skills.disabled` list, matching the CLI `/skills` panel's Space-key behavior. Lookup is case-insensitive, while persistence and the response use the skill's canonical name. Existing disabled entries for skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A disable entry inherited from system defaults, user, or system scope locks the skill: workspace scope cannot override the merged union.
+Toggle a loaded, user-invocable skill through the workspace skill settings, matching the CLI `/skills` panel's Space-key behavior. Lookup is case-insensitive, while persistence and the response use the skill's canonical name. Enabling a `skills.defaultDisabled` skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard-disable entry inherited from system defaults, user, or system scope locks the skill: workspace scope cannot override it.
 
-This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. `skills.disabled` removes the skill from slash-command/model availability and rejects later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
+This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. Effective skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
 Request:
 
@@ -2590,7 +2612,7 @@ Errors:
 - `404 {code: 'skill_not_found'}` — no loaded skill matches the name.
 - `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?: 'system' | 'user' | 'systemDefaults'}` — the CLI panel would not allow the target to be toggled. `lockedScope` is present only when `reason` is `locked`.
 
-The mutation reuses the workspace-scoped `settings_changed` event with `key: 'skills.disabled'`; it does not add a new event type.
+The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
 
 #### `POST /workspace/init`
 

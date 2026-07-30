@@ -31,6 +31,8 @@ import {
   ToolErrorType,
 } from '../index.js';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import * as fsSync from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
@@ -56,6 +58,7 @@ import {
   MOCK_TOOL_GET_DEFAULT_PERMISSION,
   MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
+import { GeminiChat } from './geminiChat.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
@@ -81,6 +84,10 @@ import {
 } from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -726,9 +733,18 @@ describe('CoreToolScheduler', () => {
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
+    getGeminiClient?: () => unknown;
+    getPlanFilePath?: () => string;
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
     chatRecordingService?: ChatRecordingService;
+    visionBridge?: boolean;
+    visionAgent?: boolean;
+    onToolResultFullTurnModel?: (model: string) => boolean;
+    getActiveTodoWorkChainOwner?: (
+      promptId: string,
+      fallbackOwner?: string,
+    ) => string;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -765,6 +781,15 @@ describe('CoreToolScheduler', () => {
           model: 'test-model',
           authType: 'gemini',
         }),
+        getEffectiveInputModalities: () =>
+          options.visionBridge || options.visionAgent ? {} : { image: true },
+        getDefaultVisionBridgeModel: () =>
+          options.visionBridge || options.visionAgent
+            ? {
+                id: 'qwen3-vl-plus',
+                ...(options.visionAgent ? { agentCapable: true as const } : {}),
+              }
+            : undefined,
         getModel: () => 'test-model',
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
@@ -786,7 +811,9 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getCwd: () => '/repo',
         getUseModelRouter: () => false,
-        getGeminiClient: () => null,
+        getGeminiClient: options.getGeminiClient ?? (() => null),
+        getPlanFilePath:
+          options.getPlanFilePath ?? (() => '/tmp/plans/test-session-id.md'),
         getChatRecordingService: () => undefined,
         getMemoryPressureMonitor: () => options.memoryMonitor,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
@@ -810,12 +837,14 @@ describe('CoreToolScheduler', () => {
         isInteractive: () => true,
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
+        getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
       } as unknown as Config,
       onAllToolCallsComplete,
       onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
       chatRecordingService: options.chatRecordingService,
+      onToolResultFullTurnModel: options.onToolResultFullTurnModel,
     });
 
     return {
@@ -838,6 +867,8 @@ describe('CoreToolScheduler', () => {
       promptId: 'unrelated-prompt',
     };
     let observedContext: InvocationContextV1 | undefined;
+    let observedPromptId: string | undefined;
+    let observedTodoWorkChainId: string | undefined;
     const tool = new MockTool({
       name: 'approval-context-tool',
       getDefaultPermission: async () => 'ask',
@@ -849,12 +880,15 @@ describe('CoreToolScheduler', () => {
       }),
       execute: async () => {
         observedContext = getInvocationContext();
+        observedPromptId = promptIdContext.getStore();
+        observedTodoWorkChainId = todoWorkChainContext.getStore();
         return { llmContent: 'ok', returnDisplay: 'ok' };
       },
     });
     const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
       toolsByName: new Map([[tool.name, tool]]),
       approvalMode: ApprovalMode.DEFAULT,
+      getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
     });
 
     await runWithInvocationContext(invocationContext, () =>
@@ -876,13 +910,17 @@ describe('CoreToolScheduler', () => {
       'awaiting_approval',
     )) as WaitingToolCall;
 
-    await runWithInvocationContext(unrelatedContext, () =>
-      waiting.confirmationDetails.onConfirm(
-        ToolConfirmationOutcome.ProceedOnce,
+    await todoWorkChainContext.run('stale-work-chain', () =>
+      runWithInvocationContext(unrelatedContext, () =>
+        waiting.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
       ),
     );
 
     expect(observedContext).toEqual(invocationContext);
+    expect(observedPromptId).toBe(invocationContext.promptId);
+    expect(observedTodoWorkChainId).toBe('mapped-work-chain');
   });
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
@@ -1178,6 +1216,211 @@ describe('CoreToolScheduler', () => {
     );
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     expect(execute).toHaveBeenCalledWith({ plan: 'Original plan' });
+  });
+
+  function createChatWithPlanCall(callId: string, plan: string): GeminiChat {
+    return new GeminiChat({} as unknown as Config, {}, [
+      { role: 'user', parts: [{ text: 'please plan this' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Here is my plan.' },
+          {
+            functionCall: {
+              id: callId,
+              name: ToolNames.EXIT_PLAN_MODE,
+              args: { plan, originalRequest: 'please plan this' },
+            },
+          },
+        ],
+      },
+    ]);
+  }
+
+  it('redacts the plan argument from history after an approved exit_plan_mode', async () => {
+    const bigPlan = '## Plan\n\n1. huge section\n2. code blocks\n3. tables';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
+    const chat = createChatWithPlanCall('plan-call-1', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'User approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-1',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const history = chat.getHistory();
+    const fnCall = history[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).not.toContain('huge section');
+    expect(fnCall.args!['plan']).toContain(
+      `Plan approved and saved to ${planFile}`,
+    );
+    fsSync.unlinkSync(planFile);
+    // Sibling parts and other args survive untouched.
+    expect(history[1]!.parts![0]).toEqual({ text: 'Here is my plan.' });
+    expect(fnCall.args!['originalRequest']).toBe('please plan this');
+  });
+
+  it('redacts the plan for a leader-approved (teammate) exit_plan_mode', async () => {
+    const bigPlan = '## Plan\n\nleader path fixture';
+    const planFile = path.join(
+      os.tmpdir(),
+      `qwen-plan-leader-${process.pid}-${Math.random().toString(16).slice(2)}.md`,
+    );
+    fsSync.writeFileSync(planFile, bigPlan, 'utf-8');
+    const chat = createChatWithPlanCall('plan-call-4', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'Leader approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'Leader approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () => planFile,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-4',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-leader-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).not.toContain('leader path fixture');
+    expect(fnCall.args!['plan']).toContain(
+      `Plan approved and saved to ${planFile}`,
+    );
+    fsSync.unlinkSync(planFile);
+  });
+
+  it('keeps the plan argument when the plan file was never written (save failed)', async () => {
+    const bigPlan = '## Plan\n\nnothing on disk backs this';
+    const chat = createChatWithPlanCall('plan-call-3', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent:
+          'User approved. You can now start coding. Start with updating your todo list if applicable.',
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan: bigPlan,
+        },
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+      getPlanFilePath: () =>
+        path.join(os.tmpdir(), 'qwen-plan-that-does-not-exist.md'),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-3',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-save-failed',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    // Never point the model at a file that is not there — the plan stays.
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).toBe(bigPlan);
+  });
+
+  it('keeps the plan argument in history when exit_plan_mode is not approved', async () => {
+    const bigPlan = '## Plan\n\nkeep me for revision';
+    const chat = createChatWithPlanCall('plan-call-2', bigPlan);
+    const tool = new MockTool({
+      name: ToolNames.EXIT_PLAN_MODE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Plan execution was not approved. Remaining in plan mode.',
+        returnDisplay: 'Plan execution was not approved.',
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[ToolNames.EXIT_PLAN_MODE, tool]]),
+      approvalMode: ApprovalMode.YOLO,
+      onAllToolCallsComplete,
+      getGeminiClient: () => ({ getChat: () => chat }),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'plan-call-2',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: bigPlan },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-rejected',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const fnCall = chat.getHistory()[1]!.parts![1]!.functionCall!;
+    expect(fnCall.args!['plan']).toBe(bigPlan);
   });
 
   it('returns guidance error through the scheduler when a PM ask rule hits exit_plan_mode outside plan mode (#7671)', async () => {
@@ -3459,6 +3702,278 @@ describe('CoreToolScheduler', () => {
         }
       ).callIdToPostToolBatchSignal.size,
     ).toBe(0);
+  });
+
+  it('bridges image tool results before completing the tool call', async () => {
+    runSideQueryMock.mockResolvedValue({ text: 'Screen says READY' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'captured screen' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            displayName: 'screen.png',
+          },
+        },
+      ],
+      returnDisplay: 'captured screen',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'screenshot_tool',
+            new MockTool({
+              name: 'screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-screen',
+          name: 'screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.id).toBe('call-screen');
+    expect(functionResponse?.name).toBe('screenshot_tool');
+    expect(functionResponse?.response?.['output']).toContain('captured screen');
+    expect(functionResponse?.response?.['output']).toContain(
+      'Screen says READY',
+    );
+    expect(completed.response.contentLength).toBe(
+      String(functionResponse?.response?.['output']).length,
+    );
+    expect(completed.response.visionBridgeNotice).toContain('qwen3-vl-plus');
+    expect(functionResponse).not.toHaveProperty('parts');
+    expect(runSideQueryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purpose: 'vision-bridge' }),
+    );
+    expect(
+      JSON.stringify(runSideQueryMock.mock.calls[0][1].contents),
+    ).toContain('screenshot_tool');
+  });
+
+  it('marks an image tool result for full-turn vision takeover', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'captured screen' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+      returnDisplay: 'captured screen',
+    });
+    const onToolResultFullTurnModel = vi.fn().mockReturnValue(true);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'screenshot_tool',
+            new MockTool({
+              name: 'screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionAgent: true,
+        onToolResultFullTurnModel,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-screen-agent',
+          name: 'screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-screen-agent',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    expect(onToolResultFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
+    expect(completed.response.modelOverride).toBe('qwen3-vl-plus\0');
+    expect(completed.response.visionBridgeNotice).toContain(
+      'Routing this image turn to qwen3-vl-plus',
+    );
+    expect(completed.response.responseParts[0].functionResponse?.parts).toEqual(
+      [
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+    );
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('bridges images returned with a tool error', async () => {
+    runSideQueryMock.mockResolvedValue({ text: 'Dialog says access denied' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'capture failure context' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+      returnDisplay: 'capture failed',
+      error: {
+        message: 'capture failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'failed_screenshot_tool',
+            new MockTool({
+              name: 'failed_screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-failed-screen',
+          name: 'failed_screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'error') {
+      throw new Error(`Expected error, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.id).toBe('call-failed-screen');
+    expect(functionResponse?.response?.['error']).toContain('capture failed');
+    expect(functionResponse?.response?.['error']).toContain(
+      'Dialog says access denied',
+    );
+    expect(completed.response.contentLength).toBe(
+      String(functionResponse?.response?.['error']).length,
+    );
+    expect(functionResponse).not.toHaveProperty('parts');
+    expect(runSideQueryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purpose: 'vision-bridge' }),
+    );
+  });
+
+  it('preserves error images for an image-capable primary model', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+      returnDisplay: 'capture failed',
+      error: {
+        message: 'capture failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'failed_screenshot_tool',
+            new MockTool({
+              name: 'failed_screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-failed-screen',
+          name: 'failed_screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'error') {
+      throw new Error(`Expected error, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['error']).toBe('capture failed');
+    expect(functionResponse?.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+    ]);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
   it('includes failed tool responses in PostToolBatch payloads', async () => {
@@ -14305,6 +14820,18 @@ describe('extractToolFilePaths', () => {
     expect(extractToolFilePaths(FS_TOOL, { file_path: '/proj/a.ts' })).toEqual([
       '/proj/a.ts',
     ]);
+  });
+
+  it('extracts the source path from zoom_image', () => {
+    expect(
+      extractToolFilePaths(ToolNames.ZOOM_IMAGE, {
+        file_path: '/proj/chart.png',
+        x1: 0,
+        y1: 0,
+        x2: 500,
+        y2: 500,
+      }),
+    ).toEqual(['/proj/chart.png']);
   });
 
   it('extracts notebook_path for notebook_edit', () => {

@@ -168,6 +168,37 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Extract the parent session's advertised tool names from its generation
+ * config: flatten every function declaration, drop tools a subagent must
+ * never inherit (EXCLUDED_TOOLS_FOR_SUBAGENTS), and deduplicate. Shared by
+ * fork launch (the Agent tool) and fork resume (background-agent-resume) so
+ * both derive the inherited tool surface identically — a single source of
+ * truth prevents the two paths from silently diverging when the exclusion or
+ * extraction logic changes.
+ */
+export function extractParentToolNames(
+  generationConfig: GenerateContentConfig | undefined,
+): string[] {
+  return Array.from(
+    new Set(
+      (
+        generationConfig?.tools as
+          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
+          | undefined
+      )
+        ?.flatMap((tool) => tool.functionDeclarations ?? [])
+        .map((declaration) => declaration.name)
+        .filter(
+          (name): name is string =>
+            typeof name === 'string' &&
+            name.length > 0 &&
+            !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(name),
+        ) ?? [],
+    ),
+  );
+}
+
+/**
  * Tools excluded from teammates. Teammates need send_message and the
  * task_* coordination tools to do their job, but they must not be able
  * to create or destroy the team itself — only the leader can do that.
@@ -470,6 +501,9 @@ export class AgentCore {
         generationConfig,
         startHistory,
       );
+      if (options?.interactive) {
+        chat.enableManualPlanExitNotices();
+      }
       // Seed the per-chat token count so the auto-compaction threshold
       // gate sees the inherited history's true size on the first send.
       // Without this, fork subagents start at 0 and the gate NOOPs even

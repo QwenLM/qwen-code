@@ -209,7 +209,10 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 // Exported for the cross-package contract test in packages/cli (see the
 // function's own doc comment) — the daemon's file-read route must resolve the
 // workspacePath this produces.
-export { buildRecordArtifactReminder } from './tools/write-file.js';
+export {
+  buildRecordArtifactReminder,
+  buildWorkspaceArtifactMetadata,
+} from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
@@ -269,10 +272,15 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
-export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
+export {
+  decodeBufferWithEncodingInfo,
+  encodeTextFileContent,
+} from './utils/sync-file-encoding.js';
+export { LargeNonUtf8TextError } from './utils/read-text-range.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
+export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
@@ -522,6 +530,7 @@ export {
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
+export * from './utils/git-branches.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';

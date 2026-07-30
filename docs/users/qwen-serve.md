@@ -192,7 +192,7 @@ idle daemon returns `initialized: false` with an empty snapshot. Once a
 session is alive they switch to `initialized: true` and surface the real
 state.
 
-To mirror the CLI `/skills` panel remotely, call `POST /workspace/skills/:name/enable` with `{ "enabled": true | false }` after checking the `workspace_skill_toggle` capability. The route writes only workspace `skills.disabled`, rejects unknown, hidden, inactive-extension, higher-scope-locked, and untrusted targets, and immediately refreshes active ACP sessions. A `deferred` response means the setting was saved while no ACP child was running; it will apply when the child starts. `skills.disabled` disables both manual and model use, unlike `disable-model-invocation: true`, which keeps direct `/skill-name` invocation available.
+To mirror the CLI `/skills` panel remotely, call `POST /workspace/skills/:name/enable` with `{ "enabled": true | false }` after checking the `workspace_skill_toggle` capability. The route updates workspace `skills.disabled` and `skills.enabled` as needed, rejects unknown, hidden, inactive-extension, higher-scope-locked, and untrusted targets, and immediately refreshes active ACP sessions. Enabling a `skills.defaultDisabled` skill writes a canonical opt-in to `skills.enabled`; a hard `skills.disabled` entry inherited from a higher scope still cannot be overridden. Skill status cells expose `disabledReason` (`hard`, `default`, or `inactive_extension`) and an optional `lockedScope`. A `deferred` response means the setting was saved while no ACP child was running; it will apply when the child starts. `skills.disabled` disables both manual and model use, unlike `disable-model-invocation: true`, which keeps direct `/skill-name` invocation available.
 
 `GET /workspace/env` and `GET /workspace/preflight` always answer with
 `initialized: true` regardless of ACP state. `env` never consults ACP
@@ -218,17 +218,19 @@ remediation.
 
 The daemon also exposes workspace file helpers:
 
-- `GET /file` reads text files and returns a raw-byte `sha256:<hex>` hash.
+- `GET /file` reads text files. Full-snapshot responses return a raw-byte
+  `sha256:<hex>` hash; finite-line windows from files above 256 KiB omit it.
 - `GET /file/bytes` reads bounded raw byte windows and returns base64 content.
 - `POST /file/write` creates or replaces text files.
 - `POST /file/edit` applies one exact text replacement.
 
 Write/edit are **strict mutation routes**: even on loopback they require a
 configured bearer token, otherwise they return `token_required`. Replacements
-and edits require the latest `expectedHash` from `GET /file` (or a full-window
-`GET /file/bytes`). `create` never overwrites. Explicit writes to ignored paths
-are allowed but audited. Binary writes, delete/move/mkdir, and recursive parent
-creation are not part of this surface.
+and edits require the latest `expectedHash` from a full-snapshot `GET /file`
+(or a full-window `GET /file/bytes`). A partial large-file window cannot be
+used as an optimistic-concurrency token. `create` never overwrites. Explicit
+writes to ignored paths are allowed but audited. Binary writes,
+delete/move/mkdir, and recursive parent creation are not part of this surface.
 
 ### 3. Open a session
 

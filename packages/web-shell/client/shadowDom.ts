@@ -21,6 +21,7 @@ const PLUGIN_SHADOW_PANELS = new Set([
   'mcp',
   'skills',
   'agents',
+  'channels',
 ]);
 
 export function isPluginShadowPanel(panel: string | null): boolean {

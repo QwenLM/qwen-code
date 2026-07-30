@@ -1,4 +1,5 @@
 export { getGlobalQwenDir, resolvePath } from './paths.js';
+export { PollingChannelBase } from './PollingChannelBase.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
@@ -16,6 +17,7 @@ export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
   DaemonChannelBridgeOptions,
+  DaemonChannelLoopMcpHost,
   DaemonChannelEvent,
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
@@ -41,6 +43,7 @@ export type {
   ChannelLoopController,
 } from './ChannelBase.js';
 export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
+export { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 export type {
   ChannelLoopSchedulerOptions,
   ChannelLoopRunner,
@@ -79,7 +82,6 @@ export {
   sanitizeLogText,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
@@ -93,7 +95,10 @@ export type {
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelPlugin,
+  ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
@@ -101,6 +106,9 @@ export type {
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
   ChannelType,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   DmPolicy,
   Envelope,
@@ -117,4 +125,6 @@ export type {
   SenderPolicy,
   SessionScope,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';

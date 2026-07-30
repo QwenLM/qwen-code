@@ -474,6 +474,9 @@ function makeRuntimeBridge(): HttpAcpBridge {
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
+const mockChannelWorkerEnabledState = vi.hoisted(() => ({
+  value: undefined as boolean | undefined,
+}));
 
 async function getFreeLoopbackPort(): Promise<number> {
   const server = createServer();
@@ -499,6 +502,28 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
         return actual.createSpawnChannelFactory(options);
       },
     ),
+  };
+});
+
+vi.mock('./channel-worker-manager.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./channel-worker-manager.js')>();
+  return {
+    ...actual,
+    createChannelWorkerManager: (
+      ...args: Parameters<typeof actual.createChannelWorkerManager>
+    ) => {
+      const manager = actual.createChannelWorkerManager(...args);
+      return {
+        ...manager,
+        state: () => {
+          const state = manager.state();
+          return mockChannelWorkerEnabledState.value === undefined
+            ? state
+            : { ...state, enabled: mockChannelWorkerEnabledState.value };
+        },
+      };
+    },
   };
 });
 
@@ -537,7 +562,115 @@ describe('workspace skill settings persistence', () => {
     );
     fs.writeFileSync(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ skills: { disabled: ['locked-skill'] } }),
+      JSON.stringify({
+        skills: {
+          disabled: ['locked-skill'],
+          defaultDisabled: ['opt-in-skill', 'inherited-opt-in'],
+          enabled: ['INHERITED-OPT-IN'],
+        },
+      }),
+    );
+
+    const originalCreateServeApp = serverModule.createServeApp;
+    let persistDisabledSkills:
+      | NonNullable<
+          Parameters<typeof serverModule.createServeApp>[2]
+        >['persistDisabledSkills']
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      persistDisabledSkills = args[2]?.persistDisabledSkills;
+      return originalCreateServeApp(...args);
+    });
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge: makeRuntimeBridge() },
+    );
+    await handle.runtimeReady;
+    expect(persistDisabledSkills).toBeDefined();
+
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      'QWEN_CUSTOM_API_KEY_SKILL_TEST=workspace-key\n',
+    );
+    delete process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST'];
+
+    await expect(
+      persistDisabledSkills!(workspace, 'inherited-opt-in', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+    });
+
+    await expect(
+      persistDisabledSkills!(workspace, 'review', false),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'review'],
+      settingsChanges: [
+        { key: 'skills.disabled', value: ['orphan', 'review'] },
+      ],
+    });
+    expect(process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST']).toBeUndefined();
+    await expect(
+      persistDisabledSkills!(workspace, 'review', false),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', 'review'],
+    });
+
+    await Promise.all([
+      persistDisabledSkills!(workspace, 'alpha', false),
+      persistDisabledSkills!(workspace, 'beta', false),
+    ]);
+    await expect(
+      persistDisabledSkills!(workspace, 'review', true),
+    ).resolves.toMatchObject({ changed: true });
+    await expect(
+      persistDisabledSkills!(workspace, 'opt-in-skill', true),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta'],
+      settingsChanges: [{ key: 'skills.enabled', value: ['opt-in-skill'] }],
+    });
+
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled: string[] } };
+    expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
+    expect(saved.skills.enabled).toEqual(['opt-in-skill']);
+    await expect(
+      persistDisabledSkills!(workspace, 'locked-skill', true),
+    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+  });
+
+  it('produces both skills.disabled and skills.enabled changes when enabling a workspace-hard-disabled default-disabled skill', async () => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-dual-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-dual-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: { disabled: ['dual-skill'] },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        skills: { defaultDisabled: ['dual-skill'] },
+      }),
     );
 
     const originalCreateServeApp = serverModule.createServeApp;
@@ -570,69 +703,41 @@ describe('workspace skill settings persistence', () => {
     expect(persistDisabledSkills).toBeDefined();
     expect(persistDisabledTools).toBeDefined();
 
-    fs.writeFileSync(
-      path.join(workspace, '.env'),
-      'QWEN_CUSTOM_API_KEY_SKILL_TEST=workspace-key\n',
-    );
-    delete process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST'];
-
     await expect(
-      persistDisabledSkills!(workspace, 'review', false),
+      persistDisabledSkills!(workspace, 'dual-skill', true),
     ).resolves.toEqual({
       changed: true,
-      disabled: ['orphan', 'review'],
+      disabled: [],
+      settingsChanges: [
+        { key: 'skills.disabled', value: undefined },
+        { key: 'skills.enabled', value: ['dual-skill'] },
+      ],
     });
-    expect(process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST']).toBeUndefined();
-    await expect(
-      persistDisabledSkills!(workspace, 'review', false),
-    ).resolves.toEqual({
-      changed: false,
-      disabled: ['orphan', 'review'],
-    });
-
-    await Promise.all([
-      persistDisabledSkills!(workspace, 'alpha', false),
-      persistDisabledSkills!(workspace, 'beta', false),
-    ]);
-    await expect(
-      persistDisabledSkills!(workspace, 'review', true),
-    ).resolves.toMatchObject({ changed: true });
 
     const saved = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
-    ) as { skills: { disabled: string[] } };
-    expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
+    ) as { skills: { disabled?: string[]; enabled: string[] } };
+    expect(saved.skills.disabled).toBeUndefined();
+    expect(saved.skills.enabled).toEqual(['dual-skill']);
 
     const setValue = vi.spyOn(
       settingsRuntime.LoadedSettings.prototype,
       'setValue',
     );
-    for (const persist of [
-      (assertGenerationOpen: () => void) =>
-        persistDisabledSkills!(
-          workspace,
-          'guarded-skill',
-          false,
-          assertGenerationOpen,
-        ),
-      (assertGenerationOpen: () => void) =>
-        persistDisabledTools!(
-          workspace,
-          'guarded-tool',
-          false,
-          assertGenerationOpen,
-        ),
-    ]) {
-      const assertGenerationOpen = vi.fn();
-      await persist(assertGenerationOpen);
-      expect(setValue.mock.calls).toHaveLength(1);
-      expect(setValue.mock.calls[0]?.[3]).toBe(assertGenerationOpen);
-      setValue.mockClear();
-    }
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
 
-    await expect(
-      persistDisabledSkills!(workspace, 'locked-skill', true),
-    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+    const skillGuard = vi.fn();
+    await persistDisabledSkills!(workspace, 'guarded-skill', false, skillGuard);
+    expect(setValues.mock.calls).toHaveLength(1);
+    expect(setValues.mock.calls[0]?.[2]).toBe(skillGuard);
+
+    const toolGuard = vi.fn();
+    await persistDisabledTools!(workspace, 'guarded-tool', false, toolGuard);
+    expect(setValue.mock.calls).toHaveLength(1);
+    expect(setValue.mock.calls[0]?.[3]).toBe(toolGuard);
   });
 });
 
@@ -6236,6 +6341,7 @@ describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
 
   afterEach(() => {
+    mockChannelWorkerEnabledState.value = undefined;
     vi.restoreAllMocks();
     if (tmpDir) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -7660,10 +7766,19 @@ describe('runQwenServe channel worker supervisor', () => {
       servePid: process.pid,
       workerPid: 1234,
     });
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const shutdownProcessRegistry =
+      processRegistry.shutdown.bind(processRegistry);
+    vi.spyOn(processRegistry, 'shutdown').mockImplementation(() => {
+      order.push('registry');
+      return shutdownProcessRegistry();
+    });
 
     await handle.close();
 
-    expect(order).toEqual(['worker', 'bridge']);
+    expect(order).toEqual(['registry', 'worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
@@ -7801,6 +7916,150 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
       expect(exitSpy).toHaveBeenCalledWith(0);
       expect(fs.readFileSync(logPath, 'utf8')).toContain('daemon stopped');
+    } finally {
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('exits on the first signal when only ACP process shutdown fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-acp-error-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    vi.spyOn(processRegistry, 'shutdown').mockRejectedValue(
+      new Error('ACP process shutdown failed'),
+    );
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+
+      expect(worker.stop).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      for (const listener of process.rawListeners('SIGINT')) {
+        if (!existingSigintListeners.has(listener)) {
+          process.removeListener('SIGINT', listener as never);
+        }
+      }
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!existingSigtermListeners.has(listener)) {
+          process.removeListener('SIGTERM', listener as never);
+        }
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('retries only the channel worker error when ACP process shutdown also fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-combined-error-')),
+    );
+    const bridge = makeFakeBridge();
+    const worker = makeWorker({
+      enabled: true,
+      state: 'failed',
+      pid: 1234,
+      channels: ['telegram'],
+      error: 'Channel worker did not exit after SIGKILL.',
+    });
+    worker.stop
+      .mockRejectedValueOnce(
+        new Error('Channel worker did not exit after SIGKILL.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    const existingSigintListeners = new Set(process.rawListeners('SIGINT'));
+    const existingSigtermListeners = new Set(process.rawListeners('SIGTERM'));
+
+    await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge,
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    vi.spyOn(processRegistry, 'shutdown').mockRejectedValue(
+      new Error('ACP process shutdown failed'),
+    );
+    mockChannelWorkerEnabledState.value = true;
+    const signalListener = process
+      .rawListeners('SIGTERM')
+      .find(
+        (listener) =>
+          !existingSigtermListeners.has(listener) &&
+          listener.name === 'onSignal',
+      ) as ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    try {
+      expect(signalListener).toBeDefined();
+      await signalListener!('SIGTERM');
+      expect(exitSpy).not.toHaveBeenCalled();
+
+      await signalListener!('SIGTERM');
+      expect(worker.stop).toHaveBeenCalledTimes(2);
+      expect(exitSpy).toHaveBeenCalledWith(1);
     } finally {
       for (const listener of process.rawListeners('SIGINT')) {
         if (!existingSigintListeners.has(listener)) {
@@ -8477,7 +8736,9 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     try {
-      await vi.waitFor(() => expect(worker.stop).toHaveBeenCalledTimes(4));
+      await vi.waitFor(() => expect(worker.stop).toHaveBeenCalledTimes(4), {
+        timeout: 5_000,
+      });
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       expect(settled).toBe(false);
       expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();

@@ -93,6 +93,7 @@ import {
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
+import { resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1456,7 +1457,7 @@ function parseMcpConfig(
  * Builds the live-read closure for `Config.getDisabledSkillNames()`.
  *
  * The returned function reads through `loadedSettings.merged` on every
- * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * call, so `LoadedSettings` skill-setting mutations
  * are reflected without rebuilding `Config`. The closure is over the
  * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
  * distinction matters because `LoadedSettings.setValue` replaces the
@@ -1471,24 +1472,7 @@ function parseMcpConfig(
 export function buildDisabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
-  return () => {
-    // Defensive: settings.json is user-editable, so the `disabled` slot
-    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
-    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
-    // fallback only catches `null`/`undefined`, so we MUST also guard
-    // against non-array values before `.filter()` — otherwise calling
-    // `"all".filter` throws `TypeError: list.filter is not a function`
-    // and bricks every skill invocation (validateToolParams + execute
-    // both call this provider without a try/catch).
-    const raw = loadedSettings.merged.skills?.disabled;
-    const list = Array.isArray(raw) ? raw : [];
-    return new Set(
-      list
-        .filter((n): n is string => typeof n === 'string')
-        .map((n) => n.trim().toLowerCase())
-        .filter(Boolean),
-    );
-  };
+  return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
 export async function loadCliConfig(
@@ -1507,8 +1491,8 @@ export async function loadCliConfig(
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
    * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
-   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
-   * mutations within the same process.
+   * effective skill availability even after `setValue` mutations within the
+   * same process.
    *
    * Callers MUST close over the live `LoadedSettings` instance, NOT over
    * the `settings: Settings` snapshot passed as the first argument here —
@@ -1878,7 +1862,18 @@ export async function loadCliConfig(
   if (argv.allowedMcpServerNames) {
     allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
     excludedMcpServers = undefined;
-  } else if (!bareMode) {
+  } else if (!bareMode && !safeMode) {
+    // Settings-sourced allow/exclude lists are LOCAL/ambient state, same
+    // category as settings.mcpServers itself — safe mode already drops the
+    // latter (getMcpServers()) but this branch used to read the former
+    // unconditionally (only bareMode was guarded), so a settings.json
+    // mcp.allowed narrower than the caller's own top-tier servers would
+    // silently filter them back out via getMcpServers()'s allowedMcpServers
+    // filter (added in this same PR, #7827, for the `--allowed-mcp-server-
+    // names` case) — defeating the very guarantee this PR exists to provide.
+    // The argv.allowedMcpServerNames branch above is unaffected: that's an
+    // explicit per-invocation argument, not local state, so it still applies
+    // under safe mode same as topTierMcpServers itself.
     allowedMcpServers = settings.mcp?.allowed
       ? new Set(settings.mcp.allowed.filter(Boolean))
       : undefined;
@@ -2024,10 +2019,20 @@ export async function loadCliConfig(
     sessionMcpServers || cliMcpServers
       ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
       : undefined;
+  // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
+  // ambient, file-sourced state they're meant to distrust) — but top-tier
+  // servers are an explicit, per-invocation argument from the caller (ACP
+  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
   const mcpServers =
     bareMode || safeMode
-      ? {}
+      ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  // Top-tier servers are never gated (#4615, see the comment above), so this
+  // is a no-op for them either way today. Skipped under safe mode anyway
+  // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
+  // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
+  // state at all, not even a read with no behavioral effect. Revisit if a
+  // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
@@ -2076,6 +2081,8 @@ export async function loadCliConfig(
             .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
+    toolSearchThreshold:
+      bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
@@ -2160,6 +2167,8 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    sessionWriterLeaseEnabled:
+      settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
@@ -2222,6 +2231,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? []
         : (settings.security?.allowedHttpHookUrls ?? []),
+    allowPrivateNetworkHooks:
+      bareMode || safeMode
+        ? false
+        : (settings.security?.allowPrivateNetworkHooks ?? false),
     cliVersion: await getCliVersion(),
     ideMode,
     chatCompression: settings.model?.chatCompression,
@@ -2319,6 +2332,8 @@ export async function loadCliConfig(
                 exploreModel: settings.agents.builtin.exploreModel,
               }
             : undefined,
+          modelGrades: settings.agents.modelGrades,
+          allowedGrades: settings.agents.allowedGrades,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

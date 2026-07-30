@@ -9,6 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import {
+  WebShellCustomizationProvider,
+  type WebShellComposerToolbarRenderInfo,
+  type WebShellCustomization,
+} from '../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -72,6 +77,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     hasMore: false,
     loading: false,
     capacityReached: false,
+    paginationError: false,
     loadMore: vi.fn(),
     release: vi.fn(),
   }),
@@ -100,6 +106,11 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
 let messagesState: any[];
 vi.mock('../hooks/useMessages', () => ({
   useMessages: () => messagesState,
+  useMessagesFromBlocks: () => messagesState,
+}));
+
+vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptBlocks: () => [],
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -135,7 +146,7 @@ vi.mock('./ChatEditor', () => ({
       insertText,
     }));
     return (
-      <div>
+      <div data-web-shell-composer>
         <button
           data-testid="pane-submit"
           onClick={() => props.onSubmit('hello there')}
@@ -218,6 +229,7 @@ const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
   connectionState = {
@@ -267,15 +279,35 @@ afterEach(() => {
   container = null;
 });
 
-function render(props: Record<string, unknown> = {}): void {
+function render(
+  props: Record<string, unknown> = {},
+  customization: WebShellCustomization = EMPTY_CUSTOMIZATION,
+): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() =>
     root!.render(
-      <I18nProvider language="en">
-        <ChatPane {...props} />
-      </I18nProvider>,
+      <WebShellCustomizationProvider value={customization}>
+        <I18nProvider language="en">
+          <ChatPane {...props} />
+        </I18nProvider>
+      </WebShellCustomizationProvider>,
+    ),
+  );
+}
+
+function rerender(
+  props: Record<string, unknown> = {},
+  customization: WebShellCustomization = EMPTY_CUSTOMIZATION,
+): void {
+  act(() =>
+    root!.render(
+      <WebShellCustomizationProvider value={customization}>
+        <I18nProvider language="en">
+          <ChatPane {...props} />
+        </I18nProvider>
+      </WebShellCustomizationProvider>,
     ),
   );
 }
@@ -285,6 +317,80 @@ function testid(id: string): HTMLElement | null {
 }
 
 describe('ChatPane', () => {
+  it('renders the custom composer footer directly after the pane editor', () => {
+    const footerProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      footerProps.push(props);
+      return <div data-testid="pane-composer-footer">pane footer</div>;
+    };
+
+    render({}, { renderComposerFooter: ComposerFooter });
+
+    const composer = container!.querySelector('[data-web-shell-composer]');
+    const footer = testid('pane-composer-footer');
+    expect(composer?.nextElementSibling).toBe(footer);
+    expect(footer?.parentElement).toBe(composer?.parentElement);
+    expect(footerProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: false,
+      currentMode: 'default',
+      currentModel: '',
+      sessionName: 'Refactor core',
+    });
+  });
+
+  it('updates the custom composer footer with pane-scoped state', () => {
+    const footerProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      footerProps.push(props);
+      return <div data-testid="pane-composer-footer" />;
+    };
+    const customization = { renderComposerFooter: ComposerFooter };
+    render({}, customization);
+
+    streamingStateValue = 'responding';
+    connectionState.catchingUp = true;
+    connectionState.currentMode = 'plan';
+    connectionState.currentModel = 'qwen-next';
+    connectionState.displayName = 'Pane Two';
+    rerender({}, customization);
+
+    expect(footerProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: true,
+      currentMode: 'plan',
+      currentModel: 'qwen-next',
+      sessionName: 'Pane Two',
+    });
+
+    connectionState.catchingUp = false;
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+    };
+    rerender({}, customization);
+
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(footerProps.at(-1)?.disabled).toBe(true);
+  });
+
+  it('adds no composer footer DOM when omitted or returning null', () => {
+    render();
+    const composer = container!.querySelector('[data-web-shell-composer]');
+    const children = Array.from(composer?.parentElement?.children ?? []);
+    expect(composer?.nextElementSibling).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
+
+    rerender({}, { renderComposerFooter: () => null });
+
+    const nullComposer = container!.querySelector('[data-web-shell-composer]');
+    expect(nullComposer?.nextElementSibling).toBeNull();
+    expect(
+      Array.from(nullComposer?.parentElement?.children ?? []),
+    ).toHaveLength(children.length);
+  });
+
   it('renders the session transcript and header label', () => {
     render({ title: 'Refactor core' });
     expect(testid('pane-messages')?.textContent).toBe('1');
@@ -322,6 +428,122 @@ describe('ChatPane', () => {
     // The chip carries the pane's stable accent color (api is the 2nd workspace
     // → the 2nd palette color) so it stays distinct when it collapses to an icon.
     expect(latestChatEditorProps.workspaceColor).toBe('green');
+  });
+
+  it('binds split Voice to the connected secondary workspace and revision', () => {
+    connectionState.workspaceCwd = '/work/api';
+    connectionState.capabilities = {
+      features: ['workspace_qualified_voice'],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+
+    render({
+      workspaceCwd: '/work/api',
+      voiceUserRevision: 3,
+      voiceWorkspaceRevisions: {
+        '["workspace-qualified","id","w1","/work/api"]': 5,
+      },
+    });
+
+    expect(latestChatEditorProps.voiceTarget).toMatchObject({
+      route: 'workspace-qualified',
+      cwd: '/work/api',
+      selector: { kind: 'id', value: 'w1' },
+      sessionId: 'sess-1',
+      streamPath: 'workspaces/w1/voice/stream',
+    });
+    expect(latestChatEditorProps.voiceStatusRevision).toEqual({
+      user: 3,
+      workspace: 5,
+    });
+  });
+
+  it('binds split Voice to the legacy primary workspace without a workspace list', () => {
+    connectionState.capabilities = {
+      features: ['voice_transcribe'],
+      workspaceCwd: '/w',
+    };
+
+    render({ workspaceCwd: '/w' });
+
+    expect(latestChatEditorProps.voiceTarget).toMatchObject({
+      route: 'legacy-primary',
+      cwd: '/w',
+      sessionId: 'sess-1',
+      streamPath: 'voice/stream',
+    });
+  });
+
+  it('keeps an active split Voice owner stable while approval is pending', () => {
+    connectionState.capabilities = {
+      features: ['voice_transcribe'],
+      workspaceCwd: '/w',
+    };
+    render({ workspaceCwd: '/w' });
+    const voiceTarget = latestChatEditorProps.voiceTarget;
+    const voiceStatusRevision = latestChatEditorProps.voiceStatusRevision;
+    expect(voiceTarget).toBeDefined();
+
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    rerender({ workspaceCwd: '/w' });
+
+    expect(latestChatEditorProps.dialogOpen).toBe(true);
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(latestChatEditorProps.voiceTarget).toBe(voiceTarget);
+    expect(latestChatEditorProps.voiceStatusRevision).toBe(voiceStatusRevision);
+  });
+
+  it('uses the merged registered workspace list for split Voice', () => {
+    connectionState.workspaceCwd = '/work/locked';
+    connectionState.capabilities = {
+      features: ['workspace_qualified_voice'],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+      ],
+    };
+
+    render({
+      workspaceCwd: '/work/locked',
+      voiceWorkspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        {
+          id: 'locked',
+          cwd: '/work/locked',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+
+    expect(latestChatEditorProps.voiceTarget).toMatchObject({
+      route: 'workspace-qualified',
+      cwd: '/work/locked',
+      selector: { kind: 'id', value: 'locked' },
+      streamPath: 'workspaces/locked/voice/stream',
+    });
+  });
+
+  it('fails closed on split workspace mismatch and while hidden', () => {
+    connectionState.workspaceCwd = '/work/api';
+    connectionState.capabilities = {
+      features: ['workspace_qualified_voice'],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+
+    render({ workspaceCwd: '/work/other' });
+    expect(latestChatEditorProps.voiceTarget).toBeUndefined();
+
+    rerender({ workspaceCwd: '/work/api', hidden: true });
+    expect(latestChatEditorProps.voiceTarget).toBeUndefined();
   });
 
   it('surfaces the workspace in the pane header on a multi-workspace daemon', () => {
@@ -689,7 +911,7 @@ describe('ChatPane', () => {
   it('invokes onClose from the header close button', () => {
     const onClose = vi.fn();
     render({ onClose });
-    const closeBtn = container!.querySelector('header button');
+    const closeBtn = container!.querySelector('[data-testid="pane-close"]');
     act(() =>
       closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
@@ -724,6 +946,27 @@ describe('ChatPane', () => {
     expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
     // The label flips to "restore" — no stale "maximize" affordance remains.
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+  });
+
+  it('renders host header actions scoped to the pane session', () => {
+    const renderHeaderActions = vi.fn(
+      (info: { sessionId: string; workspaceCwd?: string }) => (
+        <button type="button" data-testid="host-pane-action">
+          {info.sessionId}:{info.workspaceCwd ?? ''}
+        </button>
+      ),
+    );
+    render({
+      title: 'Refactor core',
+      workspaceCwd: '/work/api',
+      renderHeaderActions,
+    });
+    expect(renderHeaderActions).toHaveBeenCalledWith({
+      sessionId: 'sess-1',
+      workspaceCwd: '/work/api',
+    });
+    expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
+    expect(testid('pane-header-actions')).not.toBeNull();
   });
 
   it('cancels the active turn via the composer cancel action', () => {

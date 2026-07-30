@@ -910,8 +910,8 @@ export function buildRoleBrief(
 
   // SKILL.md is explicit: "Do NOT inject review rules into Agent 7 (Build &
   // Test) — it runs deterministic commands, not code review." The roster path
-  // hands the same --rules to every role, so the exclusion lives here, where
-  // both the single-role and roster builds pass through.
+  // hands the same --rules to every role, so the exclusion lives here, where both
+  // the single-role and roster builds pass through.
   parts.push(...tail(role === '7' ? undefined : opts.rules, brief.output));
   return parts.join('\n');
 }
@@ -1233,6 +1233,9 @@ function rosterLabel(req: RequiredAgent): string {
  * because both come from `requiredAgents(plan)`.
  */
 function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+  // The roster reads `plan.effort` (written by the capturing command), so a
+  // `medium` plan builds the reduced set here without an `--effort` flag — and
+  // `check-coverage` holds the run to that same set from the same field.
   const roster = requiredAgents(report as RosterPlan);
   const blocks = roster.map((req, i) => {
     const { key, prompt } = buildLaunch(

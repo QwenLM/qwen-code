@@ -92,7 +92,8 @@ jobs:
           CI_BEGIN="<!-- qwen-triage-ci sha=${HEAD_SHA} -->"
           CI_END='<!-- /qwen-triage-ci -->'
           APPROVE_MARKER="<!-- qwen-triage approve-on-green sha=${HEAD_SHA} -->"
-          STATUS_MARKER='<!-- qwen-triage stage=status -->'
+          STATUS_MARKER='<!-- qwen-triage lifecycle -->'
+          LEGACY_STATUS_MARKER='<!-- qwen-triage stage=status -->'
 
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Cannot resolve the bot identity; skipping (markers cannot be author-verified)."
@@ -320,8 +321,8 @@ jobs:
                 ;;
               *) return 0 ;;
             esac
-            sid="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$STATUS_MARKER" \
-              '[.[] | select(.user.login == $bot) | select(.body | contains($m))] | last | .id // empty' \
+            sid="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$STATUS_MARKER" --arg legacy "$LEGACY_STATUS_MARKER" \
+              '[.[] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty' \
               "/tmp/comments-$pr.json")"
             [ -n "$sid" ] || return 0
             printf '%s\n\n%s\n\n%s' "$STATUS_MARKER" "$en" "$zh" > /tmp/status-body.md

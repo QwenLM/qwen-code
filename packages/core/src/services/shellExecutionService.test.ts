@@ -42,6 +42,7 @@ const mockSpawnSync = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
+const mockLoadXtermHeadless = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToText = vi.hoisted(() =>
   vi.fn((terminal: pkg.Terminal): string => {
@@ -102,6 +103,9 @@ vi.mock('os', () => ({
 }));
 vi.mock('../utils/getPty.js', () => ({
   getPty: mockGetPty,
+}));
+vi.mock('../utils/load-xterm-headless.js', () => ({
+  loadXtermHeadless: mockLoadXtermHeadless,
 }));
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
@@ -250,6 +254,7 @@ describe('ShellExecutionService', () => {
       module: { spawn: mockPtySpawn },
       name: 'mock-pty',
     });
+    mockLoadXtermHeadless.mockResolvedValue({ Terminal });
 
     onOutputEventMock = vi.fn();
 
@@ -3581,6 +3586,42 @@ describe('ShellExecutionService execution method selection', () => {
       expect(mockCpSpawn).not.toHaveBeenCalled();
     },
   );
+
+  it('does not spawn when aborted while xterm is loading', async () => {
+    let resolveXterm:
+      | ((value: { Terminal: typeof Terminal }) => void)
+      | undefined;
+    mockLoadXtermHeadless.mockReturnValue(
+      new Promise((resolve) => {
+        resolveXterm = resolve;
+      }),
+    );
+    const abortController = new AbortController();
+    const handlePromise = ShellExecutionService.execute(
+      'test command',
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true,
+      shellExecutionConfig,
+    );
+
+    await vi.waitFor(() => {
+      expect(mockLoadXtermHeadless).toHaveBeenCalledOnce();
+    });
+    abortController.abort();
+    resolveXterm?.({ Terminal });
+
+    const handle = await handlePromise;
+    expect(await handle.result).toMatchObject({
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+      output: '',
+    });
+    expect(mockPtySpawn).not.toHaveBeenCalled();
+    expect(mockCpSpawn).not.toHaveBeenCalled();
+  });
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();

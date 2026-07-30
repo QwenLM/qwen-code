@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  getArtifactFormatIcon,
   getArtifactPreviewContent,
   getFileChangePreviewContent,
   isRenderedFilePath,
   type TurnOutputFileChange,
 } from './TurnOutputs';
+import {
+  FileAudioIcon,
+  FileCode2Icon,
+  FileIcon,
+  FileImageIcon,
+  FileTextIcon,
+  FileVideoIcon,
+  LinkIcon,
+  NotebookTabsIcon,
+} from 'lucide-react';
 
 describe('TurnOutputs helpers', () => {
   it('uses workspace cwd when matching artifact preview content', () => {
@@ -76,9 +87,29 @@ describe('TurnOutputs helpers', () => {
     expect(getFileChangePreviewContent(change)).toBe('latest');
   });
 
-  it('limits rendered review previews to HTML and Markdown files', () => {
+  it('enables review previews for rendered documents and raster images', () => {
     expect(isRenderedFilePath('REPORT.HTML')).toBe(true);
     expect(isRenderedFilePath('notes.markdown')).toBe(true);
+    expect(isRenderedFilePath('screenshots/result.PNG')).toBe(true);
+    expect(isRenderedFilePath('diagram.svg')).toBe(false);
     expect(isRenderedFilePath('source.ts')).toBe(false);
+  });
+
+  it.each([
+    ['file', FileIcon],
+    ['link', LinkIcon],
+    ['html', FileCode2Icon],
+    ['image', FileImageIcon],
+    ['video', FileVideoIcon],
+    ['audio', FileAudioIcon],
+    ['pdf', FileTextIcon],
+    ['notebook', NotebookTabsIcon],
+  ])('selects the Lucide icon for %s artifacts', (kind, icon) => {
+    expect(getArtifactFormatIcon(kind)).toBe(icon);
+  });
+
+  it('uses the existing document icon for unsupported artifact kinds', () => {
+    expect(getArtifactFormatIcon('other')).toBeUndefined();
+    expect(getArtifactFormatIcon('future-format')).toBeUndefined();
   });
 });

@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseSlashCommand, parseStackedSlashCommands } from './commands.js';
+import {
+  isValidStackedSkillPrefix,
+  parseSlashCommand,
+  parseStackedSlashCommands,
+} from './commands.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 
 // Mock command structure for testing
@@ -184,6 +188,63 @@ const mockCommandsWithSkills: readonly SlashCommand[] = [
     kind: CommandKind.SKILL,
   },
 ];
+
+describe('isValidStackedSkillPrefix', () => {
+  it('accepts one or more leading skills and aliases', () => {
+    expect(
+      isValidStackedSkillPrefix('/feat-dev ', mockCommandsWithSkills),
+    ).toBe(true);
+    expect(
+      isValidStackedSkillPrefix('/feat-dev\n/debug ', mockCommandsWithSkills),
+    ).toBe(true);
+  });
+
+  it('rejects non-skill, unknown, and prompt-text prefixes', () => {
+    expect(isValidStackedSkillPrefix('/help ', mockCommandsWithSkills)).toBe(
+      false,
+    );
+    expect(isValidStackedSkillPrefix('/unknown ', mockCommandsWithSkills)).toBe(
+      false,
+    );
+    expect(
+      isValidStackedSkillPrefix('/feat-dev implement ', mockCommandsWithSkills),
+    ).toBe(false);
+  });
+
+  it('rejects non-user-invocable and hidden skills', () => {
+    const restrictedSkills: readonly SlashCommand[] = [
+      ...mockCommandsWithSkills,
+      {
+        name: 'model-only',
+        description: 'Model-only skill',
+        kind: CommandKind.SKILL,
+        userInvocable: false,
+      },
+      {
+        name: 'hidden-skill',
+        description: 'Hidden skill',
+        kind: CommandKind.SKILL,
+        hidden: true,
+      },
+    ];
+
+    expect(isValidStackedSkillPrefix('/model-only ', restrictedSkills)).toBe(
+      false,
+    );
+    expect(isValidStackedSkillPrefix('/hidden-skill ', restrictedSkills)).toBe(
+      false,
+    );
+  });
+
+  it('rejects a prefix that already contains the maximum skill count', () => {
+    expect(
+      isValidStackedSkillPrefix(
+        '/feat-dev /e2e-testing /bugfix /review /simplify ',
+        mockCommandsWithSkills,
+      ),
+    ).toBe(false);
+  });
+});
 
 describe('parseStackedSlashCommands', () => {
   it('should return empty for a single skill (not stacked)', () => {
