@@ -58,6 +58,17 @@ vi.mock('../utils/fileUtils.js', async (importOriginal) => {
 
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
 
+vi.mock('../utils/read-text-range.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/read-text-range.js')>();
+  return {
+    ...actual,
+    readTextRangeFromHandle: vi.fn(),
+  };
+});
+
+import { readTextRangeFromHandle } from '../utils/read-text-range.js';
+
 describe('StandardFileSystemService', () => {
   let fileSystem: StandardFileSystemService;
 
@@ -233,6 +244,34 @@ describe('StandardFileSystemService', () => {
           maxOutputBytes: 262_144,
         }),
       ).rejects.toThrow(/non-negative integer line/);
+    });
+
+    it.each([
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['omitted', undefined],
+    ])('should accept %s limit on a handle read', async (_label, limit) => {
+      vi.mocked(readTextRangeFromHandle).mockResolvedValue({
+        content: 'hello',
+        bom: false,
+        encoding: 'utf-8',
+        originalLineCount: 1,
+      });
+      const fileHandle = {} as import('node:fs/promises').FileHandle;
+
+      const result = await fileSystem.readTextFileFromHandle({
+        fileHandle,
+        ...(limit !== undefined ? { limit } : {}),
+        maxOutputBytes: 262_144,
+      });
+
+      expect(result.content).toBe('hello');
+      expect(readTextRangeFromHandle).toHaveBeenCalledWith(
+        fileHandle,
+        expect.objectContaining({
+          limit: Number.POSITIVE_INFINITY,
+          maxOutputBytes: 262_144,
+        }),
+      );
     });
 
     it('should return encoding info for GBK file', async () => {
