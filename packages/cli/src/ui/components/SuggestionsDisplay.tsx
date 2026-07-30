@@ -189,12 +189,12 @@ export function SuggestionsDisplay({
           })}
           {/* Only show the switching hint when there are >2 categories
               (matching the gate in InputPrompt.tsx) and mention Ctrl+Tab
-              as an alternative since many terminals intercept Ctrl+←/→
+              as alternatives since many terminals intercept Ctrl+←/→
               for word-jump (#8069). */}
           {availableCategories.length > 2 && (
             <Box marginLeft={2}>
               <Text color={theme.text.secondary}>
-                {t('(Ctrl+Tab or Ctrl+←/→ to switch)')}
+                {t('(Ctrl+Tab / Ctrl+Shift+Tab or Ctrl+←/→ to switch)')}
               </Text>
             </Box>
           )}
