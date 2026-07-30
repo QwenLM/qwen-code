@@ -5004,7 +5004,7 @@ export class Session implements SessionContext {
         });
         void this.#drainCronQueue();
       };
-      if (!job.prompt.startsWith('autofix tick ')) {
+      if (!job.prompt.startsWith('autofix tick')) {
         enqueue(null);
         return;
       }
