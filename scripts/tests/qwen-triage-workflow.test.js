@@ -4411,14 +4411,31 @@ describe('qwen-triage tmux lane parity', () => {
 describe('qwen-triage npm cache producer', () => {
   it('saves with the same key and path the triage lanes restore', () => {
     expect(cacheProducerWorkflow).toContain('actions/cache/save@');
+    // Prettier may choose single or double quotes depending on inner
+    // quote characters, so compare the parsed scalar, not the raw YAML.
+    const yamlScalar = (raw) => {
+      if (!raw) return '';
+      if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+      return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    };
+    const savePath = yamlScalar(
+      cacheProducerWorkflow.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+    );
+    const saveKey = yamlScalar(
+      cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+    );
     for (const jobName of ['verify', 'tmux-testing']) {
       const restoreStep = stepIn(jobName, 'Restore npm cache');
-      const path = restoreStep.match(/path:\s*'([^']+)'/)?.[1];
-      const key = restoreStep.match(/key:\s*'((?:[^']|'')+)'/)?.[1];
+      const path = yamlScalar(
+        restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+      );
+      const key = yamlScalar(
+        restoreStep.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+      );
       expect(path).toBeTruthy();
       expect(key).toBeTruthy();
-      expect(cacheProducerWorkflow).toContain(path);
-      expect(cacheProducerWorkflow).toContain(key);
+      expect(savePath).toBe(path);
+      expect(saveKey).toBe(key);
     }
   });
 
