@@ -19,7 +19,7 @@ import {
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
-import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/status';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,

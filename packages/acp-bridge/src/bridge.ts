@@ -54,7 +54,6 @@ import {
   BridgeTimeoutError,
   createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
-  EXTERNAL_TOOL_GUARD_READY_META_KEY,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -66,6 +65,7 @@ import {
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
 } from './status.js';
+import { EXTERNAL_TOOL_GUARD_READY_META_KEY } from './externalToolGuard.js';
 import {
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,

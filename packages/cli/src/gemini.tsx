@@ -24,7 +24,7 @@ import {
 import {
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
-} from '@qwen-code/acp-bridge/status';
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import os from 'node:os';

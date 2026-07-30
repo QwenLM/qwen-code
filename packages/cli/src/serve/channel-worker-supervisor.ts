@@ -18,7 +18,7 @@ import {
   CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
   CHANNEL_WORKER_STOP_GRACE_MS,
 } from '@qwen-code/acp-bridge/channelControlTimeouts';
-import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/status';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,

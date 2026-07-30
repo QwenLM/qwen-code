@@ -293,10 +293,12 @@ import {
   type ServeExtensionCapabilities,
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
+} from '@qwen-code/acp-bridge/status';
+import {
   EXTERNAL_TOOL_GUARD_READY_META_KEY,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
-} from '@qwen-code/acp-bridge/status';
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,

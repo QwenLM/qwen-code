@@ -90,7 +90,7 @@ import {
 import {
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
-} from '@qwen-code/acp-bridge/status';
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,

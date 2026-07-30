@@ -12,7 +12,7 @@ import type {
   ExternalToolGuardPrepareRequest,
   ExternalToolGuardPrepareResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
-import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/status';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 
 export const EXTERNAL_TOOL_GUARD_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_EXTERNAL_TOOL_GUARD_TIMEOUT_MS = 3000;

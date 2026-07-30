@@ -51,10 +51,10 @@ import {
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
-  EXTERNAL_TOOL_GUARD_READY_META_KEY,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
+import { EXTERNAL_TOOL_GUARD_READY_META_KEY } from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';

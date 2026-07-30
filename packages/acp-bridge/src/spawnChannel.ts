@@ -11,10 +11,8 @@ import { getHeapStatistics } from 'node:v8';
 import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
 import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
-import {
-  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
-  MissingCliEntryError,
-} from './status.js';
+import { MissingCliEntryError } from './status.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 
 let cachedMemoryArgs: string[] | undefined;

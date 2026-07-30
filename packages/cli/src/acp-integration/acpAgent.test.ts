@@ -868,10 +868,10 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
-  EXTERNAL_TOOL_GUARD_READY_META_KEY,
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
+import { EXTERNAL_TOOL_GUARD_READY_META_KEY } from '@qwen-code/acp-bridge/externalToolGuard';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   resolveOutputLanguageOrPreserveAuto,
