@@ -1184,9 +1184,14 @@ describe('Permission Control (E2E)', () => {
             // auto-edit auto-approves write/edit tools without invoking the
             // callback, but the model may still issue a non-edit tool (e.g.
             // run_shell_command) that legitimately routes through canUseTool.
-            // Assert only that no write/edit tool was gated on the callback.
+            // Assert a write/edit tool actually ran (so this test exercises the
+            // bypass it is named for) and that none gated on the callback.
             expect(hasSuccessfulToolResults(messages)).toBe(true);
             const WRITE_EDIT_TOOLS = ['write_file', 'edit'];
+            const writeEditToolCalls = findToolCalls(messages).filter((tc) =>
+              WRITE_EDIT_TOOLS.includes(tc.toolUse.name),
+            );
+            expect(writeEditToolCalls.length).toBeGreaterThan(0);
             expect(
               callbackToolNames.filter((name) =>
                 WRITE_EDIT_TOOLS.includes(name),
