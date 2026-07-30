@@ -63,7 +63,8 @@ function stripDelimitingNewlines(value: string): string {
  * Tracks delimiter type and length so a fence is only closed by a run of
  * the same delimiter that is at least as long as the opener, consistent
  * with CommonMark §4.5 (a shorter same-delimiter run is content, not a
- * close).
+ * close). A closing fence must also be whitespace-only after the delimiter
+ * run — CommonMark forbids an info string on a closing fence.
  */
 function positionInsideFence(text: string, index: number): boolean {
   let openFence: { delim: string; len: number } | null = null;
@@ -73,7 +74,11 @@ function positionInsideFence(text: string, index: number): boolean {
     const delim = m[2] ? '`' : '~';
     const len = m[1].length;
     if (openFence === null) openFence = { delim, len };
-    else if (openFence.delim === delim && len >= openFence.len)
+    else if (
+      openFence.delim === delim &&
+      len >= openFence.len &&
+      line.slice(m[0].length).trim() === ''
+    )
       openFence = null;
   }
   return openFence !== null;

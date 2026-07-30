@@ -209,6 +209,25 @@ describe('extractXmlToolCalls', () => {
       '````';
     expect(extractXmlToolCalls(text)).toEqual([]);
   });
+
+  it('treats a closing fence with an info string as content, not a close (CommonMark 4.5)', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```xml\n' +
+      '````';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
+  it('treats a closing fence with trailing text as content, not a close', () => {
+    const text =
+      '~~~markdown\n' +
+      invoke('run_shell_command', param('command', 'echo hi')) +
+      '\n~~~ end of examples\n' +
+      '~~~';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
 });
 
 describe('tryRecoverXmlToolCalls', () => {
@@ -368,6 +387,31 @@ describe('tryRecoverXmlToolCalls', () => {
       invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
       '\n```\n' +
       '````';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
+  it('does not recover an invoke when the closing fence carries an info string', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```xml\n' +
+      '````';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
+  it('does not recover an invoke when the closing fence has trailing text', () => {
+    const text =
+      '~~~markdown\n' +
+      invoke('run_shell_command', param('command', 'echo hi')) +
+      '\n~~~ end of examples\n' +
+      '~~~';
     const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);
