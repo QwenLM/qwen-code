@@ -1,0 +1,17 @@
+{
+  "name": "@qwen-code/desktop-shell",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:runtime": "node scripts/prepare-runtime.js",
+    "smoke:runtime": "node scripts/smoke-runtime.js",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.5"
+  }
+}

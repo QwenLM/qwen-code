@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Qwen Code",
+  "version": "0.0.1",
+  "identifier": "com.qwen.code.desktop",
+  "build": {
+    "frontendDist": "../bootstrap"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null,
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../runtime/qwen-code": "runtime/qwen-code"
+    }
+  }
+}

@@ -18,7 +18,8 @@
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
-    "!packages/desktop"
+    "!packages/desktop",
+    "!packages/desktop-shell"
   ],
   "repository": {
     "type": "git",
