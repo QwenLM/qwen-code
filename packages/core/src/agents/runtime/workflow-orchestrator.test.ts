@@ -2911,6 +2911,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     /** What the subagent's Config answers for "where am I?". */
     runtimeTargetDir?: string;
     runtimeIgnoreFiles?: string;
+    runtimeContext: Config;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
@@ -2998,6 +2999,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             runtimeIgnoreFiles: runtimeContext
               .getFileService?.()
               .getQwenIgnoreFileNamesDisplay(),
+            runtimeContext,
             options: { runConfigOverrides: options?.runConfigOverrides },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
@@ -4427,6 +4429,26 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].config.model).toBe('qwen3-max');
     // Default-clean stub auto-removes; no suffix expected.
     expect(String(result)).not.toMatch(/worktree preserved/);
+    expect(calls[0].runtimeContextSame).toBe(false);
+    expect(calls[0].runtimeContext.getTargetDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getCwd()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getWorkingDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getProjectRoot()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(Object.hasOwn(calls[0].runtimeContext, 'workspaceContext')).toBe(
+      true,
+    );
+    expect(
+      calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
+    ).toBe('.qwenignore, .cursorignore');
+    expect(config.getTargetDir()).toBe('/fake/repo');
   });
 
   it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {

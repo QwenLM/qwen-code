@@ -16,6 +16,7 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   deriveConfig,
+  deriveWorktreeConfig,
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
@@ -1664,6 +1665,35 @@ describe('Server Config (config.ts)', () => {
 
       expect(child.getCwd()).toBe(parent.getCwd());
       expect(Object.hasOwn(child, 'getCwd')).toBe(false);
+    });
+
+    it('rebinds worktree getters and private field reads together', () => {
+      const parent = new Config({
+        ...baseParams,
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      });
+      const child = deriveWorktreeConfig(parent, '/tmp/worktree', {
+        customIgnoreFiles: ['.cursorignore'],
+      });
+
+      expect(child.getTargetDir()).toBe('/tmp/worktree');
+      expect(child.getCwd()).toBe('/tmp/worktree');
+      expect(child.getWorkingDir()).toBe('/tmp/worktree');
+      expect(child.getProjectRoot()).toBe('/tmp/worktree');
+      expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
+        '/tmp/worktree',
+      ]);
+      expect(child.getFileService()).not.toBe(parent.getFileService());
+      expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      const workspaceState = child as unknown as Record<string, unknown>;
+      expect(workspaceState['targetDir']).toBe('/tmp/worktree');
+      expect(workspaceState['cwd']).toBe('/tmp/worktree');
+      expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
+      expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
+      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
     it('prohibits inherited session-writer lifecycle access', async () => {
