@@ -1560,6 +1560,44 @@ describe('DiscoveredMCPTool', () => {
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
 
+    it('does not reconnect a guarded invocation after an ambiguous connection error', async () => {
+      const params = { param: 'test' };
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolInvocationGuard: () => vi.fn(),
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const guardedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      await expect(
+        guardedTool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow('Connection closed');
+
+      expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
     it('should not retry on non-connection errors', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {

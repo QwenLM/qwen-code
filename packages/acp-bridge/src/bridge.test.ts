@@ -51,6 +51,7 @@ import {
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
@@ -1259,6 +1260,44 @@ describe('createAcpSessionBridge', () => {
     ).toBe(capabilities[1]);
     await bridge1.shutdown();
     await bridge2.shutdown();
+  });
+
+  it('rejects a required Guard channel whose child does not acknowledge enforcement', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      externalToolGuard: async () => ({ allowed: true }),
+    });
+
+    await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+      'did not acknowledge',
+    );
+    expect(handle.agent.newSessionCalls).toHaveLength(0);
+    await bridge.shutdown();
+  });
+
+  it('accepts a required Guard channel only after the child acknowledges enforcement', async () => {
+    const handle = makeChannel({
+      initializeImpl: async () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        agentInfo: { name: 'guard-aware-agent', version: '0' },
+        authMethods: [],
+        agentCapabilities: {},
+        _meta: {
+          [EXTERNAL_TOOL_GUARD_READY_META_KEY]: 'required-v1',
+        },
+      }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      externalToolGuard: async () => ({ allowed: true }),
+    });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ sessionId: SESS_A });
+    expect(handle.agent.newSessionCalls).toHaveLength(1);
+    await bridge.shutdown();
   });
 
   it('spawns a session and returns the agent-assigned id', async () => {

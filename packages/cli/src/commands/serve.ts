@@ -19,6 +19,7 @@ import {
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/status';
 import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
@@ -138,6 +139,9 @@ interface ServeArgs {
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
+  'external-tool-guard-mode': 'off' | 'required';
+  'external-tool-guard-endpoint'?: string;
+  'external-tool-guard-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -408,6 +412,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'ask_user_question response in daemon (ACP) mode (ms). ' +
           '0 = disabled (wait forever). Default: 300000 (5 min).',
       })
+      .option('external-tool-guard-mode', {
+        choices: ['off', 'required'] as const,
+        default: 'off' as const,
+        description:
+          'Managed ACP pre-execution policy mode. Default off preserves current CLI and daemon behavior. Required fails startup unless a compatible loopback provider is available.',
+      })
+      .option('external-tool-guard-endpoint', {
+        type: 'string',
+        description:
+          'Origin-only loopback HTTP(S) endpoint for required external tool guarding, for example http://127.0.0.1:8787.',
+      })
+      .option('external-tool-guard-timeout-ms', {
+        type: 'number',
+        description:
+          'Per-handshake/prepare external tool guard timeout in milliseconds. Default: 3000.',
+      })
       .option('rate-limit', {
         type: 'boolean',
         description:
@@ -611,6 +631,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       }
     }
 
+    const externalToolGuardToken =
+      process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV] ?? '';
+    delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+
     // Lazy-load the slim serve runner so the yargs fallback path does not pull
     // the public serve barrel, which also exports REST/ACP runtime modules.
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
@@ -670,6 +694,20 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? {
               permissionResponseTimeoutMs:
                 argv['permission-response-timeout-ms'],
+            }
+          : {}),
+        ...(argv['external-tool-guard-mode'] === 'required'
+          ? {
+              externalToolGuard: {
+                mode: 'required' as const,
+                endpoint: argv['external-tool-guard-endpoint'] ?? '',
+                token: externalToolGuardToken,
+                ...(argv['external-tool-guard-timeout-ms'] !== undefined
+                  ? {
+                      timeoutMs: argv['external-tool-guard-timeout-ms'],
+                    }
+                  : {}),
+              },
             }
           : {}),
         ...(rateLimit ? { rateLimit: true } : {}),

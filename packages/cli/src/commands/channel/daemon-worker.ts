@@ -41,6 +41,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/status';
 import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
@@ -752,6 +753,7 @@ function scrubDaemonWorkerEnv(): void {
   delete process.env[QWEN_DAEMON_URL_ENV];
   delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
   delete process.env[QWEN_SERVER_TOKEN_ENV];
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
 }
 
 function readDaemonWorkerEnv(): {

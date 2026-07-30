@@ -8186,6 +8186,7 @@ export class Session implements SessionContext {
 
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
             const guardDecision = await evaluateToolInvocationGuard(
               toolInvocationGuard,
               {
@@ -8193,6 +8194,7 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                ...(invocationContext ? { invocationContext } : {}),
               },
             );
             if (activeToolAbortSignal.aborted) {

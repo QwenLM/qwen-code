@@ -54,6 +54,7 @@ import {
   BridgeTimeoutError,
   createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -2318,6 +2319,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () =>
             channelInfo?.sessionIds === sessionIds &&
             channelInfo.sessionSpawnsInFlight > 0,
+          opts.externalToolGuard,
         );
         connection = new ClientSideConnection(() => client, channel.stream);
       } catch (error) {
@@ -2531,6 +2533,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               initTimeoutMs,
               'initialize',
             );
+            if (
+              opts.externalToolGuard &&
+              response._meta?.[EXTERNAL_TOOL_GUARD_READY_META_KEY] !==
+                'required-v1'
+            ) {
+              throw new Error(
+                'ACP child did not acknowledge the required external tool guard.',
+              );
+            }
             try {
               const attributes = getChannelStartupProfileAttributes(
                 response,

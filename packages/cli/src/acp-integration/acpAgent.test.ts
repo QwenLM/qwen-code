@@ -240,6 +240,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ToolNames: {
     AGENT: 'agent',
     SKILL: 'skill',
+    WORKFLOW: 'workflow',
+    CREATE_SUB_SESSION: 'create_sub_session',
+    SEND_MESSAGE: 'send_message',
   },
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
@@ -809,6 +812,7 @@ import {
   createWorkspaceMcpBudget,
   deliverClientMcpMessage,
   selectVisibleHistoryRecords,
+  createManagedExternalToolGuard,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -843,6 +847,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   mcpServerRequiresOAuth,
   APPROVAL_MODES,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { SESSION_SOURCE_META_KEY } from '@qwen-code/acp-bridge';
@@ -863,6 +868,7 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
@@ -981,6 +987,8 @@ describe('runAcpAgent shutdown cleanup', () => {
     resetAcpStartupProfilerForTesting();
     vi.clearAllMocks();
     delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+    delete process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'];
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     mockMcpApprovals.getState.mockReturnValue('approved');
     mockMcpApprovals.setState.mockResolvedValue(undefined);
     // Reset mockConfig after clearAllMocks
@@ -1044,6 +1052,8 @@ describe('runAcpAgent shutdown cleanup', () => {
   afterEach(() => {
     resetAcpStartupProfilerForTesting();
     delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+    delete process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'];
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     processExitSpy.mockRestore();
     stdinDestroySpy.mockRestore();
     stdoutDestroySpy.mockRestore();
@@ -1419,23 +1429,42 @@ describe('runAcpAgent shutdown cleanup', () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
-  it('removes the private parent capability before config initialization', async () => {
+  it('removes private parent credentials before config initialization', async () => {
     const envName = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
     process.env[envName] = 'private-capability';
-    let observedDuringInitialize: string | undefined;
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    let observedCapability: string | undefined;
+    let observedGuardToken: string | undefined;
     mockConfig.initialize = vi.fn().mockImplementation(async () => {
-      observedDuringInitialize = process.env[envName];
+      observedCapability = process.env[envName];
+      observedGuardToken = process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     });
 
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
     await vi.waitFor(() =>
       expect(mockConfig.initialize).toHaveBeenCalledTimes(1),
     );
-    expect(observedDuringInitialize).toBeUndefined();
+    expect(observedCapability).toBeUndefined();
+    expect(observedGuardToken).toBeUndefined();
     expect(process.env[envName]).toBeUndefined();
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('rejects a required managed guard without a private parent and scrubs its marker', async () => {
+    process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'] = 'required-v1';
+
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv, {
+        externalToolGuardRequired: true,
+      }),
+    ).rejects.toThrow('only to a private managed ACP parent');
+    expect(
+      process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'],
+    ).toBeUndefined();
+    expect(mockConfig.initialize).not.toHaveBeenCalled();
   });
 
   it('writes config startup warnings to stderr for the ACP client log', async () => {
@@ -7770,6 +7799,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects agent-backed workspace memory operations when the managed guard is required', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        externalToolGuardRequired: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      extMethod: vi.fn(),
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+    const initializeResponse = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    })) as { _meta?: Record<string, unknown> };
+    expect(initializeResponse._meta?.[EXTERNAL_TOOL_GUARD_READY_META_KEY]).toBe(
+      'required-v1',
+    );
+
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+        {},
+      ),
+    ).resolves.toEqual({ available: false });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'remember this',
+      }),
+    ).rejects.toThrow(
+      'does not support agent-backed workspace memory remember',
+    );
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {}),
+    ).rejects.toThrow('does not support agent-backed workspace memory dream');
+    expect(mockRunManagedRememberByAgent).not.toHaveBeenCalled();
+    expect(mockRunManagedAutoMemoryDream).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('launches fork agents with neutral history text', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -7841,6 +7925,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(addHistory.mock.calls[0]?.[0]?.parts[0]?.text).not.toContain(
       '[system]',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects /fork before starting a nested agent when the managed guard is required', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const execute = vi.fn();
+    const build = vi.fn().mockReturnValue({ execute });
+    Object.assign(innerConfig, {
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(() => ({ build })),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        externalToolGuardRequired: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      extMethod: vi.fn(),
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionForkAgent, {
+        sessionId,
+        directive: 'review this branch',
+      }),
+    ).rejects.toThrow('does not support /fork');
+    expect(build).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(loadCliConfig).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      '/tmp',
+      undefined,
+      expect.anything(),
+      expect.any(Function),
+      expect.anything(),
+      undefined,
+      true,
+      expect.objectContaining({
+        toolInvocationGuard: expect.any(Function),
+      }),
     );
 
     mockConnectionState.resolve();
@@ -17288,5 +17442,116 @@ describe('selectVisibleHistoryRecords', () => {
 
     expect(selectVisibleHistoryRecords(records, true)).toEqual([own]);
     expect(selectVisibleHistoryRecords(records, false)).toEqual(records);
+  });
+});
+
+describe('createManagedExternalToolGuard', () => {
+  it('forwards only runtime-owned correlation and final invocation data', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'pwd' },
+      },
+    );
+  });
+
+  it('fails closed without a managed invocation context', async () => {
+    const extMethod = vi.fn();
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'write_file',
+        args: {},
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow('requires a runtime invocation context');
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ToolNames.AGENT,
+    ToolNames.WORKFLOW,
+    ToolNames.CREATE_SUB_SESSION,
+    ToolNames.SEND_MESSAGE,
+  ])(
+    'rejects unsupported nested executor %s without contacting the provider',
+    async (toolName) => {
+      const extMethod = vi.fn();
+      const guard = createManagedExternalToolGuard({
+        extMethod,
+      } as unknown as AgentSideConnection);
+
+      await expect(
+        guard({
+          callId: 'call-1',
+          toolName,
+          args: {},
+          signal: new AbortController().signal,
+          invocationContext: {
+            version: 1,
+            sessionId: 'session-1',
+            promptId: 'prompt-1',
+          },
+        }),
+      ).resolves.toEqual({
+        allowed: false,
+        reason:
+          'Managed external tool guard v1 does not support nested or delegated agent execution.',
+      });
+      expect(extMethod).not.toHaveBeenCalled();
+    },
+  );
+
+  it('stops waiting when the tool invocation is cancelled', async () => {
+    const extMethod = vi.fn(
+      () => new Promise<Record<string, unknown>>(() => {}),
+    );
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+    const controller = new AbortController();
+    const pending = guard({
+      callId: 'call-1',
+      toolName: 'write_file',
+      args: {},
+      signal: controller.signal,
+      invocationContext: {
+        version: 1,
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+      },
+    });
+
+    controller.abort();
+
+    await expect(pending).rejects.toThrow('aborted');
+    expect(extMethod).toHaveBeenCalledTimes(1);
   });
 });

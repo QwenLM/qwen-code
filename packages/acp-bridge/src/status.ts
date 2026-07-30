@@ -185,6 +185,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * result: `{ payload }`.
    */
   clientMcpMessage: 'qwen/control/client_mcp/message',
+  /**
+   * Called by a private ACP CHILD immediately before a tool executor. The
+   * parent validates the runtime-owned session/prompt identity, invokes its
+   * configured external provider once, and returns allow/deny. Unavailable
+   * unless the daemon explicitly enabled required external guarding.
+   */
+  externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
   sessionCd: 'qwen/control/session/cd',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
@@ -197,6 +204,25 @@ export const SERVE_CONTROL_EXT_METHODS = {
   createSubSession: 'qwen/control/create-sub-session',
   channelDelivery: 'qwen/control/channel-delivery',
 } as const;
+
+/**
+ * Private, non-secret activation marker passed only from `qwen serve` to its
+ * authenticated ACP child. The child consumes and deletes it before any tool,
+ * hook, MCP server, or sub-agent can inherit the process environment.
+ */
+export const PRIVATE_EXTERNAL_TOOL_GUARD_ENV =
+  'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD';
+
+/**
+ * ACP initialize-response metadata proving that the child consumed the
+ * private activation marker and installed the required executor callback.
+ */
+export const EXTERNAL_TOOL_GUARD_READY_META_KEY =
+  'qwen-code/external-tool-guard-ready';
+
+/** Daemon-local bearer token for the loopback external Tool Guard provider. */
+export const EXTERNAL_TOOL_GUARD_TOKEN_ENV =
+  'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN';
 
 export type ServeStatus =
   | 'ok'

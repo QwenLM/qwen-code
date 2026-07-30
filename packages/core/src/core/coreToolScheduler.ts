@@ -4137,6 +4137,7 @@ export class CoreToolScheduler {
 
     const toolInvocationGuard = this.config.getToolInvocationGuard?.();
     if (toolInvocationGuard) {
+      const invocationContext = getInvocationContext();
       const guardDecision = await evaluateToolInvocationGuard(
         toolInvocationGuard,
         {
@@ -4144,6 +4145,7 @@ export class CoreToolScheduler {
           toolName: canonicalName,
           args: invocation.params as Record<string, unknown>,
           signal,
+          ...(invocationContext ? { invocationContext } : {}),
         },
       );
       if (signal.aborted) {
