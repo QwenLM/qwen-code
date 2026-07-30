@@ -19,10 +19,10 @@ const HELPER = path.join(repoRoot, 'scripts/verify-capture.mjs');
 const ESC = String.fromCharCode(27);
 
 // Every assertion here runs the real helper and inspects the real PNG. The
-// point of this script is that the pipeline it replaces did NOT exist — four
-// live /verify runs produced zero images because the skill named node-pty and
-// Playwright, neither of which is installed. A test that only checked the
-// skill's wording would have passed through all four of those rounds.
+// point of this script is that the browser pipeline it replaces never produced
+// an image in four live /verify runs — it needed a browser and a route that is
+// not installed as a unit. A test that only checked the skill's wording would
+// have passed through all four of those rounds.
 describe('verify-capture helper', () => {
   const run = (args, opts = {}) =>
     spawnSync('node', [HELPER, ...args], {
@@ -80,12 +80,15 @@ describe('verify-capture helper', () => {
         harness(dir),
       ]);
       expect(res.status).toBe(0);
+      // isPng reads from evidence/01-ab.png, so a pass also proves the helper
+      // created the parent dir the skill tells the agent to write into.
       expect(isPng(out)).toBe(true);
       // Geometry is reported so a caller can spot a blank or clipped capture.
-      expect(res.stdout).toMatch(/\d+x\d+ \d+B 3 rows/);
-      // Parent dirs are created — the skill tells the agent to write into
-      // evidence/, which will not exist yet.
-      expect(readFileSync(out).length).toBeGreaterThan(1000);
+      // The canvas size is deterministic — cols fix the width, the row count
+      // the height — so assert it exactly; the compressed byte length varies
+      // with the platform's font rasterisation and flaked on Linux (846B for a
+      // render that was >1000B on macOS).
+      expect(res.stdout).toMatch(/360x96 \d+B 3 rows/);
     }));
 
   it('accepts piped input as well as a command', () =>
@@ -117,8 +120,7 @@ describe('verify-capture helper', () => {
     }));
 
   // Colour and weight are the whole reason to render rather than paste text:
-  // a red FAIL beside a green PASS is what makes the cell readable at a
-  // glance.
+  // a red FAIL beside a green PASS is what makes the cell readable at a glance.
   //
   // Each attribute is isolated against the SAME plain baseline. A single
   // "coloured and bold vs plain" comparison passes while EITHER attribute
@@ -171,6 +173,49 @@ describe('verify-capture helper', () => {
       expect(tall.stdout.split(' ')[1]).toBe(short.stdout.split(' ')[1]);
     }));
 
+  // Regression: U+FE0F (the emoji variation selector in ⚠️) sent Pango looking
+  // for a colour-emoji font and abort()ing in native code on macOS — no PNG, no
+  // diagnostic, exit 133. The helper strips it and the base codepoint renders.
+  // No other test fed the helper a non-ASCII byte.
+  it('renders non-ASCII and emoji without aborting', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'emoji.png');
+      const res = run(['--out', out, '--cols', '40'], {
+        input: 'warn ⚠️ history gap 中文 café\n',
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+    }));
+
+  // escapeXml guards every rendered cell and the title; feed it XML-hostile
+  // content (common in test output: expect(a < b), foo & bar) so a deleted
+  // escape rule cannot silently corrupt the SVG and ship a broken image.
+  it('escapes XML special characters in rendered text', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'xml.png');
+      const res = run(
+        ['--out', out, '--cols', '40', '--title', 'a < b & "c"'],
+        { input: 'expect(a < b) & foo > bar "q"\n' },
+      );
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+    }));
+
+  // scrollback: 0 keeps only the last --rows lines, so a taller input loses its
+  // header with no visible sign. The helper must say so on stderr rather than
+  // ship an image that looks complete but starts halfway down.
+  it('warns when input is taller than --rows', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'tall.png');
+      const res = run(['--out', out, '--rows', '4'], {
+        input: 'l1\nl2\nl3\nl4\nl5\nl6\n',
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      expect(res.stderr).toContain('warning: input has 6 lines');
+      expect(res.stderr).toContain('dropped the top 2');
+    }));
+
   describe('fails loudly rather than writing a broken image', () => {
     it('rejects a missing --out', () => {
       const res = run(['--', 'echo', 'hi']);
@@ -180,10 +225,14 @@ describe('verify-capture helper', () => {
 
     it('rejects nonsense geometry', () =>
       withDir((dir) => {
-        for (const bad of ['0', '-5', 'abc', '9999']) {
-          const res = run(['--out', path.join(dir, 'x.png'), '--cols', bad]);
-          expect(res.status, `--cols ${bad} was accepted`).toBe(1);
-          expect(res.stderr).toContain('must be an integer');
+        // Both flags share one validation loop; feed both so a mutation
+        // dropping 'rows' from it cannot survive the suite.
+        for (const flag of ['--cols', '--rows']) {
+          for (const bad of ['0', '-5', 'abc', '9999']) {
+            const res = run(['--out', path.join(dir, 'x.png'), flag, bad]);
+            expect(res.status, `${flag} ${bad} was accepted`).toBe(1);
+            expect(res.stderr).toContain('must be an integer');
+          }
         }
       }));
 
@@ -215,18 +264,24 @@ describe('verify-capture helper', () => {
       }));
   });
 
-  // The helper only helps if the skill points at it. Three rounds of
-  // rewording failed because the named pipeline did not exist; assert the
-  // dead route is gone and the live one is named.
+  // The helper only helps if the skill points at it. Three rounds of rewording
+  // failed because the named pipeline never produced an image; assert the slow
+  // browser route is no longer the recommendation and the live command is named.
   it('is the route the skill actually names', () => {
     const skill = readFileSync(
       path.join(repoRoot, '.qwen/skills/verify-pr/SKILL.md'),
       'utf8',
     );
-    expect(skill).toContain('node scripts/verify-capture.mjs --out');
-    expect(skill).toContain('no\n  browser and no pseudo-terminal');
-    // The route that never existed must not be recommended again.
-    expect(skill).not.toMatch(/Route: `terminal-capture` skill/);
-    expect(skill).not.toMatch(/node-pty → xterm\.js → Playwright PNG/);
+    // Flatten whitespace so a prose reflow cannot break these, like the sibling
+    // test in qwen-triage-workflow.test.js.
+    const flat = skill.replace(/\s+/g, ' ');
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).toContain('no browser and no pseudo-terminal');
+    // The slow browser pipeline must not be the recommended route again...
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
+    expect(flat).not.toMatch(/node-pty → xterm\.js → Playwright PNG/);
+    // ...but the skill must still point at it for the captures this helper
+    // cannot do (an ink TUI or a browser page), so the route stays discoverable.
+    expect(flat).toContain('see the `terminal-capture` skill');
   });
 });

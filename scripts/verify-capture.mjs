@@ -9,12 +9,16 @@
 /**
  * Render a command's terminal output to a PNG, for `/verify` evidence images.
  *
- * Why this exists: the `verify-pr` skill asked the agent to build its own
- * node-pty -> xterm.js -> Playwright pipeline. Neither `node-pty` nor the
- * `playwright` package is a dependency of this repo, and node-pty needs a
- * native build — so the documented route did not exist, and three rounds of
- * rewording the instruction produced zero images across four live runs. This
- * turns a capture into one command using deps that are already installed.
+ * Why this exists: the `verify-pr` skill asked the agent to assemble its own
+ * node-pty -> xterm.js -> Playwright pipeline. Those dependencies do resolve
+ * from this repo (node-pty is a root optionalDependency shipping prebuilt
+ * binaries; playwright is declared in packages/webui and
+ * integration-tests/terminal-capture), but the route needs a browser, is slow,
+ * and — the real fragility — integration-tests/terminal-capture is not a root
+ * workspace, so its package.json is never installed as a unit and resolves only
+ * because every dependency happens to be hoisted. Four live runs still produced
+ * zero images. This makes a capture one fast command on deps already installed:
+ * no browser, no pseudo-terminal.
  *
  * Pipeline: run the command, feed its bytes to @xterm/headless (which parses
  * ANSI into a cell grid with colour and bold attributes), emit that grid as
@@ -149,8 +153,11 @@ function collectOutput(cmd) {
     process.exit(1);
   }
   // A non-zero exit is not a capture failure — capturing a failing base arm is
-  // the normal case for an A/B cell.
-  process.stderr.write(`verify-capture: command exited ${res.status}\n`);
+  // the normal case for an A/B cell. A signal-killed child has status === null,
+  // so name the signal rather than printing "exited null".
+  const how =
+    res.signal != null ? `killed by ${res.signal}` : `exited ${res.status}`;
+  process.stderr.write(`verify-capture: command ${how}\n`);
   return `${res.stdout ?? ''}${res.stderr ?? ''}`;
 }
 
@@ -162,12 +169,15 @@ async function render(raw, opts) {
     scrollback: 0,
     allowProposedApi: true,
   });
-  // xterm needs CRLF; a bare LF leaves the cursor in the old column and every
-  // line after the first renders indented by the previous line's length.
-  term.write(raw.replace(/\r?\n/g, '\r\n'));
-  // write() is asynchronous internally; without a turn of the loop the buffer
-  // is still empty and the capture silently comes out blank.
-  await new Promise((r) => setTimeout(r, 120));
+  // U+FE0F (emoji variation selector) makes Pango abort() in native code when
+  // no colour-emoji font exists — uncatchable here — so strip it; the base
+  // codepoint still renders. CRLF is required or a bare LF leaves the cursor in
+  // the old column and indents every later line. Await xterm's write callback
+  // (fires once the parser has drained the input) rather than a fixed sleep, so
+  // a large capture is not read mid-parse and silently come out blank.
+  await new Promise((r) =>
+    term.write(raw.replace(/\uFE0F/g, '').replace(/\r?\n/g, '\r\n'), r),
+  );
 
   const buf = term.buffer.active;
   const rows = [];
@@ -230,6 +240,17 @@ async function render(raw, opts) {
   const info = await sharp(Buffer.from(svg))
     .png({ compressionLevel: 9 })
     .toFile(out);
+  // scrollback: 0 keeps only the last --rows lines, so a taller input loses its
+  // top — often the header — with no visible sign; say so rather than shipping
+  // an image that looks complete but starts halfway down.
+  const inputLines = raw.replace(/\r?\n$/, '').split(/\r?\n/).length;
+  if (inputLines > opts.rows) {
+    process.stderr.write(
+      `verify-capture: warning: input has ${inputLines} lines; ` +
+        `--rows ${opts.rows} kept the last ${opts.rows} and dropped the top ` +
+        `${inputLines - opts.rows}\n`,
+    );
+  }
   process.stdout.write(
     `${out} ${info.width}x${info.height} ${info.size}B ${rows.length} rows\n`,
   );

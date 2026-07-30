@@ -552,16 +552,22 @@ workflow globs). It must contain:
   ```
 
   It runs the command, parses its ANSI through `@xterm/headless`, and
-  rasterises the cell grid with `sharp` — colour and bold preserved, **no
+  rasterises the cell grid with `sharp` — the 16 base ANSI colours and bold
+  preserved (256-colour and truecolor fall back to the default grey), **no
   browser and no pseudo-terminal**. A non-zero exit from the captured command
   is fine and often the point: capturing a failing base arm is normal. Options
   that matter: `--cols` (default 100) to stop wrapping, `--title` for the
-  caption, `--rows` to cap height.
+  caption, `--rows` to cap height (output taller than `--rows` keeps the tail
+  and warns on stderr that the top was dropped).
 
-  Earlier versions of this section sent you to build node-pty → xterm →
-  Playwright yourself. **That route did not exist** — `node-pty` is not a
-  dependency of this repo and needs a native build — and four live runs
-  produced zero images because of it. If `verify-capture.mjs` is missing or
+  This helper covers flat command output only: it gives the captured command
+  no TTY, so it cannot render an ink TUI or a browser page; for a TUI or
+  web-UI capture, see the `terminal-capture` skill. Earlier versions of this
+  section sent you to build that browser pipeline yourself. Its dependencies
+  do resolve from this repo, but it needs a browser, is slower, and is wired
+  fragilely (integration-tests/terminal-capture is not a root workspace, so
+  its package.json is never installed as a unit), and four live runs produced
+  zero images. Prefer this one command. If `verify-capture.mjs` is missing or
   fails, say so under _Not covered_ in one line and ship the text-only report;
   do not reconstruct the pipeline by hand.
 
