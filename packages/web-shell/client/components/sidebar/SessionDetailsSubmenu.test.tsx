@@ -164,6 +164,12 @@ function getMenuItem(label: string): HTMLElement {
   return item!;
 }
 
+function getStatus(): HTMLElement {
+  const status = portalRoot.querySelector<HTMLElement>('[role="status"]');
+  expect(status).not.toBeNull();
+  return status!;
+}
+
 async function openDetails(): Promise<void> {
   const details = Array.from(portalRoot.querySelectorAll('button')).find(
     (button) => button.textContent?.includes('Details'),
@@ -272,13 +278,13 @@ describe('SessionDetailsSubmenu', () => {
     await openDetails();
 
     expect(getMenuItem('Copy session ID')).not.toBeNull();
+    expect(getStatus().textContent).toBe('');
     const selectEvent = await selectCopy();
 
     expect(selectEvent.defaultPrevented).toBe(true);
     expect(writeText).toHaveBeenCalledWith(session.sessionId);
-    const status = portalRoot.querySelector<HTMLElement>('[role="status"]');
-    expect(status?.textContent).toBe('Session ID copied');
-    expect(status?.getAttribute('aria-live')).toBe('polite');
+    expect(getStatus().textContent).toBe('Session ID copied');
+    expect(getStatus().getAttribute('aria-live')).toBe('polite');
   });
 
   it('clears copied feedback when Details closes or its session changes', async () => {
@@ -287,16 +293,16 @@ describe('SessionDetailsSubmenu', () => {
     render();
     await openDetails();
     await selectCopy();
-    expect(portalRoot.querySelector('[role="status"]')).not.toBeNull();
+    expect(getStatus().textContent).toBe('Session ID copied');
 
     await openDetails();
-    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(getStatus().textContent).toBe('');
 
     await openDetails();
     await selectCopy();
-    expect(portalRoot.querySelector('[role="status"]')).not.toBeNull();
+    expect(getStatus().textContent).toBe('Session ID copied');
     render({ ...session, sessionId: 'different-session-id' });
-    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(getStatus().textContent).toBe('');
   });
 
   it('ignores a pending copy result after Details closes and reopens', async () => {
@@ -313,7 +319,7 @@ describe('SessionDetailsSubmenu', () => {
       await pendingCopy.promise;
     });
 
-    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(getStatus().textContent).toBe('');
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -336,17 +342,13 @@ describe('SessionDetailsSubmenu', () => {
       secondCopy.resolve(undefined);
       await secondCopy.promise;
     });
-    expect(portalRoot.querySelector('[role="status"]')?.textContent).toBe(
-      'Session ID copied',
-    );
+    expect(getStatus().textContent).toBe('Session ID copied');
 
     await act(async () => {
       firstCopy.reject(staleError);
       await firstCopy.promise.catch(() => undefined);
     });
-    expect(portalRoot.querySelector('[role="status"]')?.textContent).toBe(
-      'Session ID copied',
-    );
+    expect(getStatus().textContent).toBe('Session ID copied');
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -364,7 +366,7 @@ describe('SessionDetailsSubmenu', () => {
       await pendingCopy.promise.catch(() => undefined);
     });
 
-    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(getStatus().textContent).toBe('');
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -376,7 +378,7 @@ describe('SessionDetailsSubmenu', () => {
 
     await selectCopy();
 
-    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(getStatus().textContent).toBe('');
     expect(onError).toHaveBeenCalledWith(error, 'Failed to copy session ID');
   });
 
@@ -390,7 +392,7 @@ describe('SessionDetailsSubmenu', () => {
 
     await selectCopy();
 
-    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(getStatus().textContent).toBe('');
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Clipboard API is unavailable' }),
       'Failed to copy session ID',

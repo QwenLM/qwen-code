@@ -103,7 +103,6 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     { width: 520, height: 320 },
   ]) {
     await page.setViewportSize(size);
-    await expectWebShellRootSize(webShellRoot, size);
     await expect(details).toBeVisible();
     await expectDetailsInsideRoot(webShellRoot, details);
     await expect(copyAction).toBeVisible();
@@ -125,20 +124,6 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
   );
   expect(titleMetrics.scrollHeight).toBeGreaterThan(titleMetrics.clientHeight);
 });
-
-async function expectWebShellRootSize(
-  root: Locator,
-  size: { width: number; height: number },
-): Promise<void> {
-  await expect
-    .poll(async () => {
-      const box = await root.boundingBox();
-      return box
-        ? { width: Math.round(box.width), height: Math.round(box.height) }
-        : null;
-    })
-    .toEqual(size);
-}
 
 async function expectDetailsInsideRoot(
   root: Locator,

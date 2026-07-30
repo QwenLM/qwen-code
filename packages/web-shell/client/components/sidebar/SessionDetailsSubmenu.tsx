@@ -92,6 +92,7 @@ export function SessionDetailsSubmenu({
         avoidCollisions
         collisionBoundary={collisionBoundary ?? undefined}
         collisionPadding={COLLISION_PADDING}
+        // Radix's optimized strategy does not observe the non-portal WebShell root.
         updatePositionStrategy="always"
         className={cn(styles.sessionDetailsContent, 'min-w-0 p-3')}
       >
@@ -136,15 +137,13 @@ export function SessionDetailsSubmenu({
               )}
             </DropdownMenuItem>
           </div>
-          {copied && (
-            <span
-              className={styles.sessionDetailsCopied}
-              role="status"
-              aria-live="polite"
-            >
-              {t('sidebar.sessionIdCopied')}
-            </span>
-          )}
+          <span
+            className={styles.sessionDetailsCopied}
+            role="status"
+            aria-live="polite"
+          >
+            {copied ? t('sidebar.sessionIdCopied') : ''}
+          </span>
         </div>
       </DropdownMenuSubContent>
     </DropdownMenuSub>
