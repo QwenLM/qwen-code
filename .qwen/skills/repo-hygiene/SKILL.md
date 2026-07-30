@@ -123,11 +123,16 @@ nothing worth fixing is a valid, silent outcome.
       "rootCause": "...",
       "evidence": "...",
       "whyReal": "...",
-      "minimalFix": "..."
+      "minimalFix": "...",
+      "status": "dropped | dropped-gate | reverted-verify"
     }
   ]
 }
 ```
+
+`reportOnly[].status` is optional. Scan-phase entries omit it; entries moved
+from `fixes` by the fix agent or workflow carry one of the values above to
+record why the finding was not committed.
 
 ## Output Contract
 

@@ -464,7 +464,7 @@ jobs:
                 return true;
               });
               for (const m of moved) {
-                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (dropped by gate: exceeded per-commit threshold)" });
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (dropped by gate: exceeded per-commit threshold)", status: "dropped-gate" });
               }
               fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
               console.log(`Moved ${moved.length} finding(s) to reportOnly.`);
@@ -538,7 +538,7 @@ jobs:
                 fix.status = "reverted-verify"; moved.push(fix); return false;
               });
               for (const m of moved) {
-                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (reverted by CI: typecheck failed)" });
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (reverted by CI: typecheck failed)", status: "reverted-verify" });
               }
               fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
               console.log(`Moved ${moved.length} reverted finding(s) to reportOnly.`);

@@ -27,7 +27,9 @@ against this checkout before touching code.
    test-coverable. If a test is impossible, the finding must carry static
    proof (every caller, read/write point, default-value chain, or a
    docs-vs-behavior contradiction, all grep-able in the repo) — otherwise
-   drop it.
+   move the entry from `fixes` to `reportOnly` in findings.json with
+   `"status": "dropped"` and the drop reason (no regression test possible,
+   no static proof) appended to `minimalFix`, and move on.
    c. Run focused verification for the touched package, plus
    `npm run generate:settings-schema` when the fix touched a settings
    source — the regenerated schema belongs in the same commit (Shared

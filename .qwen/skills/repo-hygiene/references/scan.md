@@ -24,6 +24,12 @@ and what "correct" looks like inside it. The scope line is a starting
 boundary, not a reading list — the subagent finds the package's own entry
 points, schemas, registries, and contracts and builds its own map.
 
+Packages intentionally excluded from scan scope: `audio-capture` (native
+addon, thin binding), `channels` (daemon-internal worker transport),
+`cua-driver` (vendored), `mobile-mcp` (vendored), `web-templates` (build
+scaffolding). These are either vendored from upstream or too thin to yield
+hygiene findings.
+
 - **cli/config** — config subsystem of the Qwen CLI (`packages/cli/src/config/`).
   - Defines the settings schema (`settingsSchema.ts`, `settings.ts`), the
     multi-scope settings loader (user / project / extension / bundled), and
@@ -51,11 +57,13 @@ points, schemas, registries, and contracts and builds its own map.
 - **cli/ui** — the Ink TUI (`packages/cli/src/ui/`).
   - `App.tsx` / `AppContainer.tsx` are the root containers.
   - `components/DialogManager.tsx` is the global dialog router driven by `uiState`.
-  - Domain subpackages: `agent-view/` (chat), `arena/` (multi-model compare),
-    `extensions/` (install wizard + tabs), `mcp/` (server approval),
-    `hooks/`, `subagents/{create,manage}/`, `background-view/`.
-  - Shared primitives: `shared/` (`ScrollableList`, `TextInput`, `ErrorBoundary`,
-    `text-buffer`, `vim-buffer-actions`), `messages/` (history item renderers).
+  - Domain subpackages (under `components/`): `agent-view/` (chat),
+    `arena/` (multi-model compare), `extensions/` (install wizard + tabs),
+    `mcp/` (server approval), `hooks/`, `subagents/{create,manage}/`,
+    `background-view/`.
+  - Shared primitives (under `components/`): `shared/` (`ScrollableList`,
+    `TextInput`, `ErrorBoundary`, `text-buffer`, `vim-buffer-actions`),
+    `messages/` (history item renderers).
   - Global layers: `contexts/`, `themes/`, `state/`, `layouts/`, `hooks/`, `voice/`,
     `selection/`, `editors/`, `daemon/`, `models/`, `noninteractive/`.
   - Correct: themes flow through semantic tokens, dialogs never double-mount.
