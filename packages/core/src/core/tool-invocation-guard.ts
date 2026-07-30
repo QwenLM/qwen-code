@@ -34,6 +34,14 @@ const debugLogger = createDebugLogger('TOOL_INVOCATION_GUARD');
 const DENIED_MESSAGE = 'Tool invocation denied by host policy';
 const FAILED_MESSAGE = 'Tool invocation guard failed';
 
+/**
+ * Evaluate a host-supplied guard against a pending tool invocation. The guard
+ * fails closed: an aborted signal, a guard exception, a malformed decision, or
+ * a cloning failure all yield `{ allowed: false, reason: FAILED_MESSAGE }`.
+ * Because an aborted signal is reported in the same shape as a policy failure,
+ * callers must re-derive cancellation from `context.signal` instead of reading
+ * it off the returned decision.
+ */
 export async function evaluateToolInvocationGuard(
   guard: ToolInvocationGuard,
   context: ToolInvocationGuardContext,
@@ -43,6 +51,10 @@ export async function evaluateToolInvocationGuard(
   }
 
   try {
+    debugLogger.debug('Evaluating tool invocation guard', {
+      callId: context.callId,
+      toolName: context.toolName,
+    });
     const decision = await guard({
       ...context,
       args: structuredClone(context.args),
