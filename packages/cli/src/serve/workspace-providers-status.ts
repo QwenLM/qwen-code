@@ -250,13 +250,21 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 /**
+ * A `user:password@` prefix, where the password may contain spaces. The
+ * negative lookahead rejects `host:8443 ` so a port is not read as the start of
+ * a password — that is the only way a colon in the authority can be followed by
+ * whitespace and still not be credentials.
+ */
+const CREDENTIAL_PREFIX_PATTERN = /^[^\s/?#'"`<>]+:(?!\d+(?:\s|$))[^/?#]*@/;
+
+/**
  * Strips credentials from every URL in a free-text warning or error message.
  *
- * Each URL-looking span is handed to `sanitizeProviderBaseUrl`, which scopes
- * credential detection to the authority. Splitting the message into spans first
- * rather than matching URLs with one global regex is what lets a password
- * containing a space or a quote — legal in userinfo, but excluded by any
- * `[^\s'"]`-style URL pattern — still be found.
+ * Each URL is handed to `sanitizeProviderBaseUrl`, which scopes credential
+ * detection to the authority. Splitting the message into spans first rather than
+ * matching URLs with one global regex is what lets a password containing a space
+ * or a quote — legal in userinfo, but excluded by any `[^\s'"]`-style URL
+ * pattern — still be found.
  */
 function sanitizeProviderWarning(warning: string): string {
   let result = '';
@@ -267,13 +275,38 @@ function sanitizeProviderWarning(warning: string): string {
     result += warning.slice(index, next.index);
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
-    result += sanitizeProviderBaseUrl(warning.slice(next.index, segmentEnd));
+    const segment = warning.slice(next.index, segmentEnd);
+    const urlEnd = findUrlEnd(segment, next.marker.length);
+    result +=
+      sanitizeProviderBaseUrl(segment.slice(0, urlEnd)) + segment.slice(urlEnd);
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
   }
 
   return result + warning.slice(index);
+}
+
+/**
+ * Where the URL ends inside a span that may continue into prose.
+ *
+ * A span runs to the next URL or end of line, so it can carry trailing text.
+ * Handing that text to `sanitizeProviderBaseUrl` would let an `@` in it — an
+ * email address, say — be read as the end of a userinfo, since a pathless URL
+ * has no delimiter to bound the authority. So the URL ends at the first space,
+ * except that a recognised `user:password@` prefix is consumed first: a
+ * password may legally contain spaces, and finding those is the whole reason
+ * the message is split into spans rather than matched with a URL regex.
+ */
+function findUrlEnd(segment: string, markerLength: number): number {
+  const credentials = CREDENTIAL_PREFIX_PATTERN.exec(
+    segment.slice(markerLength),
+  );
+  const from = credentials
+    ? markerLength + credentials[0].length
+    : markerLength;
+  const space = segment.slice(from).search(/\s/);
+  return space === -1 ? segment.length : from + space;
 }
 
 function findNextUrlStart(

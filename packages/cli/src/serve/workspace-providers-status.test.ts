@@ -619,6 +619,63 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
+  it('keeps a pathless URL and the email after it intact', async () => {
+    // A pathless URL has no `/`, `?` or `#` to bound its authority, so handing
+    // the trailing prose to the sanitizer let the `@` in an email address read
+    // as the end of a userinfo: the host was rewritten and the text deleted.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example.com — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example.com — contact admin@example.com',
+    );
+  });
+
+  it('keeps a pathless URL with a port and the email after it intact', async () => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example.com:8443 — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example.com:8443 — contact admin@example.com',
+    );
+  });
+
+  it('strips a spaced password from a pathless URL followed by prose', async () => {
+    // The counterpart to the two above: bounding the URL at the first space
+    // must not stop a password that legally contains one from being found.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:sec ret@broken.example — retry later';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://broken.example — retry later',
+    );
+    expect(JSON.stringify(result)).not.toContain('sec ret');
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
