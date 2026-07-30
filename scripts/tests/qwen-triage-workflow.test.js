@@ -4414,7 +4414,7 @@ describe('qwen-triage npm cache producer', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
       const restoreStep = stepIn(jobName, 'Restore npm cache');
       const path = restoreStep.match(/path:\s*'([^']+)'/)?.[1];
-      const key = restoreStep.match(/key:\s*'([^']+)'/)?.[1];
+      const key = restoreStep.match(/key:\s*'((?:[^']|'')+)'/)?.[1];
       expect(path).toBeTruthy();
       expect(key).toBeTruthy();
       expect(cacheProducerWorkflow).toContain(path);

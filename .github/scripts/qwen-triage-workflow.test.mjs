@@ -406,6 +406,17 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
         /rm -rf/,
         'clear step must rm -rf the cache directory',
       );
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      const dir = cacheStep.with.path.replace(
+        /^\$\{\{\s*runner\.temp\s*\}\}\//,
+        '',
+      );
+      assert.ok(
+        jobDef.steps[clearIdx].run.includes(`/${dir}"`),
+        `clear step must remove the restored cache directory (${dir})`,
+      );
     });
   }
 });
@@ -417,6 +428,7 @@ describe('qwen-triage: npm cache producer workflow', () => {
     const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
     assert.ok(push, 'must have a push trigger');
     assert.deepEqual(push.branches, ['main']);
+    assert.deepEqual(push.paths, ['package-lock.json']);
   });
 
   it('saves with the same key and path the triage lanes restore', () => {
@@ -442,5 +454,25 @@ describe('qwen-triage: npm cache producer workflow', () => {
         `cache key must match ${jobName} restore key`,
       );
     }
+  });
+
+  it('populates the cache directory it saves', () => {
+    const saveStep = saveJob.steps.find(
+      (s) => s.uses?.startsWith('actions/cache/save@'),
+    );
+    assert.ok(saveStep, 'must have an actions/cache/save step');
+    const dir = saveStep.with.path.replace(
+      /^\$\{\{\s*runner\.temp\s*\}\}\//,
+      '',
+    );
+    assert.ok(dir, 'save path must resolve to a directory name');
+    const populateStep = saveJob.steps.find(
+      (s) => s.name === 'Populate npm cache',
+    );
+    assert.ok(populateStep, "'Populate npm cache' step must exist");
+    assert.ok(
+      populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
+      `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
+    );
   });
 });
