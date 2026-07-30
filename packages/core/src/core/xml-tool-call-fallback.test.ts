@@ -228,6 +228,83 @@ describe('extractXmlToolCalls', () => {
       '~~~';
     expect(extractXmlToolCalls(text)).toEqual([]);
   });
+
+  it('extracts a later invoke when an earlier parameter contains an unclosed fence', () => {
+    const editWithFence = invoke(
+      'edit',
+      param('file_path', 'docs.md') +
+        param('old_string', '```ts\nconst x = 1;'),
+    );
+    const readCall = invoke('read_file', param('file_path', 'a.ts'));
+    const text = editWithFence + '\n' + readCall;
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'edit',
+        args: { file_path: 'docs.md', old_string: '```ts\nconst x = 1;' },
+      },
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+  });
+
+  it('extracts a later invoke when an earlier parameter contains a closed fence pair', () => {
+    const editWithFence = invoke('edit', param('old_string', '```\ncode\n```'));
+    const readCall = invoke('read_file', param('file_path', 'b.ts'));
+    const text = editWithFence + '\n' + readCall;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'edit', args: { old_string: '```\ncode\n```' } },
+      { name: 'read_file', args: { file_path: 'b.ts' } },
+    ]);
+  });
+
+  it('still skips invokes inside a prose fence when parameters also contain fences', () => {
+    const text =
+      '```markdown\n' +
+      invoke('edit', param('old_string', '```\ninner\n```')) +
+      '\n```\n' +
+      invoke('read_file', param('file_path', 'c.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'c.ts' } },
+    ]);
+  });
+
+  it('decodes XML entities in parameter values', () => {
+    const text = invoke(
+      'edit',
+      param('old_string', 'if (a &lt; b) &amp;&amp; c &gt; d') +
+        param('new_string', 'x &apos;y&apos; &quot;z&quot;'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'edit',
+        args: {
+          old_string: 'if (a < b) && c > d',
+          new_string: 'x \'y\' "z"',
+        },
+      },
+    ]);
+  });
+
+  it('decodes &amp; last so &amp;lt; becomes literal &lt;', () => {
+    const text = invoke('tool', param('v', '&amp;lt;'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'tool', args: { v: '&lt;' } },
+    ]);
+  });
+
+  it('leaves values without entities unchanged', () => {
+    const text = invoke('tool', param('v', 'plain text'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'tool', args: { v: 'plain text' } },
+    ]);
+  });
+
+  it('supports single-quoted attribute values', () => {
+    const text =
+      "<invoke name='read_file'><parameter name='file_path'>a.ts</parameter></invoke>";
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+  });
 });
 
 describe('tryRecoverXmlToolCalls', () => {
@@ -416,5 +493,30 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);
     expect(result.remainingText).toBe(text);
+  });
+
+  it('recovers both invokes when the first has a fence-like parameter value', () => {
+    const editWithFence = invoke(
+      'edit',
+      param('old_string', '```\nunclosed fence'),
+    );
+    const readCall = invoke('read_file', param('file_path', 'a.ts'));
+    const text = editWithFence + '\n' + readCall;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts).toHaveLength(2);
+    expect(result.functionCallParts[0]?.functionCall?.name).toBe('edit');
+    expect(result.functionCallParts[1]?.functionCall?.name).toBe('read_file');
+  });
+
+  it('strips an empty function_calls wrapper from remainingText', () => {
+    const text =
+      '<function_calls>\n' +
+      invoke('read_file', param('file_path', 'a.ts')) +
+      '\n<' +
+      '/function_calls>';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.remainingText).toBe('');
   });
 });

@@ -4336,7 +4336,7 @@ export class GeminiChat {
         syncFunctionCallsField(syntheticChunk, recovery.functionCallParts);
         recoveredChunk = syntheticChunk;
         debugLogger.warn(
-          `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) from plain text content`,
+          `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) [${recovery.functionCallParts.map((p) => p.functionCall?.name).join(', ')}] from plain text content (contentLength=${contentText.length})`,
         );
       } else {
         debugLogger.warn(

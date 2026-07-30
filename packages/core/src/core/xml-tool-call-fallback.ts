@@ -6,9 +6,9 @@
 
 import type { Part } from '@google/genai';
 
-const INVOKE_PATTERN = /<invoke\s+name="([^"]+)">([\s\S]*?)<\/invoke>/g;
+const INVOKE_PATTERN = /<invoke\s+name=["']([^"']+)["']>([\s\S]*?)<\/invoke>/g;
 const PARAMETER_PATTERN =
-  /<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>/g;
+  /<parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/parameter>/g;
 
 export interface ExtractedToolCall {
   name: string;
@@ -21,6 +21,24 @@ export interface ExtractedToolCall {
 export function containsXmlToolCalls(text: string): boolean {
   INVOKE_PATTERN.lastIndex = 0;
   return INVOKE_PATTERN.test(text);
+}
+
+/**
+ * Decodes the five predefined XML entities in a parameter value so
+ * recovered args match the literal text the model intended. Models
+ * emitting this dialect commonly escape `<`/`&` inside code payloads;
+ * without decoding, an `edit` old_string never matches the file and a
+ * `write_file` content writes literal `&lt;` into the user's source.
+ * `&amp;` is decoded last so `&amp;lt;` correctly becomes `&lt;`.
+ */
+function decodeXmlEntities(value: string): string {
+  if (!value.includes('&')) return value;
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 /**
@@ -59,16 +77,47 @@ function stripDelimitingNewlines(value: string): string {
 }
 
 /**
+ * Precomputes the character ranges spanned by invoke blocks so fence
+ * detection can skip their interiors. Without this, a fence-like line
+ * inside a parameter value (e.g. an `edit` whose `old_string` contains
+ * a triple-backtick line) opens a fence that is never closed, causing
+ * later invoke blocks to be silently skipped.
+ */
+function computeInvokeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  INVOKE_PATTERN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INVOKE_PATTERN.exec(text)) !== null) {
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  return ranges;
+}
+
+/**
  * Returns true when `index` falls inside an unclosed fenced code block.
  * Tracks delimiter type and length so a fence is only closed by a run of
  * the same delimiter that is at least as long as the opener, consistent
  * with CommonMark §4.5 (a shorter same-delimiter run is content, not a
  * close). A closing fence must also be whitespace-only after the delimiter
  * run — CommonMark forbids an info string on a closing fence.
+ *
+ * Lines inside `invokeRanges` are skipped: they are parameter values,
+ * not prose, so fence-like content there must not affect fence state.
  */
-function positionInsideFence(text: string, index: number): boolean {
+function positionInsideFence(
+  text: string,
+  index: number,
+  invokeRanges: Array<[number, number]>,
+): boolean {
   let openFence: { delim: string; len: number } | null = null;
+  let lineStart = 0;
   for (const line of text.slice(0, index).split('\n')) {
+    const lineEnd = lineStart + line.length;
+    const insideInvoke = invokeRanges.some(
+      ([start, end]) => lineStart >= start && lineEnd <= end,
+    );
+    lineStart = lineEnd + 1;
+    if (insideInvoke) continue;
     const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
     if (!m) continue;
     const delim = m[2] ? '`' : '~';
@@ -92,13 +141,14 @@ function positionInsideFence(text: string, index: number): boolean {
  */
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
   const results: ExtractedToolCall[] = [];
+  const invokeRanges = computeInvokeRanges(text);
 
   // Reset lastIndex for global regex
   INVOKE_PATTERN.lastIndex = 0;
 
   let match: RegExpExecArray | null;
   while ((match = INVOKE_PATTERN.exec(text)) !== null) {
-    if (positionInsideFence(text, match.index)) {
+    if (positionInsideFence(text, match.index, invokeRanges)) {
       continue;
     }
 
@@ -114,7 +164,9 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
     let paramMatch: RegExpExecArray | null;
     while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
       const paramName = paramMatch[1];
-      const paramValue = stripDelimitingNewlines(paramMatch[2]);
+      const paramValue = decodeXmlEntities(
+        stripDelimitingNewlines(paramMatch[2]),
+      );
       args[paramName] = parseParameterValue(paramValue);
     }
 
@@ -157,6 +209,8 @@ export function tryRecoverXmlToolCalls(text: string): {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 
+  const invokeRanges = computeInvokeRanges(text);
+
   // Strip only invoke blocks that contain parameters and are outside
   // fenced code blocks (the ones we actually recovered). Parameterless
   // and fenced blocks are preserved as plain text.
@@ -165,13 +219,14 @@ export function tryRecoverXmlToolCalls(text: string): {
     .replace(
       INVOKE_PATTERN,
       (block, _name: string, _body: string, offset: number) => {
-        if (positionInsideFence(text, offset)) {
+        if (positionInsideFence(text, offset, invokeRanges)) {
           return block;
         }
         PARAMETER_PATTERN.lastIndex = 0;
         return PARAMETER_PATTERN.test(block) ? '' : block;
       },
     )
+    .replace(/<function_calls>\s*<\/function_calls>/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
