@@ -595,26 +595,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
-  // Transcript full-detail screen (Ctrl+O). Freezes a snapshot of the
-  // conversation at entry time. Both committed history and the streaming
-  // `pendingHistoryItems` are stored as shallow copies (`.slice()` / spread):
-  // the snapshot must stay stable while open, but `useMemoryMonitor` →
-  // `compactOldItems` can replace `historyManager.history` with a rewritten
-  // array (collapsed tool groups, merged thoughts, shifted indices) mid-view.
-  // Re-slicing the live array at render would let that rewrite visibly corrupt
-  // the "frozen" transcript, so we pin the array of item references here. A
-  // shallow copy is cheap (references only) even for long sessions.
-  const [transcriptFreeze, setTranscriptFreeze] = useState<{
-    committedItems: HistoryItem[];
-    pendingItems: HistoryItemWithoutId[];
-  } | null>(null);
-  const isTranscriptOpen = transcriptFreeze != null;
-  const isTranscriptOpenRef = useRef(isTranscriptOpen);
-  isTranscriptOpenRef.current = isTranscriptOpen;
-  const closeTranscript = useCallback(() => {
-    setTranscriptFreeze(null);
-  }, []);
-
   // Ctrl+O / Alt+T inline expansion toggle for thinking blocks (expands all at once).
   const [thoughtExpanded, setThoughtExpanded] = useState(false);
   // Per-thought inline expansion: head ids the user expanded by clicking the
@@ -1158,67 +1138,11 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
-    // While the transcript (alt-screen) owns the whole screen, suppress static
-    // refreshes (e.g. resize-settle repaints) so they don't write into / reorder
-    // the normal-buffer scrollback that is currently hidden behind the alt
-    // screen. On transcript close the
-    // AlternateScreen unmount restores the normal buffer; the next legitimate
-    // refreshStatic (model change, Alt+T, etc.) repaints as usual.
-    if (isTranscriptOpenRef.current) {
-      return;
-    }
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
     }
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
-
-  // Repaint the normal buffer once when the transcript (alt-screen) closes.
-  // In the legacy <Static> path the normal buffer still holds the pre-transcript
-  // frame; remounting the main tree would append the committed history a second
-  // time (the transcript's full-detail rows leaking into scrollback). Force one
-  // clear + Static remount AFTER the AlternateScreen's exit escape (?1049l) has
-  // flushed — deferred a tick so the buffer switch lands first, and run outside
-  // the during-transcript guard above (which has already cleared by now). VP
-  // mode keeps its own scrollback via the React tree, so this is non-VP only.
-  // Snapshot the previous-render value during render (not inside the effect),
-  // so React.StrictMode's double-invoke of the effect can't read a value the
-  // effect itself just wrote — `wasOpenPrevRender` is always a true previous
-  // render snapshot.
-  const prevTranscriptOpenRef = useRef(isTranscriptOpen);
-  const wasOpenPrevRender = prevTranscriptOpenRef.current;
-  prevTranscriptOpenRef.current = isTranscriptOpen;
-  // Bump a counter on each close transition and use IT — not `wasOpenPrevRender`
-  // / `isTranscriptOpen` — as the effect's only changing trigger. If those were
-  // in the dep array (as they were originally), the very next streaming
-  // re-render flips `wasOpenPrevRender` back to false, the deps change, cleanup
-  // runs, and `clearTimeout` cancels the pending repaint before it fires —
-  // leaving stale pre-transcript content in the normal buffer. With the counter,
-  // post-close re-renders don't change the deps, so the scheduled repaint
-  // survives and fires exactly once per close.
-  const transcriptCloseCountRef = useRef(0);
-  if (wasOpenPrevRender && !isTranscriptOpen) {
-    transcriptCloseCountRef.current += 1;
-  }
-  const transcriptCloseCount = transcriptCloseCountRef.current;
-  useEffect(() => {
-    if (transcriptCloseCount === 0 || useTerminalBuffer) {
-      return undefined;
-    }
-    // Guard the clear-screen write on stdout being a TTY: with stdout piped or
-    // redirected (`qwen | tee log`) the transcript degrades to in-buffer
-    // rendering (AlternateScreen skips its escapes on non-TTY), so emitting
-    // `clearTerminal` here would leak raw control bytes into the captured
-    // output without ever having taken over a screen to repaint.
-    if (!stdout.isTTY) {
-      return undefined;
-    }
-    const id = setTimeout(() => {
-      stdout.write(ansiEscapes.clearTerminal);
-      remountStaticHistory();
-    }, 0);
-    return () => clearTimeout(id);
-  }, [transcriptCloseCount, useTerminalBuffer, stdout, remountStaticHistory]);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -3067,26 +2991,6 @@ export const AppContainer = (props: AppContainerProps) => {
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
 
-  // Anti-deadlock: the transcript takes over the whole screen via alt-screen,
-  // so any blocking confirmation/dialog (or a tool awaiting confirmation) would
-  // be invisible and unanswerable behind it. Auto-close the transcript whenever
-  // one appears so the user can see and respond. `dialogsVisible` already
-  // aggregates every blocking request surfaced by DialogManager
-  // (shellConfirmationRequest / loopDetectionConfirmationRequest /
-  // confirmationRequest / confirmUpdateExtensionRequests / providerUpdateRequest
-  // and friends); WaitingForConfirmation covers the inline tool-approval path.
-  const needsBlockingInput =
-    dialogsVisible || streamingState === StreamingState.WaitingForConfirmation;
-  useEffect(() => {
-    if (needsBlockingInput && isTranscriptOpen) {
-      closeTranscript();
-    }
-    // `isTranscriptOpen` must be a dependency (not just read via ref): if a
-    // blocking prompt is already visible when the user opens the transcript,
-    // `needsBlockingInput` doesn't change, so without this the effect wouldn't
-    // re-fire and the transcript would open over an invisible prompt.
-  }, [needsBlockingInput, isTranscriptOpen, closeTranscript]);
-
   const shouldShowStickyTodos =
     stickyTodos !== null &&
     !dialogsVisible &&
@@ -3747,32 +3651,6 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
-      // Transcript full-detail screen owns all input while open. This MUST be
-      // the first branch — earlier than QUIT(Ctrl+C) / EXIT(Ctrl+D) / ESCAPE
-      // (and its vim-INSERT guard) — so Ctrl+C/Esc close the transcript
-      // instead of triggering quit / being swallowed by vim. TranscriptView's
-      // own ScrollableList handles the scroll keys; we swallow everything else
-      // here so a single broadcast keypress isn't double-handled.
-      if (isTranscriptOpenRef.current) {
-        if (
-          keyMatchers[Command.ESCAPE](key) ||
-          // Bare `q` only — Ink reports Ctrl/Alt/Shift+Q as `{ name: 'q', … }`
-          // too (Alt arrives as `meta`), so guard every modifier to avoid those
-          // silently closing it (Shift+Q is the user typing a literal `Q`, not
-          // a close request).
-          (key.name === 'q' && !key.ctrl && !key.meta && !key.shift) ||
-          keyMatchers[Command.QUIT](key) ||
-          keyMatchers[Command.EXIT](key)
-        ) {
-          // Esc / q / Ctrl+C / Ctrl+D all just close the transcript.
-          // EXIT (Ctrl+D) is included so it isn't silently swallowed by the
-          // blanket return below — the transcript is a transient overlay, so we
-          // close it rather than fall through to app exit.
-          closeTranscript();
-        }
-        return;
-      }
-
       // Ctrl+O / Alt+T: toggle inline expansion of thinking blocks.
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
@@ -4033,7 +3911,6 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
       vimMode,
       setThoughtExpanded,
-      closeTranscript,
     ],
   );
 
@@ -4096,10 +3973,6 @@ export const AppContainer = (props: AppContainerProps) => {
     ) {
       return;
     }
-    // Don't silently auto-submit queued messages while the transcript is open
-    // (it isn't part of `dialogsVisible`). Resume draining once it closes.
-    if (isTranscriptOpenRef.current) return;
-
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
     const submission = popNextTurn();
     if (submission === null) return;
@@ -4114,8 +3987,6 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     isProcessing,
     dialogsVisible,
-    // Re-run the drain when the transcript closes so queued messages resume.
-    isTranscriptOpen,
     messageQueue,
     popNextTurn,
     submitUserQuery,
