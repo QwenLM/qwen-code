@@ -4040,7 +4040,7 @@ describe('qwen-autofix workflow', () => {
     // feedback, untrusted authors, and command comments never count.
     expect(workflow).toContain("CRITICAL_ONLY_HUMAN_BATCHES: '2'");
     const censusBlock = prepareBranchAndFeedbackStep.match(
-      /OVER_BUDGET_AUTHORS="\$\(jq -n[\s\S]*?' 2> \/dev\/null \|\| echo '\[\]'\)"/,
+      /OVER_BUDGET_AUTHORS="\$\(jq -n[\s\S]*?' \|\| echo '\[\]'\)"/,
     )?.[0];
     expect(censusBlock).toBeTruthy();
     const WKEY = '2026-07-01T00:00:00Z';
@@ -4084,6 +4084,22 @@ describe('qwen-autofix workflow', () => {
             '2026-07-02T13:00:00Z',
             'MEMBER',
             '@qwen-code /review',
+          ),
+          // Command-only author: both items are /commands, so with the
+          // command-exclusion filter they count 0 consumed spans and stay
+          // absent; dropping the filter would surface them and fail the
+          // assertion, which is what makes the guard observable.
+          humanC(
+            'commander',
+            '2026-07-02T14:00:00Z',
+            'MEMBER',
+            '@qwen-code /review',
+          ),
+          humanC(
+            'commander',
+            '2026-07-03T14:00:00Z',
+            'MEMBER',
+            '@qwen-code /retry',
           ),
         ]),
       );

@@ -2976,7 +2976,7 @@ jobs:
                   | {login: $c.login, span: .hi} ]
               | group_by(.login)
               | map(select((map(.span) | unique | length) >= $k) | .[0].login)
-              ' 2> /dev/null || echo '[]')"
+              ' || echo '[]')"
             [[ -z "${OVER_BUDGET_AUTHORS}" ]] && OVER_BUDGET_AUTHORS='[]'
             [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]] && echo "🚦 regular-feedback budget exhausted this window for: $(jq -r 'join(", ")' <<< "${OVER_BUDGET_AUTHORS}")"
           fi
