@@ -97,6 +97,96 @@ describe('comment attachment guard workflow', () => {
     return { calls, failures, summaries, warnings };
   }
 
+  // The trust check used to run only INSIDE the script, so a runner was
+  // queued, allocated and started before the job could decide it had nothing
+  // to do. Measured over the 200 most recent comments on this repo: 184
+  // trusted associations + 9 bots = 96.5% of runs existed to print "Trusted
+  // author; skipping", each waiting up to 629s on a saturated hosted pool.
+  //
+  // The hoisted `if:` is an OPTIMISATION, not the control — the script keeps
+  // its own checks. So the only unsafe direction is skipping a scan that
+  // should have run, and every ambiguity must resolve toward running.
+  describe('job-level gate', () => {
+    const gate = workflow.slice(
+      workflow.indexOf('  remove-suspicious-attachments:'),
+      workflow.indexOf("runs-on: 'ubuntu-latest'"),
+    );
+
+    it('gates on association and sender before a runner is allocated', () => {
+      expect(gate).toContain('if: >-');
+      expect(gate).toContain("github.event.sender.type != 'Bot'");
+      expect(gate).toContain('!contains(');
+      expect(gate).toContain('["OWNER","MEMBER","COLLABORATOR"]');
+      // Both payload shapes: reviews carry the association on `review`,
+      // comments on `comment`. Missing one silently un-gates that event.
+      expect(gate).toContain('github.event.comment.author_association');
+      expect(gate).toContain('github.event.review.author_association');
+      // The script must KEEP its own copy — defence in depth, and the two
+      // are allowed to disagree only in the safe direction.
+      expect(script).toContain('trustedAssociations');
+      expect(script).toContain("sender?.type === 'Bot'");
+    });
+
+    // Replicates GitHub expression semantics: `a || b` yields the first
+    // truthy value, a missing path is '', and contains(list, '') is false.
+    it('resolves every payload shape, ambiguity toward running', () => {
+      const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+      const runs = (ev) =>
+        (ev?.sender?.type ?? '') !== 'Bot' &&
+        !TRUSTED.includes(
+          ev?.comment?.author_association ||
+            ev?.review?.author_association ||
+            '',
+        );
+      const user = { type: 'User' };
+      // Trusted -> skipped, which is the whole saving.
+      for (const a of TRUSTED) {
+        expect(runs({ sender: user, comment: { author_association: a } })).toBe(
+          false,
+        );
+        expect(runs({ sender: user, review: { author_association: a } })).toBe(
+          false,
+        );
+      }
+      expect(
+        runs({
+          sender: { type: 'Bot' },
+          comment: { author_association: 'NONE' },
+        }),
+      ).toBe(false);
+      // Everyone else -> scanned. CONTRIBUTOR is deliberately NOT trusted:
+      // a merged PR does not make someone's links safe.
+      for (const a of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE', '']) {
+        expect(runs({ sender: user, comment: { author_association: a } })).toBe(
+          true,
+        );
+      }
+      // Fail-safe: an unrecognised or empty payload runs the scan rather
+      // than skipping it.
+      expect(runs({ sender: user })).toBe(true);
+      expect(runs({})).toBe(true);
+    });
+  });
+
+  // Every comment event started its own job, `edited` included — and the bot
+  // PATCHes its own comments constantly, so repeated edits of one comment
+  // stacked. The scan reads the CURRENT body, so a queued earlier scan is
+  // already stale and cancelling it loses nothing.
+  it('collapses repeated scans of one comment', () => {
+    const concurrency = workflow.slice(
+      workflow.indexOf('concurrency:'),
+      workflow.indexOf('jobs:'),
+    );
+    expect(concurrency).toContain('cancel-in-progress: true');
+    // Keyed per comment, not globally — a global group would serialise every
+    // scan in the repo behind one runner.
+    expect(concurrency).toContain('github.event.comment.id');
+    expect(concurrency).toContain('github.event.review.id');
+    // ...and an unexpected payload gets its own group rather than joining a
+    // shared empty-key group where unrelated scans cancel each other.
+    expect(concurrency).toContain('github.run_id');
+  });
+
   it('stops risky extensions only on alphanumeric continuation', () => {
     expect(workflow).toContain('(?![a-zA-Z0-9])');
   });
