@@ -107,7 +107,12 @@ async function buildWorkspaceSkillsStatus(
     });
     let skillManager = managers.get(workspaceCwd);
     if (!skillManager) {
-      const rawLevels = settings.merged.skills?.disabledLevels;
+      // Mirror the CLI guard in loadCliConfig: safe mode nullifies
+      // disabledSkillLevels so the child session loads all bundled skills.
+      const rawLevels =
+        !workspaceTrusted || isSafeModeEnv()
+          ? undefined
+          : settings.merged.skills?.disabledLevels;
       const disabledLevels = new Set<SkillLevel>(
         Array.isArray(rawLevels)
           ? rawLevels.filter(
