@@ -158,7 +158,7 @@ jobs:
         if: "runner.os == 'Linux'"
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 xdg-utils xvfb
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils xvfb
 
       - name: 'Install Qwen Code dependencies'
         working-directory: '${{ runner.temp }}/qwen-code-source'

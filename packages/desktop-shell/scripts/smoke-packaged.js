@@ -58,16 +58,21 @@ const child = spawn(executable, [], {
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let processOutput = '';
+let completed = false;
 captureProcessOutput(child.stdout, 'stdout');
 captureProcessOutput(child.stderr, 'stderr');
+child.on('exit', (code, signal) => {
+  processOutput += `[exit] code=${code ?? 'null'} signal=${signal ?? 'null'}\n`;
+});
 child.unref();
 
 try {
   await waitForReady(previousSize);
+  completed = true;
   console.log(`Packaged desktop runtime ready: ${executable}`);
 } finally {
   terminate(child.pid);
-  fs.rmSync(workspace, { recursive: true, force: true });
+  if (completed) fs.rmSync(workspace, { recursive: true, force: true });
 }
 
 function captureProcessOutput(stream, name) {
@@ -92,7 +97,7 @@ async function waitForReady(offset) {
       fs.statSync(runtimeInfoPath, { throwIfNoEntry: false })?.isFile()
     ) {
       const runtime = JSON.parse(fs.readFileSync(runtimeInfoPath, 'utf8'));
-      await verifyAuthenticatedShell(runtime);
+      await verifyAuthenticatedShell(runtime, contents);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -103,16 +108,24 @@ async function waitForReady(offset) {
       flag: 'a+',
     })
     .slice(offset);
+  const runtimeInfo = fs
+    .statSync(runtimeInfoPath, { throwIfNoEntry: false })
+    ?.isFile()
+    ? fs.readFileSync(runtimeInfoPath, 'utf8')
+    : '<missing>';
   throw new Error(
-    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}`,
+    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}\nRuntime info: ${runtimeInfo}\nSmoke workspace: ${workspace}`,
   );
 }
 
-async function verifyAuthenticatedShell({ url, token }) {
+async function verifyAuthenticatedShell({ url, token }, contents) {
   const headers = { Authorization: `Bearer ${token}` };
   const health = await fetch(new URL('/health', url), { headers });
   if (!health.ok || !(await health.text()).includes('"status":"ok"')) {
-    throw new Error(`Packaged desktop health check failed: ${health.status}`);
+    throw smokeError(
+      `Packaged desktop health check failed: ${health.status}`,
+      contents,
+    );
   }
   const bootstrapUrl = new URL('/', url);
   bootstrapUrl.searchParams.set('token', token);
@@ -125,22 +138,33 @@ async function verifyAuthenticatedShell({ url, token }) {
     },
   });
   if (shell.status !== 303 || shell.headers.get('location') !== '/') {
-    throw new Error(
+    throw smokeError(
       `Packaged desktop Web Shell bootstrap failed: ${shell.status}`,
+      contents,
     );
   }
   const cookie = shell.headers
     .getSetCookie()
     .find((value) => value.startsWith('qwen-daemon-token='));
   if (!cookie?.includes('HttpOnly') || !cookie.includes('SameSite=Strict')) {
-    throw new Error('Packaged desktop Web Shell bootstrap cookie is invalid');
+    throw smokeError(
+      'Packaged desktop Web Shell bootstrap cookie is invalid',
+      contents,
+    );
   }
   const capabilities = await fetch(new URL('/capabilities', url), { headers });
   if (!capabilities.ok) {
-    throw new Error(
+    throw smokeError(
       `Packaged desktop authenticated API failed: ${capabilities.status}`,
+      contents,
     );
   }
+}
+
+function smokeError(message, contents) {
+  return new Error(
+    `${message}\n${contents}${processOutput}\nSmoke workspace: ${workspace}`,
+  );
 }
 
 function terminate(pid) {
