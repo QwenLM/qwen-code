@@ -32,6 +32,7 @@ Add the channel to `~/.qwen/settings.json`:
       "allowedUsers": ["operator-github-username"],
       "sessionScope": "chat_thread",
       "cwd": "/path/to/your/project",
+      "blockStreaming": "off",
       "groupPolicy": "open",
       "groups": {
         "*": { "requireMention": true }
@@ -66,15 +67,16 @@ For GitHub Enterprise Server, set `baseUrl`:
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                      |
-| ------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
-| `token`                   | (required)               | Classic PAT with `notifications` scope                                           |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                              |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                           |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                       |
-| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                          |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                     |
+| Option                    | Default                  | Description                                                                                   |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
+| `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
+| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
+| `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                  |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -107,6 +109,20 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 The comment window is `(previousCursor, currentMaxUpdatedAt]` — comments already eligible in a previous poll cycle are excluded by the cursor, preventing duplicate replies even when the async mark-read has not taken effect. If the process crashes mid-processing, the user can re-mention the bot to retry.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
+
+## Response Feedback
+
+For an accepted issue or pull-request comment, the channel adds GitHub's `👀` reaction while the agent is working, then removes it when the run completes, fails, or is cancelled. Both operations are best-effort: a reaction API or permission failure is logged and never prevents the final response.
+
+### Final-only output
+
+The GitHub channel always forces final-only delivery. The adapter sets `blockStreaming` to `"off"`, so intermediate model chunks are never published as separate comments and `blockStreaming: "on"` is not supported.
+
+```json
+{
+  "blockStreaming": "off"
+}
+```
 
 ## Known Limitations
 

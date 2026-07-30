@@ -1870,12 +1870,24 @@ jobs:
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
       cancel-in-progress: false
-    # 60, not 45: the agent's own 25m timeout is the graceful budget (it
-    # ships a partial report); the job limit only guards infra hangs. At 45
-    # a slow npm ci + build (15m+ on this monorepo) could let the JOB
-    # timeout kill the container mid-run, bypassing the agent's
+    # The agent's own 120m timeout is the GRACEFUL budget — it ships a
+    # partial report on expiry. This job limit only guards infra hangs, so it
+    # must stay comfortably ABOVE `agent budget + everything before it`, or
+    # the JOB timeout kills the container mid-run and bypasses the
     # ship-what-ran path entirely.
-    timeout-minutes: 60
+    #
+    #   agent budget                 120m
+    #   install + build              ~6m measured (run 30284341325: npm ci
+    #                                3m00 + build 2m40), budget 15m for a
+    #                                cold cache or a heavier dependency tree
+    #   resolver/tools, checkout,
+    #   pin, upload, cleanup         ~5m
+    #   ------------------------------------
+    #   worst case                   ~140m  ⇒ 150 leaves 10m of headroom.
+    #
+    # Cost of the raise, stated so it is a decision and not a surprise: a
+    # verify run now occupies one ECS slot for up to 2.5h instead of 1h.
+    timeout-minutes: 150
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2255,6 +2267,25 @@ jobs:
           (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
           qwen --version
 
+          # Chromium system dependencies (apt packages) for evidence
+          # screenshots. install-deps is unpinned so the apt list tracks
+          # current Playwright (a superset of the lockfile binary's needs);
+          # the version-sensitive BINARY is downloaded after checkout by the
+          # "Install evidence browser" step, using the checkout's own
+          # Playwright so it always matches the lockfile. Best-effort: a
+          # failure here must not fail the job.
+          # Record success in a marker the "Install evidence browser" step
+          # gates on: apt and the Playwright CDN are independent servers with
+          # no shared success signal, so a binary download alone must not
+          # promise chromium to the agent. Rewritten or removed every run so
+          # a stale success on the persistent pool cannot leak through.
+          if (cd "${RUNNER_TEMP:?}" && npx --yes playwright install-deps chromium); then
+            printf 'ok' > "${RUNNER_TEMP:?}/verify-chromium-deps-ok"
+          else
+            rm -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok"
+            echo "::warning::Chromium system deps install failed; the verification agent will produce a text-only report."
+          fi
+
       # This container mounts the persistent runner workspace, and a previous
       # run EXECUTED PR code as the node user with write access to .git —
       # hooks or config planted then would fire during the checkout below (as
@@ -2465,8 +2496,11 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           # rm first: on the persistent pool a stale verify-results from an
           # EARLIER PR's run would otherwise ride along into this run's
-          # artifact upload and report selection.
+          # artifact upload and report selection. The chromium marker is
+          # cleared too, so a previous run's success cannot promise this run
+          # a browser it never installed.
           rm -rf "$RUNNER_TEMP/verify-results"
+          rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
           # Make the npm cache readable+writable by the build user so
@@ -2563,6 +2597,46 @@ jobs:
             exit 0
           fi
           echo "Install/build completed before verification." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Install evidence browser'
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -uo pipefail
+          # Download the browser binary for the Playwright package the
+          # capture harness actually imports. This lockfile has TWO
+          # Playwright trees: terminal-capture.ts imports `playwright`, but
+          # node_modules/.bin/playwright is @playwright/test's CLI, which
+          # pins a different chromium revision — so `npx playwright install`
+          # would download a browser the harness cannot launch. Resolve the
+          # CLI from the harness's own directory: require.resolve runs the
+          # same algorithm as its `from 'playwright'` import, so the binary
+          # matches the lockfile even if npm's hoist layout changes (nothing
+          # pins playwright to the root node_modules). cli.js is not in the
+          # package's exports map, so resolve the exported package.json and
+          # join. Runs as node so the tree is agent-readable without chmod.
+          # Best-effort: failure degrades to a text-only report.
+          PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
+          mkdir -p "$PW_PATH"
+          chown node:node "$PW_PATH"
+          PW_CLI="$(runuser -u node -- node -p "require('path').join(require('path').dirname(require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })), 'cli.js')")"
+          # The marker gates QWEN_VERIFY_CHROMIUM in the agent step, so it
+          # requires BOTH halves: the system deps installed as root in the
+          # tools step (which writes verify-chromium-deps-ok) AND the binary
+          # download below. A binary-only success would tell the agent
+          # chromium is ready when every launch still dies on a missing .so.
+          if [ -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok" ] &&
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_RUNTIME_URL -u ACTIONS_CACHE_URL \
+              PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" \
+              node "$PW_CLI" install chromium; then
+            printf '%s' "$PW_PATH" > "${RUNNER_TEMP:?}/verify-chromium-path"
+            echo "Chromium available for evidence screenshots." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Chromium unavailable (system deps or browser download failed); the verification agent will produce a text-only report."
+          fi
 
       - name: 'Run verification agent'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
@@ -2998,16 +3072,32 @@ jobs:
             "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
             "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
           )
+          # Evidence screenshots: the "Install evidence browser" step
+          # downloaded chromium into a shared path using the checkout's
+          # Playwright. Both variables are set only when that install
+          # actually succeeded, so their ABSENCE is the agent's signal to
+          # skip captures rather than burn budget on a download it cannot
+          # complete.
+          if CHROMIUM_PATH="$(cat "${RUNNER_TEMP:?}/verify-chromium-path" 2>/dev/null)" &&
+             [ -n "$CHROMIUM_PATH" ]; then
+            QWEN_ENV+=(
+              "PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH"
+              "QWEN_VERIFY_CHROMIUM=1"
+            )
+          fi
           if [ -n "${OPENAI_MODEL:-}" ]; then
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi
 
+          # The agent's graceful kill budget in minutes. The watchdog
+          # threshold below derives from it, so the two cannot drift apart.
+          AGENT_BUDGET_M=120
           # Elapsed time of the WATCHDOG CHILD only: $SECONDS includes proxy
           # and network setup, so an OOM kill late in the step could cross a
           # global threshold and be mislabeled a configured timeout.
           AGENT_START=$SECONDS
           set +e
-          timeout --kill-after=10s 25m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+          timeout --kill-after=10s "${AGENT_BUDGET_M}m" runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
             --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/verify-results/output.jsonl"
@@ -3023,6 +3113,7 @@ jobs:
           TEE_STATUS=${PIPE_STATUS[1]:-0}
           EXIT_CODE=$AGENT_STATUS
           set -e
+          AGENT_ELAPSED=$((SECONDS - AGENT_START))
 
           # Collect the skill's artifacts (report.md, verdict.txt,
           # assertions.json, harness scripts, raw logs) into the upload dir.
@@ -3034,10 +3125,12 @@ jobs:
 
           # 137 is ambiguous: the watchdog escalating past --kill-after looks
           # identical to an OOM kill. Use the elapsed budget to tell them
-          # apart instead of labelling every 137 a crash.
-          AGENT_ELAPSED=$((SECONDS - AGENT_START))
+          # apart instead of labelling every 137 a crash. The threshold is
+          # derived from AGENT_BUDGET_M so it cannot drift from the budget:
+          # a 137 at or after the full budget is the watchdog, an earlier
+          # 137 is an OOM.
           WATCHDOG_FIRED=false
-          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge 1500 ]; then
+          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge $((AGENT_BUDGET_M * 60)) ]; then
             WATCHDOG_FIRED=true
           fi
           if [ "$EXIT_CODE" -eq 124 ] || [ "$WATCHDOG_FIRED" = true ]; then
@@ -3273,8 +3366,8 @@ jobs:
             printf '</code></pre>\n\n</details>\n\n'
           }
 
-          # Host the agent's evidence images (if any) on the pr-assets branch
-          # — the same convention hand-run verification rounds use — and build
+          # Host the agent's evidence images (if any) on a per-PR branch
+          # (pr-assets/<N>-verify, matching hand-run convention) and build
           # a markdown section referencing them. Image bytes come from a run
           # that executed PR code: inert but untrusted, so filenames pass a
           # strict allowlist, count/size are capped (8 files, <2 MB each; the
@@ -3285,6 +3378,7 @@ jobs:
           collect_and_host_evidence() {
             local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
             local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+            local assets_branch="pr-assets/${PR_NUMBER}-verify"
             local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
             local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
             # `|| true` on every find: the artifact download is
@@ -3304,9 +3398,12 @@ jobs:
               return 0
             fi
             rm -rf "$clone_dir"
-            if ! git clone -q --depth 1 --branch pr-assets "$remote" "$clone_dir" 2>/dev/null; then
-              echo "::warning::pr-assets branch unavailable; posting a text-only report." >&2
-              return 0
+            if ! git clone -q --depth 1 --branch "$assets_branch" "$remote" "$clone_dir" 2>/dev/null; then
+              rm -rf "$clone_dir"
+              mkdir -p "$clone_dir"
+              git -C "$clone_dir" init -q
+              git -C "$clone_dir" checkout -q --orphan "$assets_branch"
+              git -C "$clone_dir" remote add origin "$remote"
             fi
             # Rebase in the racing-push retry needs a committer identity, so
             # set it once on the clone instead of per-command -c flags.
@@ -3342,11 +3439,11 @@ jobs:
               git add "$dest_dir" &&
               git commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
               {
-                git push -q origin HEAD:pr-assets 2>/dev/null ||
+                git push -q origin "HEAD:$assets_branch" 2>/dev/null ||
                 {
                   # One retry after a racing push from another assets job.
-                  git pull -q --rebase origin pr-assets 2>/dev/null &&
-                  git push -q origin HEAD:pr-assets 2>/dev/null
+                  git pull -q --rebase origin "$assets_branch" 2>/dev/null &&
+                  git push -q origin "HEAD:$assets_branch" 2>/dev/null
                 }
               }
             ); then
@@ -3354,7 +3451,7 @@ jobs:
               EVIDENCE_SECTION=''
               return 0
             fi
-            local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/pr-assets/${dest_dir}"
+            local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${assets_branch}/${dest_dir}"
             EVIDENCE_SECTION=$'### Evidence images\n\n'
             for f in "$clone_dir/$dest_dir"/*.png; do
               [ -f "$f" ] || continue

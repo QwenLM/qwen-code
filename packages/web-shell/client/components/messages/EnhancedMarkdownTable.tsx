@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -181,7 +182,10 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
 
 export const MAX_ENHANCED_TABLE_ROWS = 500;
 export const MAX_ENHANCED_TABLE_COLUMNS = 50;
+// Must stay in sync with --action-column-width in EnhancedMarkdownTable.module.css
+const ACTION_COLUMN_WIDTH = 40;
 const DEFAULT_COLUMN_WIDTH = 160;
+const COMPACT_COLUMN_WIDTH = 72;
 const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
@@ -189,13 +193,10 @@ const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
 const LONG_CELL_TEXT_LENGTH = 60;
 const LONG_CELL_LINE_COUNT = 3;
 const DENSITY_OPTIONS: TableDensity[] = ['standard', 'compact', 'comfortable'];
-const DEFAULT_COLUMN_STYLE: CSSProperties = {
-  width: DEFAULT_COLUMN_WIDTH,
-  minWidth: DEFAULT_COLUMN_WIDTH,
-  maxWidth: DEFAULT_COLUMN_WIDTH,
-};
-const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
-  width: 'auto',
+const ACTION_COLUMN_STYLE: CSSProperties = {
+  width: ACTION_COLUMN_WIDTH,
+  minWidth: ACTION_COLUMN_WIDTH,
+  maxWidth: ACTION_COLUMN_WIDTH,
 };
 
 function clampColumnWidth(width: number): number {
@@ -243,6 +244,24 @@ function densityClassName(density: TableDensity): string {
     default:
       return styles.densityStandard;
   }
+}
+
+function findVerticalScrollContainer(
+  element: HTMLElement | null,
+): HTMLElement | null {
+  let current = element;
+  while (current) {
+    const overflowY = window.getComputedStyle(current).overflowY;
+    if (
+      overflowY === 'auto' ||
+      overflowY === 'scroll' ||
+      overflowY === 'overlay'
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
 }
 
 function getTextContent(node: ReactNode): string {
@@ -1468,6 +1487,9 @@ export function EnhancedTable({
   const [cellDialog, setCellDialog] = useState<CellDialogState | null>(null);
   const [longTextExpanded, setLongTextExpanded] = useState(false);
   const [density, setDensity] = useState<TableDensity>('standard');
+  const [frozenColumnShadowLeft, setFrozenColumnShadowLeft] = useState<
+    number | null
+  >(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
@@ -1488,6 +1510,12 @@ export function EnhancedTable({
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
+  const detailToggleAnchorRef = useRef<{
+    element: HTMLElement;
+    scrollContainer: HTMLElement | null;
+    top: number;
+  } | null>(null);
   const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
   const cellDialogRef = useRef<HTMLDivElement | null>(null);
   const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
@@ -1789,6 +1817,14 @@ export function EnhancedTable({
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
     : undefined;
+  const fixedVisibleColumnWidth = orderedVisibleColumnIndexes.reduce(
+    (total, index) => total + (columnWidths[index] ?? 0),
+    0,
+  );
+  const flexibleColumnCount = orderedVisibleColumnIndexes.filter(
+    (index) => columnWidths[index] === undefined,
+  ).length;
+  const hasFillerColumn = flexibleColumnCount === 0;
   const currentCellDialogCell = useMemo(() => {
     if (!cellDialog) return null;
     const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
@@ -1858,6 +1894,19 @@ export function EnhancedTable({
       setCellDialog(null);
     }
   }, [cellDialog, detailRowKey, visibleRows]);
+
+  useLayoutEffect(() => {
+    const anchor = detailToggleAnchorRef.current;
+    detailToggleAnchorRef.current = null;
+    if (!anchor?.element.isConnected) return;
+    const offset = anchor.element.getBoundingClientRect().top - anchor.top;
+    if (offset === 0) return;
+    if (anchor.scrollContainer) {
+      anchor.scrollContainer.scrollTop += offset;
+    } else {
+      window.scrollBy(0, offset);
+    }
+  }, [detailRowKey]);
 
   useEffect(() => {
     if (!cellDialog) return;
@@ -2017,7 +2066,16 @@ export function EnhancedTable({
     });
   };
 
-  const toggleRowDetail = (rowKey: string) => {
+  const toggleRowDetail = (rowKey: string, rowElement: HTMLElement | null) => {
+    if (detailRowKey !== rowKey && rowElement) {
+      detailToggleAnchorRef.current = {
+        element: rowElement,
+        scrollContainer: findVerticalScrollContainer(
+          shellRef.current?.parentElement ?? null,
+        ),
+        top: rowElement.getBoundingClientRect().top,
+      };
+    }
     setSelection(null);
     setCellDialog(null);
     resetCopiedCellDialog();
@@ -2086,25 +2144,58 @@ export function EnhancedTable({
     );
   };
 
-  const columnStyle = (
-    columnIndex: number,
-    extra?: CSSProperties,
-  ): CSSProperties => {
+  const flexibleColumnWidth = (
+    minWidth: number,
+    fixedWidth: number,
+    flexibleColumnCount: number,
+  ): string =>
+    `max(${minWidth}px, calc((100cqw - ${ACTION_COLUMN_WIDTH}px - ${fixedWidth}px) / ${flexibleColumnCount}))`;
+
+  const columnGroupStyle = (columnIndex: number): CSSProperties => {
     const width = columnWidths[columnIndex];
-    if (width === undefined) {
-      const defaultStyle =
-        density === 'compact'
-          ? COMPACT_AUTO_COLUMN_STYLE
-          : DEFAULT_COLUMN_STYLE;
-      return extra ? { ...defaultStyle, ...extra } : defaultStyle;
-    }
+    if (width !== undefined) return { width };
+    const minWidth =
+      density === 'compact' ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
     return {
-      width,
-      minWidth: width,
-      maxWidth: width,
-      ...extra,
+      width: flexibleColumnWidth(
+        minWidth,
+        fixedVisibleColumnWidth,
+        flexibleColumnCount,
+      ),
     };
   };
+
+  useLayoutEffect(() => {
+    if (!freezeFirstColumn || frozenColumnIndex === undefined) {
+      setFrozenColumnShadowLeft(null);
+      return;
+    }
+    const shell = shellRef.current;
+    const frozenHeader = frozenHeaderCellRef.current;
+    if (!shell || !frozenHeader) return;
+    const updateShadowPosition = () => {
+      const shellRect = shell.getBoundingClientRect();
+      const headerRect = frozenHeader.getBoundingClientRect();
+      setFrozenColumnShadowLeft(
+        Math.max(0, headerRect.right - shellRect.left - shell.clientLeft),
+      );
+    };
+    updateShadowPosition();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateShadowPosition);
+      return () => window.removeEventListener('resize', updateShadowPosition);
+    }
+    const resizeObserver = new ResizeObserver(updateShadowPosition);
+    resizeObserver.observe(shell);
+    resizeObserver.observe(frozenHeader);
+    return () => resizeObserver.disconnect();
+  }, [
+    columnWidths,
+    density,
+    freezeFirstColumn,
+    frozenColumnIndex,
+    orderedVisibleColumnIndexes,
+  ]);
 
   const startColumnResize = (
     event: ReactMouseEvent<HTMLButtonElement>,
@@ -2608,13 +2699,21 @@ export function EnhancedTable({
       </TooltipProvider>
       <div
         ref={containerRef}
-        className={`${styles.scroller} ${
-          detailRowKey ? styles.scrollerWithDetail : ''
-        }`}
+        className={styles.scroller}
         tabIndex={0}
         onCopy={handleCopy}
       >
         <table className={styles.table}>
+          <colgroup>
+            <col className={styles.actionColumn} style={ACTION_COLUMN_STYLE} />
+            {orderedVisibleColumnIndexes.map((columnIndex) => (
+              <col
+                key={`column-${columnIndex}`}
+                style={columnGroupStyle(columnIndex)}
+              />
+            ))}
+            {hasFillerColumn && <col className={styles.fillerColumn} />}
+          </colgroup>
           <thead>
             <tr>
               <th
@@ -2655,6 +2754,7 @@ export function EnhancedTable({
                 return (
                   <th
                     key={header.key}
+                    ref={isFrozenColumn ? frozenHeaderCellRef : undefined}
                     className={`${styles.headerCell} ${
                       isFrozenColumn ? styles.frozenHeaderCell : ''
                     } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
@@ -2662,7 +2762,7 @@ export function EnhancedTable({
                     onContextMenu={(event) =>
                       openColumnContextMenu(event, columnIndex)
                     }
-                    style={columnStyle(columnIndex, headerAlignStyle)}
+                    style={headerAlignStyle}
                     title={columnName}
                   >
                     <div className={styles.headerControls}>
@@ -2750,6 +2850,9 @@ export function EnhancedTable({
                   </th>
                 );
               })}
+              {hasFillerColumn && (
+                <th className={styles.fillerHeaderCell} aria-hidden="true" />
+              )}
             </tr>
           </thead>
           <tbody>
@@ -2767,7 +2870,12 @@ export function EnhancedTable({
                       <button
                         className={styles.rowDetailButton}
                         type="button"
-                        onClick={() => toggleRowDetail(row.key)}
+                        onClick={(event) =>
+                          toggleRowDetail(
+                            row.key,
+                            event.currentTarget.closest('tr'),
+                          )
+                        }
                         aria-expanded={detailOpen}
                         aria-controls={detailId}
                         aria-label={t(
@@ -2799,7 +2907,7 @@ export function EnhancedTable({
                               ? styles.selectedCell
                               : ''
                           } ${isFrozenColumn ? styles.frozenCell : ''}`}
-                          style={columnStyle(columnIndex, cellAlignStyle)}
+                          style={cellAlignStyle}
                           data-row-index={rowIndex}
                           data-column-index={columnIndex}
                           onMouseDown={(event) =>
@@ -2825,12 +2933,19 @@ export function EnhancedTable({
                         </td>
                       );
                     })}
+                    {hasFillerColumn && (
+                      <td className={styles.fillerCell} aria-hidden="true" />
+                    )}
                   </tr>
                   {detailOpen && (
                     <tr id={detailId} className={styles.detailRow}>
                       <td
                         className={styles.detailCell}
-                        colSpan={orderedVisibleColumnIndexes.length + 1}
+                        colSpan={
+                          orderedVisibleColumnIndexes.length +
+                          1 +
+                          (hasFillerColumn ? 1 : 0)
+                        }
                       >
                         <div className={styles.detailPanel}>
                           <span className="sr-only">
@@ -2879,6 +2994,13 @@ export function EnhancedTable({
           </div>
         )}
       </div>
+      {freezeFirstColumn && frozenColumnShadowLeft !== null && (
+        <div
+          className={styles.frozenColumnShadow}
+          style={{ left: frozenColumnShadowLeft }}
+          aria-hidden="true"
+        />
+      )}
       {columnContextMenu && orderedVisibleColumnIndexes.length > 0 && (
         <div
           ref={columnContextMenuRef}

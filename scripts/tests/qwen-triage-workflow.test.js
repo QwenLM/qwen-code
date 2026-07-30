@@ -6,6 +6,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -1519,15 +1520,19 @@ describe('qwen-triage verify hardening', () => {
   // The lifecycle-script command-file guards must be asserted on the verify
   // job's own commands: a bare step() lookup returns the tmux job's
   // identically named step, so verify-side regressions would pass silently.
-  it('strips GitHub command files from both verify lifecycle commands', () => {
-    // Bound to the prepare step: the agent step's own `runuser` launches
-    // qwen under `env -i`, which needs no per-variable stripping.
+  it('strips GitHub command files from every node-run verify command', () => {
+    // Bound to the lifecycle commands that run as node before the agent:
+    // npm ci and npm run build in the prepare step, plus the evidence
+    // browser download. The slice stops at the agent step, whose own
+    // `runuser` launches qwen under `env -i` and needs no per-variable
+    // stripping. Covering all three by construction (not enumeration) is
+    // what catches a future node-run command added without the strip.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(2);
+    expect(commands.length).toBe(3);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -1873,7 +1878,7 @@ describe('qwen-triage verify hardening round 2', () => {
       // A bare remote with a pr-assets branch, plus a gh stub.
       sh(`git init -q --bare "${dir}/assets.git"`);
       sh(
-        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets`,
+        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/7999-verify`,
       );
       writeFileSync(
         join(dir, 'gh'),
@@ -1935,7 +1940,7 @@ describe('qwen-triage verify hardening round 2', () => {
       });
       expect(res.status).toBe(0);
       const hosted = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets | grep verify/ || true`,
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
       )
         .stdout.trim()
         .split('\n')
@@ -1951,8 +1956,8 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(comment).not.toContain('02-fake');
       expect(comment).toContain('did not pass the hosting checks');
 
-      // No reachable pr-assets branch -> text-only, never an aborted report.
-      sh(`git init -q --bare "${dir}/empty.git"`);
+      // Unreachable remote -> text-only, never an aborted report.
+      sh(`rm -rf "${dir}/empty.git" && mkdir -p "${dir}/empty.git"`);
       const out2 = join(dir, 'comment2.md');
       const res2 = sh(script, {
         cwd: work,
@@ -1980,6 +1985,62 @@ describe('qwen-triage verify hardening round 2', () => {
       const comment2 = readFileSync(out2, 'utf8');
       expect(comment2).toContain('Sandboxed verification');
       expect(comment2).not.toContain('Evidence images');
+
+      // FIRST RUN on a PR: the remote is valid but the per-PR branch does
+      // not exist yet, so the clone fails and the orphan-init path runs for
+      // real. Both scenarios above take the clone-failed branch too, but
+      // both then fail to push (one seeded the branch, the other has no
+      // remote), so neither proves orphan-init can actually DELIVER. Without
+      // this, a bug in `checkout --orphan` or a dropped `remote add origin`
+      // would silently discard every image on every PR's first run.
+      sh(`git -C "${dir}/assets.git" branch -D pr-assets/7999-verify`);
+      expect(
+        sh(
+          `git -C "${dir}/assets.git" branch --list pr-assets/7999-verify`,
+        ).stdout.trim(),
+      ).toBe('');
+      const out3 = join(dir, 'comment3.md');
+      const res3 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out3,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '79',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+        },
+      });
+      expect(res3.status).toBe(0);
+      // The branch was created by orphan-init and carries this run's images.
+      const hosted3 = sh(
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
+      )
+        .stdout.trim()
+        .split('\n')
+        .filter(Boolean);
+      expect(hosted3.map((p) => p.split('/').pop()).sort()).toEqual([
+        '01-ab.png',
+        '04-edge.png',
+      ]);
+      // Orphan, not a graft onto unrelated history: exactly one commit.
+      expect(
+        sh(
+          `git -C "${dir}/assets.git" rev-list --count pr-assets/7999-verify`,
+        ).stdout.trim(),
+      ).toBe('1');
+      expect(readFileSync(out3, 'utf8')).toContain('![01-ab](');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2091,6 +2152,102 @@ describe('qwen-triage verify hardening round 2', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Verification techniques lifted from maintainer-written verification rounds that
+  // the skill could not previously have produced. Each is pinned to the
+  // failure it exists for, because a rule stated without its failure reads
+  // as advice and gets skipped.
+  it('carries the maintainer-round verification techniques', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    // #7914 §4: the PR added write_file as a second writer into the shared
+    // artifact store, and the store's pre-existing first-writer-wins merge
+    // then silently discarded record_artifact's curated title. Nothing in
+    // the old skill pointed at collisions between writers.
+    expect(flat).toContain('new writer into a shared store');
+    expect(flat).toContain('in both orders');
+    expect(flat).toContain('what the loser is told');
+
+    // ...and that finding surfaced from a control that existed to validate
+    // the BASE probe, run identically on head.
+    expect(flat).toContain('Run every control on BOTH arms');
+
+    // #7998: the hardware cursor was read with a tmux query, then
+    // corroborated by a post-exit marker — a second effect of the same fact
+    // whose failure mode does not involve the query.
+    expect(flat).toContain('corroborate it with a mechanism that does not use');
+
+    // #7998 nit: re-running patch-package produced a byte-different file,
+    // proving the committed hunks were hand-written.
+    expect(flat).toContain('Re-run the generator and diff');
+
+    // #7998 "what I did not verify": a blank harness was proved
+    // environmental by booting base and head identically.
+    expect(flat).toContain('A/A control');
+
+    // #7934 R4 §1: a new guard turned a vacuous pass into a failure that is
+    // deterministic on a fast machine. Sampling cannot find it from a
+    // loaded CI box — only measuring the margin can, so the rule must say
+    // measure and must say why repetition is the wrong instrument here.
+    expect(flat).toContain('measure it, do not sample it');
+    expect(flat).toContain('speed-correlated failure is not flake');
+    expect(flat).toContain('You cannot reproduce a fast-machine failure');
+    // The blocking verdict must be expressible in the contract, not just
+    // asserted in prose: encode the margin as a scripted assertion so a
+    // crossing distribution lands in `fail`.
+    expect(flat).toContain('encoding the margin as a scripted assertion');
+
+    // #7934 R4 §2: the abort cases fired during CLI startup, so the fake
+    // server saw zero requests — a suite named for mid-stream aborts never
+    // streamed, and every assertion passed.
+    expect(flat).toContain('the scenario never reached the code under test');
+    expect(flat).toContain('assert that count is non-zero');
+
+    // #7836: both blockers had one root cause — a route and the child it
+    // spawns asked the same question against different state (pinned vs
+    // unpinned runtime dir), and a lazily-created backing file left a
+    // window where a just-created session was invisible to any on-disk
+    // existence check.
+    expect(flat).toContain('the same predicate is checked in two places');
+    expect(flat).toContain('is the state observable yet at all');
+    expect(flat).toContain('blast radius on bystanders');
+
+    // #7836: a whole-file revert removed a test's precondition, so a good
+    // test looked vacuous. A false "your test is vacuous" is worse than a
+    // missed survivor, so the rule must demand the finer mutation first.
+    expect(flat).toContain('escalate to a finer mutation');
+
+    // #7885: an npm cache claimed ~75% off npm ci; isolating the slice a
+    // download cache can touch (--ignore-scripts) showed 36s of 226s, so
+    // the real saving was 15% — and 33s off a 14m37s job at that.
+    expect(flat).toContain('Isolate the slice the mechanism can actually');
+    expect(flat).toContain('has a cost, not only a benefit');
+    // ...and the severity of the finding it did have was bounded by
+    // disproving the scarier readings.
+    expect(flat).toContain('report which ones do NOT hold');
+
+    // #7885: the PR said the cache dir was discarded after the job; the
+    // action's own manifest declares a post-step that uploads it as root.
+    expect(flat).toContain('their own manifest');
+
+    // #7899: the shipped script was run verbatim against the live repo with
+    // every mutating call hard-failing — real data, no possible side effect.
+    expect(flat).toContain('interpose a refusing proxy on the write path');
+
+    // #7862 R4: the fix bundled reduce() with an ordering change. A third
+    // build with only the ordering change showed each half does a different
+    // job — either alone leaves a channel that floods or wedges, which the
+    // two-cell A/B cannot reach.
+    expect(flat).toContain('build the intermediate variants');
+    // ...and the same round bisected the RangeError threshold through the
+    // real async stack, where it fired far below a micro-benchmark's number.
+    expect(flat).toContain(
+      'A limit measured in isolation does not transfer to the real call site',
+    );
+    // ...counting emitted envelopes instead of delivered prompts would have
+    // hidden every gate on the path.
+    expect(flat).toContain('count at the destination, not at the component');
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -2902,6 +3059,331 @@ describe('qwen-triage verify round-3 hardening', () => {
       verifyJob.indexOf('timeout-minutes:'),
     );
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+  });
+
+  // Evidence images: the agent cannot install chromium (runs as `node`,
+  // `env -i`, fresh HOME, no apt). The tools step installs system deps
+  // as root; a post-checkout step downloads the browser binary using the
+  // checkout's own Playwright so the version always matches the lockfile.
+  it('pre-installs chromium and hands it to the agent', () => {
+    // System deps only — no browser binary, no version-sensitive download.
+    const tools = stepIn('verify', 'Install verify runner tools');
+    expect(tools).toContain('install-deps chromium');
+    expect(tools).not.toContain('install --with-deps');
+    expect(tools).toContain('::warning::Chromium system deps install failed');
+    // Deps success is recorded in a marker the browser step gates on: apt
+    // and the Playwright CDN are independent servers, so a binary download
+    // alone must not promise chromium to the agent.
+    expect(tools).toContain('verify-chromium-deps-ok');
+    // No hardcoded Playwright pin here either: the apt list must track
+    // current Playwright so it covers the lockfile-matched binary below.
+    expect(tools).not.toMatch(/playwright@[\d.]/);
+
+    // Browser binary: downloaded after npm ci, and by the CLI of the
+    // package the capture harness actually imports — never a hardcoded pin
+    // (M5). This lockfile has TWO Playwright trees: terminal-capture.ts
+    // imports `playwright`, but node_modules/.bin/playwright (what `npx
+    // playwright` resolves) is @playwright/test's CLI, which pins a
+    // different chromium revision. The install must therefore resolve the
+    // imported package's cli.js from the harness's own directory (the same
+    // algorithm as its import), not assume npm hoists `playwright` to the
+    // root — a hoist nothing pins. cli.js is absent from the package's
+    // exports map, so the workflow resolves the exported package.json and
+    // joins; binding this assertion to the harness's import keeps the two
+    // from drifting apart.
+    const capture = readFileSync(
+      'integration-tests/terminal-capture/terminal-capture.ts',
+      'utf8',
+    );
+    expect(capture).toMatch(/from 'playwright'/);
+    const browser = stepIn('verify', 'Install evidence browser');
+    expect(browser).toContain(
+      "require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })",
+    );
+    expect(browser).toContain('node "$PW_CLI" install chromium');
+    expect(browser).not.toContain('./node_modules/playwright/cli.js');
+    expect(browser).not.toContain('npx playwright install chromium');
+    expect(browser).not.toMatch(/playwright@[\d.]/);
+    expect(browser).toContain('PLAYWRIGHT_BROWSERS_PATH');
+    // The CLI runs PR-controlled code ($PW_CLI resolves from the PR's
+    // node_modules), so it must drop the same runner-injected cache
+    // credentials the prepare and agent steps unset — a doctored
+    // playwright package could otherwise write to the Actions cache.
+    expect(browser).toContain('-u ACTIONS_RUNTIME_TOKEN');
+    expect(browser).toContain('-u ACTIONS_RUNTIME_URL');
+    expect(browser).toContain('-u ACTIONS_CACHE_URL');
+    // Marker is written ONLY inside the success branch (M6): the if
+    // condition must precede the marker write, and the else branch must
+    // carry the warning instead. The condition must ALSO require the deps
+    // marker (M6b): a binary download alone is not enough.
+    expect(browser).toContain('verify-chromium-deps-ok');
+    const ifIdx = browser.indexOf(
+      'if [ -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok" ]',
+    );
+    const markerIdx = browser.indexOf('verify-chromium-path');
+    const elseIdx = browser.indexOf('::warning::Chromium unavailable');
+    expect(ifIdx).toBeGreaterThan(-1);
+    expect(markerIdx).toBeGreaterThan(ifIdx);
+    expect(elseIdx).toBeGreaterThan(markerIdx);
+    // Best-effort: a failed download must not fail a verification.
+    expect(browser).not.toContain('exit 1');
+    // A stale marker from an earlier run on the persistent pool must not
+    // ride along: prepare clears it before this step writes a fresh one,
+    // so absence stays a real signal even though RUNNER_TEMP outlives the
+    // run.
+    expect(stepIn('verify', 'Install and build PR app')).toContain(
+      'rm -f "$RUNNER_TEMP/verify-chromium-path"',
+    );
+
+    // The agent is told ONLY when the install actually succeeded, so the
+    // variable's absence is a real signal rather than a stale promise.
+    // The guard must be CONDITIONAL (M1b): QWEN_VERIFY_CHROMIUM=1 must
+    // appear inside the if-block that reads the marker, not unconditionally.
+    const runStep = stepIn('verify', 'Run verification agent');
+    expect(runStep).toContain('verify-chromium-path');
+    expect(runStep).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // Both variables, not just the flag. Losing the path alone is the
+    // nastiest arm: the agent is TOLD chromium is available, Playwright
+    // then looks in the default ~/.cache/ms-playwright instead of the
+    // shared install, and captures degrade to text-only after a successful
+    // install — verified by mutation, this test passed without this line.
+    expect(runStep).toContain('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
+    const guard = runStep.indexOf('verify-chromium-path');
+    const marker = runStep.indexOf('QWEN_VERIFY_CHROMIUM=1');
+    const path = runStep.indexOf('PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH');
+    expect(guard).toBeLessThan(marker);
+    expect(guard).toBeLessThan(path);
+    // The if-fi block must wrap the QWEN_ENV+= assignment. Anchor the
+    // slice at the real `if` keyword: `guard - 20` lands inside the marker
+    // path, where "ver-if-y-chromium-path" satisfies toContain('if') even
+    // with the guard deleted.
+    const runIfIdx = runStep.lastIndexOf('if CHROMIUM_PATH', guard);
+    expect(runIfIdx).toBeGreaterThan(-1);
+    const ifBlock = runStep.slice(runIfIdx, marker + 30);
+    expect(ifBlock).toMatch(/(^|\s)if\s/);
+    expect(ifBlock).toContain('then');
+
+    // The tmux lane is untouched: it has no evidence-image path.
+    expect(stepIn('tmux-testing', 'Run tmux real-user testing')).not.toContain(
+      'QWEN_VERIFY_CHROMIUM',
+    );
+
+    // And the skill must stop calling captures optional, must name the
+    // gate, and must forbid the install the agent cannot complete.
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('Produce these whenever you ran a harness');
+    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
+    expect(flat).toContain('Do **not** run `playwright install`');
+    expect(flat).not.toContain('Optionally `evidence/*.png`');
+  });
+
+  // The browser step's require.resolve + cli.js join is otherwise guarded
+  // only by a literal string match, so a Playwright bump that relocates
+  // cli.js would break the download at runtime while that assertion still
+  // passes. Execute the workflow's exact resolution against the installed
+  // tree and require it to land on a real cli.js. Skipped only when
+  // playwright is absent entirely (the require.resolve itself fails),
+  // mirroring the jq tool-availability guard above.
+  const resolveHarnessCli =
+    "process.stdout.write(require('path').join(require('path').dirname(" +
+    "require.resolve('playwright/package.json', { paths: ['./integration-tests/terminal-capture'] })" +
+    "), 'cli.js'))";
+  it.skipIf(spawnSync('node', ['-e', resolveHarnessCli]).status !== 0)(
+    'resolves the harness Playwright cli.js to a real file',
+    () => {
+      const cli = spawnSync('node', ['-e', resolveHarnessCli], {
+        encoding: 'utf8',
+      });
+      expect(cli.status).toBe(0);
+      expect(cli.stdout).toMatch(/cli\.js$/);
+      expect(existsSync(cli.stdout)).toBe(true);
+    },
+  );
+
+  // The publish job must host images on a per-PR branch that can coexist
+  // with the existing pr-assets/* namespace — a bare `pr-assets` leaf
+  // cannot be created while `pr-assets/…` children exist.
+  it('hosts evidence on a per-PR branch, not a bare pr-assets leaf', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain('pr-assets/${PR_NUMBER}-verify');
+    expect(publish).toContain('checkout -q --orphan');
+    expect(publish).not.toMatch(/--branch pr-assets["\s]/);
+  });
+
+  // Every `pr-assets/*` producer needs a deleter, or its branches are
+  // permanent: one single-commit branch per verified PR, forever, slowing
+  // `git ls-remote` and cluttering the branch list for every contributor.
+  // The verify lane became a second producer and was not added.
+  it('deletes both pr-assets producers when a PR closes', () => {
+    const cleanup = readFileSync(
+      '.github/workflows/web-shell-visuals-cleanup.yml',
+      'utf8',
+    );
+    // Both branch names, built from the same PR number.
+    expect(cleanup).toContain('pr-assets/web-shell-visuals-${PR_NUMBER}');
+    expect(cleanup).toContain('pr-assets/${PR_NUMBER}-verify');
+    // Runs in the base context and never touches PR code.
+    expect(cleanup).toContain('pull_request_target');
+    expect(cleanup).not.toContain('actions/checkout');
+    // One branch missing or one delete failing must not stop the other:
+    // most PRs produce neither, so absence is the normal case.
+    expect(cleanup).not.toContain('set -euo pipefail');
+    expect(cleanup).toContain('continue');
+    // ...but a real delete failure still has to be visible.
+    expect(cleanup).toContain('::warning::Failed to delete');
+
+    // Execute it against a stubbed gh: the loop must attempt both refs, and
+    // a missing first branch must not skip the second.
+    const script = cleanup.match(/run: \|-\n([\s\S]*?)$/)?.[1];
+    expect(script).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'assets-cleanup-'));
+    try {
+      const calls = join(dir, 'gh-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GH_CALLS"',
+          // Only the verify branch exists; the visuals one 404s.
+          'case "$*" in',
+          '  *web-shell-visuals*) exit 1 ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res = spawnSync('bash', ['-c', script.replace(/^ {10}/gm, '')], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_CALLS: calls,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '7999',
+        },
+      });
+      expect(res.status).toBe(0);
+      const lines = readFileSync(calls, 'utf8').trim().split('\n');
+      const deletes = lines.filter((l) => l.includes('DELETE'));
+      // The missing visuals branch was probed but never deleted...
+      expect(
+        lines.some((l) => l.includes('pr-assets/web-shell-visuals-7999')),
+      ).toBe(true);
+      expect(deletes.some((l) => l.includes('web-shell-visuals'))).toBe(false);
+      // ...and the loop carried on to the verify branch and deleted it.
+      // This is the assertion the whole test exists for: a `set -e` script
+      // would have exited on the first 404 and never reached here.
+      expect(deletes.some((l) => l.includes('pr-assets/7999-verify'))).toBe(
+        true,
+      );
+      expect(res.stdout).toContain('Deleted pr-assets/7999-verify');
+
+      // Delete-FAILURE path: the verify branch probes OK but its DELETE
+      // fails (transient 500, or the PAT lost contents:write). The loop
+      // must set a non-zero exit and surface the warning — without this, a
+      // future edit dropping `exit "$status"` leaves the job green while
+      // the orphaned branch this workflow exists to prevent accumulates.
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GH_CALLS"',
+          // The verify branch probes OK but its DELETE fails; the visuals
+          // branch still 404s on the probe.
+          'case "$*" in',
+          '  *web-shell-visuals*) exit 1 ;;',
+          '  *"-X DELETE"*) exit 1 ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const res2 = spawnSync('bash', ['-c', script.replace(/^ {10}/gm, '')], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_CALLS: calls,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '7999',
+        },
+      });
+      expect(res2.status).toBe(1);
+      expect(res2.stdout).toContain(
+        '::warning::Failed to delete pr-assets/7999-verify',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // One budget drives the agent's graceful kill and the watchdog threshold
+  // that distinguishes that kill from an OOM — both derive from a single
+  // AGENT_BUDGET_M, so they cannot drift apart. The job limit and the
+  // skill's advertised budget are still separate literals with their own
+  // quiet failures, so pin their relationship to the budget, not the number.
+  it('keeps the verify budget, watchdog and job limit consistent', () => {
+    const verifyJob = job('verify');
+    const runStep = stepIn('verify', 'Run verification agent');
+
+    const agentMinutes = Number(runStep.match(/AGENT_BUDGET_M=(\d+)/)?.[1]);
+    const jobMinutes = Number(
+      verifyJob.match(/^ {4}timeout-minutes: (\d+)/m)?.[1],
+    );
+    expect(agentMinutes).toBeGreaterThan(0);
+    expect(jobMinutes).toBeGreaterThan(0);
+
+    // The graceful kill and the watchdog threshold must both derive from
+    // AGENT_BUDGET_M rather than carry their own literals — that derivation
+    // is what makes the coupling correct by construction. A hardcoded
+    // `120m` or `7200` would reintroduce the drift this test exists to
+    // catch: set the threshold below the budget and a late OOM (137) reads
+    // as `timeout`, publishing "partial evidence" for a crash; set it above
+    // and a real timeout reads as a crash.
+    expect(runStep).toMatch(/timeout --kill-after=10s "\$\{AGENT_BUDGET_M\}m"/);
+    expect(runStep).toMatch(
+      /"\$AGENT_ELAPSED" -ge \$\(\(AGENT_BUDGET_M \* 60\)\)/,
+    );
+
+    // That comparison is only meaningful if the elapsed-time chain exists:
+    // drop the baseline and AGENT_ELAPSED is total shell uptime, so a late
+    // OOM reads as `timeout`; drop the assignment and it is empty, so the
+    // watchdog never fires and a real timeout reads as a crash. Pin both
+    // lines so deleting either fails here instead of silently in CI.
+    expect(runStep).toMatch(/AGENT_START=\$SECONDS/);
+    expect(runStep).toMatch(/AGENT_ELAPSED=\$\(\(SECONDS - AGENT_START\)\)/);
+
+    // A step-level `timeout-minutes` on the run step would cap the agent
+    // below the budget while every relationship above stays green — the
+    // job limit must be the only cap.
+    expect(runStep).not.toMatch(/^\s+timeout-minutes:/m);
+
+    // The job limit only guards infra hangs, so it must clear the agent
+    // budget plus install/build plus fixed overhead — otherwise the job
+    // is killed mid-run and the agent never ships its partial report.
+    // 20 minutes is the documented allowance (≈15m install/build + ≈5m
+    // tools, checkout, pin, upload, cleanup).
+    expect(jobMinutes).toBeGreaterThanOrEqual(agentMinutes + 20);
+
+    // And the skill has to advertise the same budget, or the agent
+    // self-limits to the old number and the raise does nothing.
+    const advertised = Number(verifySkill.match(/hard (\d+)-minute kill/)?.[1]);
+    expect(advertised).toBe(agentMinutes);
+    const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
+    expect(soft).toBeLessThan(agentMinutes);
+    expect(soft).toBeLessThanOrEqual(agentMinutes - 10);
+    // A proportional lower bound catches the most common drift — the hard
+    // kill is raised but the soft budget is forgotten, silently wasting CI
+    // time — without freezing the reserve at a fixed minute count for every
+    // future budget.
+    expect(soft).toBeGreaterThanOrEqual(Math.floor(agentMinutes * 0.8));
   });
 
   // Cleanups must never descend through a PR-writable parent, and an

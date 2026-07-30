@@ -103,6 +103,13 @@ interface NotificationContext {
   reason: string;
 }
 
+interface WorkingReaction {
+  owner: string;
+  repo: string;
+  commentId: number;
+  reactionId?: number;
+}
+
 function normalizeReasonFilter(
   config: GithubConfig,
   channelName: string,
@@ -204,6 +211,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
+  private readonly activeReactions = new Map<string, WorkingReaction>();
+  private readonly reactionsPendingRemoval = new Set<string>();
   private reasonFilter: Set<string> | null = null;
 
   constructor(
@@ -438,6 +447,89 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return response.data;
   }
 
+  /**
+   * Adds GitHub's eyes reaction to accepted comment prompts, then removes it
+   * when the prompt ends. Both operations are best-effort and never block the
+   * agent response.
+   */
+  protected override onPromptStart(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId || !/^\d+$/.test(messageId)) return;
+    const [owner, repo] = chatId.split('/');
+    if (!owner || !repo) return;
+    const commentId = Number(messageId);
+    const key = this.reactionKey(chatId, commentId);
+    if (this.activeReactions.has(key)) return;
+    const reaction: WorkingReaction = { owner, repo, commentId };
+    this.activeReactions.set(key, reaction);
+    void this.githubApi(
+      () =>
+        this.octokit.rest.reactions.createForIssueComment({
+          owner,
+          repo,
+          comment_id: commentId,
+          content: 'eyes',
+        }),
+      `acknowledgeComment(${messageId})`,
+    )
+      .then(({ data }) => {
+        reaction.reactionId = data.id;
+        if (this.reactionsPendingRemoval.delete(key)) {
+          this.removeReaction(key, reaction);
+        }
+      })
+      .catch((err) => {
+        this.activeReactions.delete(key);
+        this.reactionsPendingRemoval.delete(key);
+        process.stderr.write(
+          `[Channel:${this.name}] failed to acknowledge comment ${messageId}: ${err}\n`,
+        );
+      });
+  }
+
+  protected override onPromptEnd(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId || !/^\d+$/.test(messageId)) return;
+    const key = this.reactionKey(chatId, Number(messageId));
+    const reaction = this.activeReactions.get(key);
+    if (!reaction) return;
+    if (reaction.reactionId === undefined) {
+      this.reactionsPendingRemoval.add(key);
+      return;
+    }
+    this.removeReaction(key, reaction);
+  }
+
+  private reactionKey(chatId: string, commentId: number): string {
+    return `${chatId}:${commentId}`;
+  }
+
+  private removeReaction(key: string, reaction: WorkingReaction): void {
+    const { reactionId } = reaction;
+    if (reactionId === undefined) return;
+    this.activeReactions.delete(key);
+    void this.githubApi(
+      () =>
+        this.octokit.rest.reactions.deleteForIssueComment({
+          owner: reaction.owner,
+          repo: reaction.repo,
+          comment_id: reaction.commentId,
+          reaction_id: reactionId,
+        }),
+      `removeAcknowledgement(${reaction.commentId})`,
+    ).catch((err) => {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to remove acknowledgement from comment ${reaction.commentId}: ${err}\n`,
+      );
+    });
+  }
+
   protected async pollOnce(): Promise<void> {
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
     const since = new Date(
@@ -610,7 +702,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       senderName: trigger.actor,
       chatId: ctx.chatId,
       threadId: ctx.threadId,
-      messageId: String(trigger.id),
+      // GitHub issue-event IDs are not comment IDs. Prefix them so lifecycle
+      // acknowledgements only target real comment messages.
+      messageId: `event-${trigger.id}`,
       text:
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
