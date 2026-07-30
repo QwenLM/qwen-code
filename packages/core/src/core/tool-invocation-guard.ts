@@ -62,6 +62,10 @@ export async function evaluateToolInvocationGuard(
             : DENIED_MESSAGE,
       };
     }
+    debugLogger.debug(
+      'Tool invocation guard returned an unrecognized decision; failing closed',
+      decision,
+    );
   } catch (error) {
     // A configured guard is an enforcement boundary. Provider and cloning
     // failures must deny the call instead of falling back to execution.
