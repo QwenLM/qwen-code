@@ -19,6 +19,28 @@ import {
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
 
+// Resolves the real path of the nearest existing ancestor of targetPath. The
+// target file itself usually does not exist yet, but a symlinked parent directory
+// can still point outside the project root, so the ancestor must be resolved to
+// detect that. Mirrors realpathNearestExisting in exportCommand.ts/statsCommand.ts.
+const realpathNearestExisting = async (targetPath: string): Promise<string> => {
+  let currentPath = targetPath;
+  for (;;) {
+    try {
+      return await fsPromises.realpath(currentPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      const parentPath = path.dirname(currentPath);
+      if (parentPath === currentPath) {
+        return currentPath;
+      }
+      currentPath = parentPath;
+    }
+  }
+};
+
 export const summaryCommand: SlashCommand = {
   name: 'summary',
   get description() {
@@ -156,6 +178,14 @@ export const summaryCommand: SlashCommand = {
         : path.resolve(projectRoot, customPath);
 
       if (!isSubpath(projectRoot, resolved)) {
+        throw new Error(t('Summary path must be within the project root.'));
+      }
+
+      // A lexical check cannot see through symlinks: a link inside the project
+      // root may point outside it. Re-check containment on the real paths.
+      const realProjectRoot = await fsPromises.realpath(projectRoot);
+      const realResolved = await realpathNearestExisting(resolved);
+      if (!isSubpath(realProjectRoot, realResolved)) {
         throw new Error(t('Summary path must be within the project root.'));
       }
 

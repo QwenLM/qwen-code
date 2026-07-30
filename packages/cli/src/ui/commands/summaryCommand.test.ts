@@ -50,6 +50,7 @@ describe('summaryCommand custom export path', () => {
   let projectRoot: string;
 
   beforeEach(async () => {
+    vi.mocked(runSideQuery).mockClear();
     projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'summary-cmd-'));
   });
 
@@ -142,12 +143,34 @@ describe('summaryCommand custom export path', () => {
     const result = await run('../outside/leak.md');
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect(result.content).toContain('within the project root');
+    expect(runSideQuery).not.toHaveBeenCalled();
   });
 
   it('rejects an absolute path outside the project root', async () => {
     const result = await run('/tmp/summary-escape/leak.md');
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect(result.content).toContain('within the project root');
+    expect(runSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('rejects a path that escapes the project root via a symlink', async () => {
+    // Symlink creation typically requires elevated privileges on Windows.
+    if (process.platform === 'win32') {
+      return;
+    }
+    const outside = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'summary-outside-'),
+    );
+    try {
+      await fs.symlink(outside, path.join(projectRoot, 'link'));
+      const result = await run('link/leak.md');
+      expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+      expect(result.content).toContain('within the project root');
+      expect(await fileExists(path.join(outside, 'leak.md'))).toBe(false);
+      expect(runSideQuery).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('does not create the target directory when generation fails', async () => {
