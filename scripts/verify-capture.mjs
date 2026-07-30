@@ -158,7 +158,7 @@ function collectOutput(cmd) {
   const how =
     res.signal != null ? `killed by ${res.signal}` : `exited ${res.status}`;
   process.stderr.write(`verify-capture: command ${how}\n`);
-  return `${res.stdout ?? ''}${res.stderr ?? ''}`;
+  return [res.stdout, res.stderr].filter(Boolean).join('\n');
 }
 
 /** Parse ANSI into a cell grid, then emit it as SVG. */

@@ -119,6 +119,28 @@ describe('verify-capture helper', () => {
       expect(isPng(out)).toBe(true);
     }));
 
+  // stdout and stderr are collected separately by spawnSync; joining them with
+  // an empty separator glues a partial stdout line to the first stderr line,
+  // producing a line that never appeared on the real terminal.
+  it('separates stdout and stderr with a newline', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'both-streams.png');
+      const res = run([
+        '--out',
+        out,
+        '--cols',
+        '40',
+        '--',
+        'node',
+        '-e',
+        'process.stdout.write("result: 42"); process.stderr.write("warning: flaky")',
+      ]);
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      // Two separate lines, not one glued "result: 42warning: flaky".
+      expect(res.stdout).toContain('2 rows');
+    }));
+
   // Colour and weight are the whole reason to render rather than paste text:
   // a red FAIL beside a green PASS is what makes the cell readable at a glance.
   //
@@ -249,6 +271,14 @@ describe('verify-capture helper', () => {
       const res = run(['--', 'echo', 'hi']);
       expect(res.status).toBe(1);
       expect(res.stderr).toContain('--out is required');
+    });
+
+    it('rejects a flag with no value', () => {
+      for (const flag of ['--out', '--cols', '--rows', '--title']) {
+        const res = run([flag]);
+        expect(res.status, `${flag} accepted without a value`).toBe(1);
+        expect(res.stderr).toContain('needs a value');
+      }
     });
 
     it('rejects nonsense geometry', () =>
