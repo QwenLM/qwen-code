@@ -25,7 +25,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { testEfficacyCommand } from './test-efficacy.js';
+import { runOneMutant, testEfficacyCommand } from './test-efficacy.js';
 
 type Handler = (args: {
   report: string;
@@ -526,6 +526,15 @@ describe('test-efficacy probe isolation (#6832)', () => {
       mockNow += 50_000;
       return mockNow;
     });
+    // The skip must also be DISCLOSED on stdout — a capped run that stays
+    // silent lets `survived: 0` read as "every safety statement is covered".
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
     try {
       await runHandler({
         report: join(repo, 'report.json'),
@@ -535,6 +544,7 @@ describe('test-efficacy probe isolation (#6832)', () => {
       });
     } finally {
       dateSpy.mockRestore();
+      stdoutSpy.mockRestore();
     }
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
@@ -544,6 +554,57 @@ describe('test-efficacy probe isolation (#6832)', () => {
     for (const m of out.mutants.probed) {
       expect(m.verdict).toBe('survived');
     }
+    expect(stdoutChunks.join('')).toContain(
+      '1 mutant(s) skipped: the remaining budget cannot fit another suite run',
+    );
+  });
+
+  it('discloses a selection failure and still runs the revert probe', async () => {
+    // Mutant selection captures the diff with `git diff <base>`, and a base
+    // this repository cannot resolve (a shallow clone's truncated history has
+    // exactly this shape) makes that capture throw. The catch is load-bearing:
+    // without it the whole command crashes and the revert probe — which does
+    // not depend on selection — is lost with it. The failure must be disclosed
+    // as the mutants note, never as a crash and never as silent zero mutants.
+    const { wt } = scaffoldModifiedPr();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base: 'no-such-base-rev',
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.note).toContain('mutant selection failed');
+    expect(out.mutants.probed).toEqual([]);
+    // The revert probe still produced a real verdict from the fake runner.
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inert',
+      }),
+    ]);
+  });
+
+  it('never deletes a line that does not hold the selected statement', () => {
+    // `runOneMutant`'s mismatch guard, pinned directly: selection and the
+    // probe tree both derive from the same commit, so the command cannot reach
+    // this branch — but if the guard were dropped, a stale line number would
+    // delete the WRONG statement and attribute the run's verdict (here the
+    // fake runner's green — `survived`) to a statement that was never removed.
+    write('src/x.ts', 'alpha();\nbeta();\n');
+    const before = readFileSync(join(repo, 'src/x.ts'), 'utf8');
+
+    const got = runOneMutant(
+      repo,
+      { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+      ['src/x.test.ts'],
+    );
+
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.detail).toContain('does not match the selected statement');
+    expect(readFileSync(join(repo, 'src/x.ts'), 'utf8')).toBe(before);
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {

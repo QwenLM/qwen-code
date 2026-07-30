@@ -709,6 +709,74 @@ describe('selectMutants', () => {
     ]);
   });
 
+  it('does not let a nested template inside ${} close the outer literal', () => {
+    // A backtick inside a `${…}` interpolation opens a NESTED template.
+    // Reading it as the outer close marks the outer literal's remaining lines
+    // as code, and the template TEXT `baz.clear();` becomes a candidate whose
+    // deletion compiles and survives — a false finding filed against string
+    // content. Real code after the outer literal must still be selected.
+    const content = src([
+      'const x = `foo ${`bar;',
+      'baz.clear();',
+      '`} qux`;',
+      'after.clear();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(4), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 4, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('does not read a single-line nested-template interpolation as code', () => {
+    // The same nesting on one line: skipping from the outer backtick to the
+    // NEXT backtick exposes the inner template's content (`key.reset(`) as
+    // code, so a verb that is actually string content matches and a valid
+    // template assignment is selected and deleted — a wasted run and a false
+    // finding.
+    const content = src([
+      'export function summarize(entries: Entry[]) {',
+      "  summary = `Results: ${entries.map((e) => `key.reset(${e.id})`).join('; ')};`;",
+      '  live.clear();',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: [2, 3], hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 3, statement: 'live.clear();' },
+    ]);
+  });
+
+  it('rejects a class field below a template whose text contains a brace', () => {
+    // The class-body walk reads code lines, not raw text: a multi-line
+    // template whose CONTENT holds an unmatched `{` (agent briefs embed JSON
+    // examples) would otherwise read as an opening brace, stop the walk before
+    // the class header, and admit the field — deleting a declaration, not a
+    // cleanup. The method-body statement below it must still be selected.
+    const content = src([
+      'class Store {',
+      '  brief = `',
+      '    docs with { brace',
+      '  `;',
+      '  cache = new Map();',
+      '  reset() {',
+      '    this.cache.clear();',
+      '  }',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(9), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 7, statement: 'this.cache.clear();' },
+    ]);
+  });
+
   it('sees through a trailing comment on the candidate and its predecessor', () => {
     // The end-anchored checks run on the code portion only. A trailing comment
     // must not hide the candidate's `;` (dropping a genuine reset) nor the

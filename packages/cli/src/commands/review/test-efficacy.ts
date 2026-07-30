@@ -141,7 +141,7 @@ export interface MutantCandidate {
   statement: string;
 }
 
-interface MutantResult extends MutantCandidate {
+export interface MutantResult extends MutantCandidate {
   verdict: MutantVerdict;
   detail: string;
 }
@@ -202,6 +202,37 @@ const NON_STATEMENT_START_RE =
   /^(?:const|let|var|function|class|interface|type|enum|import|export|return|throw|yield|if|for|while|switch|do|else|try|catch|finally|case|default|break|continue|async|public|private|protected|readonly|static)\b/;
 
 /**
+ * Skip a template literal that opens at `line[start]`. Returns the index of
+ * its closing backtick, or -1 when it does not close on this line. Tracks
+ * `${…}` interpolation brace depth so a backtick seen inside an interpolation
+ * opens a NESTED template and is never mistaken for the outer close — without
+ * this, everything after the nested backtick (its string content included)
+ * reads as code. Approximate by construction (a `}` in a nested template's
+ * text, or in a string inside the interpolation, still miscounts), but the
+ * approximation only mis-scans shapes the delimiter check then rejects.
+ */
+function skipTemplateOnLine(line: string, start: number): number {
+  let depth = 0;
+  for (let i = start + 1; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '\\') {
+      i++;
+    } else if (depth === 0) {
+      if (ch === '`') return i;
+      if (ch === '$' && line[i + 1] === '{') {
+        depth = 1;
+        i++;
+      }
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+    }
+  }
+  return -1;
+}
+
+/**
  * Scan one line's code, skipping string literals and comments. Returns `null`
  * when the line cannot be judged in isolation — an unterminated string or block
  * comment (it continues on another line), or a closer without an opener (the
@@ -217,7 +248,13 @@ function scanLineDelimiters(
   let brace = 0;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
+    if (ch === '`') {
+      const close = skipTemplateOnLine(line, i);
+      if (close < 0) return null;
+      i = close;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
       i++;
       while (i < line.length && line[i] !== ch) {
         if (line[i] === '\\') i++;
@@ -244,69 +281,78 @@ function scanLineDelimiters(
   return { paren, bracket, brace };
 }
 
-/**
- * The code portion of a line: line (`//`) and block comments stripped and the
- * contents of single/double/template literals blanked (delimiters kept), then
- * trimmed. The mutant-selection checks are end-anchored — `endsWith(';')`, the
- * `$` alternatives in {@link SAFETY_VERB_RE}, the predecessor `/[;{}]$/` — so
- * they must see the real statement end: a trailing comment
- * (`reminders.clear(); // why`) otherwise hides it, and a verb inside a string
- * (`log("sessions.clear()")`) fakes it. Same skip rules as
- * {@link scanLineDelimiters}; a line that cannot be judged in isolation (an
- * unterminated literal or comment) is returned as-is, which only ever keeps the
- * conservative rejection those checks already apply.
- */
-function codeOnly(line: string): string {
-  let out = '';
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      out += ch;
-      i++;
-      while (i < line.length && line[i] !== ch) {
-        if (line[i] === '\\') i++;
-        i++;
-      }
-      if (i >= line.length) return line.trim();
-      out += ch;
-      continue;
-    }
-    if (ch === '/' && line[i + 1] === '/') break;
-    if (ch === '/' && line[i + 1] === '*') {
-      const close = line.indexOf('*/', i + 2);
-      if (close < 0) return line.trim();
-      i = close + 1;
-      continue;
-    }
-    out += ch;
-  }
-  return out.trim();
+interface FileScan {
+  /** Per line: does it START inside a template literal or block comment? */
+  inLiteral: boolean[];
+  /** Per line: its code portion — comments stripped, literal contents blanked
+   *  (delimiters kept), trimmed. */
+  codeLines: string[];
 }
 
 /**
- * For each line, whether it STARTS inside a template literal or block comment.
- * Without this, a safety-verb line inside a multi-line template (an agent-brief
- * string, a here-doc in a test) or a commented-out block would be "deleted"
- * without changing any behaviour — a guaranteed false survivor. Interpolations
- * (`${…}`) are treated as still-template: that can only skip a candidate, never
- * admit one.
+ * One pass over the whole file, feeding every text check mutant selection runs.
+ *
+ * `inLiteral`: without it, a safety-verb line inside a multi-line template (an
+ * agent-brief string, a here-doc in a test) or a commented-out block would be
+ * "deleted" without changing any behaviour — a guaranteed false survivor.
+ * Interpolations (`${…}`) are treated as still-template, tracked by brace
+ * depth so the backtick of a NESTED template inside `${…}` is not mistaken for
+ * the outer close (which would flag the outer literal's remaining lines as
+ * code and admit its text as candidates): still-template can only skip a
+ * candidate, never admit one.
+ *
+ * `codeLines`: the selection checks are end-anchored — `endsWith(';')`, the
+ * `$` alternatives in {@link SAFETY_VERB_RE}, the predecessor `/[;{}]$/` — so
+ * they must see the real statement end: a trailing comment
+ * (`reminders.clear(); // why`) otherwise hides it, and a verb inside a string
+ * (`log("sessions.clear()")`) fakes it. Whole-file state is what lets a line
+ * that is comment or template CONTENT come out empty — per-line stripping
+ * cannot know that, and its stray `{`/`}` mislead the class-body walk. A line
+ * holding an unterminated single/double-quoted string cannot be judged at all
+ * and is kept verbatim, which only ever preserves the conservative rejection
+ * the checks already apply. The scan stops such a string BEFORE its newline:
+ * consuming the `\n` (a `\`-continued line swallows it) would drop one per-line
+ * entry and shift every later line's verdict onto its neighbour — the template
+ * escape skip below guards its newline for the same reason.
  */
-function lineStartsInsideLiteral(content: string): boolean[] {
-  const flags: boolean[] = [];
+function scanFileLines(content: string): FileScan {
+  const inLiteral: boolean[] = [];
+  const codeLines: string[] = [];
   let state: 'code' | 'template' | 'comment' = 'code';
-  flags.push(state !== 'code');
+  let interpDepth = 0;
+  let buf = '';
+  let lineStart = 0;
+  let rawLine = false;
+  inLiteral.push(state !== 'code');
+  const endLine = (i: number) => {
+    codeLines.push(rawLine ? content.slice(lineStart, i).trim() : buf.trim());
+    buf = '';
+    rawLine = false;
+    lineStart = i + 1;
+  };
   for (let i = 0; i < content.length; i++) {
     const ch = content[i];
     if (ch === '\n') {
-      flags.push(state !== 'code');
+      endLine(i);
+      inLiteral.push(state !== 'code');
       continue;
     }
     if (state === 'template') {
-      // Mirror the single/double-quote guard below: a `\`-continued template
-      // line swallows its newline, so skipping that newline here would drop a
-      // flags entry and shift every later line's verdict onto its neighbour.
-      if (ch === '\\' && content[i + 1] !== '\n') i++;
-      else if (ch === '`') state = 'code';
+      if (ch === '\\' && content[i + 1] !== '\n') {
+        i++;
+      } else if (interpDepth === 0) {
+        if (ch === '`') {
+          state = 'code';
+          buf += '`';
+        } else if (ch === '$' && content[i + 1] === '{') {
+          interpDepth = 1;
+          i++;
+        }
+      } else if (ch === '{') {
+        interpDepth++;
+      } else if (ch === '}') {
+        interpDepth--;
+      }
       continue;
     }
     if (state === 'comment') {
@@ -317,7 +363,9 @@ function lineStartsInsideLiteral(content: string): boolean[] {
       continue;
     }
     if (ch === '`') {
+      buf += '`';
       state = 'template';
+      interpDepth = 0;
     } else if (ch === '/' && content[i + 1] === '*') {
       state = 'comment';
       i++;
@@ -329,13 +377,19 @@ function lineStartsInsideLiteral(content: string): boolean[] {
         if (content[k] === '\\' && content[k + 1] !== '\n') k++;
         k++;
       }
-      // An unterminated (or `\`-continued) string stops the scan BEFORE its
-      // newline: consuming the `\n` here would drop a flags entry and shift
-      // every later line's verdict onto its neighbour.
-      i = content[k] === '\n' ? k - 1 : k;
+      if (k < content.length && content[k] === ch) {
+        buf += ch + ch;
+        i = k;
+      } else {
+        rawLine = true;
+        i = k < content.length && content[k] === '\n' ? k - 1 : k;
+      }
+    } else {
+      buf += ch;
     }
   }
-  return flags;
+  endLine(content.length);
+  return { inLiteral, codeLines };
 }
 
 /**
@@ -347,11 +401,14 @@ function lineStartsInsideLiteral(content: string): boolean[] {
  * that opens the immediately enclosing block and report whether it belongs to a
  * `class`. A statement in a method body is enclosed by the method's brace, not
  * the class's, so it is unaffected. Over-rejecting here is the cheap error.
+ * Walks the {@link scanFileLines} code lines, never the raw text: a `{` in
+ * template or comment CONTENT (an agent brief embedding a JSON example) would
+ * otherwise read as an opening brace, stop the walk early, and admit the field.
  */
-function insideClassBody(lines: string[], idx: number): boolean {
+function insideClassBody(codeLines: string[], idx: number): boolean {
   let depth = 0;
   for (let j = idx - 1; j >= 0; j--) {
-    const code = codeOnly(lines[j]);
+    const code = codeLines[j];
     for (let i = code.length - 1; i >= 0; i--) {
       const ch = code[i];
       if (ch === '}') depth++;
@@ -359,7 +416,7 @@ function insideClassBody(lines: string[], idx: number): boolean {
         if (depth === 0) {
           if (/\bclass\b/.test(code.slice(0, i))) return true;
           for (let k = j - 1; k >= 0; k--) {
-            const prev = codeOnly(lines[k]);
+            const prev = codeLines[k];
             if (/[;{}]/.test(prev)) break;
             if (/\bclass\b/.test(prev)) return true;
           }
@@ -382,35 +439,29 @@ function insideClassBody(lines: string[], idx: number): boolean {
  * something: `;`, `{`, or `}`. Anything else — a trailing `(`, `,`, `=>`,
  * `&&`, or the bare `)` that may be an `if (…)` header — is skipped.
  */
-function isRemovableStatement(lines: string[], idx: number): boolean {
+function isRemovableStatement(
+  lines: string[],
+  codeLines: string[],
+  idx: number,
+): boolean {
   const t = (lines[idx] ?? '').trim();
   // End-anchored checks run on the code portion only, so a trailing comment
   // (`reminders.clear(); // why`) does not hide the statement's real end.
-  if (!codeOnly(t).endsWith(';')) return false;
+  if (!(codeLines[idx] ?? '').endsWith(';')) return false;
   if (!/^(?:await\s+)?[A-Za-z_$]/.test(t)) return false;
   if (NON_STATEMENT_START_RE.test(t)) return false;
-  if (insideClassBody(lines, idx)) return false;
+  if (insideClassBody(codeLines, idx)) return false;
   const depth = scanLineDelimiters(t);
   if (!depth || depth.paren !== 0 || depth.bracket !== 0 || depth.brace !== 0) {
     return false;
   }
+  // The nearest line that holds any CODE at all — a blank line, a comment
+  // (whether it looks like one or is the content of a block), or template text
+  // decides nothing about where the previous statement ended.
   let j = idx - 1;
-  while (j >= 0) {
-    const p = lines[j].trim();
-    if (
-      p === '' ||
-      p.startsWith('//') ||
-      p.startsWith('/*') ||
-      p.startsWith('*') ||
-      p.endsWith('*/')
-    ) {
-      j--;
-      continue;
-    }
-    break;
-  }
+  while (j >= 0 && codeLines[j] === '') j--;
   if (j < 0) return true;
-  return /[;{}]$/.test(codeOnly(lines[j]));
+  return /[;{}]$/.test(codeLines[j]);
 }
 
 export interface MutantSourceFile {
@@ -441,14 +492,14 @@ export function selectMutants(
   const rest: MutantCandidate[] = [];
   for (const f of files) {
     const lines = f.content.split('\n');
-    const inLiteral = lineStartsInsideLiteral(f.content);
+    const { inLiteral, codeLines } = scanFileLines(f.content);
     for (const n of [...f.addedLines].sort((a, b) => a - b)) {
       const raw = lines[n - 1];
       if (raw === undefined) continue;
       const t = raw.trim();
-      if (!SAFETY_VERB_RE.test(codeOnly(t))) continue;
+      if (!SAFETY_VERB_RE.test(codeLines[n - 1] ?? '')) continue;
       if (inLiteral[n - 1]) continue;
-      if (!isRemovableStatement(lines, n - 1)) continue;
+      if (!isRemovableStatement(lines, codeLines, n - 1)) continue;
       (f.hasNewTests ? preferred : rest).push({
         file: f.file,
         line: n,
@@ -900,8 +951,12 @@ function runProbeSuite(
  * enforce for deletes: the candidate resolved as a blob at the head commit, and
  * one git tree cannot hold both `dir` as a symlink and `dir/file` as a blob, so
  * in a fresh checkout every ancestor is a real directory.)
+ *
+ * Exported for its tests: the never-delete-a-mismatched-line guard cannot be
+ * reached through the command (selection and the probe tree derive from the
+ * same commit), so the test pins it directly rather than not at all.
  */
-function runOneMutant(
+export function runOneMutant(
   probeTree: string,
   mutant: MutantCandidate,
   probes: string[],
