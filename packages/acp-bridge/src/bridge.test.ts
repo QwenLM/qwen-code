@@ -11665,6 +11665,56 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
       shellSpy.mockRestore();
     });
+
+    it('executes direct shell in previous cwd when a pending cd fails', async () => {
+      const shellSpy = mockShellExecute();
+      const cdResult = deferred<{
+        previousCwd: string;
+        newCwd: string;
+        warnings: string[];
+      }>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+            return cdResult.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const cd = bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+          params: {
+            sessionId: session.sessionId,
+            path: WS_B,
+          },
+        }),
+      );
+      const shell = bridge.executeShellCommand(
+        session.sessionId,
+        'echo after-failed-cd',
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      await Promise.resolve();
+      expect(shellSpy).not.toHaveBeenCalled();
+      cdResult.reject(new Error('cd failed'));
+      await expect(cd).rejects.toThrow();
+      await shell;
+
+      expect(shellSpy.mock.calls[0]?.[1]).toBe(WS_A);
+
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
   });
 
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
