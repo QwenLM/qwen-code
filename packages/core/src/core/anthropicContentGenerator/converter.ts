@@ -176,6 +176,16 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveAssistantMessages(messages);
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
+    // Cross-turn complement to cleanOrphanedToolCalls's same-turn cascade --
+    // see pruneUntrustworthyThinking's doc for what this catches. Skipped
+    // for DeepSeek's injectThinkingOnToolUseTurns path: DeepSeek requires a
+    // synthetic empty thinking placeholder structurally on every tool-use
+    // turn and doesn't validate a signature the way Anthropic does, so
+    // "empty/untrustworthy thinking" isn't a meaningful concept there --
+    // pruning would strip the very placeholder DeepSeek needs.
+    if (!options.injectThinkingOnToolUseTurns) {
+      messages = pruneUntrustworthyThinking(messages);
+    }
     if (options.dropUnsignedAssistantThinking) {
       messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
     }
@@ -1078,6 +1088,12 @@ function mergeConsecutiveAssistantMessages(
  * Remove tool_use blocks that have no matching tool_result in the
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
+ * Also cascade-strips `thinking`/`redacted_thinking` blocks from an
+ * assistant turn whenever a `tool_use` is removed from that same turn by
+ * this pass -- the signature on those blocks was computed over content
+ * that included the now-removed `tool_use`, so replaying it produces
+ * Anthropic 400 "thinking blocks in the latest assistant message cannot be
+ * modified". The model regenerates thinking on its next turn regardless.
  *
  * A `tool_use` in the very last message (no message follows it at all) is
  * never condemned as orphaned here -- "no result yet" isn't the same as
@@ -1176,11 +1192,14 @@ function cleanOrphanedToolCalls(
       continue;
     }
 
+    let toolUseRemoved = false;
     const filtered = blocks.filter((b) => {
       const t = (b as { type?: string }).type;
       if (t === 'tool_use') {
         const id = (b as { id?: string }).id;
-        return !id || validToolUseBlocks.has(b as object);
+        const keep = !id || validToolUseBlocks.has(b as object);
+        if (!keep) toolUseRemoved = true;
+        return keep;
       }
       if (t === 'tool_result') {
         const id = (b as { tool_use_id?: string }).tool_use_id;
@@ -1189,8 +1208,20 @@ function cleanOrphanedToolCalls(
       return true;
     });
 
-    if (filtered.length > 0) {
-      cleaned.push({ ...message, content: filtered });
+    // A tool_use was stripped from this turn -- any thinking/
+    // redacted_thinking sibling in the same turn is now untrustworthy (see
+    // function doc). tool_use/thinking only ever co-occur on assistant
+    // messages, but the role check is defensive.
+    const finalBlocks =
+      toolUseRemoved && message.role === 'assistant'
+        ? filtered.filter((b) => {
+            const t = (b as { type?: string }).type;
+            return t !== 'thinking' && t !== 'redacted_thinking';
+          })
+        : filtered;
+
+    if (finalBlocks.length > 0) {
+      cleaned.push({ ...message, content: finalBlocks });
     } else {
       debugLogger.debug(
         'cleanOrphanedToolCalls: dropping message with only orphaned tool blocks',
@@ -1199,6 +1230,99 @@ function cleanOrphanedToolCalls(
   }
 
   return cleaned;
+}
+
+/**
+ * Complements {@link cleanOrphanedToolCalls}'s same-turn cascade: that pass
+ * only catches a `tool_use` sibling removed *by this same cleanup cycle*.
+ * It doesn't catch the cross-turn case -- a non-latest assistant turn whose
+ * `thinking` block survived earlier trims but whose `tool_use` was already
+ * gone by the time it entered this request's history (e.g. compaction that
+ * dropped old tool calls to save context budget). That turn's `thinking`
+ * signature no longer matches any current content and Anthropic 400s the
+ * same way: "thinking blocks in the latest assistant message cannot be
+ * modified".
+ *
+ * Only operates on assistant turns that are NOT the most recent assistant
+ * turn -- the latest assistant turn's signatures MUST be replayed
+ * byte-exact per Anthropic's contract regardless of tool_use presence.
+ * A strictly thinking-only older turn (no surviving tool_use, no other
+ * text) has its thinking downgraded to plain text, so the model still sees
+ * the historical reasoning without replaying an unreplayable signature;
+ * `redacted_thinking` has no plaintext fallback and is dropped instead. A
+ * turn that already carries real text alongside the untrustworthy thinking
+ * is left as-is -- narrower in scope than a blanket "no tool_use = always
+ * rewrite", matching the tested downstream fix this port is based on.
+ */
+function pruneUntrustworthyThinking(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  let latestAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'assistant') {
+      latestAssistantIdx = i;
+      break;
+    }
+  }
+
+  const out: AnthropicMessageParam[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) {
+      out.push(msg);
+      continue;
+    }
+    if (i === latestAssistantIdx) {
+      out.push(msg);
+      continue;
+    }
+
+    const blocks = msg.content as AnthropicContentBlockParam[];
+    const hasSurvivingToolUse = blocks.some(
+      (b) => (b as { type?: string }).type === 'tool_use',
+    );
+    const hasText = blocks.some((b) => {
+      const t = (b as { type?: string }).type;
+      const text = (b as { text?: unknown }).text;
+      return t === 'text' && typeof text === 'string' && text.length > 0;
+    });
+
+    const filtered: AnthropicContentBlockParam[] = [];
+    for (const raw of blocks) {
+      const bType = (raw as { type?: string }).type ?? '';
+      const bThinkingRaw = (raw as { thinking?: unknown }).thinking;
+      const bThinking =
+        typeof bThinkingRaw === 'string' ? bThinkingRaw : undefined;
+
+      // Defense-in-depth: empty-text signed thinking is always invalid.
+      if (
+        bType === 'thinking' &&
+        (bThinking === undefined || bThinking.length === 0)
+      ) {
+        continue;
+      }
+      // Thinking-only turn with no surviving tool_use is structurally
+      // untrustworthy. Downgrade thinking -> text so the model can still
+      // see the historical reasoning, but no signature is replayed.
+      if (bType === 'thinking' && !hasSurvivingToolUse && !hasText) {
+        filtered.push({
+          type: 'text',
+          text: bThinking ?? '',
+        } as AnthropicContentBlockParam);
+        continue;
+      }
+      // redacted_thinking has no plaintext fallback -- drop on untrustworthy
+      // turns.
+      if (bType === 'redacted_thinking' && !hasSurvivingToolUse && !hasText) {
+        continue;
+      }
+      filtered.push(raw);
+    }
+
+    if (filtered.length === 0) continue;
+    out.push({ role: msg.role, content: filtered });
+  }
+  return out;
 }
 
 function mergeConsecutiveUserMessages(

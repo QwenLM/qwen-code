@@ -1148,6 +1148,35 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('cascade-strips a signed thinking block when its sibling tool_use is orphaned in the same pass', () => {
+      // A thinking block's signature is computed over the full sibling
+      // content of its turn. If a sibling tool_use is stripped as an
+      // orphan, the signature no longer matches and replaying it 400s:
+      // "thinking blocks in the latest assistant message cannot be
+      // modified". So the thinking block must go with it.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning', thought: true, thoughtSignature: 'sig' },
+              { text: 'Let me help' },
+              { functionCall: { id: 'orphan', name: 'tool', args: {} } },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'never mind' }] },
+        ],
+      });
+
+      const assistantMsg = messages.find((m) => m.role === 'assistant');
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg!.content).toEqual([
+        { type: 'text', text: 'Let me help' },
+      ]);
+    });
+
     it('cleans orphaned tool_result blocks without matching tool_use', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -1598,6 +1627,128 @@ describe('AnthropicContentConverter', () => {
           { dropUnsignedAssistantThinking: true },
         ),
       ).toThrow('proxy omitted the thinking signature');
+    });
+  });
+
+  describe('cross-turn stale thinking signatures (pruneUntrustworthyThinking)', () => {
+    // Complements cleanOrphanedToolCalls's same-turn cascade: catches a
+    // non-latest assistant turn whose thinking survived earlier trims but
+    // whose tool_use was already gone by the time it entered this
+    // request's history (e.g. history compaction dropped the old tool
+    // call). That turn's thinking signature no longer matches any current
+    // content and Anthropic 400s the same way as the same-turn case.
+    it('downgrades a thinking-only non-latest turn (no tool_use, no other text) to plain text', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                text: 'stale reasoning',
+                thought: true,
+                thoughtSignature: 'sig',
+              },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const olderAssistant = messages[1];
+      expect(olderAssistant.role).toBe('assistant');
+      expect(olderAssistant.content).toEqual([
+        { type: 'text', text: 'stale reasoning' },
+      ]);
+    });
+
+    it('drops an empty redacted_thinking-derived turn entirely (defensive, no plaintext fallback)', () => {
+      // convertAnthropicResponseToGemini represents a redacted_thinking
+      // block as `{ text: '', thought: true }` (its opaque `data` doesn't
+      // survive the Gemini-Part round trip -- see that method's doc). When
+      // this round-trips back through processContent it becomes an
+      // empty-text `thinking` block on the wire, which the defensive
+      // empty-text guard drops outright. pruneUntrustworthyThinking's own
+      // dedicated `redacted_thinking`-type branch mirrors the same
+      // never-a-plaintext-fallback handling for a literal redacted_thinking
+      // block, matching the type-check pattern already used elsewhere in
+      // this file (stripThinkingFromAssistantMessages,
+      // dropUnsignedThinkingFromAssistantMessages) -- not independently
+      // reachable through this converter's own request-building path, but
+      // defensive against a future path constructing one directly.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ text: '', thought: true }],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0].content).toEqual([
+        { type: 'text', text: 'Sure, here you go.' },
+      ]);
+    });
+
+    it('leaves the latest assistant turn untouched even with no surviving tool_use', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                text: 'final reasoning',
+                thought: true,
+                thoughtSignature: 'sig',
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.content).toEqual([
+        { type: 'thinking', thinking: 'final reasoning', signature: 'sig' },
+      ]);
+    });
+
+    it('leaves a non-latest turn with real accompanying text untouched (narrower than a blanket rewrite)', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                text: 'stale reasoning',
+                thought: true,
+                thoughtSignature: 'sig',
+              },
+              { text: 'Here is my answer.' },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'anything else?' }] },
+          { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+        ],
+      });
+
+      const olderAssistant = messages[1];
+      expect(olderAssistant.content).toEqual([
+        { type: 'thinking', thinking: 'stale reasoning', signature: 'sig' },
+        { type: 'text', text: 'Here is my answer.' },
+      ]);
     });
   });
 
