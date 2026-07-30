@@ -7,7 +7,7 @@
 import { createContext, useContext } from 'react';
 
 export interface ThoughtExpandedValue {
-  /** Alt+T global toggle — expands every thinking block at once. */
+  /** Ctrl+O / Alt+T global toggle — expands every thinking block and tool output at once. */
   allExpanded: boolean;
   /**
    * Head ids of thoughts the user expanded individually (by clicking the

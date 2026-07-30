@@ -234,7 +234,6 @@ export default {
   Transcript: 'Transkript',
   'to close': 'zum Schließen',
   'to scroll': 'zum Scrollen',
-  'Failed to render transcript.': 'Transkript konnte nicht gerendert werden.',
   'Read {{count}} file': '{{count}} Datei gelesen',
   'Read {{count}} files': '{{count}} Dateien gelesen',
   'Reading {{count}} file': 'Lese {{count}} Datei',
@@ -1911,7 +1910,7 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
-  'to expand thinking': 'zum Erweitern der Gedanken',
+  'to expand details': 'zum Erweitern der Details',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

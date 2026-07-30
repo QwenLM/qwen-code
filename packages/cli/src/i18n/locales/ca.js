@@ -58,7 +58,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to expand thinking': 'per expandir el pensament',
+  'to expand details': 'per expandir els detalls',
   'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",
@@ -254,7 +254,6 @@ export default {
   Transcript: 'Transcripció',
   'to close': 'per tancar',
   'to scroll': 'per desplaçar',
-  'Failed to render transcript.': 'Error en renderitzar la transcripció.',
   'Read {{count}} file': 'Ha llegit {{count}} fitxer',
   'Read {{count}} files': 'Ha llegit {{count}} fitxers',
   'Reading {{count}} file': 'Llegint {{count}} fitxer',

@@ -99,7 +99,6 @@ describe('keyMatchers', () => {
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
       (key.ctrl && key.name === 'o') || (key.meta && key.name === 't'),
-    [Command.TOGGLE_TRANSCRIPT]: (_key: Key) => false,
   };
 
   // Test data for each command with positive and negative test cases
@@ -460,11 +459,6 @@ describe('keyMatchers', () => {
         createKey('t', { ctrl: true }),
         createKey('o'),
       ],
-    },
-    {
-      command: Command.TOGGLE_TRANSCRIPT,
-      positive: [],
-      negative: [createKey('o', { ctrl: true }), createKey('o')],
     },
   ];
 

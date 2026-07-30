@@ -89,7 +89,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to expand thinking': 'развернуть размышления',
+  'to expand details': 'развернуть детали',
 
   // ============================================================================
   // Поля системной информации
@@ -257,7 +257,6 @@ export default {
   Transcript: 'Транскрипт',
   'to close': 'закрыть',
   'to scroll': 'прокрутить',
-  'Failed to render transcript.': 'Не удалось отобразить транскрипт.',
   'Read {{count}} file': 'Прочитано файлов: {{count}}',
   'Read {{count}} files': 'Прочитано файлов: {{count}}',
   'Reading {{count}} file': 'Чтение файлов: {{count}}',

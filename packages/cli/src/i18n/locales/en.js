@@ -276,7 +276,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to expand thinking': 'to expand thinking',
+  'to expand details': 'to expand details',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -508,7 +508,6 @@ export default {
   Transcript: 'Transcript',
   'to close': 'to close',
   'to scroll': 'to scroll',
-  'Failed to render transcript.': 'Failed to render transcript.',
   'Read {{count}} file': 'Read {{count}} file',
   'Read {{count}} files': 'Read {{count}} files',
   'Reading {{count}} file': 'Reading {{count}} file',
