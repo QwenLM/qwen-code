@@ -6,7 +6,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   query,
-  isSDKAssistantMessage,
   isSDKSystemMessage,
   isSDKResultMessage,
   type SDKUserMessage,
@@ -139,8 +138,8 @@ describe('System Control (E2E)', () => {
             }
             if (isSDKResultMessage(message)) {
               resultWaiter.notifyResult();
-            }
-            if (isSDKAssistantMessage(message)) {
+              // Resolve on result (one per turn), not assistant message
+              // (which may fire multiple times per turn: thinking + text)
               if (!firstResponseReceived) {
                 firstResponseReceived = true;
                 resolvers.first?.();
