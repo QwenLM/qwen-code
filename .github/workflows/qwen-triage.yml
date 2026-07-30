@@ -3325,6 +3325,61 @@ jobs:
             printf '%s%s\n' "$esc" "$truncated"
             printf '</code></pre>\n\n</details>\n\n'
           }
+          # Render report.md as MARKDOWN instead of an escaped <pre> dump.
+          # The report is a curated bilingual document (tables, nested
+          # <details>, headings); the pre/code embedding displayed it as a
+          # wall of raw source (#8140's comment was the exhibit). Rendering
+          # keeps the same security floor via four line-independent
+          # guarantees:
+          #   1. every & < > is escaped, then ONLY the structural tags the
+          #      report legitimately uses are un-escaped back to live tags
+          #      (details/summary/pre/code/br) — no other tag can form, so
+          #      <img>/<script>/onerror never render;
+          #   2. the comment-open token is broken (<!-- becomes an escaped
+          #      no-op, the autofix-proven neutralizer), so no forged
+          #      qwen-triage:* marker can form anywhere in the body;
+          #   3. @ becomes &#64; — renders identically, never fires a
+          #      mention;
+          #   4. unbalanced <details> opens are counted and closed at the
+          #      end, so a malformed report cannot swallow the footer.
+          # An OVERSIZED report falls back to emit_block wholesale (cut
+          # markdown dangles fences/folds), as does any sanitizer failure.
+          emit_report() {
+            local file="$1" max="$2"
+            [ -n "$file" ] && [ -f "$file" ] || return 0
+            if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              return 0
+            fi
+            local san_file="${TMPDIR:-/tmp}/verify-report-$$"
+            if ! (
+              set -o pipefail
+              tr -d '\000' < "$file" |
+                sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+                  -e 's/&lt;\(\/\{0,1\}\)\(details\|summary\|pre\|code\|br\)&gt;/<\1\2>/g' \
+                  -e 's/&lt;!--/\&lt;!\\-\\-/g' \
+                  -e 's/@/\&#64;/g' > "$san_file"
+            ); then
+              rm -f "$san_file"
+              emit_block 'Verification report (report.md)' "$file" "$max"
+              return 0
+            fi
+            local opens closes
+            # `|| true` inside the substitution: grep exits 1 on zero
+            # matches, and under the step's pipefail that would kill the
+            # whole composer for a report with no folds at all.
+            opens="$(grep -o '<details>' "$san_file" | wc -l || true)"
+            closes="$(grep -o '</details>' "$san_file" | wc -l || true)"
+            printf '### Verification report\n\n'
+            cat "$san_file"
+            rm -f "$san_file"
+            printf '\n'
+            while [ "$opens" -gt "$closes" ]; do
+              printf '</details>\n'
+              opens=$(( opens - 1 ))
+            done
+            printf '\n'
+          }
 
           # Host the agent's evidence images (if any) on a per-PR branch
           # (pr-assets/<N>-verify, matching hand-run convention) and build
@@ -3695,7 +3750,7 @@ jobs:
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
-              emit_block 'Verification report (report.md)' "$REPORT" 45000
+              emit_report "$REPORT" 45000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi

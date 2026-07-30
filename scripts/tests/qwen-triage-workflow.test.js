@@ -1549,6 +1549,102 @@ describe('qwen-triage verify hardening', () => {
   // tests do not cover it. Execute it: hostile content must stay literal,
   // and the escaped body must land under GitHub's 65,536-char comment cap
   // (the cap is applied AFTER escaping for exactly this reason).
+  it('renders report.md as sanitized markdown with an escaped-pre fallback', () => {
+    // #8140's verify comment displayed the whole curated bilingual report
+    // as a wall of raw markdown source inside <pre><code> — tables, bold
+    // markers, and literal <details> tags all rendered as text. report.md
+    // now renders as MARKDOWN, holding the same security floor: only
+    // structural tags un-escape, the comment-open token is broken so no
+    // forged qwen-triage:* marker can form in the RAW body the upsert
+    // greps, @ cannot fire mentions, and unbalanced folds are closed so a
+    // malformed report cannot swallow the footer. Oversized reports fall
+    // back to the escaped <pre> wholesale (cut markdown dangles fences).
+    const publishStep = step('Post verification report comment');
+    const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    const script = body.replace(/^ {10}/gm, '');
+    const helpers = script.slice(
+      script.indexOf('html_escape()'),
+      script.indexOf('EVIDENCE_SECTION='),
+    );
+    expect(helpers).toContain('emit_report()');
+    // The report call site uses the rendering path; the tmux lane keeps
+    // its escaped embedding.
+    expect(script).toContain('emit_report "$REPORT" 45000');
+    expect(step('Post tmux result comment')).not.toContain('emit_report');
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-render-'));
+    try {
+      const report = join(dir, 'report.md');
+      writeFileSync(
+        report,
+        [
+          '# Deep Verification — `merge-ready`',
+          '',
+          '**Verdict:** pass && <T<U>> ok',
+          '',
+          '| scenario | match |',
+          '| --- | --- |',
+          '| success | ✅ |',
+          '',
+          '<details>',
+          '<summary>中文摘要</summary>',
+          '',
+          '- 结论：通过 @everyone <img src=x onerror=alert(1)>',
+          '- marker: <!-- qwen-triage:verify -->',
+          '',
+          '</details>',
+          '',
+          '<details>',
+          '<summary>unclosed fold</summary>',
+          'tail',
+          '',
+        ].join('\n'),
+      );
+      const emit = (file, max) => {
+        const proc = spawnSync(
+          'bash',
+          ['-c', `${helpers}\nemit_report "$1" ${max}`, '_', file],
+          { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+        );
+        expect(proc.status).toBe(0);
+        return proc.stdout;
+      };
+
+      const out = emit(report, 45000);
+      // Markdown structure survives (renders), instead of an escaped dump.
+      expect(out).toContain('### Verification report');
+      expect(out).toContain('| scenario | match |');
+      expect(out).toContain('**Verdict:**');
+      expect(out).toContain('<details>');
+      expect(out).toContain('<summary>中文摘要</summary>');
+      expect(out).not.toContain('<pre><code>');
+      // Security floor: no live marker in the RAW body, no mention, no
+      // non-allowlisted tag, entities escaped.
+      expect(out).not.toContain('<!-- qwen-triage');
+      expect(out).not.toContain('@everyone');
+      expect(out).not.toContain('<img');
+      expect(out).toContain('&#64;everyone');
+      expect(out).toContain('&amp;&amp;');
+      expect(out).toContain('&lt;T&lt;U&gt;&gt;');
+      expect(out.match(/<(?!\/?(details|summary|pre|code|br)\b)[a-z]/g)).toBe(
+        null,
+      );
+      // The unclosed fold is balanced so the footer cannot be swallowed.
+      const opens = out.split('<details>').length - 1;
+      const closes = out.split('</details>').length - 1;
+      expect(opens).toBe(closes);
+
+      // Oversize → wholesale fallback to the escaped pre embedding.
+      const big = join(dir, 'big.md');
+      writeFileSync(big, `x${'y'.repeat(46000)}`);
+      const fb = emit(big, 45000);
+      expect(fb).toContain('<pre><code>');
+      expect(fb).toContain('Verification report (report.md, truncated)');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('escapes and size-caps the verify report body', () => {
     const publishStep = step('Post verification report comment');
     const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
@@ -2663,10 +2759,12 @@ describe('qwen-triage verify publish fidelity', () => {
           expect(assertZh).toBeGreaterThan(details);
           expect(assertZh).toBeLessThan(detailsEnd);
         }
-        // The report block stays outside the Chinese fold.
-        expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
+        // The report section stays outside the Chinese fold — now rendered
+        // as markdown under its own heading, not an escaped <pre> dump.
+        expect(body.indexOf('### Verification report')).toBeGreaterThan(
           detailsEnd,
         );
+        expect(body).toContain('## real report');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
