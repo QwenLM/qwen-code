@@ -359,6 +359,7 @@ async function writeJsonFile(
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
+    forceMode: true,
   });
 }
 

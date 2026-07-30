@@ -42,7 +42,9 @@ describe('getAgentViewSupervisorSocketPath', () => {
       platform: 'linux',
       runtimeDir,
     });
-    expect(socketPath.startsWith(`${runtimeDir}${path.sep}`)).toBe(true);
+    expect(socketPath.startsWith(`${path.join(runtimeDir)}${path.sep}`)).toBe(
+      true,
+    );
     expect(socketPath.endsWith('.sock')).toBe(true);
   });
 
