@@ -245,6 +245,29 @@ export function createDaemonWorkspaceActions({
         );
         return workspace.approveWorkspaceChannelPairing(name, { code });
       },
+
+      async approvals(name) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel pairing approvals failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelPairingApprovals(name),
+          'Load channel pairing approvals timed out',
+        );
+      },
+
+      async revoke(name, senderId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Revoke channel pairing approval failed',
+        );
+        return workspace.revokeWorkspaceChannelPairingApproval(name, {
+          senderId,
+        });
+      },
     },
 
     async loadMcpStatus() {

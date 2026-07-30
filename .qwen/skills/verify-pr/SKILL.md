@@ -104,6 +104,13 @@ secondary claims. Budget by value:
 1. **A/B load-bearing proof of the central claim** (always, ~half the budget).
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
+4. **Capture the A/B and the matrix as they print** (~5 minutes, whenever
+   `QWEN_VERIFY_CHROMIUM=1`). This is a budget line, not an afterthought:
+   two live runs with the browser installed and working produced **zero**
+   images, because the instruction lived in the artifact contract while the
+   plan the agent follows is this list. Decide here how many captures the
+   round needs — normally two, at most a handful — and reserve the time.
+   See the artifact contract for the mechanics and the naming rule.
 
 Everything else is explicitly out of scope — and is **listed as not covered**
 in the report. Never let breadth eat the A/B: one proven load-bearing claim
@@ -572,6 +579,8 @@ central claim from being tested — say why.
    them. Cite the tables below by name instead of restating their numbers in
    prose: a number written twice is a number that can disagree with itself.
 3. **Central claim + A/B table** (cells, oracles, head vs control counts).
+   Reference the capture of those cells here by its filename — a table with
+   no witness beside it is the shape every report has had so far.
 4. **Corrections**, when an earlier review round or bot comment described
    the code inaccurately (a wrong ARIA role, a wrong mechanism, a
    misattributed cause). State the correct fact with its evidence and label
