@@ -56,6 +56,14 @@ describe('optimizeMultilineEraseLines', () => {
 });
 
 describe('installTerminalRedrawOptimizer', () => {
+  beforeEach(() => {
+    // Clear WSL/Windows Terminal env vars so existing tests expecting the
+    // optimizer to be active are not silently skipped when run in WSL. #7634
+    vi.stubEnv('WSL_DISTRO_NAME', '');
+    vi.stubEnv('WSL_INTEROP', '');
+    vi.stubEnv('WT_SESSION', '');
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
     resetTerminalRedrawStats();
@@ -138,6 +146,17 @@ describe('installTerminalRedrawOptimizer', () => {
 
   it('is skipped on Windows Terminal via WT_SESSION (#7634)', () => {
     vi.stubEnv('WT_SESSION', 'console-12345');
+    const write = vi.fn(() => true);
+    const stdout = { write } as unknown as NodeJS.WriteStream;
+    const restore = installTerminalRedrawOptimizer(stdout);
+
+    expect(stdout.write).toBe(write);
+    restore();
+    expect(stdout.write).toBe(write);
+  });
+
+  it('is skipped on WSL via WSL_INTEROP (#7634)', () => {
+    vi.stubEnv('WSL_INTEROP', '/run/WSL/123_interop');
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
     const restore = installTerminalRedrawOptimizer(stdout);
