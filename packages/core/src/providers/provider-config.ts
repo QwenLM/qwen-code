@@ -307,6 +307,7 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
  */
 const DEFAULT_BASE_URLS: Partial<Record<AuthType, string>> = {
   [AuthType.USE_OPENAI]: 'https://api.openai.com/v1',
+  [AuthType.USE_OPENAI_RESPONSES]: 'https://api.openai.com',
   [AuthType.USE_ANTHROPIC]: 'https://api.anthropic.com/v1',
   [AuthType.USE_GEMINI]: 'https://generativelanguage.googleapis.com',
 };
