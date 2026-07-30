@@ -212,6 +212,12 @@ vi.mock('../voice/VoiceButton', () => ({
   },
 }));
 
+vi.mock('./SpecularComposerEffect', () => ({
+  SpecularComposerEffect: () => (
+    <span data-web-shell-composer-specular aria-hidden="true" />
+  ),
+}));
+
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -233,6 +239,7 @@ afterEach(() => {
   mockComposerCoreState.composerTags = [];
   mockComposerCoreState.pastedImages = [];
   mockComposerCoreState.removeTopTag.mockReset();
+  vi.useRealTimers();
 });
 
 function renderChatEditor(props: {
@@ -250,6 +257,7 @@ function renderChatEditor(props: {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
+  placeholderText?: string;
   customization?: WebShellCustomization;
 }) {
   const {
@@ -318,6 +326,73 @@ describe('ChatEditor voice toolbar integration', () => {
         visibleToolbarActions: [],
       }).querySelector('[data-testid="voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor animation layers', () => {
+  it('mounts the inert specular layer without replacing composer controls', () => {
+    const container = renderChatEditor({});
+
+    expect(
+      container.querySelector('[data-web-shell-composer-specular]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer-editor]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer-submit]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the typewriter visible through automatic focus', () => {
+    const container = renderChatEditor({});
+    const editor = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-editor]',
+    );
+    const outside = document.createElement('button');
+    container.appendChild(outside);
+    editor!.tabIndex = 0;
+
+    act(() => editor!.focus());
+    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
+
+    act(() => {
+      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    });
+    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
+
+    act(() => outside.focus());
+    expect(container.querySelector('[data-typewriter-visible]')).not.toBeNull();
+  });
+
+  it('plays the typewriter twice and then keeps the completed text', () => {
+    vi.useFakeTimers();
+    const container = renderChatEditor({ placeholderText: 'abc' });
+    const typewriter = () =>
+      container.querySelector('[data-web-shell-composer-typewriter]');
+
+    expect(typewriter()?.textContent).toBe('_');
+
+    act(() => vi.advanceTimersByTime(3 * 45));
+    expect(typewriter()?.textContent).toBe('abc_');
+
+    act(() => vi.advanceTimersByTime(3000));
+    expect(typewriter()?.textContent).toBe('_');
+
+    act(() => vi.advanceTimersByTime(3 * 45));
+    expect(typewriter()?.textContent).toBe('abc_');
+
+    act(() => vi.advanceTimersByTime(3001));
+    expect(typewriter()?.textContent).toBe('abc_');
+  });
+
+  it('does not mount the typewriter for an empty placeholder', () => {
+    const container = renderChatEditor({ placeholderText: '' });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-typewriter]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
   });
 });
 
