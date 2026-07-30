@@ -6909,6 +6909,11 @@ export function App({
     },
     [sessionActions, reportError],
   );
+  const handleAskUserConfirm = useCallback(
+    (id: string, selectedOption: string, answers?: Record<string, string>) =>
+      sessionActions.submitPermission(id, selectedOption, answers),
+    [sessionActions],
+  );
 
   const handleCancel = useCallback(() => {
     const dropped = queuedShellCommandsRef.current.length;
@@ -8879,7 +8884,8 @@ export function App({
                         >
                           <AskUserQuestion
                             request={pendingAskUserApproval}
-                            onConfirm={handleConfirm}
+                            onConfirm={handleAskUserConfirm}
+                            onError={reportError}
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
                           />
