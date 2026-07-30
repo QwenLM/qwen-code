@@ -220,8 +220,12 @@ async function render(raw, opts) {
     const baseline = PAD + (y + titleRows + 1) * CELL_H - 5;
     for (const cell of cells) {
       if (cell.blank) continue;
-      const colour =
+      const mapped =
         cell.fg >= 0 && cell.fg < ANSI.length ? ANSI[cell.fg] : FG_DEFAULT;
+      // SGR 30 maps to #1e1e1e — identical to the canvas BG — so black-foreground
+      // text (the normal way to label a coloured badge, e.g. vitest's project
+      // badge) would vanish as black-on-black; lift it to the default grey.
+      const colour = mapped === BG ? FG_DEFAULT : mapped;
       body +=
         `<text x="${(PAD + cell.x * CELL_W).toFixed(1)}" y="${baseline}" ` +
         `fill="${colour}"${cell.bold ? ' font-weight="bold"' : ''}>` +
@@ -256,11 +260,17 @@ async function render(raw, opts) {
         sum + Math.max(1, Math.ceil(stripAnsi(line).length / opts.cols)),
       0,
     );
-  if (wrappedRows > opts.rows) {
+  // Newline-terminated output needs one row BEYOND its last line: the final
+  // CRLF advances the cursor off the viewport and scrolls one row away, so with
+  // scrollback: 0 the usable capacity is rows - 1, not rows. Comparing against
+  // opts.rows instead let input of exactly --rows lines lose its top silently —
+  // the very case this warning exists for.
+  const capacity = /\r?\n$/.test(raw) ? opts.rows - 1 : opts.rows;
+  if (wrappedRows > capacity) {
     process.stderr.write(
       `verify-capture: warning: input occupies ${wrappedRows} terminal rows; ` +
-        `--rows ${opts.rows} kept the last ${opts.rows} and dropped the top ` +
-        `${wrappedRows - opts.rows}\n`,
+        `--rows ${opts.rows} kept the last ${capacity} and dropped the top ` +
+        `${wrappedRows - capacity}\n`,
     );
   }
   process.stdout.write(

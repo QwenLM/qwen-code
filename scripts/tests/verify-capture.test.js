@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -181,6 +182,39 @@ describe('verify-capture helper', () => {
       expect(isPng(out)).toBe(true);
     }));
 
+  // SGR 30 maps to #1e1e1e — identical to the canvas BG — so black-foreground
+  // text (the normal way to label a coloured badge, e.g. vitest's project
+  // badge) vanished as black-on-black. The helper lifts it to the default
+  // grey; assert the rendered pixels contain something other than the background
+  // colour, which a black-on-black render cannot. sharp's PNG bytes are not
+  // run-to-run deterministic, so compare pixels, not file bytes.
+  it('keeps black-foreground text readable instead of black-on-black', async () => {
+    let png;
+    withDir((dir) => {
+      const out = path.join(dir, 'black.png');
+      expect(
+        run(['--out', out, '--cols', '30'], {
+          input: `${ESC}[30mFAIL PASS${ESC}[0m\n`,
+        }).status,
+      ).toBe(0);
+      // Read the bytes before withDir removes the dir; decode them below.
+      png = readFileSync(out);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const BG = 0x1e; // #1e1e1e canvas background
+    let visible = false;
+    for (let i = 0; i + 2 < data.length; i += info.channels) {
+      if (data[i] !== BG || data[i + 1] !== BG || data[i + 2] !== BG) {
+        visible = true;
+        break;
+      }
+    }
+    expect(visible, 'SGR 30 rendered as black-on-black').toBe(true);
+  });
+
   // A bare LF leaves xterm's cursor in the old column, so line 2 renders
   // indented by line 1's width and the capture looks like a staircase. The
   // helper normalises to CRLF; assert the rendered height matches the line
@@ -248,7 +282,7 @@ describe('verify-capture helper', () => {
       expect(res.status).toBe(0);
       expect(isPng(out)).toBe(true);
       expect(res.stderr).toContain('warning: input occupies 6 terminal rows');
-      expect(res.stderr).toContain('dropped the top 2');
+      expect(res.stderr).toContain('dropped the top 3');
     }));
 
   // A line wider than --cols wraps into ceil(len / cols) terminal rows, so
@@ -263,7 +297,23 @@ describe('verify-capture helper', () => {
       expect(res.status).toBe(0);
       expect(isPng(out)).toBe(true);
       expect(res.stderr).toContain('warning: input occupies 6 terminal rows');
-      expect(res.stderr).toContain('dropped the top 2');
+      expect(res.stderr).toContain('dropped the top 3');
+    }));
+
+  // The defect the guard exists for: at EXACTLY --rows newline-terminated lines
+  // the final CRLF still scrolls the top line off the scrollback-less viewport,
+  // yet the old `wrappedRows > opts.rows` test stayed silent. Usable capacity is
+  // rows - 1, so exactly --rows lines must warn that one was dropped.
+  it('warns at exactly --rows lines, where the top line is already gone', () =>
+    withDir((dir) => {
+      const out = path.join(dir, 'boundary.png');
+      const res = run(['--out', out, '--rows', '4'], {
+        input: 'l1\nl2\nl3\nl4\n',
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      expect(res.stderr).toContain('warning: input occupies 4 terminal rows');
+      expect(res.stderr).toContain('dropped the top 1');
     }));
 
   describe('fails loudly rather than writing a broken image', () => {
