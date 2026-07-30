@@ -9,6 +9,7 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  isDebugLogFileEnabled,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
@@ -316,8 +317,11 @@ export async function startInteractiveUI(
     // fallback UI was drawn on the alternate screen and is gone.
     const renderError = consumeLastRenderError();
     if (renderError) {
+      const loggedHint = isDebugLogFileEnabled()
+        ? ' (logged to debug file)'
+        : '';
       writeStderrLine(
-        `\nRendering error (logged to debug file): ${sanitizeTerminalText(renderError.message)}`,
+        `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
       );
     }
   });

@@ -18,6 +18,7 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
 import {
@@ -25,6 +26,8 @@ import {
   sanitizeTerminalText,
 } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
+
+const debugLogger = createDebugLogger('THINK_RENDER');
 
 export const THINKING_ICON = `${ICON.THEREFORE} `;
 export const THINKING_ICON_PENDING = `${ICON.BECAUSE} `;
@@ -351,6 +354,11 @@ const ThinkBody: React.FC<{
             {sanitizeTerminalText(err.message)}
           </Text>
         )}
+        onError={(error, info) => {
+          debugLogger.error(
+            `[THINK_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+          );
+        }}
       >
         <MarkdownDisplay
           text={text}

@@ -83,6 +83,7 @@ import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 import {
@@ -171,7 +172,7 @@ import { handleUncaughtException, isExpectedPtyRaceError } from './cli.js';
 
 let uncaughtExceptionHandler: ((error: unknown) => void) | undefined;
 
-export function setupUncaughtExceptionHandler(sessionId: string) {
+export function setupUncaughtExceptionHandler(config: Config) {
   // runCliEntryPoint() registered the basic handleUncaughtException at startup,
   // before the session ID existed. Replace it now: two listeners conflict — the
   // first calls process.exit(1) so the second never runs — and the basic one
@@ -193,7 +194,9 @@ export function setupUncaughtExceptionHandler(sessionId: string) {
     // abandoned by the process.exit() below. Write synchronously instead.
     let logged = false;
     try {
-      fs.appendFileSync(Storage.getDebugLogPath(sessionId), line, 'utf8');
+      const logPath = Storage.getDebugLogPath(config.getSessionId());
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.appendFileSync(logPath, line, 'utf8');
       logged = true;
     } catch {
       // Best-effort: if the debug dir doesn't exist yet or the disk is
@@ -212,7 +215,7 @@ export function setupUncaughtExceptionHandler(sessionId: string) {
       }
     }
     writeStderrLineSafe(
-      `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${error.stack ?? error.message}`,
+      `\nFatal: uncaught exception${logged ? ' (logged to debug file)' : ''}\n${sanitizeTerminalText(error.stack ?? error.message)}`,
     );
     process.exit(1);
   };
@@ -921,7 +924,7 @@ export async function main() {
     // Install the uncaughtException handler once the session ID is known.
     // Before this point VP mode is not active, so Node's default stderr
     // output is visible and sufficient.
-    setupUncaughtExceptionHandler(config.getSessionId());
+    setupUncaughtExceptionHandler(config);
 
     startEarlyStartupPrefetches(config);
 

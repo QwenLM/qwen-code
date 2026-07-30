@@ -2697,7 +2697,7 @@ describe('startInteractiveUI', () => {
 
     expect(unmount).toHaveBeenCalledTimes(1);
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      '\nRendering error (logged to debug file): render boom',
+      '\nRendering error: render boom',
     );
   });
 
