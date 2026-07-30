@@ -52,8 +52,11 @@ const child = spawn(executable, [], {
           ),
         }),
   },
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
+let processOutput = '';
+captureProcessOutput(child.stdout, 'stdout');
+captureProcessOutput(child.stderr, 'stderr');
 child.unref();
 
 try {
@@ -62,6 +65,14 @@ try {
 } finally {
   terminate(child.pid);
   fs.rmSync(workspace, { recursive: true, force: true });
+}
+
+function captureProcessOutput(stream, name) {
+  stream?.on('data', (chunk) => {
+    if (processOutput.length >= 16 * 1024) return;
+    processOutput += `[${name}] ${chunk.toString('utf8')}`;
+    processOutput = processOutput.slice(0, 16 * 1024);
+  });
 }
 
 async function waitForReady(offset) {
@@ -90,7 +101,7 @@ async function waitForReady(offset) {
     })
     .slice(offset);
   throw new Error(
-    `Timed out waiting for packaged desktop runtime.\n${contents}`,
+    `Timed out waiting for packaged desktop runtime.\n${contents}${processOutput}`,
   );
 }
 

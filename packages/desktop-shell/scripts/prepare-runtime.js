@@ -31,25 +31,27 @@ const binDir = path.join(packageRoot, 'bin');
 const target = desktopTarget();
 const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';
 
+const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
 if (!skipBuild) {
-  execFileSync('npm', ['run', 'build', '--', '--cli-only'], {
+  execFileSync(npm, ['run', 'build', '--', '--cli-only'], {
     cwd: sourceRoot,
     stdio: 'inherit',
   });
-  execFileSync('npm', ['run', 'build', '--workspace=packages/webui'], {
+  execFileSync(npm, ['run', 'build', '--workspace=packages/webui'], {
     cwd: sourceRoot,
     stdio: 'inherit',
   });
-  execFileSync('npm', ['run', 'build', '--workspace=packages/web-shell'], {
+  execFileSync(npm, ['run', 'build', '--workspace=packages/web-shell'], {
     cwd: sourceRoot,
     stdio: 'inherit',
   });
-  execFileSync('npm', ['run', 'bundle'], {
+  execFileSync(npm, ['run', 'bundle'], {
     cwd: sourceRoot,
     stdio: 'inherit',
     env: { ...process.env, DEV: 'true' },
   });
-  execFileSync('npm', ['run', 'prepare:package'], {
+  execFileSync(npm, ['run', 'prepare:package'], {
     cwd: sourceRoot,
     stdio: 'inherit',
   });
