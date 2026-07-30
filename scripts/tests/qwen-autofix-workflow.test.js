@@ -2415,25 +2415,30 @@ describe('qwen-autofix workflow', () => {
     // Measured 2026-07-29: 28 open takeover PRs, 8 idle in "nothing new"
     // state for 10+ hours. Every idle inspection costs a unit of the
     // shared MAX_CANDIDATE_INSPECTIONS budget and a slice of the serial
-    // API walk (the walk is what delayed #8002's first pickup by ~6
-    // minutes). Candidates idle >24h are inspected on roughly every 4th
-    // scan. The staleness signal is the list's own updatedAt — no API
-    // call, and no per-candidate process fork either: one jq builds the
-    // idle SET, and the loop tests membership like the busy skip does.
+    // API walk (a few fewer gh round-trips per scan; the #8002 delay was
+    // queue/startup, which the candidate loop cannot recover). Candidates
+    // idle >24h are inspected on about one scan in four. The staleness
+    // signal is the list's own updatedAt — no API call, and no
+    // per-candidate process fork either: one jq builds the idle SET, and
+    // the loop tests membership like the busy skip does.
     expect(
       (reviewScanJob.match(/--json [^\n]*\bupdatedAt\b/g) ?? []).length,
     ).toBe(2);
     expect(reviewScanJob).toContain(`IDLE_CUTOFF="$(date -u -d '24 hours ago'`);
-    // Slotting quantum is the SCAN TICK (600s, same quantum as ROT_OFF),
-    // not the hour: an hourly slot against a */10 cron means 6 back-to-back
-    // inspections then a ~3h blind window — same 25% average, terrible
-    // shape. With 600s the gap is bounded at ~40 minutes, which is what
-    // the operator-facing strings promise.
-    expect(reviewScanJob).toContain(
-      'IDLE_SLOT_NOW="$(( ($(date -u +%s) / 600) % 4 ))"',
+    // The slot is a time quantum mod 4 keyed against PR % 4 (same quantum
+    // family as ROT_OFF). The exact quantum is deliberately NOT pinned:
+    // against the real irregular scan cadence (~40-70 min gaps, not */10)
+    // no constant quantum bounds the gap — the wait is geometric (measured
+    // median ~2h, p90 ~6h) — and 3600 s actually measures better on p90/max
+    // than 600 s, so CI must not forbid a future quantum change. The
+    // behavioral replay below (which passes slotNow explicitly) protects
+    // the slot logic; this pin only asserts the mod-4 time-quantum shape.
+    expect(reviewScanJob).toMatch(
+      /IDLE_SLOT_NOW="\$\(\(.*\$\(date -u \+%s\) \/ \d+\) % 4 \)\)"/,
     );
-    expect(reviewScanJob).not.toMatch(/IDLE_SLOT_NOW[^\n]*\/ 3600/);
-    expect(reviewScanJob).toContain('gap ≤40m');
+    expect(reviewScanJob).toContain(
+      'inspected ~1 scan in 4 (median ~2h, p90 ~6h)',
+    );
     // Fail-open on the forced-dispatch path: it never builds the list
     // files, so the set stays empty and a forced PR is always inspected.
     expect(reviewScanJob).toContain("IDLE_PRS=' '");
@@ -2497,7 +2502,7 @@ describe('qwen-autofix workflow', () => {
     expect(
       runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 0 }),
     ).toBe('skip');
-    // Idle but IN its slot → inspected (the gap is bounded).
+    // Idle but IN its slot → inspected (its slot matched this scan).
     expect(
       runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 1 }),
     ).toBe('inspect');
