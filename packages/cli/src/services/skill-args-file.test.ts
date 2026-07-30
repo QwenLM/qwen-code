@@ -16,7 +16,7 @@ import {
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, join, isAbsolute, relative, resolve } from 'node:path';
 import {
   skillArgsPath,
   writeSkillArgs,
@@ -116,7 +116,7 @@ describe('writeSkillArgs', () => {
     // is the best-effort guard for Windows, where O_NOFOLLOW does not exist; CI
     // runs on POSIX, so this case does not isolate that guard on its own.
     const linkPath = skillArgsPath('review');
-    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    mkdirSync(dirname(linkPath), { recursive: true });
     symlinkSync(join(dir, 'missing.txt'), linkPath);
 
     expect(writeSkillArgs('review', 'attacker')).toBeNull();
