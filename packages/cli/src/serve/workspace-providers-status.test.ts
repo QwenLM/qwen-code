@@ -758,6 +758,111 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
+  it('strips a spaced password from a URL with a bare single-label host', async () => {
+    // Requiring a dot in the host excluded exactly the hosts an intranet uses:
+    // a proxy name, a container name like `ollama`, a k8s service. Not
+    // recognising the host means not recognising the userinfo, and the fallback
+    // then cut the URL at the first space -- inside the password.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:my password@internalhost/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://internalhost/v1',
+    );
+    expect(JSON.stringify(result)).not.toContain('my password');
+  });
+
+  it('keeps a single-label host and the prose after it when the URL is pathless', async () => {
+    // The other half of the same omission: with the real `@` unrecognised, the
+    // lazy tail ran on into the prose and stripped at the email's `@` instead,
+    // reporting a host the user never configured and deleting the contact line.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://user:pass@intranet — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://intranet — contact admin@example.com',
+    );
+    expect(JSON.stringify(result)).not.toContain('pass@');
+  });
+
+  it('does not read a port as a password when punctuation follows it', async () => {
+    // A port was only recognised at end of message or before a space, so the
+    // comma in `:8443, contact` left `8443` looking like the start of a
+    // password -- and the tail then found the email's `@`.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443, contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example:8443, contact admin@example.com',
+    );
+  });
+
+  it('strips a spaced password when the URL ends a sentence', async () => {
+    // The characters allowed to follow a host were enumerated, and `.` was not
+    // among them, so a URL at the end of a sentence -- the most ordinary shape
+    // an error message has -- was not recognised, and the password leaked.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:my pass@host.example. Retry later';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed https://host.example. Retry later',
+    );
+    expect(JSON.stringify(result)).not.toContain('my pass');
+  });
+
+  it('keeps the host and the following sentence when a period ends the URL', async () => {
+    // Same omission, corrupting instead of leaking: the trailing period made
+    // the real `@` invisible, so the strip landed on the email in the next
+    // sentence and both the host and that sentence were rewritten away.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://user:pass@host.example. Contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://host.example. Contact admin@example.com',
+    );
+    expect(JSON.stringify(result)).not.toContain('pass@');
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),

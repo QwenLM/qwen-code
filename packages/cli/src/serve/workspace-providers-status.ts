@@ -250,11 +250,23 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 /**
- * A host a provider base URL can address: a dotted name, a bracketed IPv6
- * literal, or `localhost`, with an optional port. A bare single label is not
- * included, so the `s` in `p@s s@host.example` cannot pass for one.
+ * A host a provider base URL can address, with an optional port.
+ *
+ * Three shapes, because a single pattern for all of them would be wrong at the
+ * edges. A bracketed IPv6 literal. A dotted name, whose first label may be a
+ * single character (`a.example`). Or a bare label — intranet proxies, container
+ * names like `ollama`, and k8s service names have no dot — required to be at
+ * least two characters, which is what keeps a one-letter fragment of a password
+ * from passing for a host.
+ *
+ * What follows the host is required only to be something a host cannot continue
+ * into, rather than a fixed list of delimiters. Enumerating them meant a URL
+ * ending a sentence was not recognised, since `.`, `,` and `)` were not on the
+ * list — and the consequence of not recognising a host is a credential leak, so
+ * the list being incomplete was not a cosmetic problem. A trailing dot is
+ * allowed to belong to the sentence rather than the name.
  */
-const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|localhost|[A-Za-z\d-]+(?:\.[A-Za-z\d-]+)+)(?::\d+)?(?:[/?#\s]|$)`;
+const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d](?:[A-Za-z\d-]*\.)+[A-Za-z\d-]+|[A-Za-z\d][A-Za-z\d-]+)(?::\d+)?(?![A-Za-z\d-])`;
 
 /**
  * A `user:password@` prefix, where the password may contain spaces.
@@ -265,7 +277,8 @@ const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|localhost|[A-Za-z\d
  * whitespace, and the negative lookahead rejects digits that read as a port
  * rather than the start of a password. `:8443 ` alone is not enough to tell
  * the two apart — a password may also begin with digits and a space
- * (`user:123 secret@host`) — so the digits count as a port only at end of span
+ * (`user:123 secret@host`) — so the digits count as a port when they end the
+ * span, when a non-space follows them (sentence punctuation: `:8443, contact`),
  * or when a further space follows before the `@`, which is prose rather than a
  * one-space password.
  *
@@ -275,7 +288,7 @@ const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|localhost|[A-Za-z\d
  * must be followed by something addressable as a host.
  */
 const CREDENTIAL_PREFIX_PATTERN = new RegExp(
-  String.raw`^[^\s/?#'"\`<>]+:(?!\d+(?:$|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  String.raw`^[^\s/?#'"\`<>]+:(?!\d+(?:$|[^\s\d]|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
 );
 
 /**
