@@ -6751,6 +6751,21 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('converts /skills arguments to a direct skill command', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/skills bugfix';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/bugfix',
+      expect.any(Object),
+    );
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
   it('opens plugin management tabs from the sidebar', async () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,

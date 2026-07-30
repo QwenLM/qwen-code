@@ -1204,6 +1204,7 @@ const EN: Messages = {
   'queue.insertCommandDisabled':
     "Commands can't be inserted into the running turn; they run after it finishes.",
   'queue.submitting': 'Submitting...',
+  'queue.serverQueued': 'Queued on server...',
   'queue.editing': 'Editing...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
@@ -3676,6 +3677,7 @@ const ZH: Messages = {
   'queue.inserted': '已插入，下次模型调用生效。',
   'queue.insertCommandDisabled': '命令无法插入当前回合。',
   'queue.submitting': '提交中...',
+  'queue.serverQueued': '服务器排队中...',
   'queue.editing': '编辑中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
