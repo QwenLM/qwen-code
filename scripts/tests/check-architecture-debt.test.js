@@ -13,6 +13,7 @@ import {
   countCorePublicExports,
   countSourceLines,
   findArchitectureDebtGrowth,
+  hasGoogleGenaiImport,
   isEligibleProductionPath,
   measureArchitectureDebt,
   validateBaseline,
@@ -75,7 +76,18 @@ describe('architecture debt ratchet', () => {
     expect(findings.join('\n')).toMatch(/threshold 1000/);
   });
 
-  it('fails when a new production @google/genai import appears', () => {
+  it('detects static imports, re-exports, and dynamic imports without comments or strings', () => {
+    expect(hasGoogleGenaiImport("import type { Part } from '@google/genai';")).toBe(true);
+    expect(hasGoogleGenaiImport("export { Part } from '@google/genai';")).toBe(true);
+    expect(hasGoogleGenaiImport("const load = () => import('@google/genai');")).toBe(true);
+    expect(
+      hasGoogleGenaiImport(
+        `const text = "import('@google/genai')"; // import '@google/genai'`,
+      ),
+    ).toBe(false);
+  });
+
+  it('fails when a new production @google/genai re-export appears', () => {
     const measurement = measure([
       {
         path: 'packages/core/src/known.ts',
@@ -83,7 +95,7 @@ describe('architecture debt ratchet', () => {
       },
       {
         path: 'packages/core/src/new-genai.ts',
-        content: "import { GoogleGenAI } from '@google/genai';\n",
+        content: "export { GoogleGenAI } from '@google/genai';\n",
       },
     ]);
     const findings = findArchitectureDebtGrowth({ measurement, baseline });
