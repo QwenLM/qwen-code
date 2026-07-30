@@ -128,6 +128,11 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /**
+   * Immutable launch-time execution policy for a restricted fork.
+   * Absence preserves unrestricted execution; an empty list means deny-all.
+   */
+  executionAllowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
@@ -301,10 +306,6 @@ export interface AttachJsonlOptions {
    * turn. Used by transcript-first resume to reconstruct fork context.
    */
   bootstrapHistory?: Content[];
-  /**
-   * Immutable launch-time execution allowlist for fork resume.
-   */
-  bootstrapExecutionAllowedTools?: string[];
   /**
    * Launching prompt that should be treated as the first model-facing task
    * prompt during transcript-based resume. For forks this may differ from the
@@ -532,21 +533,10 @@ export function attachJsonlTranscriptWriter(
     recordUserMessage(event.text, event.kind ?? 'message');
   };
 
-  const hasBootstrapPayload =
-    options.bootstrapHistory !== undefined ||
-    options.bootstrapExecutionAllowedTools !== undefined;
-
-  if (hasBootstrapPayload) {
+  if (options.bootstrapHistory !== undefined) {
     const payload: AgentBootstrapRecordPayload = {
       kind: 'fork',
       history: structuredClone(options.bootstrapHistory ?? []),
-      ...(options.bootstrapExecutionAllowedTools !== undefined
-        ? {
-            executionAllowedTools: structuredClone(
-              options.bootstrapExecutionAllowedTools,
-            ),
-          }
-        : {}),
     };
     recordSystem('agent_bootstrap', payload);
   }

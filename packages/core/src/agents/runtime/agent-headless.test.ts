@@ -1533,7 +1533,10 @@ describe('subagent.ts', () => {
           (part) => part.functionResponse?.id === 'call_edit',
         )?.functionResponse;
         expect(deniedResponse?.name).toBe(ToolNames.EDIT);
-        expect(deniedResponse?.response?.['error']).toContain('fork_tools');
+        expect(deniedResponse?.response?.['error']).toContain(
+          'execution allowlist',
+        );
+        expect(deniedResponse?.response?.['error']).not.toContain('fork_tools');
         expect(deniedResponse?.response?.['error']).not.toContain('not found');
         expect(toolCallEvents.map((event) => event.callId).sort()).toEqual([
           'call_edit',
@@ -1595,6 +1598,225 @@ describe('subagent.ts', () => {
         )[0]?.functionResponse;
         expect(response?.id).toBe('call_read');
         expect(response?.response?.['error']).toContain('No tools are allowed');
+      });
+
+      it('caps and decouples the execution allowlist denial message', async () => {
+        const toolDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const tool = {
+          name: ToolNames.READ_FILE,
+          schema: toolDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn().mockReturnValue(tool),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+        const executionAllowedTools = Array.from(
+          { length: 12 },
+          (_, index) => `tool_${index}_${'x'.repeat(50)}`,
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [toolDef], executionAllowedTools },
+        );
+        await scope.execute(new ContextState());
+
+        const error = (
+          mockSendMessageStream.mock.calls[1][1].message as Part[]
+        )[0]?.functionResponse?.response?.['error'];
+        expect(error).toContain('execution allowlist');
+        expect(error).toContain('(+4 more)');
+        expect(error).not.toContain('fork_tools');
+        expect(String(error).length).toBeLessThan(400);
+        expect(tool.build).not.toHaveBeenCalled();
+      });
+
+      it('matches an exact MCP server allowlist entry without crossing server boundaries', async () => {
+        const githubName = normalizeToolNameForProvider('mcp__github__search');
+        const enterpriseName = normalizeToolNameForProvider(
+          'mcp__github-enterprise__search',
+        );
+        const githubDef: FunctionDeclaration = {
+          name: githubName,
+          description: 'Search GitHub',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const enterpriseDef: FunctionDeclaration = {
+          name: enterpriseName,
+          description: 'Search GitHub Enterprise',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const githubInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Search GitHub'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'github result',
+            returnDisplay: 'github result',
+          }),
+        };
+        const githubTool = {
+          name: githubName,
+          serverName: 'github',
+          serverToolName: 'search',
+          schema: githubDef,
+          build: vi.fn().mockReturnValue(githubInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const enterpriseTool = {
+          name: enterpriseName,
+          serverName: 'github-enterprise',
+          serverToolName: 'search',
+          schema: enterpriseDef,
+          build: vi.fn(),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn((name: string) =>
+            name === githubName
+              ? githubTool
+              : name === enterpriseName
+                ? enterpriseTool
+                : undefined,
+          ),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: 'call_github', name: githubName, args: {} },
+              { id: 'call_enterprise', name: enterpriseName, args: {} },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [githubDef, enterpriseDef],
+            executionAllowedTools: ['mcp__github'],
+          },
+        );
+        await scope.execute(new ContextState());
+
+        expect(githubInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(enterpriseTool.build).not.toHaveBeenCalled();
+        const responses = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          responses.find(
+            (part) => part.functionResponse?.id === 'call_enterprise',
+          )?.functionResponse?.response?.['error'],
+        ).toContain('execution allowlist');
+      });
+
+      it('lets mcp__* match MCP tools without matching built-in tools', async () => {
+        const mcpName = normalizeToolNameForProvider('mcp__github__search');
+        const mcpDef: FunctionDeclaration = {
+          name: mcpName,
+          description: 'Search GitHub',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const builtinDef: FunctionDeclaration = {
+          name: ToolNames.READ_FILE,
+          description: 'Read a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const mcpInvocation = {
+          params: {},
+          getDescription: vi.fn().mockReturnValue('Search GitHub'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'github result',
+            returnDisplay: 'github result',
+          }),
+        };
+        const mcpTool = {
+          name: mcpName,
+          serverName: 'github',
+          serverToolName: 'search',
+          schema: mcpDef,
+          build: vi.fn().mockReturnValue(mcpInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        const builtinTool = {
+          name: ToolNames.READ_FILE,
+          schema: builtinDef,
+          build: vi.fn(),
+        } as unknown as AnyDeclarativeTool;
+        const { config } = await createMockConfig({
+          getTool: vi.fn((name: string) =>
+            name === mcpName
+              ? mcpTool
+              : name === ToolNames.READ_FILE
+                ? builtinTool
+                : undefined,
+          ),
+        });
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: 'call_mcp', name: mcpName, args: {} },
+              {
+                id: 'call_builtin',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'fork',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          {
+            tools: [mcpDef, builtinDef],
+            executionAllowedTools: ['mcp__*'],
+          },
+        );
+        await scope.execute(new ContextState());
+
+        expect(mcpInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(builtinTool.build).not.toHaveBeenCalled();
+        const responses = mockSendMessageStream.mock.calls[1][1]
+          .message as Part[];
+        expect(
+          responses.find((part) => part.functionResponse?.id === 'call_builtin')
+            ?.functionResponse?.response?.['error'],
+        ).toContain('execution allowlist');
       });
 
       it('matches long MCP wildcard patterns by raw server identity and boundary', async () => {
@@ -1707,12 +1929,12 @@ describe('subagent.ts', () => {
         expect(
           responses.find((part) => part.functionResponse?.id === 'call_repo2')
             ?.functionResponse?.response?.['error'],
-        ).toContain('fork_tools');
+        ).toContain('execution allowlist');
         expect(
           responses.find(
             (part) => part.functionResponse?.id === 'call_boundary',
           )?.functionResponse?.response?.['error'],
-        ).toContain('fork_tools');
+        ).toContain('execution allowlist');
       });
 
       it('should ignore duplicate provider tool-call ids across rounds', async () => {

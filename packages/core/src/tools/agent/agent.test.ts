@@ -20,6 +20,7 @@ import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import {
   buildChildMessage,
+  buildForkedMessages,
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   runInForkContext,
@@ -807,7 +808,14 @@ describe('AgentTool', () => {
         agentTool.validateToolParams({
           ...validParams,
           subagent_type: 'fork',
-          fork_tools: [ToolNames.READ_FILE, 'mcp__github'],
+          fork_tools: [
+            ToolNames.READ_FILE,
+            'unknown_exact_tool',
+            'mcp__github',
+            'mcp__*',
+            'mcp__github__*',
+            'mcp__github__read_*',
+          ],
         }),
       ).toBeNull();
       expect(
@@ -826,7 +834,14 @@ describe('AgentTool', () => {
           subagent_type: 'fork',
           fork_tools: ['  '],
         }),
-      ).toMatch(/array of non-empty tool names/i);
+      ).toMatch(/without surrounding whitespace/i);
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: [' read_file '],
+        }),
+      ).toMatch(/without surrounding whitespace/i);
       expect(
         agentTool.validateToolParams({
           ...validParams,
@@ -841,6 +856,24 @@ describe('AgentTool', () => {
           fork_tools: ['*'],
         }),
       ).toMatch(/omit it for unrestricted execution/i);
+    });
+
+    it.each([
+      'read*',
+      'read_*',
+      'mcp__github*',
+      'mcp__*__read',
+      'mcp__github__read*more',
+      'mcp__github__read**',
+      'mcp____*',
+    ])('rejects structurally invalid fork_tools wildcard %s', (toolName) => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          fork_tools: [toolName],
+        }),
+      ).toMatch(/wildcard entries/i);
     });
 
     it.each([undefined, 'file-search'])(
@@ -863,6 +896,24 @@ describe('AgentTool', () => {
           subagent_type: 'fork',
           fork_tools: [ToolNames.READ_FILE],
           name: 'worker',
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('reports fork_tools applicability before malformed entries', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'general-purpose',
+          fork_tools: ['*'],
+        }),
+      ).toMatch(/only be used with subagent_type "fork"/i);
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          name: 'worker',
+          fork_tools: ['*'],
         }),
       ).toMatch(/named teammate/i);
     });
@@ -3008,6 +3059,48 @@ describe('AgentTool', () => {
       );
     });
 
+    it('adds the execution restriction only when fork_tools is supplied', () => {
+      const unrestricted = buildChildMessage('inspect the implementation');
+      const restricted = buildChildMessage('inspect the implementation', [
+        ToolNames.READ_FILE,
+        'mcp__github',
+      ]);
+      const denyAll = buildChildMessage('reason without tools', []);
+
+      expect(unrestricted).not.toContain('TOOL EXECUTION RESTRICTION');
+      expect(restricted).toContain('TOOL EXECUTION RESTRICTION');
+      expect(restricted).toContain(
+        JSON.stringify([ToolNames.READ_FILE, 'mcp__github']),
+      );
+      expect(restricted).toContain(
+        'Other visible tool declarations are unavailable',
+      );
+      expect(denyAll).toContain('may not execute any tools');
+    });
+
+    it('includes the execution restriction in the synthetic fork suffix', () => {
+      const messages = buildForkedMessages(
+        'inspect the implementation',
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: ToolNames.READ_FILE,
+                args: { path: 'README.md' },
+              },
+            },
+          ],
+        },
+        [ToolNames.READ_FILE],
+      );
+
+      const suffix = messages[1]?.parts?.find((part) => part.text)?.text;
+      expect(suffix).toContain('TOOL EXECUTION RESTRICTION');
+      expect(suffix).toContain(JSON.stringify([ToolNames.READ_FILE]));
+    });
+
     it('forks in interactive mode', async () => {
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
@@ -3313,11 +3406,19 @@ describe('AgentTool', () => {
       await invocation.execute();
 
       const toolConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+      const promptConfig = vi.mocked(AgentHeadless.create).mock.calls[0]?.[2];
+      expect(promptConfig).toMatchObject({
+        renderedSystemPrompt: 'parent system',
+      });
       expect(toolConfig?.tools).toStrictEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
       ]);
       expect(toolConfig?.executionAllowedTools).toEqual([ToolNames.READ_FILE]);
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        expect.stringContaining(JSON.stringify([ToolNames.READ_FILE])),
+      );
     });
 
     it('omitting subagent_type uses general-purpose, not fork', async () => {
@@ -6042,7 +6143,7 @@ describe('AgentTool', () => {
       });
     });
 
-    it('does not persist fork capability snapshots in the bootstrap transcript', async () => {
+    it('stores fork execution policy in the sidecar without capability snapshots in the bootstrap transcript', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
@@ -6074,6 +6175,7 @@ describe('AgentTool', () => {
       );
 
       const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       const createSpy = vi
         .spyOn(AgentHeadless, 'create')
         .mockResolvedValue(mockAgent);
@@ -6087,10 +6189,15 @@ describe('AgentTool', () => {
       expect(writerOptions).toBeDefined();
       expect(writerOptions).not.toHaveProperty('bootstrapSystemInstruction');
       expect(writerOptions).not.toHaveProperty('bootstrapTools');
+      expect(writerOptions).not.toHaveProperty(
+        'bootstrapExecutionAllowedTools',
+      );
       expect(writerOptions).toMatchObject({
         bootstrapHistory: [{ role: 'model', parts: [{ text: 'Ready' }] }],
-        bootstrapExecutionAllowedTools: ['Read'],
         launchTaskPrompt: expect.any(String),
+      });
+      expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+        executionAllowedTools: ['Read'],
       });
       const createArgs = createSpy.mock.calls[0];
       expect(createArgs?.[5]).toEqual({
@@ -6099,6 +6206,7 @@ describe('AgentTool', () => {
       });
 
       attachSpy.mockRestore();
+      writeMetaSpy.mockRestore();
       createSpy.mockRestore();
     });
   });

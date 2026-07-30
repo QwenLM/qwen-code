@@ -254,6 +254,28 @@ export interface AgentParams {
 
 const debugLogger = createDebugLogger('AGENT');
 
+function isValidForkToolWildcard(toolName: string): boolean {
+  if (!toolName.includes('*')) {
+    return true;
+  }
+  if (toolName === 'mcp__*') {
+    return true;
+  }
+  if (
+    !toolName.startsWith('mcp__') ||
+    !toolName.endsWith('*') ||
+    toolName.slice(0, -1).includes('*')
+  ) {
+    return false;
+  }
+
+  // After removing `mcp__` and the trailing wildcard, a server-scoped tool
+  // pattern must still contain a non-empty raw server name followed by `__`.
+  // The tool-name prefix may be empty, as in `mcp__github__*`.
+  const patternBody = toolName.slice('mcp__'.length, -1);
+  return patternBody.lastIndexOf('__') > 0;
+}
+
 /**
  * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
  * caller-owned git worktree that a sub-agent should be pinned to (e.g. the
@@ -807,7 +829,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
             minLength: 1,
           },
           description:
-            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. The model-visible tool declarations remain unchanged for prompt-cache sharing. Omit for unrestricted execution; use an empty array to reject every tool call.',
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Omit for unrestricted execution; use an empty array to reject every tool call.',
         },
         run_in_background: {
           type: 'boolean',
@@ -1126,23 +1148,30 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     }
 
     if (params.fork_tools !== undefined) {
-      if (
-        !Array.isArray(params.fork_tools) ||
-        params.fork_tools.some(
-          (toolName) =>
-            typeof toolName !== 'string' || toolName.trim().length === 0,
-        )
-      ) {
-        return 'Parameter "fork_tools" must be an array of non-empty tool names.';
-      }
-      if (params.fork_tools.includes('*')) {
-        return 'Parameter "fork_tools" does not accept "*"; omit it for unrestricted execution.';
-      }
       if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
         return 'Parameter "fork_tools" can only be used with subagent_type "fork".';
       }
       if (params.name !== undefined) {
         return 'Parameter "fork_tools" cannot be used when spawning a named teammate.';
+      }
+      if (
+        !Array.isArray(params.fork_tools) ||
+        params.fork_tools.some(
+          (toolName) =>
+            typeof toolName !== 'string' ||
+            toolName.trim().length === 0 ||
+            toolName.trim() !== toolName,
+        )
+      ) {
+        return 'Parameter "fork_tools" must be an array of non-empty tool names without surrounding whitespace.';
+      }
+      if (params.fork_tools.includes('*')) {
+        return 'Parameter "fork_tools" does not accept "*"; omit it for unrestricted execution.';
+      }
+      if (
+        params.fork_tools.some((toolName) => !isValidForkToolWildcard(toolName))
+      ) {
+        return 'Parameter "fork_tools" wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*".';
       }
     }
 
@@ -1671,6 +1700,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const forkedMessages = buildForkedMessages(
           this.params.prompt,
           lastMessage,
+          this.params.fork_tools,
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -1700,7 +1730,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     // Default: directive with fork boilerplate as task_prompt
     if (!taskPrompt) {
-      taskPrompt = buildChildMessage(this.params.prompt);
+      taskPrompt = buildChildMessage(
+        this.params.prompt,
+        this.params.fork_tools,
+      );
     }
 
     // Read the parent's live generationConfig (systemInstruction + tool
@@ -3147,9 +3180,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            bootstrapExecutionAllowedTools: isFork
-              ? bgToolConfig?.executionAllowedTools
-              : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
@@ -3169,6 +3199,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork && bgToolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...bgToolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
@@ -3959,6 +3994,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork && toolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...toolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,

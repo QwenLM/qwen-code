@@ -126,7 +126,6 @@ interface TranscriptRecovery {
     history: Content[];
     taskPrompt: string;
     runtimeHistory: Content[];
-    executionAllowedTools?: string[];
   };
 }
 
@@ -362,10 +361,6 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
             history: structuredClone(
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
                 .history,
-            ),
-            executionAllowedTools: structuredClone(
-              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
-                .executionAllowedTools,
             ),
             taskPrompt: (
               launchPromptRecord!.systemPayload as NotificationRecordPayload
@@ -985,7 +980,7 @@ export class BackgroundAgentResumeService {
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
-          recovery.forkBootstrap?.executionAllowedTools,
+          meta.executionAllowedTools,
         );
       } else {
         const resumeSubagentConfig =

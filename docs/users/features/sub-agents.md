@@ -27,11 +27,12 @@ Tool responses and pure system reminders do not count as user turns. Regular nam
 
 ## Restricting Fork Tool Execution with `fork_tools`
 
-Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but a call not matched by `fork_tools` is rejected before scheduling or approval.
+Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval.
 
 - Omitting `fork_tools` preserves unrestricted fork execution.
 - An empty array rejects every tool call.
 - `*` is not accepted; omit `fork_tools` when unrestricted execution is intended.
+- Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
 - `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
 - Shell command argument patterns are not supported. Listing `run_shell_command` allows that tool to proceed through its normal permission checks but does not pre-approve any command.
 
@@ -59,9 +60,9 @@ The AI automatically uses fork when it needs to:
 
 All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
 
-### Recursive Fork Prevention
+### Recursive Delegation Prevention
 
-Fork children cannot create further forks. This is enforced at runtime — if a fork attempts to spawn another fork, it receives an error instructing it to execute tasks directly.
+Fork children cannot spawn any further sub-agent. This is enforced at runtime — if a fork calls the Agent tool, it receives an error instructing it to execute tasks directly.
 
 ### Current Limitation
 

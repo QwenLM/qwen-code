@@ -420,11 +420,6 @@ export interface AgentBootstrapRecordPayload {
    * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
-  /**
-   * Optional execution-layer allowlist. Absence preserves unrestricted
-   * execution for forks launched without `fork_tools`.
-   */
-  executionAllowedTools?: string[];
 }
 
 /**

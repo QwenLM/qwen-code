@@ -115,6 +115,34 @@ import {
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 } from './subagent-plan-tool-policy.js';
 
+const EXECUTION_ALLOWLIST_ERROR_MAX_ITEMS = 8;
+const EXECUTION_ALLOWLIST_ERROR_MAX_CHARS = 240;
+
+function summarizeExecutionAllowlist(
+  executionAllowedTools: readonly string[],
+): string | undefined {
+  if (executionAllowedTools.length === 0) {
+    return undefined;
+  }
+
+  const visibleTools = executionAllowedTools.slice(
+    0,
+    EXECUTION_ALLOWLIST_ERROR_MAX_ITEMS,
+  );
+  let summary = visibleTools
+    .map((toolName) => JSON.stringify(toolName))
+    .join(', ');
+  const wasClipped = summary.length > EXECUTION_ALLOWLIST_ERROR_MAX_CHARS;
+  if (wasClipped) {
+    summary = `${summary.slice(0, EXECUTION_ALLOWLIST_ERROR_MAX_CHARS - 3)}...`;
+  }
+  const omittedCount = executionAllowedTools.length - visibleTools.length;
+  if (omittedCount > 0) {
+    return `${summary} (+${omittedCount} more)`;
+  }
+  return wasClipped ? `${summary} (truncated)` : summary;
+}
+
 /**
  * Result of a single reasoning loop invocation.
  */
@@ -342,7 +370,10 @@ export class AgentCore {
   readonly modelConfig: ModelConfig;
   readonly runConfig: RunConfig;
   readonly toolConfig?: ToolConfig;
-  private readonly executionAllowedTools?: ReadonlySet<string>;
+  private readonly executionAllowedTools?: readonly string[];
+  private readonly executionAllowedExactTools?: ReadonlySet<string>;
+  private readonly executionAllowedMcpPatterns?: readonly string[];
+  private readonly executionAllowlistErrorSummary?: string;
   /**
    * Event emitter for this agent. Always present — if the caller doesn't
    * pass one, AgentCore allocates its own so the observable state below
@@ -422,10 +453,22 @@ export class AgentCore {
     this.modelConfig = modelConfig;
     this.runConfig = runConfig;
     this.toolConfig = toolConfig;
-    this.executionAllowedTools =
-      toolConfig?.executionAllowedTools === undefined
-        ? undefined
-        : new Set(toolConfig.executionAllowedTools);
+    if (toolConfig?.executionAllowedTools !== undefined) {
+      this.executionAllowedTools = Object.freeze([
+        ...toolConfig.executionAllowedTools,
+      ]);
+      this.executionAllowedExactTools = new Set(
+        this.executionAllowedTools.filter(
+          (toolName) => !toolName.includes('*'),
+        ),
+      );
+      this.executionAllowedMcpPatterns = Object.freeze(
+        this.executionAllowedTools.filter((toolName) => toolName.includes('*')),
+      );
+      this.executionAllowlistErrorSummary = summarizeExecutionAllowlist(
+        this.executionAllowedTools,
+      );
+    }
     this.eventEmitter = eventEmitter ?? new AgentEventEmitter();
     this.hooks = hooks;
     this.runtimeView = runtimeView;
@@ -1394,10 +1437,10 @@ export class AgentCore {
   }
 
   private isToolExecutionAllowed(toolName: string): boolean {
-    if (!this.executionAllowedTools) {
+    if (this.executionAllowedTools === undefined) {
       return true;
     }
-    if (this.executionAllowedTools.has(toolName)) {
+    if (this.executionAllowedExactTools?.has(toolName)) {
       return true;
     }
     if (!toolName.startsWith('mcp__')) {
@@ -1423,16 +1466,19 @@ export class AgentCore {
     const serverToolName = registeredTool.serverToolName;
     const serverPattern = `mcp__${serverName}`;
     const rawToolName = `${serverPattern}__${serverToolName}`;
-    return [...this.executionAllowedTools].some((pattern) => {
+    if (
+      this.executionAllowedExactTools?.has(serverPattern) ||
+      this.executionAllowedExactTools?.has(rawToolName)
+    ) {
+      return true;
+    }
+
+    return this.executionAllowedMcpPatterns!.some((pattern) => {
+      if (pattern === 'mcp__*') {
+        return true;
+      }
       if (!pattern.startsWith('mcp__')) {
         return false;
-      }
-      if (
-        pattern === 'mcp__*' ||
-        pattern === serverPattern ||
-        pattern === rawToolName
-      ) {
-        return true;
       }
       if (!pattern.endsWith('*')) {
         return false;
@@ -1529,11 +1575,10 @@ export class AgentCore {
             ? getLeaderOnlyToolUnavailableMessage(toolName)
             : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
       } else if (!this.isToolExecutionAllowed(toolName)) {
-        const executionAllowedTools = this.executionAllowedTools;
         errorMessage =
-          executionAllowedTools && executionAllowedTools.size > 0
-            ? `Tool "${toolName}" is not allowed by this agent's execution allowlist (fork_tools). Allowed tools: ${[...executionAllowedTools].join(', ')}.`
-            : `Tool "${toolName}" is not allowed by this agent's execution allowlist (fork_tools). No tools are allowed.`;
+          this.executionAllowlistErrorSummary !== undefined
+            ? `Tool "${toolName}" is not allowed by this agent's execution allowlist. Allowed entries: ${this.executionAllowlistErrorSummary}.`
+            : `Tool "${toolName}" is not allowed by this agent's execution allowlist. No tools are allowed.`;
       }
 
       if (errorMessage) {

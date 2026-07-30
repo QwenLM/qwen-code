@@ -110,6 +110,7 @@ describe('BackgroundAgentResumeService', () => {
       copyDiscoveredToolsFrom: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getDeferredToolSummary: vi
@@ -2054,6 +2055,9 @@ describe('BackgroundAgentResumeService', () => {
         status: 'running',
         subagentName: FORK_SUBAGENT_TYPE,
         resolvedApprovalMode: 'default',
+        ...(executionAllowedTools !== undefined
+          ? { executionAllowedTools }
+          : {}),
       });
       fs.writeFileSync(
         outputFile,
@@ -2072,9 +2076,6 @@ describe('BackgroundAgentResumeService', () => {
                 { role: 'model', parts: [{ text: 'bootstrap ack' }] },
               ],
               ...legacyCapabilities,
-              ...(executionAllowedTools !== undefined
-                ? { executionAllowedTools }
-                : {}),
             },
           }),
           JSON.stringify({
@@ -2121,38 +2122,60 @@ describe('BackgroundAgentResumeService', () => {
         isBackgrounded: true,
       });
 
-      const execute = vi.fn(async (_context: unknown) => undefined);
-      const subagent = {
-        execute,
-        setExternalMessageProvider: vi.fn(),
-        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-        getExecutionSummary: () => ({
-          totalTokens: 0,
-          outputTokens: 0,
-          totalDurationMs: 0,
-        }),
-        getTerminateMode: () => AgentTerminateMode.GOAL,
-        getFinalText: () => 'done',
-      };
-
+      const originalCreate = AgentHeadless.create;
+      let executeContext: unknown;
+      let deniedError: unknown;
       const createSpy = vi
         .spyOn(AgentHeadless, 'create')
-        .mockResolvedValue(subagent as unknown as AgentHeadless);
+        .mockImplementation(async (...args) => {
+          const subagent = await originalCreate(...args);
+          vi.spyOn(subagent, 'execute').mockImplementation(async (context) => {
+            executeContext = context;
+            if (executionAllowedTools === undefined) {
+              return;
+            }
+            const denial = await subagent
+              .getCore()
+              .processFunctionCalls(
+                [{ id: 'call-edit', name: 'Edit', args: {} }],
+                new AbortController(),
+                'resume-policy-test',
+                1,
+                [{ name: 'Read' }, { name: 'Edit' }],
+              );
+            deniedError =
+              denial.messages[0]?.parts?.[0]?.functionResponse?.response?.[
+                'error'
+              ];
+          });
+          vi.spyOn(subagent, 'getTerminateMode').mockReturnValue(
+            AgentTerminateMode.GOAL,
+          );
+          vi.spyOn(subagent, 'getFinalText').mockReturnValue('done');
+          return subagent;
+        });
       const currentSystemInstruction: Content = {
         role: 'system',
         parts: [{ text: 'current parent system instruction' }],
       };
-      const { service, subagentManager } = createService({
+      const { service, subagentManager, stubToolRegistry } = createService({
         currentForkRuntime: {
           systemInstruction: currentSystemInstruction,
           advertisedTools: [
             { name: 'Read', description: 'advertised current schema' },
+            { name: 'Edit', description: 'advertised edit schema' },
             { name: 'mcp__removed__search' },
           ],
           registeredTools: [
             { name: 'Read', description: 'registered current schema' },
+            { name: 'Edit', description: 'registered edit schema' },
           ],
         },
+      });
+      const deniedBuild = vi.fn();
+      stubToolRegistry.getTool.mockReturnValue({
+        name: 'Edit',
+        build: deniedBuild,
       });
       const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
@@ -2174,15 +2197,13 @@ describe('BackgroundAgentResumeService', () => {
         max_turns: FORK_DEFAULT_MAX_TURNS,
       });
       expect(createArgs?.[5]).toEqual({
-        tools: ['Read'],
+        tools: ['Read', 'Edit'],
         ...(executionAllowedTools !== undefined
           ? { executionAllowedTools }
           : {}),
       });
-      expect(execute).toHaveBeenCalledTimes(1);
-      const executeCall = execute.mock.calls[0];
-      expect(executeCall).toBeDefined();
-      const contextArg = executeCall?.[0] as
+      expect(executeContext).toBeDefined();
+      const contextArg = executeContext as
         | { get(key: string): unknown }
         | undefined;
       expect(contextArg).toBeDefined();
@@ -2193,6 +2214,14 @@ describe('BackgroundAgentResumeService', () => {
         'Earlier capability listings in the conversation history are obsolete',
       );
       expect(contextArg.get('task_prompt')).toContain('continue');
+      if (executionAllowedTools !== undefined) {
+        expect(deniedError).toContain('execution allowlist');
+        expect(deniedError).not.toContain('not found');
+        expect(stubToolRegistry.getTool).not.toHaveBeenCalled();
+        expect(deniedBuild).not.toHaveBeenCalled();
+      } else {
+        expect(deniedError).toBeUndefined();
+      }
       createSpy.mockRestore();
     },
   );
