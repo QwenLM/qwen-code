@@ -31,11 +31,7 @@ import {
   type HistoryItemWithoutId,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
-import {
-  MessageType,
-  StreamingState,
-  isHistoryItemVisibleAfterRestore,
-} from './types.js';
+import { MessageType, StreamingState } from './types.js';
 import {
   type EditorType,
   type Config,
@@ -212,13 +208,11 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
-import { StreamingContext } from './contexts/StreamingContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
-import { TranscriptView } from './components/TranscriptView.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -260,10 +254,6 @@ import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
-
-// Stable empty reference for the transcript items memo when no snapshot is
-// frozen, so the memo never hands TranscriptView a fresh [] each render.
-const EMPTY_HISTORY_ITEMS: HistoryItem[] = [];
 
 export function isRenderModeToggleKey(key: Key): boolean {
   return (
@@ -625,7 +615,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setTranscriptFreeze(null);
   }, []);
 
-  // Alt+T inline expansion toggle for thinking blocks (expands all at once).
+  // Ctrl+O / Alt+T inline expansion toggle for thinking blocks (expands all at once).
   const [thoughtExpanded, setThoughtExpanded] = useState(false);
   // Per-thought inline expansion: head ids the user expanded by clicking the
   // collapsed thinking line (VP mode). Replaces the old full-screen viewer —
@@ -2521,47 +2511,6 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
-  // Read history/pending through refs so `openTranscript` stays referentially
-  // stable. Both arrays change identity on every streaming tick; capturing them
-  // as deps would rebuild this callback — and, since `handleGlobalKeypress`
-  // lists it in its deps, the entire keypress-handler closure — on every render
-  // during active streaming. The callback only ever runs on a Ctrl+O press, so
-  // reading the latest values via refs at call time is sufficient.
-  const historyForTranscriptRef = useRef(historyManager.history);
-  historyForTranscriptRef.current = historyManager.history;
-  const pendingForTranscriptRef = useRef(pendingHistoryItems);
-  pendingForTranscriptRef.current = pendingHistoryItems;
-  const openTranscript = useCallback(() => {
-    setTranscriptFreeze({
-      // Share MainContent's visibility predicate so the transcript shows exactly
-      // what the main view shows. Items collapsed on session resume
-      // (ui.history.collapseOnResume) are represented by their collapse-summary
-      // row and must NOT be re-exposed in the Ctrl+O view.
-      committedItems: historyForTranscriptRef.current.filter(
-        isHistoryItemVisibleAfterRestore,
-      ),
-      pendingItems: [...pendingForTranscriptRef.current],
-    });
-  }, []);
-
-  // Build the transcript item list from the frozen snapshot only. Recomputes
-  // on open/close (when `transcriptFreeze` flips), not on every streaming tick,
-  // so the array reference stays stable while open — combined with the
-  // React.memo'd TranscriptView this avoids re-running its VirtualizedList
-  // offset/render memos on every AppContainer re-render during streaming.
-  const transcriptItems = useMemo<HistoryItem[]>(() => {
-    if (!transcriptFreeze) return EMPTY_HISTORY_ITEMS;
-    return [
-      ...transcriptFreeze.committedItems,
-      // Pending snapshot gets negative ids (mirrors MainContent's `id: -(i+1)`)
-      // so keys never collide with committed history items.
-      ...transcriptFreeze.pendingItems.map((item, i) => ({
-        ...item,
-        id: -(i + 1),
-      })),
-    ];
-  }, [transcriptFreeze]);
-
   const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
@@ -3813,10 +3762,9 @@ export const AppContainer = (props: AppContainerProps) => {
           // a close request).
           (key.name === 'q' && !key.ctrl && !key.meta && !key.shift) ||
           keyMatchers[Command.QUIT](key) ||
-          keyMatchers[Command.EXIT](key) ||
-          keyMatchers[Command.TOGGLE_TRANSCRIPT](key)
+          keyMatchers[Command.EXIT](key)
         ) {
-          // Esc / q / Ctrl+C / Ctrl+D / Ctrl+O all just close the transcript.
+          // Esc / q / Ctrl+C / Ctrl+D all just close the transcript.
           // EXIT (Ctrl+D) is included so it isn't silently swallowed by the
           // blanket return below — the transcript is a transient overlay, so we
           // close it rather than fall through to app exit.
@@ -3825,17 +3773,10 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // Alt+T: toggle inline expansion of thinking blocks.
+      // Ctrl+O / Alt+T: toggle inline expansion of thinking blocks.
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
-        return;
-      }
-
-      // Ctrl+O: open the transcript full-detail screen. (Close while open is
-      // handled by the transcript guard at the very top of this handler.)
-      if (keyMatchers[Command.TOGGLE_TRANSCRIPT](key)) {
-        openTranscript();
         return;
       }
 
@@ -4092,7 +4033,6 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
       vimMode,
       setThoughtExpanded,
-      openTranscript,
       closeTranscript,
     ],
   );
@@ -4691,23 +4631,7 @@ export const AppContainer = (props: AppContainerProps) => {
                 <RenderModeProvider value={renderModeValue}>
                   <TerminalOutputProvider value={writeRaw}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      {transcriptFreeze ? (
-                        // TranscriptView renders as a sibling of <App/>, which
-                        // owns the StreamingContext.Provider — so the frozen
-                        // transcript subtree has no provider of its own. A
-                        // pending tool group captured in the snapshot can hold a
-                        // tool in the Executing state, whose spinner calls
-                        // useStreamingContext and would otherwise throw. Provide
-                        // the context here so the transcript renders.
-                        <StreamingContext.Provider value={streamingState}>
-                          <TranscriptView
-                            items={transcriptItems}
-                            useAlternateScreen={!useTerminalBuffer}
-                          />
-                        </StreamingContext.Provider>
-                      ) : (
-                        <App />
-                      )}
+                      <App />
                     </ShellFocusContext.Provider>
                   </TerminalOutputProvider>
                 </RenderModeProvider>

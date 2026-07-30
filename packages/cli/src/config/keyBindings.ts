@@ -261,11 +261,14 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
 
-  // Thinking expansion
-  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
+  // Thinking expansion (Ctrl+O primary, Alt+T legacy)
+  [Command.TOGGLE_THINKING_EXPANDED]: [
+    { key: 'o', ctrl: true },
+    { key: 't', meta: true },
+  ],
 
-  // Transcript full-detail screen
-  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
+  // Transcript overlay — unbound (replaced by inline thinking expansion)
+  [Command.TOGGLE_TRANSCRIPT]: [],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

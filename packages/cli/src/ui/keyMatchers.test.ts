@@ -98,8 +98,8 @@ describe('keyMatchers', () => {
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
-      key.meta && key.name === 't',
-    [Command.TOGGLE_TRANSCRIPT]: (key: Key) => key.ctrl && key.name === 'o',
+      (key.ctrl && key.name === 'o') || (key.meta && key.name === 't'),
+    [Command.TOGGLE_TRANSCRIPT]: (_key: Key) => false,
   };
 
   // Test data for each command with positive and negative test cases
@@ -451,13 +451,20 @@ describe('keyMatchers', () => {
     },
     {
       command: Command.TOGGLE_THINKING_EXPANDED,
-      positive: [createKey('t', { meta: true })],
-      negative: [createKey('t'), createKey('t', { ctrl: true })],
+      positive: [
+        createKey('t', { meta: true }),
+        createKey('o', { ctrl: true }),
+      ],
+      negative: [
+        createKey('t'),
+        createKey('t', { ctrl: true }),
+        createKey('o'),
+      ],
     },
     {
       command: Command.TOGGLE_TRANSCRIPT,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('o', { meta: true })],
+      positive: [],
+      negative: [createKey('o', { ctrl: true }), createKey('o')],
     },
   ];
 
