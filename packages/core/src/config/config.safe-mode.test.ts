@@ -324,7 +324,10 @@ describe('Config safe mode', () => {
         topTierMcpServers: { probe: { command: 'probe', args: [] } },
       });
       expect(config.getMcpServers()).toEqual({
-        probe: { command: 'probe', args: [] },
+        probe: {
+          command: 'probe',
+          args: [],
+        },
       });
     });
 
@@ -343,7 +346,10 @@ describe('Config safe mode', () => {
         },
       });
       expect(config.getMcpServers()).toEqual({
-        probe: { command: 'probe', args: [] },
+        probe: {
+          command: 'probe',
+          args: [],
+        },
       });
     });
   });

@@ -339,6 +339,24 @@ describe('cdCommand', () => {
     });
   });
 
+  it('reports a successful move when MCP refresh fails afterward', async () => {
+    relocateWorkingDirectory.mockResolvedValue({
+      mcpRefreshError: new Error('MCP failed'),
+    });
+
+    const result = (await cdCommand.action?.(
+      context,
+      '../next',
+    )) as MessageActionReturn;
+    const realNextDir = await realpath(nextDir);
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content: `Moved to ${realNextDir}. MCP refresh failed: MCP failed`,
+    });
+  });
+
   it('asks for confirmation before moving to an untrusted directory', async () => {
     context = createMockCommandContext({
       invocation: {
