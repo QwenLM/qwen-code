@@ -81,6 +81,21 @@ async function hasAutoSkillSource(filePath: string): Promise<boolean | null> {
   return /^source:\s*auto-skill\s*$/m.test(match[1]);
 }
 
+async function isArchivedSkillDirectoryReserved(
+  filePath: string,
+  projectRoot: string,
+): Promise<boolean> {
+  const directoryName = path.basename(path.dirname(filePath));
+  try {
+    await fs.lstat(
+      path.join(getArchivedSkillsRoot(projectRoot), directoryName),
+    );
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
 function isScopedTool(toolName: string): boolean {
   return (
     toolName === ToolNames.READ_FILE ||
@@ -139,7 +154,10 @@ async function evaluateScopedDecision(
       // For existing files, verify source: auto-skill is present.
       const sourceFlag = await hasAutoSkillSource(ctx.filePath);
       if (sourceFlag === null) {
-        // File does not exist yet — allow creation (path already validated above).
+        if (await isArchivedSkillDirectoryReserved(ctx.filePath, projectRoot)) {
+          return 'deny';
+        }
+        // File does not exist yet and the directory name is not archived.
         return 'allow';
       }
       return sourceFlag ? 'allow' : 'deny';
@@ -170,14 +188,8 @@ async function evaluateScopedDecision(
       } catch {
         return 'deny';
       }
-      const directoryName = path.basename(path.dirname(ctx.filePath));
-      try {
-        await fs.lstat(
-          path.join(getArchivedSkillsRoot(projectRoot), directoryName),
-        );
+      if (await isArchivedSkillDirectoryReserved(ctx.filePath, projectRoot)) {
         return 'deny';
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return 'deny';
       }
       // ENOENT → file does not exist → allow creation.
       // Anything else (file present, EACCES, EISDIR, ...) → deny so we

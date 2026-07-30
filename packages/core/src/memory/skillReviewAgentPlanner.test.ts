@@ -165,6 +165,28 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
     ).toBe('deny');
   });
 
+  it('denies edit creation when the directory name is already archived', async () => {
+    const directoryName = 'auto-skill-retired';
+    await fs.mkdir(
+      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+      { recursive: true },
+    );
+    const target = path.join(
+      projectRoot,
+      '.qwen',
+      'skills',
+      directoryName,
+      'SKILL.md',
+    );
+
+    expect(
+      await scopedPm(projectRoot).evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: target,
+      }),
+    ).toBe('deny');
+  });
+
   it('still allows edit on an existing auto-skill (update path preserved)', async () => {
     const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
     const pm = scopedPm(projectRoot);

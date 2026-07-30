@@ -31,7 +31,7 @@ describe('curator command', () => {
   let context: CommandContext;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mocks.isSafeMode.mockReturnValue(false);
     mocks.isTrustedFolder.mockReturnValue(true);
     context = {
@@ -117,6 +117,49 @@ describe('curator command', () => {
     expect(mocks.refreshCache).toHaveBeenCalledTimes(1);
   });
 
+  it('does not refresh skill discovery when a live run archives nothing', async () => {
+    mocks.run.mockResolvedValue({
+      dryRun: false,
+      checked: 1,
+      seeded: [],
+      markedStale: [],
+      reactivated: [],
+      archived: [],
+      skippedCollisions: [],
+    });
+    const runCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'run',
+    )!;
+
+    const result = await runCommand.action!(context, '');
+
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(mocks.refreshCache).not.toHaveBeenCalled();
+  });
+
+  it('keeps a successful live run successful when cache refresh fails', async () => {
+    mocks.run.mockResolvedValue({
+      dryRun: false,
+      checked: 1,
+      seeded: [],
+      markedStale: [],
+      reactivated: [],
+      archived: ['auto-skill-old'],
+      skippedCollisions: [],
+    });
+    mocks.refreshCache.mockRejectedValue(new Error('refresh exploded'));
+    const runCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'run',
+    )!;
+
+    const result = await runCommand.action!(context, '');
+
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect((result as { content: string }).content).toContain(
+      'Archived skills:\n  auto-skill-old',
+    );
+  });
+
   it('restores an archived directory and refreshes skill discovery', async () => {
     const restoreCommand = curatorCommand.subCommands!.find(
       (command) => command.name === 'restore',
@@ -127,6 +170,21 @@ describe('curator command', () => {
     expect(mocks.restore).toHaveBeenCalledWith('/project', 'auto-skill-old');
     expect(mocks.refreshCache).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+  });
+
+  it('keeps a successful restore successful when cache refresh fails', async () => {
+    mocks.refreshCache.mockRejectedValue(new Error('refresh exploded'));
+    const restoreCommand = curatorCommand.subCommands!.find(
+      (command) => command.name === 'restore',
+    )!;
+
+    const result = await restoreCommand.action!(context, 'auto-skill-old');
+
+    expect(mocks.restore).toHaveBeenCalledWith('/project', 'auto-skill-old');
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect((result as { content: string }).content).toContain(
+      'Restored auto-skill: auto-skill-old',
+    );
   });
 
   it('pins and unpins a managed auto-skill', async () => {

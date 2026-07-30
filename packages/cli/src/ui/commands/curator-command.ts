@@ -47,6 +47,15 @@ function mutationGuard(config: Config): MessageActionReturn | undefined {
   return undefined;
 }
 
+async function refreshSkillCache(config: Config): Promise<void> {
+  try {
+    await config.getSkillManager()?.refreshCache();
+  } catch {
+    // Cache refresh is best-effort. The primary mutation already succeeded,
+    // so do not turn a transient refresh failure into a misleading retry.
+  }
+}
+
 function displayName(entry: AutoSkillCuratorEntry): string {
   return entry.skillName === entry.directoryName
     ? entry.directoryName
@@ -168,7 +177,7 @@ const runCommand: SlashCommand = {
         dryRun: normalized === '--dry-run',
       });
       if (!result.dryRun && result.archived.length > 0) {
-        await config.getSkillManager()?.refreshCache();
+        await refreshSkillCache(config);
       }
       return message(formatRun(result));
     } catch (error) {
@@ -201,7 +210,7 @@ const restoreCommand: SlashCommand = {
     if (blocked) return blocked;
     try {
       await restoreArchivedAutoSkill(config.getProjectRoot(), directoryName);
-      await config.getSkillManager()?.refreshCache();
+      await refreshSkillCache(config);
       return message(
         t('Restored auto-skill: {{name}}', { name: directoryName }),
       );

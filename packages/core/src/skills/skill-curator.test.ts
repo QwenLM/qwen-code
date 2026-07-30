@@ -81,6 +81,16 @@ describe('auto-skill curator', () => {
     expect(status.active).toEqual([]);
   });
 
+  it('does not leave a placeholder file beside the proper lock', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+
+    await getAutoSkillCuratorStatus(projectRoot, now);
+
+    await expect(
+      fs.lstat(path.join(projectRoot, '.qwen', 'skill-curator.lock')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('ignores auto-skill directories whose names carry control/ANSI bytes', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const old = new Date(now.getTime() - 100 * DAY_MS);
@@ -652,9 +662,23 @@ describe('auto-skill curator', () => {
 
   it('rejects archive directory traversal during restore', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
+    const traversalTarget = path.join(projectRoot, '.qwen', 'outside');
     await fs.mkdir(path.join(projectRoot, '.qwen', 'archived-skills'), {
       recursive: true,
     });
+    await fs.mkdir(traversalTarget, { recursive: true });
+    await fs.writeFile(
+      path.join(traversalTarget, 'SKILL.md'),
+      [
+        '---',
+        'name: outside',
+        'description: traversal target',
+        'source: auto-skill',
+        '---',
+        '',
+        '# Outside',
+      ].join('\n'),
+    );
 
     await expect(
       restoreArchivedAutoSkill(
@@ -663,6 +687,7 @@ describe('auto-skill curator', () => {
         now,
       ),
     ).rejects.toThrow('Archived auto-skill not found');
+    expect((await fs.lstat(traversalTarget)).isDirectory()).toBe(true);
   });
 
   it.skipIf(process.platform === 'win32')(

@@ -433,31 +433,15 @@ async function ensureSafeDirectory(directory: string): Promise<void> {
   }
 }
 
-async function ensureRegularLockFile(lockPath: string): Promise<void> {
-  try {
-    const handle = await fs.open(lockPath, 'ax', 0o600);
-    await handle.close();
-  } catch (error) {
-    if (
-      !isMissing(error) &&
-      (error as NodeJS.ErrnoException).code !== 'EEXIST'
-    ) {
-      throw error;
-    }
-  }
-  const stat = await fs.lstat(lockPath);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`Auto-skill curator refuses unsafe lock ${lockPath}.`);
-  }
-}
-
 async function withCuratorLock<T>(
   projectRoot: string,
   operation: (paths: CuratorPaths) => Promise<T>,
 ): Promise<T> {
   const paths = getCuratorPaths(projectRoot);
   await ensureSafeQwenRoot(paths);
-  await ensureRegularLockFile(paths.lockPath);
+  // proper-lockfile acquires `${lockPath}.lock` with an atomic mkdir. Do not
+  // create or validate `lockPath` itself: it is not the lock and would leave a
+  // permanent placeholder file behind after every curator operation.
   const release = await lockfile.lock(paths.lockPath, LOCK_OPTIONS);
   try {
     return await operation(paths);
@@ -832,6 +816,9 @@ export async function restoreArchivedAutoSkill(
   now: Date = new Date(),
 ): Promise<void> {
   await withCuratorLock(projectRoot, async (paths) => {
+    if (!isManagedDirectoryName(directoryName)) {
+      throw new Error(`Archived auto-skill not found: ${directoryName}.`);
+    }
     const archiveRootStat = await fs.lstat(paths.archiveRoot).catch((error) => {
       if (isMissing(error)) return undefined;
       throw error;
