@@ -697,10 +697,15 @@
 }
 
 .tooltipTitle {
+  display: -webkit-box;
+  overflow: hidden;
   color: var(--popover-foreground);
   font-size: 13px;
   font-weight: 500;
   line-height: 20px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .tooltipTags {
@@ -736,7 +741,9 @@
 .sessionDetailsContent {
   width: min(16rem, var(--radix-dropdown-menu-content-available-width));
   max-width: var(--radix-dropdown-menu-content-available-width);
+  max-height: var(--radix-dropdown-menu-content-available-height);
   min-width: 0;
+  overflow: hidden auto;
   padding: 12px;
 }
 

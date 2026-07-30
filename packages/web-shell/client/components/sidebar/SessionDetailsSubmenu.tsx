@@ -18,6 +18,8 @@ interface SessionDetailsSubmenuProps {
   getCollisionBoundary: () => HTMLElement | null;
 }
 
+const COLLISION_PADDING = 8;
+
 export function SessionDetailsSubmenu({
   session,
   label,
@@ -28,90 +30,52 @@ export function SessionDetailsSubmenu({
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [collisionBoundary, setCollisionBoundary] =
-    useState<HTMLElement | null>(null);
-  const collisionRepositionFrameRef = useRef<number | null>(null);
-
-  const cancelCollisionReposition = useCallback(() => {
-    if (collisionRepositionFrameRef.current !== null) {
-      cancelAnimationFrame(collisionRepositionFrameRef.current);
-      collisionRepositionFrameRef.current = null;
-    }
-  }, []);
+  const copyAttemptRef = useRef(0);
+  const currentSessionIdRef = useRef(session.sessionId);
+  currentSessionIdRef.current = session.sessionId;
+  const collisionBoundary = open ? getCollisionBoundary() : null;
 
   useEffect(() => {
     setCopied(false);
   }, [session.sessionId]);
 
-  useEffect(() => {
-    if (!open) {
-      setCollisionBoundary(null);
-      return;
-    }
-
-    const boundary = getCollisionBoundary();
-    setCollisionBoundary(boundary);
-    if (!boundary || typeof ResizeObserver === 'undefined') {
-      return;
-    }
-
-    let hasInitialMeasurement = false;
-    let lastWidth = 0;
-    let lastHeight = 0;
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries.find((candidate) => candidate.target === boundary);
-      const { width, height } =
-        entry?.contentRect ?? boundary.getBoundingClientRect();
-
-      if (!hasInitialMeasurement) {
-        hasInitialMeasurement = true;
-        lastWidth = width;
-        lastHeight = height;
-        return;
-      }
-      if (width === lastWidth && height === lastHeight) {
-        return;
-      }
-
-      lastWidth = width;
-      lastHeight = height;
-      if (collisionRepositionFrameRef.current !== null) return;
-
-      setCollisionBoundary(null);
-      collisionRepositionFrameRef.current = requestAnimationFrame(() => {
-        collisionRepositionFrameRef.current = null;
-        setCollisionBoundary(boundary);
-      });
-    });
-    observer.observe(boundary);
-    return () => {
-      observer.disconnect();
-      cancelCollisionReposition();
-    };
-  }, [cancelCollisionReposition, getCollisionBoundary, open]);
-
-  useEffect(() => cancelCollisionReposition, [cancelCollisionReposition]);
-
-  const handleOpenChange = useCallback(
-    (nextOpen: boolean) => {
-      cancelCollisionReposition();
-      if (!nextOpen) {
-        setCollisionBoundary(null);
-      }
-      setCopied(false);
-      setOpen(nextOpen);
+  useEffect(
+    () => () => {
+      copyAttemptRef.current += 1;
     },
-    [cancelCollisionReposition],
+    [],
   );
 
+  const handleOpenChange = useCallback((nextOpen: boolean) => {
+    if (!nextOpen) {
+      copyAttemptRef.current += 1;
+    }
+    setCopied(false);
+    setOpen(nextOpen);
+  }, []);
+
   const copySessionId = useCallback(async () => {
+    const sessionId = session.sessionId;
+    const copyAttempt = ++copyAttemptRef.current;
     try {
       if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
         throw new Error('Clipboard API is unavailable');
       }
-      await navigator.clipboard.writeText(session.sessionId);
+      await navigator.clipboard.writeText(sessionId);
+      if (
+        copyAttemptRef.current !== copyAttempt ||
+        currentSessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
       setCopied(true);
     } catch (error: unknown) {
+      if (
+        copyAttemptRef.current !== copyAttempt ||
+        currentSessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
       setCopied(false);
       onError(error, t('sidebar.copySessionIdFailed'));
     }
@@ -126,12 +90,14 @@ export function SessionDetailsSubmenu({
       <DropdownMenuSubContent
         avoidCollisions
         collisionBoundary={collisionBoundary ?? undefined}
-        collisionPadding={8}
+        collisionPadding={COLLISION_PADDING}
+        updatePositionStrategy="always"
         className={styles.sessionDetailsContent}
-        onClick={(event) => event.stopPropagation()}
       >
         <div className={styles.tooltipContent}>
-          <div className={styles.tooltipTitle}>{label}</div>
+          <div className={styles.tooltipTitle} title={label}>
+            {label}
+          </div>
           <div className={styles.tooltipTags}>
             {session.hasActivePrompt && (
               <span

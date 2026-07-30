@@ -154,7 +154,9 @@ describe('SessionDetailsSubmenu keyboard behavior', () => {
     await focus(copy);
     expect(document.activeElement).toBe(copy);
     await pressKey(copy, 'Enter');
+    expect(document.activeElement).toBe(copy);
     await pressKey(copy, ' ');
+    expect(document.activeElement).toBe(copy);
 
     expect(writeText).toHaveBeenNthCalledWith(1, session.sessionId);
     expect(writeText).toHaveBeenNthCalledWith(2, session.sessionId);

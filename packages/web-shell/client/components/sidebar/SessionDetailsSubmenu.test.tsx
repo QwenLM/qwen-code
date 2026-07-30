@@ -4,7 +4,6 @@ import {
   act,
   forwardRef,
   type ButtonHTMLAttributes,
-  type MouseEventHandler,
   type PropsWithChildren,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -61,29 +60,26 @@ vi.mock('../ui/dropdown-menu', () => {
     avoidCollisions,
     collisionBoundary,
     collisionPadding,
+    updatePositionStrategy,
     className,
-    onClick,
   }: PropsWithChildren<{
     avoidCollisions?: boolean;
     collisionBoundary?: Element;
     collisionPadding?: number;
+    updatePositionStrategy?: 'optimized' | 'always';
     className?: string;
-    onClick?: MouseEventHandler<HTMLDivElement>;
   }>) {
     const subContentProps = {
       avoidCollisions,
       collisionBoundary,
       collisionPadding,
+      updatePositionStrategy,
       className,
     };
     dropdownMenu.subContentProps = subContentProps;
     dropdownMenu.subContentPropsHistory.push(subContentProps);
     return (
-      <div
-        data-slot="dropdown-menu-sub-content"
-        className={className}
-        onClick={onClick}
-      >
+      <div data-slot="dropdown-menu-sub-content" className={className}>
         {children}
       </div>
     );
@@ -128,27 +124,10 @@ const session = {
 let root: Root;
 let container: HTMLDivElement;
 let webShellRoot: HTMLDivElement;
-let sidebarBoundary: HTMLElement;
 let portalRoot: HTMLDivElement;
 let onError: ReturnType<typeof vi.fn>;
 let getCollisionBoundary: ReturnType<typeof vi.fn>;
 let clipboardDescriptor: PropertyDescriptor | undefined;
-let resizeObserverDescriptor: PropertyDescriptor | undefined;
-let requestAnimationFrameDescriptor: PropertyDescriptor | undefined;
-let cancelAnimationFrameDescriptor: PropertyDescriptor | undefined;
-let nextAnimationFrame = 0;
-const animationFrameCallbacks = new Map<number, FrameRequestCallback>();
-const resizeObservers: ResizeObserverMock[] = [];
-
-class ResizeObserverMock {
-  readonly observe = vi.fn();
-  readonly unobserve = vi.fn();
-  readonly disconnect = vi.fn();
-
-  constructor(readonly callback: ResizeObserverCallback) {
-    resizeObservers.push(this);
-  }
-}
 
 function render(sessionOverride: DaemonSessionSummary = session): void {
   act(() => {
@@ -156,15 +135,13 @@ function render(sessionOverride: DaemonSessionSummary = session): void {
       <I18nProvider language="en">
         <div
           ref={(element) => {
-            if (element) webShellRoot = element;
+            if (element) {
+              webShellRoot = element;
+            }
           }}
           data-web-shell-root
         >
-          <aside
-            ref={(element) => {
-              if (element) sidebarBoundary = element;
-            }}
-          >
+          <aside>
             <SessionDetailsSubmenu
               session={sessionOverride}
               label="Long running session"
@@ -213,42 +190,25 @@ async function selectCopy(): Promise<Event> {
   return event;
 }
 
-function resizeEntry(width: number, height: number): ResizeObserverEntry {
-  return {
-    target: webShellRoot,
-    contentRect: { width, height } as DOMRectReadOnly,
-  } as ResizeObserverEntry;
-}
-
-async function triggerBoundaryResize(
-  width: number,
-  height: number,
-): Promise<void> {
-  const observer = resizeObservers.at(-1);
-  expect(observer).toBeDefined();
-  await act(async () => {
-    observer!.callback(
-      [resizeEntry(width, height)],
-      observer as unknown as ResizeObserver,
-    );
-    await Promise.resolve();
-  });
-}
-
-async function flushAnimationFrame(): Promise<void> {
-  const callbacks = [...animationFrameCallbacks.values()];
-  animationFrameCallbacks.clear();
-  await act(async () => {
-    callbacks.forEach((callback) => callback(0));
-    await Promise.resolve();
-  });
-}
-
 function mockClipboard(writeText: ReturnType<typeof vi.fn>): void {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText },
   });
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -267,34 +227,6 @@ beforeEach(() => {
   dropdownMenu.onOpenChange = null;
   dropdownMenu.copyItemOnSelect = null;
   dropdownMenu.portalRoot = portalRoot;
-  resizeObserverDescriptor = Object.getOwnPropertyDescriptor(
-    globalThis,
-    'ResizeObserver',
-  );
-  requestAnimationFrameDescriptor = Object.getOwnPropertyDescriptor(
-    globalThis,
-    'requestAnimationFrame',
-  );
-  cancelAnimationFrameDescriptor = Object.getOwnPropertyDescriptor(
-    globalThis,
-    'cancelAnimationFrame',
-  );
-  Object.defineProperty(globalThis, 'ResizeObserver', {
-    configurable: true,
-    value: ResizeObserverMock,
-  });
-  Object.defineProperty(globalThis, 'requestAnimationFrame', {
-    configurable: true,
-    value: (callback: FrameRequestCallback) => {
-      const frame = ++nextAnimationFrame;
-      animationFrameCallbacks.set(frame, callback);
-      return frame;
-    },
-  });
-  Object.defineProperty(globalThis, 'cancelAnimationFrame', {
-    configurable: true,
-    value: (frame: number) => animationFrameCallbacks.delete(frame),
-  });
 });
 
 afterEach(() => {
@@ -306,98 +238,31 @@ afterEach(() => {
   } else {
     Reflect.deleteProperty(navigator, 'clipboard');
   }
-  if (resizeObserverDescriptor) {
-    Object.defineProperty(
-      globalThis,
-      'ResizeObserver',
-      resizeObserverDescriptor,
-    );
-  } else {
-    Reflect.deleteProperty(globalThis, 'ResizeObserver');
-  }
-  if (requestAnimationFrameDescriptor) {
-    Object.defineProperty(
-      globalThis,
-      'requestAnimationFrame',
-      requestAnimationFrameDescriptor,
-    );
-  } else {
-    Reflect.deleteProperty(globalThis, 'requestAnimationFrame');
-  }
-  if (cancelAnimationFrameDescriptor) {
-    Object.defineProperty(
-      globalThis,
-      'cancelAnimationFrame',
-      cancelAnimationFrameDescriptor,
-    );
-  } else {
-    Reflect.deleteProperty(globalThis, 'cancelAnimationFrame');
-  }
-  animationFrameCallbacks.clear();
-  resizeObservers.length = 0;
-  nextAnimationFrame = 0;
   vi.restoreAllMocks();
 });
 
 describe('SessionDetailsSubmenu', () => {
   it('uses the non-portal WebShell root for narrow-screen collision flipping', async () => {
     render();
+    dropdownMenu.subContentPropsHistory = [];
     await openDetails();
 
+    const firstOpenProps = dropdownMenu.subContentPropsHistory.at(0) as {
+      collisionBoundary?: Element;
+    };
     const subContentProps = dropdownMenu.subContentProps as {
       avoidCollisions?: boolean;
       collisionBoundary?: Element;
       collisionPadding?: number;
+      updatePositionStrategy?: 'optimized' | 'always';
     };
-    expect(getCollisionBoundary).toHaveBeenCalledOnce();
-    expect(portalRoot.querySelector('button')).not.toBeNull();
-    expect(webShellRoot.contains(portalRoot)).toBe(false);
-    expect(webShellRoot.contains(sidebarBoundary)).toBe(true);
+    expect(getCollisionBoundary).toHaveBeenCalled();
+    expect(firstOpenProps.collisionBoundary).toBe(webShellRoot);
     expect(subContentProps.avoidCollisions).toBe(true);
-    expect(subContentProps.collisionBoundary).not.toBeNull();
     expect(subContentProps.collisionBoundary).toBe(webShellRoot);
     expect(subContentProps.collisionBoundary).not.toBe(portalRoot);
     expect(subContentProps.collisionPadding).toBe(8);
-  });
-
-  it('reconfigures once for a real root boundary size change', async () => {
-    render();
-    await openDetails();
-
-    const content = portalRoot.querySelector(
-      '[data-slot="dropdown-menu-sub-content"]',
-    );
-    expect(content).not.toBeNull();
-    const firstObserver = resizeObservers.at(-1);
-    expect(firstObserver?.observe).toHaveBeenCalledWith(webShellRoot);
-
-    await triggerBoundaryResize(320, 480);
-    expect(animationFrameCallbacks.size).toBe(0);
-
-    await triggerBoundaryResize(320, 480);
-    expect(animationFrameCallbacks.size).toBe(0);
-
-    await triggerBoundaryResize(280, 480);
-
-    expect(animationFrameCallbacks.size).toBe(1);
-    await flushAnimationFrame();
-
-    expect(getCollisionBoundary).toHaveBeenCalledOnce();
-    expect(
-      (dropdownMenu.subContentProps as { collisionBoundary?: Element })
-        .collisionBoundary,
-    ).toBe(webShellRoot);
-    expect(
-      portalRoot.querySelector('[data-slot="dropdown-menu-sub-content"]'),
-    ).toBe(content);
-    expect(resizeObservers).toHaveLength(1);
-    expect(firstObserver?.disconnect).not.toHaveBeenCalled();
-
-    await triggerBoundaryResize(280, 480);
-    expect(animationFrameCallbacks.size).toBe(0);
-
-    await openDetails();
-    expect(firstObserver?.disconnect).toHaveBeenCalledOnce();
+    expect(subContentProps.updatePositionStrategy).toBe('always');
   });
 
   it('copies the complete session ID through the copy menu item', async () => {
@@ -432,6 +297,75 @@ describe('SessionDetailsSubmenu', () => {
     expect(portalRoot.querySelector('[role="status"]')).not.toBeNull();
     render({ ...session, sessionId: 'different-session-id' });
     expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('ignores a pending copy result after Details closes and reopens', async () => {
+    const pendingCopy = deferred<void>();
+    mockClipboard(vi.fn().mockReturnValue(pendingCopy.promise));
+    render();
+    await openDetails();
+    await selectCopy();
+
+    await openDetails();
+    await openDetails();
+    await act(async () => {
+      pendingCopy.resolve(undefined);
+      await pendingCopy.promise;
+    });
+
+    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('only applies the latest copy attempt for the current session', async () => {
+    const firstCopy = deferred<void>();
+    const secondCopy = deferred<void>();
+    const staleError = new Error('stale clipboard failure');
+    mockClipboard(
+      vi
+        .fn()
+        .mockReturnValueOnce(firstCopy.promise)
+        .mockReturnValueOnce(secondCopy.promise),
+    );
+    render();
+    await openDetails();
+    await selectCopy();
+    await selectCopy();
+
+    await act(async () => {
+      secondCopy.resolve(undefined);
+      await secondCopy.promise;
+    });
+    expect(portalRoot.querySelector('[role="status"]')?.textContent).toBe(
+      'Session ID copied',
+    );
+
+    await act(async () => {
+      firstCopy.reject(staleError);
+      await firstCopy.promise.catch(() => undefined);
+    });
+    expect(portalRoot.querySelector('[role="status"]')?.textContent).toBe(
+      'Session ID copied',
+    );
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('ignores a pending copy failure after the session changes', async () => {
+    const pendingCopy = deferred<void>();
+    const staleError = new Error('stale clipboard failure');
+    mockClipboard(vi.fn().mockReturnValue(pendingCopy.promise));
+    render();
+    await openDetails();
+    await selectCopy();
+
+    render({ ...session, sessionId: 'different-session-id' });
+    await act(async () => {
+      pendingCopy.reject(staleError);
+      await pendingCopy.promise.catch(() => undefined);
+    });
+
+    expect(portalRoot.querySelector('[role="status"]')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('reports clipboard failures through the existing error path', async () => {
