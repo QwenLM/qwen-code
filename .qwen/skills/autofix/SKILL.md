@@ -202,6 +202,13 @@ implement — satisfying a nit is never a reason to bloat the code.
   reason per finding (out of scope, conflicts with the PR's direction, or not
   worth the diff growth) so the deferral is visible in the PR thread — never
   drop one silently.
+- Critical-only mode: when `feedback.md` contains a
+  `Deferred non-Critical feedback` section, the PR has already completed five
+  suggestion-capable, change-producing rounds. That section is an audit record,
+  not work: do not modify code, resolve threads, or write comment replies for
+  those items. Act only on Critical feedback and formally requested changes
+  rendered in the actionable sections, failed checks, and the requested
+  base-conflict resolution.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether

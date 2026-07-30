@@ -248,9 +248,10 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Quick copy');
-    expect(container.textContent).toContain('Details');
-    expect(container.querySelector('button[aria-label*="table"]')).toBeNull();
+    expect(container.textContent).toContain('Copy table');
+    expect(
+      container.querySelector('button[aria-label="View details for row 1"]'),
+    ).not.toBeNull();
 
     act(() => root.unmount());
     container.remove();
@@ -293,7 +294,7 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
     expect(container.querySelector('[data-custom-table="true"]')).toBeNull();
 
     act(() => root.unmount());
@@ -319,7 +320,7 @@ describe('Markdown enhanced tables', () => {
     });
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
 
     act(() => root.unmount());
     container.remove();
@@ -357,7 +358,7 @@ describe('Markdown enhanced tables', () => {
     expect(table).not.toBeNull();
     expect(table?.textContent).toContain('A');
     expect(table?.textContent).toContain('1');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
     expect(consoleError).toHaveBeenCalledWith(
       '[web-shell] enhanced markdown table failed:',
       expect.any(Error),
@@ -488,6 +489,7 @@ describe('Markdown custom code block rendering', () => {
       className: 'language-echarts-fulldata',
       code: 'const option = {};',
       isStreaming: true,
+      isIncomplete: false,
       source: 'assistant',
       theme: 'dark',
     });
@@ -496,6 +498,41 @@ describe('Markdown custom code block rendering', () => {
       'assistant:true:const option = {};',
     );
     expect(container.querySelector('pre code')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('marks only the unterminated tail fence as incomplete', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() =>
+      createElement('div', { 'data-custom-code': 'true' }),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content:
+              '```first-chart\n{"value":1}\n```\n\ntext\n\n```second-chart\n{"value":',
+            source: 'assistant',
+            isStreaming: true,
+          }),
+        ),
+      );
+    });
+
+    const infos = renderCodeBlock.mock.calls.map(
+      ([info]) => info as WebShellCodeBlockRenderInfo,
+    );
+    expect(infos.map((info) => info.isStreaming)).toEqual([true, true]);
+    expect(infos.map((info) => info.isIncomplete)).toEqual([false, true]);
 
     await act(async () => {
       root.unmount();

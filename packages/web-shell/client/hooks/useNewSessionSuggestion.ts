@@ -3,6 +3,7 @@ import type { Message } from '../adapters/types';
 import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
 
 const MIN_PROMPT_LENGTH = 12;
+const MIN_BTW_MESSAGE_COUNT = 2;
 const MIN_MESSAGE_COUNT = 8;
 const MIN_CONTEXT_USAGE_RATIO = 0.35;
 const MIN_EXPLICIT_CUE_MESSAGE_COUNT = 2;
@@ -50,29 +51,33 @@ const EXPLICIT_NEW_TASK_PATTERNS = [
   /brainstorm/i,
 ];
 
-interface TopicShiftDecision {
-  shouldSuggestNewSession: boolean;
+type SuggestionKind = 'btw' | 'new_session' | 'none';
+
+interface ComposerSuggestionDecision {
+  suggestion: SuggestionKind;
   confidence: number;
 }
 
 export interface NewSessionSuggestionState {
-  isVisible: boolean;
+  suggestion: Exclude<SuggestionKind, 'none'>;
   classifiedInput: string;
+  sourceSessionId: string;
 }
 
 export interface UseNewSessionSuggestionOptions {
   enabled: boolean;
-  inputText: string;
   messages: Message[];
   sessionId?: string;
   contextUsageRatio: number;
   isRunning: boolean;
   dialogOpen: boolean;
+  hasAttachments: boolean | null;
   generateContent?: DaemonSessionActions['generateSessionContent'];
 }
 
 export interface UseNewSessionSuggestionReturn {
   suggestion: NewSessionSuggestionState | null;
+  updateInput: (inputText: string) => void;
   dismiss: () => void;
   suppress: () => void;
 }
@@ -114,16 +119,20 @@ function buildPrompt(params: {
   currentInput: string;
   contextUsageRatio: number;
   messageCount: number;
+  allowBtw: boolean;
+  allowNewSession: boolean;
 }): string {
   const recent = params.recentMessages
     .map((message, index) => `${index + 1}. ${message.role}: ${message.text}`)
     .join('\n');
   return [
-    "You are deciding whether a user's new message still belongs in the current coding session.",
-    'Suggest starting a new session only when the new message is clearly a different task or topic, and continuing in the current session would likely add context noise or wasted token usage.',
-    'Be conservative. When in doubt, keep the current session.',
-    'Do NOT suggest a new session for follow-up questions, implementation continuations, debugging iterations, review follow-ups, or adjacent design discussion about the same repo, PR, bug, or feature.',
-    'Return JSON only with keys: shouldSuggestNewSession (boolean) and confidence (0-1 number).',
+    "You are deciding how a user's new message should be handled in the current coding session.",
+    'Choose "new_session" only when the message is clearly a different task or topic and continuing here would add context noise.',
+    'Choose "btw" only for a brief side question that can be answered without changing the main task or adding its answer to the main conversation context.',
+    'Choose "none" for follow-ups, implementation continuations, debugging iterations, review follow-ups, and adjacent discussion about the same repo, PR, bug, or feature.',
+    'Be conservative. When in doubt, choose "none".',
+    `Allowed actions: btw=${params.allowBtw ? 'yes' : 'no'}, new_session=${params.allowNewSession ? 'yes' : 'no'}. Never choose an action marked no.`,
+    'Return JSON only with keys: suggestion ("btw", "new_session", or "none") and confidence (0-1 number).',
     '',
     `Context usage ratio: ${params.contextUsageRatio.toFixed(2)}`,
     `Visible message count: ${params.messageCount}`,
@@ -136,13 +145,26 @@ function buildPrompt(params: {
   ].join('\n');
 }
 
-function tryParseDecision(text: string): TopicShiftDecision | null {
+function tryParseDecision(text: string): ComposerSuggestionDecision | null {
   try {
-    const parsed = JSON.parse(text) as Partial<TopicShiftDecision>;
-    if (typeof parsed.shouldSuggestNewSession !== 'boolean') return null;
-    if (typeof parsed.confidence !== 'number') return null;
+    const parsed = JSON.parse(text) as Partial<ComposerSuggestionDecision>;
+    if (
+      parsed.suggestion !== 'btw' &&
+      parsed.suggestion !== 'new_session' &&
+      parsed.suggestion !== 'none'
+    ) {
+      return null;
+    }
+    if (
+      typeof parsed.confidence !== 'number' ||
+      !Number.isFinite(parsed.confidence) ||
+      parsed.confidence < 0 ||
+      parsed.confidence > 1
+    ) {
+      return null;
+    }
     return {
-      shouldSuggestNewSession: parsed.shouldSuggestNewSession,
+      suggestion: parsed.suggestion,
       confidence: parsed.confidence,
     };
   } catch {
@@ -150,7 +172,7 @@ function tryParseDecision(text: string): TopicShiftDecision | null {
   }
 }
 
-function parseDecision(text: string): TopicShiftDecision | null {
+function parseDecision(text: string): ComposerSuggestionDecision | null {
   const direct = tryParseDecision(text);
   if (direct) return direct;
   // Despite the JSON-only instruction, the model sometimes wraps a perfectly
@@ -170,12 +192,12 @@ function parseDecision(text: string): TopicShiftDecision | null {
 
 export function useNewSessionSuggestion({
   enabled,
-  inputText,
   messages,
   sessionId,
   contextUsageRatio,
   isRunning,
   dialogOpen,
+  hasAttachments,
   generateContent,
 }: UseNewSessionSuggestionOptions): UseNewSessionSuggestionReturn {
   const [suggestion, setSuggestion] =
@@ -183,9 +205,31 @@ export function useNewSessionSuggestion({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const suppressUntilRef = useRef(0);
+  const currentInputRef = useRef('');
+  const suggestionRef = useRef<NewSessionSuggestionState | null>(null);
   const latestSessionIdRef = useRef(sessionId);
 
   const recentMessages = useMemo(() => summarizeMessages(messages), [messages]);
+  const optionsRef = useRef({
+    enabled,
+    recentMessages,
+    sessionId,
+    contextUsageRatio,
+    isRunning,
+    dialogOpen,
+    hasAttachments,
+    generateContent,
+  });
+  optionsRef.current = {
+    enabled,
+    recentMessages,
+    sessionId,
+    contextUsageRatio,
+    isRunning,
+    dialogOpen,
+    hasAttachments,
+    generateContent,
+  };
 
   const clearPending = useCallback(() => {
     if (timerRef.current) {
@@ -196,126 +240,170 @@ export function useNewSessionSuggestion({
     abortRef.current = null;
   }, []);
 
-  const dismiss = useCallback(() => {
+  const clearSuggestion = useCallback(() => {
+    if (suggestionRef.current === null) return;
+    suggestionRef.current = null;
     setSuggestion(null);
+  }, []);
+
+  const dismiss = useCallback(() => {
+    clearSuggestion();
     clearPending();
-  }, [clearPending]);
+  }, [clearPending, clearSuggestion]);
 
   const suppress = useCallback(() => {
     suppressUntilRef.current = Date.now() + SUPPRESS_MS;
-    setSuggestion(null);
+    clearSuggestion();
     clearPending();
-  }, [clearPending]);
+  }, [clearPending, clearSuggestion]);
+
+  const scheduleInput = useCallback(
+    (inputText: string) => {
+      clearPending();
+      const {
+        enabled: currentEnabled,
+        recentMessages: currentRecentMessages,
+        sessionId: currentSessionId,
+        contextUsageRatio: currentContextUsageRatio,
+        isRunning: currentIsRunning,
+        dialogOpen: currentDialogOpen,
+        hasAttachments: currentHasAttachments,
+        generateContent: currentGenerateContent,
+      } = optionsRef.current;
+      if (!currentEnabled || !currentGenerateContent || !currentSessionId) {
+        clearSuggestion();
+        return;
+      }
+      const trimmed = inputText.trim();
+      if (trimmed.length < MIN_PROMPT_LENGTH) {
+        clearSuggestion();
+        return;
+      }
+      const explicitNewTaskCue = hasExplicitNewTaskCue(trimmed);
+      if (currentIsRunning || currentDialogOpen) {
+        clearSuggestion();
+        return;
+      }
+      const allowBtw =
+        currentHasAttachments === false &&
+        currentRecentMessages.length >= MIN_BTW_MESSAGE_COUNT;
+      const allowNewSession =
+        !isFollowupLike(trimmed) &&
+        (explicitNewTaskCue
+          ? currentRecentMessages.length >= MIN_EXPLICIT_CUE_MESSAGE_COUNT ||
+            currentContextUsageRatio >= MIN_EXPLICIT_CUE_CONTEXT_USAGE_RATIO
+          : currentRecentMessages.length >= MIN_MESSAGE_COUNT ||
+            currentContextUsageRatio >= MIN_CONTEXT_USAGE_RATIO);
+      if (!allowBtw && !allowNewSession) {
+        clearSuggestion();
+        return;
+      }
+      if (Date.now() < suppressUntilRef.current) {
+        clearSuggestion();
+        return;
+      }
+
+      clearSuggestion();
+      timerRef.current = setTimeout(() => {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const prompt = buildPrompt({
+          recentMessages: currentRecentMessages,
+          currentInput: trimmed,
+          contextUsageRatio: currentContextUsageRatio,
+          messageCount: currentRecentMessages.length,
+          allowBtw,
+          allowNewSession,
+        });
+        void (async () => {
+          let text = '';
+          try {
+            for await (const event of currentGenerateContent(prompt, {
+              signal: controller.signal,
+            })) {
+              if (abortRef.current !== controller) return;
+              if (event.type === 'delta') {
+                text += event.text;
+              } else if (event.type === 'error') {
+                if (abortRef.current === controller) {
+                  clearSuggestion();
+                }
+                return;
+              }
+            }
+            if (abortRef.current !== controller) return;
+            const decision = parseDecision(text.trim());
+            if (
+              decision &&
+              decision.suggestion !== 'none' &&
+              ((decision.suggestion === 'btw' && allowBtw) ||
+                (decision.suggestion === 'new_session' && allowNewSession)) &&
+              decision.confidence >= MIN_CONFIDENCE
+            ) {
+              const nextSuggestion = {
+                suggestion: decision.suggestion,
+                classifiedInput: trimmed,
+                sourceSessionId: currentSessionId,
+              } satisfies NewSessionSuggestionState;
+              suggestionRef.current = nextSuggestion;
+              setSuggestion(nextSuggestion);
+              return;
+            }
+            clearSuggestion();
+          } catch {
+            if (!controller.signal.aborted) {
+              clearSuggestion();
+            }
+          } finally {
+            if (abortRef.current === controller) {
+              abortRef.current = null;
+            }
+          }
+        })();
+      }, REQUEST_DEBOUNCE_MS);
+    },
+    [clearPending, clearSuggestion],
+  );
+
+  const updateInput = useCallback(
+    (inputText: string) => {
+      currentInputRef.current = inputText;
+      scheduleInput(inputText);
+    },
+    [scheduleInput],
+  );
 
   useEffect(() => {
     if (latestSessionIdRef.current !== sessionId) {
-      setSuggestion(null);
-      clearPending();
       latestSessionIdRef.current = sessionId;
-    }
-  }, [clearPending, sessionId]);
-
-  useEffect(() => {
-    clearPending();
-    if (!enabled || !generateContent || !sessionId) {
-      setSuggestion(null);
-      return;
-    }
-    const trimmed = inputText.trim();
-    if (trimmed.length < MIN_PROMPT_LENGTH) {
-      setSuggestion(null);
-      return;
-    }
-    if (isFollowupLike(trimmed)) {
-      setSuggestion(null);
-      return;
-    }
-    const explicitNewTaskCue = hasExplicitNewTaskCue(trimmed);
-    if (isRunning || dialogOpen) {
-      setSuggestion(null);
-      return;
-    }
-    if (
-      explicitNewTaskCue
-        ? recentMessages.length < MIN_EXPLICIT_CUE_MESSAGE_COUNT &&
-          contextUsageRatio < MIN_EXPLICIT_CUE_CONTEXT_USAGE_RATIO
-        : recentMessages.length < MIN_MESSAGE_COUNT &&
-          contextUsageRatio < MIN_CONTEXT_USAGE_RATIO
-    ) {
-      setSuggestion(null);
-      return;
-    }
-    if (Date.now() < suppressUntilRef.current) {
-      setSuggestion(null);
-      return;
-    }
-
-    setSuggestion(null);
-    timerRef.current = setTimeout(() => {
-      const controller = new AbortController();
-      abortRef.current = controller;
-      const prompt = buildPrompt({
-        recentMessages,
-        currentInput: trimmed,
-        contextUsageRatio,
-        messageCount: recentMessages.length,
-      });
-      void (async () => {
-        let text = '';
-        try {
-          for await (const event of generateContent(prompt, {
-            signal: controller.signal,
-          })) {
-            if (abortRef.current !== controller) return;
-            if (event.type === 'delta') {
-              text += event.text;
-            } else if (event.type === 'error') {
-              if (abortRef.current === controller) {
-                setSuggestion(null);
-              }
-              return;
-            }
-          }
-          if (abortRef.current !== controller) return;
-          const decision = parseDecision(text.trim());
-          if (
-            decision &&
-            decision.shouldSuggestNewSession &&
-            decision.confidence >= MIN_CONFIDENCE
-          ) {
-            setSuggestion({ isVisible: true, classifiedInput: trimmed });
-            return;
-          }
-          setSuggestion(null);
-        } catch {
-          if (!controller.signal.aborted) {
-            setSuggestion(null);
-          }
-        } finally {
-          if (abortRef.current === controller) {
-            abortRef.current = null;
-          }
-        }
-      })();
-    }, REQUEST_DEBOUNCE_MS);
-
-    return () => {
       clearPending();
-    };
+      clearSuggestion();
+    }
+    scheduleInput(currentInputRef.current);
   }, [
     clearPending,
+    clearSuggestion,
     contextUsageRatio,
     dialogOpen,
     enabled,
     generateContent,
-    inputText,
+    hasAttachments,
     isRunning,
     recentMessages,
+    scheduleInput,
     sessionId,
   ]);
 
+  useEffect(
+    () => () => {
+      clearPending();
+    },
+    [clearPending],
+  );
+
   return {
     suggestion,
+    updateInput,
     dismiss,
     suppress,
   };

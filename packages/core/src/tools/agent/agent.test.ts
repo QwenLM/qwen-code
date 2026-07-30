@@ -5910,7 +5910,7 @@ describe('AgentTool', () => {
       });
     });
 
-    it('persists fork capability snapshots in the bootstrap transcript', async () => {
+    it('does not persist fork capability snapshots in the bootstrap transcript', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
@@ -5950,14 +5950,16 @@ describe('AgentTool', () => {
       ).createInvocation(forkParams);
       await invocation.execute();
 
-      expect(attachSpy).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.any(String),
-        expect.objectContaining({
-          bootstrapSystemInstruction: generationConfig.systemInstruction,
-          bootstrapTools: generationConfig.tools[0].functionDeclarations,
-        }),
-      );
+      const writerOptions = attachSpy.mock.calls[0]?.[2];
+      expect(writerOptions).toBeDefined();
+      expect(writerOptions).not.toHaveProperty('bootstrapSystemInstruction');
+      expect(writerOptions).not.toHaveProperty('bootstrapTools');
+      expect(writerOptions).toMatchObject({
+        bootstrapHistory: [{ role: 'model', parts: [{ text: 'Ready' }] }],
+        launchTaskPrompt: expect.any(String),
+      });
+      const createArgs = createSpy.mock.calls[0];
+      expect(createArgs?.[5]).toEqual({ tools: ['Bash', 'Read'] });
 
       attachSpy.mockRestore();
       createSpy.mockRestore();

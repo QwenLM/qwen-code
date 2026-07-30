@@ -78,6 +78,15 @@ export interface ChannelPairingApprovalResult
   approved: PairingRequest;
 }
 
+export interface ChannelPairingApprovalsSnapshot {
+  senderIds: string[];
+}
+
+export interface ChannelPairingRevocationResult
+  extends ChannelPairingApprovalsSnapshot {
+  revoked: string;
+}
+
 export interface ChannelManagementService {
   list(): Promise<DaemonChannelsSnapshot>;
   upsert(
@@ -100,6 +109,11 @@ export interface ChannelManagementService {
     name: string,
     code: string,
   ): Promise<ChannelPairingApprovalResult>;
+  pairingApprovals(name: string): Promise<ChannelPairingApprovalsSnapshot>;
+  revokePairingApproval(
+    name: string,
+    senderId: string,
+  ): Promise<ChannelPairingRevocationResult>;
 }
 
 interface ChannelManagementSettingsStore {
@@ -540,6 +554,19 @@ export function createChannelManagementService(
       }
       return { approved, requests: store.listPending() };
     },
+    async pairingApprovals(name) {
+      return { senderIds: pairingStoreFor(name).getAllowlist() };
+    },
+    async revokePairingApproval(name, senderId) {
+      const store = pairingStoreFor(name);
+      if (!store.revoke(senderId)) {
+        throw new ChannelManagementError(
+          'channel_pairing_approval_not_found',
+          'Pairing approval was not found.',
+        );
+      }
+      return { revoked: senderId, senderIds: store.getAllowlist() };
+    },
   };
   return {
     list: () => service.list(),
@@ -555,5 +582,8 @@ export function createChannelManagementService(
     pairingRequests: (name) => service.pairingRequests(name),
     approvePairing: (name, code) =>
       inMutationLane(() => service.approvePairing(name, code)),
+    pairingApprovals: (name) => service.pairingApprovals(name),
+    revokePairingApproval: (name, senderId) =>
+      inMutationLane(() => service.revokePairingApproval(name, senderId)),
   };
 }

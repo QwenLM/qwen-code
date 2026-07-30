@@ -20,7 +20,6 @@ import {
   useProviders,
   useSessionNotices,
   useStreamingState,
-  useTranscriptBlocks,
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
@@ -95,6 +94,7 @@ import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
+import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
   type ArtifactPanelTab,
@@ -168,9 +168,9 @@ import {
   skillDescriptionKey,
 } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
-import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { useMessages } from './hooks/useMessages';
+import { useMessagesFromBlocks } from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
@@ -543,6 +543,12 @@ export interface WebShellProps {
   /** Called when the split pane list changes from inside WebShell. */
   onSplitSessionIdsChange?: (sessionIds: string[]) => void;
   /**
+   * Extra actions rendered in each split-pane header, before the built-in
+   * close button. Receives the pane's session id (and workspace when known).
+   * When the actions no longer fit they collapse into a `…` overflow menu.
+   */
+  renderPaneHeaderActions?: PaneHeaderActionsRenderer;
+  /**
    * Called instead of the built-in right panel open behavior when a user clicks
    * a turn output such as review changes, an artifact, or a scheduled task.
    */
@@ -566,8 +572,7 @@ export interface WebShellProps {
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
    * Called whenever transcript blocks change. Receives the full blocks array
-   * from useTranscriptBlocks(). Fires on every streaming delta during active
-   * generation, so consumers should debounce or throttle expensive work.
+   * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
@@ -1146,6 +1151,7 @@ export function App({
   sidebar,
   splitSessionIds: externalSplitSessionIds,
   onSplitSessionIdsChange,
+  renderPaneHeaderActions,
   onRightPanelOpen,
   messageTurnOutputs,
   shellRef,
@@ -1379,7 +1385,7 @@ export function App({
   const CustomComposerHeader = renderComposerHeader;
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
-  const blocks = useTranscriptBlocks();
+  const blocks = useAnimationFrameTranscriptBlocks();
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
@@ -1693,7 +1699,7 @@ export function App({
     });
   }, []);
 
-  const messages = useMessages(t);
+  const messages = useMessagesFromBlocks(t, blocks);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
@@ -2353,10 +2359,9 @@ export function App({
     [artifactPanelWidth, getMaxArtifactPanelWidth],
   );
   useEffect(() => () => artifactPanelResizeCleanupRef.current?.(), []);
-  const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
-    () => extractPendingPermission(messageBlocks),
-    [messageBlocks],
+    () => extractPendingPermission(blocks),
+    [blocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
   const canActOnPendingApproval = !(
@@ -2614,10 +2619,9 @@ export function App({
     },
   });
   const composerTextRef = useRef('');
-  const composerTextDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const [composerText, setComposerText] = useState('');
+  const [hasComposerAttachments, setHasComposerAttachments] = useState<
+    boolean | null
+  >(null);
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
@@ -5164,34 +5168,22 @@ export function App({
   const handleOpenExistingWorkspace = useCallback(() => {
     setShowAddWorkspaceDialog(true);
   }, []);
-  useEffect(
-    () => () => {
-      if (composerTextDebounceRef.current) {
-        clearTimeout(composerTextDebounceRef.current);
-      }
+
+  const handleComposerAttachmentsChange = useCallback(
+    (hasAttachments: boolean) => {
+      setHasComposerAttachments(hasAttachments);
     },
     [],
   );
 
-  const handleComposerTextChange = useCallback((text: string) => {
-    composerTextRef.current = text;
-    if (composerTextDebounceRef.current) {
-      clearTimeout(composerTextDebounceRef.current);
-    }
-    composerTextDebounceRef.current = setTimeout(() => {
-      setComposerText(text);
-      composerTextDebounceRef.current = null;
-    }, 120);
-  }, []);
-
   const {
     suggestion: newSessionSuggestion,
+    updateInput: updateNewSessionSuggestionInput,
     dismiss: dismissNewSessionSuggestion,
     suppress: suppressNewSessionSuggestion,
   } = useNewSessionSuggestion({
     enabled:
       connection.capabilities?.features.includes('session_generation') === true,
-    inputText: composerText,
     messages,
     sessionId: connection.sessionId,
     contextUsageRatio:
@@ -5200,8 +5192,17 @@ export function App({
         : 0,
     isRunning: streamingState !== 'idle',
     dialogOpen: interactionBlocked || approvalOverlayActive,
+    hasAttachments: hasComposerAttachments,
     generateContent: sessionActions.generateSessionContent,
   });
+
+  const handleComposerTextChange = useCallback(
+    (text: string) => {
+      composerTextRef.current = text;
+      updateNewSessionSuggestionInput(text);
+    },
+    [updateNewSessionSuggestionInput],
+  );
 
   const flushPendingNewSessionSuggestionSubmit = useCallback(
     (expectedToken?: number) => {
@@ -5263,7 +5264,11 @@ export function App({
   const handleAcceptNewSessionSuggestion = useCallback(() => {
     const draft = composerTextRef.current.trim();
     if (!draft || isStartingNewSessionSuggestion) return;
-    if (newSessionSuggestion?.classifiedInput !== draft) {
+    if (
+      newSessionSuggestion?.suggestion !== 'new_session' ||
+      newSessionSuggestion.classifiedInput !== draft ||
+      newSessionSuggestion.sourceSessionId !== connectionRef.current.sessionId
+    ) {
       dismissNewSessionSuggestion();
       return;
     }
@@ -5302,6 +5307,24 @@ export function App({
     onSessionIdChange,
     suppressNewSessionSuggestion,
   ]);
+
+  const handleAcceptBtwSuggestion = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    if (
+      !draft ||
+      newSessionSuggestion?.suggestion !== 'btw' ||
+      newSessionSuggestion.classifiedInput !== draft ||
+      newSessionSuggestion.sourceSessionId !==
+        connectionRef.current.sessionId ||
+      editorRef.current?.hasAttachments() !== false
+    ) {
+      dismissNewSessionSuggestion();
+      return;
+    }
+    dismissNewSessionSuggestion();
+    editorRef.current?.submit({ text: `/btw ${draft}` });
+    editorRef.current?.focus();
+  }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
@@ -8338,6 +8361,7 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
+                        renderPaneHeaderActions={renderPaneHeaderActions}
                         voiceUserRevision={voiceUserRevision}
                         voiceWorkspaceRevisions={voiceWorkspaceRevisions}
                         voiceWorkspaces={
@@ -8653,7 +8677,11 @@ export function App({
                           <div
                             className={styles.composerActionTip}
                             role="status"
-                            data-testid="new-session-suggestion"
+                            data-testid={
+                              newSessionSuggestion.suggestion === 'btw'
+                                ? 'btw-suggestion'
+                                : 'new-session-suggestion'
+                            }
                           >
                             <span
                               className={styles.composerActionTipIcon}
@@ -8662,17 +8690,29 @@ export function App({
                               ✦
                             </span>
                             <span className={styles.composerActionTipText}>
-                              {t('editor.newSessionSuggestionTitle')}
+                              {newSessionSuggestion.suggestion === 'btw'
+                                ? t('editor.btwSuggestionTitle')
+                                : t('editor.newSessionSuggestionTitle')}
                             </span>
                             <div className={styles.composerActionTipActions}>
                               <button
                                 type="button"
                                 className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                data-testid="new-session-suggestion-start"
+                                data-testid={
+                                  newSessionSuggestion.suggestion === 'btw'
+                                    ? 'btw-suggestion-send'
+                                    : 'new-session-suggestion-start'
+                                }
                                 onMouseDown={(event) => event.preventDefault()}
-                                onClick={handleAcceptNewSessionSuggestion}
+                                onClick={
+                                  newSessionSuggestion.suggestion === 'btw'
+                                    ? handleAcceptBtwSuggestion
+                                    : handleAcceptNewSessionSuggestion
+                                }
                               >
-                                {t('editor.newSessionSuggestionStart')}
+                                {newSessionSuggestion.suggestion === 'btw'
+                                  ? t('editor.btwSuggestionSend')
+                                  : t('editor.newSessionSuggestionStart')}
                               </button>
                             </div>
                           </div>
@@ -8703,6 +8743,9 @@ export function App({
                           ref={setEditorHandle}
                           onSubmit={handleEditorSubmit}
                           onInputTextChange={handleComposerTextChange}
+                          onAttachmentsChange={
+                            handleComposerAttachmentsChange
+                          }
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
