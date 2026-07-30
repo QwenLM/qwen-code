@@ -24,6 +24,12 @@ describe('no-core-root-barrel-import', () => {
     expect(runRule(`import value from '${importedPath}';`, filename)).toHaveLength(1);
   });
 
+  it('rejects export and dynamic root barrel sources', () => {
+    expect(runRule("export { value } from '../index.js';", 'packages/core/src/core/client.ts')).toHaveLength(1);
+    expect(runRule("export * from '../index.js';", 'packages/core/src/core/client.ts')).toHaveLength(1);
+    expect(runRule("import('../index.js');", 'packages/core/src/core/client.ts')).toHaveLength(1);
+  });
+
   it('allows tests, fixtures, and non-core consumers', () => {
     expect(runRule("import value from '../index.js';", 'packages/core/src/core/client.test.ts')).toHaveLength(0);
     expect(runRule("import value from '../../index.js';", 'packages/core/src/fixtures/client.ts')).toHaveLength(0);
