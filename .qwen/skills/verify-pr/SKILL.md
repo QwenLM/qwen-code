@@ -104,13 +104,15 @@ secondary claims. Budget by value:
 1. **A/B load-bearing proof of the central claim** (always, ~half the budget).
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
-4. **Capture the A/B and the matrix as they print** (~5 minutes, whenever
-   `QWEN_VERIFY_CHROMIUM=1`). This is a budget line, not an afterthought:
-   two live runs with the browser installed and working produced **zero**
-   images, because the instruction lived in the artifact contract while the
-   plan the agent follows is this list. Decide here how many captures the
-   round needs — normally two, at most a handful — and reserve the time.
-   See the artifact contract for the mechanics and the naming rule.
+4. **Capture the A/B and the matrix as they print** — one command each,
+   `node scripts/verify-capture.mjs --out …/01-ab.png -- <cmd>`, so budget
+   ~2 minutes, not the ~5 an ad-hoc pipeline would need. This is a budget
+   line, not an afterthought: **four live runs produced zero images**, first
+   because the instruction was worded as optional, then because it lived in
+   the artifact contract while the plan the agent follows is this list, and
+   underneath both because the pipeline it named did not exist. Decide here
+   how many captures the round needs — normally two, at most a handful — and
+   reserve the time. Mechanics and the naming rule: artifact contract.
 
 Everything else is explicitly out of scope — and is **listed as not covered**
 in the report. Never let breadth eat the A/B: one proven load-bearing claim
@@ -541,15 +543,28 @@ workflow globs). It must contain:
   headline number. One capture of the terminal showing `2999 → 0` is worth
   more than the sentence asserting it.
 
-  **Chromium is pre-installed for you** when `QWEN_VERIFY_CHROMIUM=1` is set;
-  `PLAYWRIGHT_BROWSERS_PATH` already points at it. Do **not** run
-  `playwright install` — you run as `node` with a fresh `HOME` and no apt
-  rights, so it downloads ~170 MB and then fails on system deps. If
-  `QWEN_VERIFY_CHROMIUM` is unset the capability is unavailable in this run:
-  ship the text-only report and note it under _Not covered_ in one line, do
-  not spend budget working around it.
+  **One command, already wired — do not build a capture pipeline.**
 
-  Route: `terminal-capture` skill (node-pty → xterm.js → Playwright PNG).
+  ```bash
+  node scripts/verify-capture.mjs --out tmp/pr<n>-verify-<ts>/evidence/01-ab.png \
+    --title 'A/B: the gate flips on noisy data' -- node my-harness.mjs
+  # or pipe:  my-harness | node scripts/verify-capture.mjs --out …/02-matrix.png
+  ```
+
+  It runs the command, parses its ANSI through `@xterm/headless`, and
+  rasterises the cell grid with `sharp` — colour and bold preserved, **no
+  browser and no pseudo-terminal**. A non-zero exit from the captured command
+  is fine and often the point: capturing a failing base arm is normal. Options
+  that matter: `--cols` (default 100) to stop wrapping, `--title` for the
+  caption, `--rows` to cap height.
+
+  Earlier versions of this section sent you to build node-pty → xterm →
+  Playwright yourself. **That route did not exist** — `node-pty` is not a
+  dependency of this repo and needs a native build — and four live runs
+  produced zero images because of it. If `verify-capture.mjs` is missing or
+  fails, say so under _Not covered_ in one line and ship the text-only report;
+  do not reconstruct the pipeline by hand.
+
   The publish job hosts what you produce on a per-PR branch
   (`pr-assets/<N>-verify`) and appends it below the report, capped at
   **8 images, 2 MB each**; anything
