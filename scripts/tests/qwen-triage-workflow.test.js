@@ -2089,6 +2089,102 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // Verification techniques lifted from maintainer-written verification rounds that
+  // the skill could not previously have produced. Each is pinned to the
+  // failure it exists for, because a rule stated without its failure reads
+  // as advice and gets skipped.
+  it('carries the maintainer-round verification techniques', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    // #7914 §4: the PR added write_file as a second writer into the shared
+    // artifact store, and the store's pre-existing first-writer-wins merge
+    // then silently discarded record_artifact's curated title. Nothing in
+    // the old skill pointed at collisions between writers.
+    expect(flat).toContain('new writer into a shared store');
+    expect(flat).toContain('in both orders');
+    expect(flat).toContain('what the loser is told');
+
+    // ...and that finding surfaced from a control that existed to validate
+    // the BASE probe, run identically on head.
+    expect(flat).toContain('Run every control on BOTH arms');
+
+    // #7998: the hardware cursor was read with a tmux query, then
+    // corroborated by a post-exit marker — a second effect of the same fact
+    // whose failure mode does not involve the query.
+    expect(flat).toContain('corroborate it with a mechanism that does not use');
+
+    // #7998 nit: re-running patch-package produced a byte-different file,
+    // proving the committed hunks were hand-written.
+    expect(flat).toContain('Re-run the generator and diff');
+
+    // #7998 "what I did not verify": a blank harness was proved
+    // environmental by booting base and head identically.
+    expect(flat).toContain('A/A control');
+
+    // #7934 R4 §1: a new guard turned a vacuous pass into a failure that is
+    // deterministic on a fast machine. Sampling cannot find it from a
+    // loaded CI box — only measuring the margin can, so the rule must say
+    // measure and must say why repetition is the wrong instrument here.
+    expect(flat).toContain('measure it, do not sample it');
+    expect(flat).toContain('speed-correlated failure is not flake');
+    expect(flat).toContain('You cannot reproduce a fast-machine failure');
+    // The blocking verdict must be expressible in the contract, not just
+    // asserted in prose: encode the margin as a scripted assertion so a
+    // crossing distribution lands in `fail`.
+    expect(flat).toContain('encoding the margin as a scripted assertion');
+
+    // #7934 R4 §2: the abort cases fired during CLI startup, so the fake
+    // server saw zero requests — a suite named for mid-stream aborts never
+    // streamed, and every assertion passed.
+    expect(flat).toContain('the scenario never reached the code under test');
+    expect(flat).toContain('assert that count is non-zero');
+
+    // #7836: both blockers had one root cause — a route and the child it
+    // spawns asked the same question against different state (pinned vs
+    // unpinned runtime dir), and a lazily-created backing file left a
+    // window where a just-created session was invisible to any on-disk
+    // existence check.
+    expect(flat).toContain('the same predicate is checked in two places');
+    expect(flat).toContain('is the state observable yet at all');
+    expect(flat).toContain('blast radius on bystanders');
+
+    // #7836: a whole-file revert removed a test's precondition, so a good
+    // test looked vacuous. A false "your test is vacuous" is worse than a
+    // missed survivor, so the rule must demand the finer mutation first.
+    expect(flat).toContain('escalate to a finer mutation');
+
+    // #7885: an npm cache claimed ~75% off npm ci; isolating the slice a
+    // download cache can touch (--ignore-scripts) showed 36s of 226s, so
+    // the real saving was 15% — and 33s off a 14m37s job at that.
+    expect(flat).toContain('Isolate the slice the mechanism can actually');
+    expect(flat).toContain('has a cost, not only a benefit');
+    // ...and the severity of the finding it did have was bounded by
+    // disproving the scarier readings.
+    expect(flat).toContain('report which ones do NOT hold');
+
+    // #7885: the PR said the cache dir was discarded after the job; the
+    // action's own manifest declares a post-step that uploads it as root.
+    expect(flat).toContain('their own manifest');
+
+    // #7899: the shipped script was run verbatim against the live repo with
+    // every mutating call hard-failing — real data, no possible side effect.
+    expect(flat).toContain('interpose a refusing proxy on the write path');
+
+    // #7862 R4: the fix bundled reduce() with an ordering change. A third
+    // build with only the ordering change showed each half does a different
+    // job — either alone leaves a channel that floods or wedges, which the
+    // two-cell A/B cannot reach.
+    expect(flat).toContain('build the intermediate variants');
+    // ...and the same round bisected the RangeError threshold through the
+    // real async stack, where it fired far below a micro-benchmark's number.
+    expect(flat).toContain(
+      'A limit measured in isolation does not transfer to the real call site',
+    );
+    // ...counting emitted envelopes instead of delivered prompts would have
+    // hidden every gate on the path.
+    expect(flat).toContain('count at the destination, not at the component');
+  });
+
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
   // expected A/B base-cell failures proving the tests are load-bearing"
   // while assertions.json said fail:7 — so the publisher's trust rule
