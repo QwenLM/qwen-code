@@ -21,7 +21,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
@@ -303,7 +303,32 @@ function positionalReadLength(args: unknown): number | undefined {
   return typeof values[2] === 'number' ? values[2] : undefined;
 }
 
+type FileHandlePrototypeMethods = {
+  read: fs.FileHandle['read'];
+  stat: fs.FileHandle['stat'];
+};
+
+let fileHandlePrototype: FileHandlePrototypeMethods;
+let nativeFileHandleRead: FileHandlePrototypeMethods['read'];
+let nativeFileHandleStat: FileHandlePrototypeMethods['stat'];
+
+beforeAll(async () => {
+  const probePath = path.join(os.tmpdir(), `qwen-fh-probe-${process.pid}`);
+  writeFileSync(probePath, '');
+  const probe = await fs.open(probePath, 'r');
+  fileHandlePrototype = Object.getPrototypeOf(
+    probe,
+  ) as FileHandlePrototypeMethods;
+  nativeFileHandleRead = fileHandlePrototype.read;
+  nativeFileHandleStat = fileHandlePrototype.stat;
+  await probe.close();
+  unlinkSync(probePath);
+});
+
 afterEach(async () => {
+  vi.restoreAllMocks();
+  fileHandlePrototype.read = nativeFileHandleRead;
+  fileHandlePrototype.stat = nativeFileHandleStat;
   lstatFault.path = undefined;
   lstatFault.remainingFailures = 0;
   lstatFault.calls = 0;
@@ -1264,12 +1289,7 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      stat: typeof probe.stat;
-    };
-    await probe.close();
-    const originalStat = fileHandlePrototype.stat;
+    const originalStat = nativeFileHandleStat;
     let injected = false;
     const stat = vi
       .spyOn(fileHandlePrototype, 'stat')
@@ -1299,12 +1319,7 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      stat: typeof probe.stat;
-    };
-    await probe.close();
-    const originalStat = fileHandlePrototype.stat;
+    const originalStat = nativeFileHandleStat;
     let injected = false;
     const stat = vi
       .spyOn(fileHandlePrototype, 'stat')
@@ -1337,11 +1352,6 @@ describe('SessionWriterLease', () => {
     const fixture = await createFixture();
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
     const read = vi.spyOn(fileHandlePrototype, 'read');
 
     try {
@@ -1371,12 +1381,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
     await fs.chmod(fixture.transcriptPath, initial.mode);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let shortened = false;
     let hashReads = 0;
     const read = vi
@@ -1421,12 +1426,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
     await fs.chmod(fixture.transcriptPath, initial.mode);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let fullReads = 0;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1456,12 +1456,7 @@ describe('SessionWriterLease', () => {
     await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
     await fs.writeFile(fixture.transcriptPath, '');
     const initial = await fs.stat(fixture.transcriptPath);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      stat: typeof probe.stat;
-    };
-    await probe.close();
-    const originalStat = fileHandlePrototype.stat;
+    const originalStat = nativeFileHandleStat;
     let statCalls = 0;
     let lease: SessionWriterLease | undefined;
     const stat = vi
@@ -1507,12 +1502,7 @@ describe('SessionWriterLease', () => {
       initial.atime,
       new Date(initial.mtimeMs + 1_000),
     );
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let injected = false;
     let scanStarts = 0;
     const read = vi
@@ -1555,12 +1545,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
     await fs.chmod(fixture.transcriptPath, initial.mode);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let fullReads = 0;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1597,12 +1582,7 @@ describe('SessionWriterLease', () => {
     await fs.chmod(fixture.transcriptPath, initial.mode);
     const replacement = `${fixture.transcriptPath}.replacement`;
     await fs.writeFile(replacement, '{"sEEd":true}\n');
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let replaced = false;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1633,12 +1613,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
     await fs.chmod(fixture.transcriptPath, initial.mode);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let truncated = false;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1669,12 +1644,7 @@ describe('SessionWriterLease', () => {
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
     await fs.chmod(fixture.transcriptPath, initial.mode);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let deleted = false;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1709,12 +1679,7 @@ describe('SessionWriterLease', () => {
       fixture.runtimeBaseDir,
       fixture.options.sessionId,
     );
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let replacedOwner = false;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1746,12 +1711,7 @@ describe('SessionWriterLease', () => {
       await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
       const lease = await SessionWriterLease.acquire(fixture.options);
       const initial = await fs.stat(fixture.transcriptPath);
-      const probe = await fs.open(fixture.transcriptPath, 'r');
-      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-        stat: typeof probe.stat;
-      };
-      await probe.close();
-      const originalStat = fileHandlePrototype.stat;
+      const originalStat = nativeFileHandleStat;
       let statCalls = 0;
       const stat = vi
         .spyOn(fileHandlePrototype, 'stat')
@@ -1783,12 +1743,7 @@ describe('SessionWriterLease', () => {
     const seed = '{"seed":true}\n';
     await fs.writeFile(fixture.transcriptPath, seed);
     const lease = await SessionWriterLease.acquire(fixture.options);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      stat: typeof probe.stat;
-    };
-    await probe.close();
-    const originalStat = fileHandlePrototype.stat;
+    const originalStat = nativeFileHandleStat;
     let invalidated = false;
     const stat = vi
       .spyOn(fileHandlePrototype, 'stat')
@@ -1833,12 +1788,7 @@ describe('SessionWriterLease', () => {
     const seed = '{"seed":true}\n';
     await fs.writeFile(fixture.transcriptPath, seed);
     const lease = await SessionWriterLease.acquire(fixture.options);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      stat: typeof probe.stat;
-    };
-    await probe.close();
-    const originalStat = fileHandlePrototype.stat;
+    const originalStat = nativeFileHandleStat;
     let overwritten = false;
     const stat = vi
       .spyOn(fileHandlePrototype, 'stat')
@@ -1877,12 +1827,7 @@ describe('SessionWriterLease', () => {
     const seed = '{"seed":true}\n';
     await fs.writeFile(fixture.transcriptPath, seed);
     const lease = await SessionWriterLease.acquire(fixture.options);
-    const probe = await fs.open(fixture.transcriptPath, 'r');
-    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-      read: typeof probe.read;
-    };
-    await probe.close();
-    const originalRead = fileHandlePrototype.read;
+    const originalRead = nativeFileHandleRead;
     let overwritten = false;
     const read = vi
       .spyOn(fileHandlePrototype, 'read')
@@ -1929,12 +1874,7 @@ describe('SessionWriterLease', () => {
       const seed = '{"seed":true}\n';
       await fs.writeFile(fixture.transcriptPath, seed);
       const lease = await SessionWriterLease.acquire(fixture.options);
-      const probe = await fs.open(fixture.transcriptPath, 'r');
-      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-        stat: typeof probe.stat;
-      };
-      await probe.close();
-      const originalStat = fileHandlePrototype.stat;
+      const originalStat = nativeFileHandleStat;
       let touched = false;
       const stat = vi
         .spyOn(fileHandlePrototype, 'stat')
