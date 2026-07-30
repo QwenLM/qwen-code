@@ -455,6 +455,36 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('forwards a workspace text cursor', async () => {
+      const payload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'next\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 20,
+        returnedBytes: 5,
+        truncated: true,
+        matchedIgnore: null,
+        originalLineCount: null,
+        nextCursor: null,
+        hasMore: false,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon/', fetch });
+
+      await expect(
+        client.readWorkspaceFile('src/a.ts', {
+          limit: 3,
+          cursor: 'cursor 1',
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/file?path=src%2Fa.ts&limit=3&cursor=cursor+1',
+      );
+    });
+
     it('reads raw bytes as base64 payloads', async () => {
       const payload = {
         kind: 'file_bytes',
@@ -2665,6 +2695,38 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.loadSession('missing')).rejects.toMatchObject({
         status: 404,
+      });
+    });
+  });
+
+  describe('createSideTaskSession', () => {
+    it('uses the dedicated side-task endpoint', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          sessionId: 'side-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: {},
+          displayName: 'Side task',
+          parentSessionId: 'main-1',
+          sourceType: 'side_task',
+          sourceId: 'main-1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.createSideTaskSession(
+        'main-1',
+        {
+          name: 'Side task',
+        },
+        'side-task-client',
+      );
+
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/side-task');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('side-task-client');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'Side task',
       });
     });
   });

@@ -2794,6 +2794,30 @@ describe('Session', () => {
       expect(notifyConfigChanged).toHaveBeenCalledTimes(1);
     });
 
+    it('publishes refreshed skill content without reloading settings or notifying twice', async () => {
+      const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+        suppressNextSlashReload: vi.fn(),
+        notifyConfigChanged,
+      });
+
+      await session.refreshSkillsFromSettings({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+
+      expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+          }),
+        }),
+      );
+      expect(notifyConfigChanged).not.toHaveBeenCalled();
+    });
+
     it('notifies SkillManager when the command update fails', async () => {
       const suppressNextSlashReload = vi.fn();
       const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);
@@ -13748,6 +13772,46 @@ describe('Session', () => {
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
           expect(result.stopReason).toBe('end_turn');
+        });
+
+        it('wraps additionalContext in the reserved tag before sending', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'response' }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sent = firstSentMessage();
+          expect(textParts(sent)[0]).toBe('hello');
+          expect(
+            core.isUserPromptSubmitContextPartText(textParts(sent).at(-1)!),
+          ).toBe(true);
+          expect(textParts(sent).at(-1)).toContain('extra hook context');
         });
       });
 
