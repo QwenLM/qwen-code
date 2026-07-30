@@ -18,6 +18,7 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
+import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
 import { wrapToVisualLines } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
@@ -341,13 +342,21 @@ const ThinkBody: React.FC<{
 
   return (
     <Box paddingLeft={2} flexDirection="column">
-      <MarkdownDisplay
-        text={text}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - 2}
-        textColor={theme.text.secondary}
-      />
+      <ErrorBoundary
+        fallback={(err) => (
+          <Text color={theme.text.secondary} dimColor>
+            {err.message}
+          </Text>
+        )}
+      >
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - 2}
+          textColor={theme.text.secondary}
+        />
+      </ErrorBoundary>
     </Box>
   );
 };

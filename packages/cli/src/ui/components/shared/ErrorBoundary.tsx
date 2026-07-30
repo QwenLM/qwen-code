@@ -16,6 +16,21 @@ function normalizeError(error: unknown): Error {
   return new Error(String(error));
 }
 
+/**
+ * Module-level store for the last rendering error. The cleanup chain in
+ * startInteractiveUI.tsx reads this after `instance.unmount()` leaves the
+ * alternate screen, so the message can be echoed to the *main* screen buffer
+ * where it survives after the process exits. Without this, VP / alternate-
+ * screen mode discards the fallback UI on teardown and the user sees nothing.
+ */
+let lastRenderError: Error | undefined;
+
+export function consumeLastRenderError(): Error | undefined {
+  const err = lastRenderError;
+  lastRenderError = undefined;
+  return err;
+}
+
 interface ErrorBoundaryProps {
   children: ReactNode;
   /**
@@ -50,7 +65,9 @@ export class ErrorBoundary extends Component<
   }
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
-    this.props.onError?.(normalizeError(error), info);
+    const normalized = normalizeError(error);
+    lastRenderError = normalized;
+    this.props.onError?.(normalized, info);
   }
 
   private readonly reset = () => {

@@ -37,7 +37,10 @@ import {
   isInteractiveTerminal,
   shouldUseVirtualViewport,
 } from './utils/terminal-buffer.js';
-import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
+import {
+  ErrorBoundary,
+  consumeLastRenderError,
+} from './components/shared/ErrorBoundary.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
@@ -306,6 +309,15 @@ export async function startInteractiveUI(
     }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
+    // If the ErrorBoundary caught a rendering error, echo it to stderr
+    // now that we are back on the main screen buffer. In VP mode the
+    // fallback UI was drawn on the alternate screen and is gone.
+    const renderError = consumeLastRenderError();
+    if (renderError) {
+      writeStderrLine(
+        `\nRendering error (logged to debug file): ${renderError.message}`,
+      );
+    }
   });
 }
 

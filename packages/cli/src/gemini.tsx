@@ -22,6 +22,7 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import dns from 'node:dns';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import v8 from 'node:v8';
@@ -167,6 +168,34 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
 
+export function setupUncaughtExceptionHandler(sessionId: string) {
+  process.on('uncaughtException', (error) => {
+    const timestamp = new Date().toISOString();
+    const line = `${timestamp} [ERROR] [STARTUP] [UNCAUGHT_EXCEPTION] ${error.message}\n${error.stack ?? ''}\n`;
+    // debugLogger.error() uses async fs.appendFile — the write would be
+    // abandoned by the process.exit() below. Write synchronously instead.
+    try {
+      fs.appendFileSync(Storage.getDebugLogPath(sessionId), line, 'utf8');
+    } catch {
+      // Best-effort: if the debug dir doesn't exist yet or the disk is
+      // full, the stderr output below is the fallback record.
+    }
+    // In VP / alternate-screen mode, stderr is written to the alternate
+    // buffer which is discarded on teardown. Leave the alternate screen
+    // *before* writing the error so the user actually sees it.
+    try {
+      process.stdout.write('\x1b[?1049l'); // leave alternate screen
+      process.stdout.write('\x1b[?25h'); // show cursor
+    } catch {
+      // stdout may be broken; the debug log above is the primary record.
+    }
+    writeStderrLine(
+      `\nFatal: uncaught exception (logged to debug file)\n${error.stack ?? error.message}`,
+    );
+    process.exit(1);
+  });
+}
+
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
   process.on('unhandledRejection', (reason, _promise) => {
@@ -191,7 +220,9 @@ ${reason.stack}`
 }
 
 function getSignalExitCode(signal: NodeJS.Signals): number {
-  return signal === 'SIGINT' ? 130 : 143;
+  if (signal === 'SIGINT') return 130;
+  if (signal === 'SIGHUP') return 129;
+  return 143;
 }
 
 // A real SIGINT only reaches the process-level handler while raw mode is
@@ -241,6 +272,9 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   const handleSigterm = () => {
     beginExit('SIGTERM');
   };
+  const handleSighup = () => {
+    beginExit('SIGHUP');
+  };
   const handleSigint = () => {
     if (cleanupStarted) {
       return;
@@ -260,10 +294,12 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
   process.on('SIGTERM', handleSigterm);
   process.on('SIGINT', handleSigint);
+  process.on('SIGHUP', handleSighup);
 
   return () => {
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
+    process.removeListener('SIGHUP', handleSighup);
   };
 }
 
@@ -858,6 +894,11 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+
+    // Install the uncaughtException handler once the session ID is known.
+    // Before this point VP mode is not active, so Node's default stderr
+    // output is visible and sufficient.
+    setupUncaughtExceptionHandler(config.getSessionId());
 
     startEarlyStartupPrefetches(config);
 
