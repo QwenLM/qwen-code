@@ -1420,7 +1420,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, transcript);
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1000),
+    );
     const originalRead = nativeFileHandleRead;
     let shortened = false;
     let hashReads = 0;
@@ -1465,7 +1469,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 500),
+    );
     const originalRead = nativeFileHandleRead;
     let fullReads = 0;
     const read = vi
@@ -1584,7 +1592,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 500),
+    );
     const originalRead = nativeFileHandleRead;
     let fullReads = 0;
     const read = vi
@@ -1619,7 +1631,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1000),
+    );
     const replacement = `${fixture.transcriptPath}.replacement`;
     await fs.writeFile(replacement, '{"sEEd":true}\n');
     const originalRead = nativeFileHandleRead;
@@ -1652,7 +1668,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1000),
+    );
     const originalRead = nativeFileHandleRead;
     let truncated = false;
     const read = vi
@@ -1683,7 +1703,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1000),
+    );
     const originalRead = nativeFileHandleRead;
     let deleted = false;
     const read = vi
@@ -1714,7 +1738,11 @@ describe('SessionWriterLease', () => {
     await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
     const lease = await SessionWriterLease.acquire(fixture.options);
     const initial = await fs.stat(fixture.transcriptPath);
-    await fs.chmod(fixture.transcriptPath, initial.mode);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1000),
+    );
     const lockPath = getSessionWriterLockPath(
       fixture.runtimeBaseDir,
       fixture.options.sessionId,
