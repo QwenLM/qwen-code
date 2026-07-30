@@ -154,6 +154,65 @@ it('creates a side task and reports the new session id', async () => {
   expect(onTitleChange).toHaveBeenCalledWith('side-task:draft:1', 'Side task');
 });
 
+it('does not retry creation after a prop change until the user requests it', async () => {
+  const createSession = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('create failed'))
+    .mockResolvedValue({
+      sessionId: 'side-session-1',
+      displayName: 'Renamed task',
+    });
+  const onCreated = vi.fn();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const renderDraft = (title: string) => (
+    <I18nProvider language="en">
+      <SideTaskPanel
+        tabId="side-task:draft:1"
+        parentSessionId="parent-session"
+        workspaceCwd="/work/project"
+        title={title}
+        createSession={createSession}
+        onCreated={onCreated}
+        onTitleChange={vi.fn()}
+      />
+    </I18nProvider>
+  );
+
+  await act(async () => {
+    root!.render(renderDraft('Side task'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(createSession).toHaveBeenCalledOnce();
+
+  await act(async () => {
+    root!.render(renderDraft('Renamed task'));
+    await Promise.resolve();
+  });
+  expect(createSession).toHaveBeenCalledOnce();
+
+  await act(async () => {
+    const retryButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retryButton).not.toBeUndefined();
+    retryButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(createSession).toHaveBeenCalledTimes(2);
+  expect(createSession).toHaveBeenLastCalledWith(
+    'side-task:draft:1',
+    'parent-session',
+    'Renamed task',
+  );
+  expect(onCreated).toHaveBeenCalledWith('side-task:draft:1', 'side-session-1');
+});
+
 it('renders a restored side task as a full chat pane', () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Investigate flaky tests';

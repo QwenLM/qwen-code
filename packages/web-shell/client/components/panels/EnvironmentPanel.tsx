@@ -19,18 +19,22 @@ import {
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
+import { BranchPickerPopover } from '../BranchPickerPopover';
 import styles from './EnvironmentPanel.module.css';
 
 interface EnvironmentPanelProps {
   floating?: boolean;
   hidden?: boolean;
   workspaceCwd?: string;
+  gitWorkspaceCwd?: string;
+  gitCwd?: string;
   branch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskStatus[];
   agentTasks?: readonly EnvironmentAgentTask[];
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
+  onOpenGitCommit?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenTask: (task: DaemonSessionTaskStatus) => void;
   onDismiss?: () => void;
@@ -106,12 +110,15 @@ export function EnvironmentPanel({
   floating = false,
   hidden = false,
   workspaceCwd,
+  gitWorkspaceCwd,
+  gitCwd,
   branch,
   gitStatus,
   tasks,
   agentTasks,
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
+  onOpenGitCommit,
   onOpenAgent,
   onOpenTask,
   onDismiss,
@@ -127,10 +134,17 @@ export function EnvironmentPanel({
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(false);
   const [tasksExpanded, setTasksExpanded] = useState(false);
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const activeBranch = branch ?? gitStatus?.branch;
 
   useEffect(() => {
-    if (!floating || hidden || !onDismiss) return;
+    if (hidden || !environmentExpanded || !gitWorkspaceCwd || !activeBranch) {
+      setBranchPickerOpen(false);
+    }
+  }, [activeBranch, environmentExpanded, gitWorkspaceCwd, hidden]);
+
+  useEffect(() => {
+    if (!floating || hidden || !onDismiss || branchPickerOpen) return;
     const dismissOnOutsidePointerDown = (event: PointerEvent) => {
       if (
         event
@@ -153,7 +167,7 @@ export function EnvironmentPanel({
     document.addEventListener('pointerdown', dismissOnOutsidePointerDown);
     return () =>
       document.removeEventListener('pointerdown', dismissOnOutsidePointerDown);
-  }, [floating, hidden, onDismiss]);
+  }, [branchPickerOpen, floating, hidden, onDismiss]);
 
   const gitDetails = [
     gitStatus?.operation
@@ -227,12 +241,34 @@ export function EnvironmentPanel({
                     t('environment.unavailable')}
                 </span>
               </div>
-              <div className={styles.row} title={activeBranch ?? undefined}>
-                <GitBranchIcon />
-                <span className={styles.branchName}>
-                  {activeBranch ?? t('environment.unavailable')}
-                </span>
-              </div>
+              {gitWorkspaceCwd && activeBranch ? (
+                <BranchPickerPopover
+                  open={branchPickerOpen}
+                  onOpenChange={setBranchPickerOpen}
+                  workspaceCwd={gitWorkspaceCwd}
+                  gitCwd={gitCwd}
+                  side="left"
+                  onOpenDiff={onOpenGitDiff}
+                  onOpenCommit={onOpenGitCommit}
+                >
+                  <button
+                    type="button"
+                    className={styles.row}
+                    title={activeBranch}
+                  >
+                    <GitBranchIcon />
+                    <span className={styles.branchName}>{activeBranch}</span>
+                    <ChevronRightIcon className={styles.rowActionIcon} />
+                  </button>
+                </BranchPickerPopover>
+              ) : (
+                <div className={styles.row} title={activeBranch ?? undefined}>
+                  <GitBranchIcon />
+                  <span className={styles.branchName}>
+                    {activeBranch ?? t('environment.unavailable')}
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </section>

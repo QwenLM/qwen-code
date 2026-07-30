@@ -123,6 +123,7 @@ function SideTaskCreation({
 >) {
   const { t } = useI18n();
   const creatingRef = useRef(false);
+  const didAttemptCreateRef = useRef(false);
   const [creationError, setCreationError] = useState<unknown>();
 
   const create = useCallback(async () => {
@@ -151,6 +152,8 @@ function SideTaskCreation({
   ]);
 
   useEffect(() => {
+    if (didAttemptCreateRef.current) return;
+    didAttemptCreateRef.current = true;
     void create();
   }, [create]);
 

@@ -120,6 +120,12 @@ button.row:disabled {
   stroke-width: 1.2;
 }
 
+.row > .rowActionIcon {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
 .branchName {
   min-width: 0;
   flex: 1 1 auto;

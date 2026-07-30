@@ -259,6 +259,7 @@ const {
       messages: [] as unknown[],
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
@@ -798,7 +799,15 @@ function mockComponent(path: string, exportName: string): void {
   });
 }
 
-mockComponent('./components/StatusBar', 'StatusBar');
+vi.doMock('./components/StatusBar', async () => {
+  const React = await import('react');
+  return {
+    StatusBar: (props: { tasks?: DaemonSessionMonitorTaskStatus[] }) => {
+      testState.latestStatusBarTasks = props.tasks ?? [];
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/StreamingStatus', 'StreamingStatus');
 mockComponent('./components/ToastHost', 'ToastHost');
 mockComponent('./components/panels/TodoPanel', 'TodoPanel');
@@ -2104,6 +2113,7 @@ beforeEach(() => {
   testState.messages = [];
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestStatusBarTasks = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
@@ -4124,6 +4134,7 @@ describe('App session callbacks', () => {
       <header data-testid="custom-chat-header">Custom session header</header>
     ));
     const { container } = renderApp({
+      header: undefined,
       renderChatHeader,
     });
 
@@ -4146,6 +4157,29 @@ describe('App session callbacks', () => {
         onRightPanelOpenChange: expect.any(Function),
       }),
     );
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'gitBranch',
+    );
+  });
+
+  it('keeps legacy task status for a custom header without explicit header configuration', () => {
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'Watch server',
+      description: 'Watch server',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+    };
+    testState.backgroundTasks = [monitor];
+
+    renderApp({
+      header: undefined,
+      renderChatHeader: () => <header>Custom session header</header>,
+    });
+
+    expect(testState.latestStatusBarTasks).toEqual([monitor]);
   });
 
   it('controls the built-in chat header actions through header items', () => {

@@ -1,11 +1,38 @@
 // @vitest-environment jsdom
 
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { EnvironmentPanel } from './EnvironmentPanel';
+
+vi.mock('../BranchPickerPopover', async () => {
+  const { createElement } = await import('react');
+  return {
+    BranchPickerPopover: ({
+      children,
+      open,
+      onOpenChange,
+      side,
+    }: {
+      children: ReactNode;
+      open: boolean;
+      onOpenChange: (open: boolean) => void;
+      side?: string;
+    }) =>
+      createElement(
+        'div',
+        {
+          'data-testid': 'branch-picker',
+          'data-open': open,
+          'data-side': side,
+          onClick: () => onOpenChange(true),
+        },
+        children,
+      ),
+  };
+});
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -97,6 +124,39 @@ describe('EnvironmentPanel', () => {
     expect(view.textContent).toContain('Environment');
     expect(view.textContent).toContain('Unavailable');
     expect(view.textContent).not.toContain('Clean');
+  });
+
+  it('opens the branch actions without dismissing a floating panel', () => {
+    const onDismiss = vi.fn();
+    const view = mount({
+      floating: true,
+      gitWorkspaceCwd: '/work/qwen-code',
+      gitCwd: '/work/qwen-code',
+      onOpenGitCommit: vi.fn(),
+      onDismiss,
+    });
+    const picker = view.querySelector('[data-testid="branch-picker"]');
+    const branchButton = Array.from(view.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('feat/context-panels'),
+    );
+
+    expect(picker?.getAttribute('data-open')).toBe('false');
+    expect(picker?.getAttribute('data-side')).toBe('left');
+    act(() => branchButton?.click());
+    expect(picker?.getAttribute('data-open')).toBe('true');
+
+    act(() => {
+      document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    toggleSection(view, 'Environment');
+    toggleSection(view, 'Environment');
+    expect(
+      view
+        .querySelector('[data-testid="branch-picker"]')
+        ?.getAttribute('data-open'),
+    ).toBe('false');
   });
 
   it('filters sections through environment-panel items', () => {

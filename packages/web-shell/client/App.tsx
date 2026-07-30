@@ -1569,7 +1569,9 @@ export function App({
   // when that header is actually enabled. Embeddings that omit the header keep
   // the legacy entries.
   const environmentPanelReachable =
-    chatHeaderEnabled && environmentHeaderItemVisible;
+    chatHeaderEnabled &&
+    environmentHeaderItemVisible &&
+    (!renderChatHeader || Boolean(header));
   const environmentGitReplacementEnabled =
     environmentPanelReachable && environmentPanelItems.includes('environment');
   const environmentTasksReplacementEnabled =
@@ -10033,20 +10035,20 @@ export function App({
                 floating={!environmentPanelFits}
                 hidden={!environmentPanelVisible}
                 workspaceCwd={sessionWorktree?.path ?? activeWorkspaceCwd}
+                gitWorkspaceCwd={
+                  connection.sessionId ? gitDiffWorkspaceCwd : undefined
+                }
+                gitCwd={sessionWorktree?.path}
                 branch={activeGitBranch}
                 gitStatus={selectedWorkspaceGitStatus}
                 tasks={sessionTasks}
                 agentTasks={environmentAgentTasks}
                 items={environmentPanelItems}
                 onOpenGitDiff={
-                  gitDiffWorkspaceCwd
-                    ? () =>
-                        setGitDialog({
-                          workspaceCwd: gitDiffWorkspaceCwd,
-                          gitCwd: sessionWorktree?.path,
-                          view: 'diff',
-                        })
-                    : undefined
+                  gitDiffWorkspaceCwd ? handleOpenGitDiff : undefined
+                }
+                onOpenGitCommit={
+                  gitDiffWorkspaceCwd ? handleOpenCommit : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}
                 onOpenTask={openEnvironmentTask}
