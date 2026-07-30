@@ -177,11 +177,13 @@ or misaligns before the fix and how to verify after the fix (`failBefore` /
 
 1. Dispatch the nine partition subagents in parallel via the `agent` tool.
    Each subagent applies the six angles inside its partition and reports
-   candidates. If the `agent` tool is unavailable, scan partitions yourself
-   serially in the order listed above — and after EACH partition, update
-   `<workdir>/findings.json` with the confirmed findings so far, so a
-   timeout never loses completed partitions. Skipping remaining partitions
-   when time runs short is acceptable; losing finished work is not.
+   candidates. As each subagent returns, immediately merge its confirmed
+   findings into `<workdir>/findings.json` (cross-partition dedup can re-run
+   at step 2) so a timeout never loses completed partitions. If the `agent`
+   tool is unavailable, scan partitions yourself serially in the order listed
+   above — and after EACH partition, update `<workdir>/findings.json` with
+   the confirmed findings so far. Skipping remaining partitions when time
+   runs short is acceptable; losing finished work is not.
 2. Collect, deduplicate across partitions, and write every confirmed finding
    to `<workdir>/findings.json` (format in the base document). Findings whose
    minimal fix fits the Scope Limits go under `fixes` with
