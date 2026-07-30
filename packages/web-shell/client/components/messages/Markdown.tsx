@@ -752,11 +752,11 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
  * Throttles a rapidly changing value (like a streaming string) to prevent
  * O(n²) re-parsing of the entire Markdown AST on every token.
  */
-function useThrottledValue<T>(
-  value: T,
+function useThrottledValue(
+  value: string,
   isStreaming: boolean | undefined,
   intervalMs: number = 80,
-): T {
+): string {
   const [throttled, setThrottled] = useState(value);
   const throttledRef = useRef(throttled);
   throttledRef.current = throttled;
@@ -896,7 +896,7 @@ export const Markdown = memo(function Markdown({
       throttledContent && source && sourceMarkdown?.transformMarkdown
         ? sourceMarkdown.transformMarkdown(throttledContent, { source })
         : throttledContent,
-    [throttledContent, source, sourceMarkdown?.transformMarkdown],
+    [throttledContent, source, sourceMarkdown],
   );
 
   const effectiveTableMode = isStreaming
