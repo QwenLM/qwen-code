@@ -1744,6 +1744,14 @@ export interface DaemonWorkspaceFile {
   hash?: DaemonContentHash;
   matchedIgnore: 'file' | 'directory' | null;
   originalLineCount: number | null;
+  /**
+   * Resume token for the next page, or `null` at the end. Optional in the type
+   * because a daemon older than `workspace_file_read_cursor` sends neither
+   * this nor `hasMore` — same reason `hash` is optional.
+   */
+  nextCursor?: string | null;
+  /** Whether content remains beyond what was returned. */
+  hasMore?: boolean;
 }
 
 export interface DaemonWorkspaceFileBytes {

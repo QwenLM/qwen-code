@@ -449,7 +449,12 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
 export interface ServeWorkspaceSkillsRefreshResult {
   sessionsRefreshed: number;
   sessionsFailed: number;
+  configsRefreshed?: number;
+  configsFailed?: number;
+  reason?: ServeWorkspaceSkillsRefreshReason;
 }
+
+export type ServeWorkspaceSkillsRefreshReason = 'settings' | 'content' | 'all';
 
 export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;

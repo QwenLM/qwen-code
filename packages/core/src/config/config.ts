@@ -4816,6 +4816,7 @@ export class Config {
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
+      this.workflowRunRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();

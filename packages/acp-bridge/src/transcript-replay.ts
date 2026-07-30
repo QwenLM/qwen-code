@@ -21,6 +21,10 @@ import {
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core/goalWire';
+// Narrow path — the helper is Node-free. Importing the core package barrel
+// here would pull the whole Node-bound core graph into the browser
+// transcript bundle (sdk-typescript daemon/transcript).
+import { stripTrailingUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -513,8 +517,99 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
+    } else if (!record.subtype) {
+      // Plain user records — including UserPromptSubmit-augmented ones —
+      // prefer the recorded display projection, then strip a trailing
+      // whole-part tagged hook-context block. Matches resumeHistoryUtils.
+      // Always go through projectMessageParts so multimodal inlineData
+      // (images) survives even when displayText replaces the text parts.
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const displayText =
+        payload && typeof payload['displayText'] === 'string'
+          ? payload['displayText']
+          : undefined;
+      yield* this.projectMessageParts(
+        displayText
+          ? this.withUserPromptDisplayText(record, displayText)
+          : this.withoutTrailingUserPromptSubmitContext(record),
+        'user',
+        emit,
+        meta,
+      );
+      return;
     }
     yield* this.projectMessageParts(record, 'user', emit, meta);
+  }
+
+  /**
+   * Drops a trailing message part that is entirely a tagged UserPromptSubmit
+   * context block. Injection always appends after the user's own part(s), so
+   * a sole matching part is treated as user-authored and kept.
+   */
+  private withoutTrailingUserPromptSubmitContext(
+    record: TranscriptRecordInput,
+  ): TranscriptRecordInput {
+    const parts = record.message?.parts;
+    if (!Array.isArray(parts)) {
+      return record;
+    }
+    const nextParts = stripTrailingUserPromptSubmitContextPart(parts);
+    if (nextParts === parts) {
+      return record;
+    }
+    return {
+      ...record,
+      message: {
+        ...record.message,
+        parts: [...nextParts],
+      },
+    };
+  }
+
+  /**
+   * Rebuilds a plain user record for display: strip trailing tagged hook
+   * context, then replace every text part with a single `displayText` part at
+   * the first text position so images keep their relative order.
+   */
+  private withUserPromptDisplayText(
+    record: TranscriptRecordInput,
+    displayText: string,
+  ): TranscriptRecordInput {
+    const stripped = this.withoutTrailingUserPromptSubmitContext(record);
+    const parts = stripped.message?.parts;
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return {
+        ...stripped,
+        message: {
+          ...stripped.message,
+          parts: [{ text: displayText }],
+        },
+      };
+    }
+    let replaced = false;
+    const nextParts: unknown[] = [];
+    for (const part of parts) {
+      if (isObjectRecord(part) && typeof part['text'] === 'string') {
+        if (!replaced) {
+          nextParts.push({ text: displayText });
+          replaced = true;
+        }
+        continue;
+      }
+      nextParts.push(part);
+    }
+    if (!replaced) {
+      nextParts.push({ text: displayText });
+    }
+    return {
+      ...stripped,
+      message: {
+        ...stripped.message,
+        parts: nextParts,
+      },
+    };
   }
 
   private *projectAssistantRecord(
