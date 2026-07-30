@@ -629,13 +629,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         if (isDefiniteNoWriteGithubError(err)) {
           continue;
         }
-        if (
-          !this.updatePendingFinalDeliveries((current) =>
-            current.filter((item) => item.id !== record.id),
-          )
-        ) {
-          continue;
-        }
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -647,6 +640,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             200,
           ),
         });
+        if (
+          !this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          continue;
+        }
       }
     }
   }

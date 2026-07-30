@@ -1713,7 +1713,7 @@ describe('GithubChannel', () => {
     });
 
     it('drops and audits an ambiguous pending final retry failure', async () => {
-      writePending([pendingRecord()]);
+      writePending([pendingRecord({ triggerKind: 'mention' })]);
       mockOctokit.rest.issues.createComment.mockRejectedValue(
         new Error('ambiguous'),
       );
@@ -1724,8 +1724,29 @@ describe('GithubChannel', () => {
       expect(existsSync(pendingPath())).toBe(false);
       expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
         outcome: 'failed',
+        triggerKind: 'mention',
         failurePhase: 'delivery',
         failureError: 'ambiguous',
+      });
+    });
+
+    it('ignores invalid pending final retry records', async () => {
+      writePending([pendingRecord(), { id: 123, bad: true }]);
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2004,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2004',
+        },
+      });
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: 'Final reply',
       });
     });
 
@@ -1770,10 +1791,20 @@ describe('GithubChannel', () => {
         issue_number: 43,
         body: 'Second reply',
       });
-      expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
-        outcome: 'posted',
-        commentId: 2004,
-      });
+      const audit = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(audit).toEqual([
+        expect.objectContaining({
+          outcome: 'failed',
+          failureError: 'ambiguous',
+        }),
+        expect.objectContaining({
+          outcome: 'posted',
+          commentId: 2004,
+        }),
+      ]);
     });
 
     it('does not replay an in-flight pending final on reconnect', async () => {
