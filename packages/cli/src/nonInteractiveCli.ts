@@ -75,6 +75,7 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
+import { resolveAutofixCronPrompt } from './utils/autofix.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -2190,14 +2191,18 @@ export async function runNonInteractive(
                   checkCronDone();
                   return;
                 }
-                const label = job.prompt.slice(0, 40);
-                localQueue.push({
-                  displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
-                  modelText: job.prompt,
-                  sendMessageType: SendMessageType.Cron,
-                  todoWorkChainId: job.todoWorkChainId,
-                });
-                drainLocalQueue().then(checkCronDone, onDrainError);
+                void (async () => {
+                  const autofix = await resolveAutofixCronPrompt(config, job);
+                  const label = autofix?.displayText ?? job.prompt.slice(0, 40);
+                  localQueue.push({
+                    displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
+                    modelText: autofix?.modelText ?? job.prompt,
+                    sendMessageType: SendMessageType.Cron,
+                    todoWorkChainId: job.todoWorkChainId,
+                  });
+                  await drainLocalQueue();
+                  checkCronDone();
+                })().catch(onDrainError);
               });
 
               // Check immediately in case jobs were already deleted

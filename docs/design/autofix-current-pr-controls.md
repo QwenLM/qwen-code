@@ -12,11 +12,11 @@ Add a bundled, user-only `/autofix` skill with explicit per-PR confirmation mode
 - `on [propose-only|auto-commit|auto-push]`: create one session-scoped 10-minute watcher for that pull request and run the first maintenance check immediately. Bare `on` defaults to `propose-only`.
 - `off`: cancel and re-check every watcher matching that pull request.
 
-The watcher runs only while Qwen Code is open. Its exact scheduled prompt pins the PR number, confirmation mode, and cumulative change-producing round count. Every tick re-resolves the current branch; a branch/PR mismatch stops the watcher instead of retargeting it.
+The watcher runs only while Qwen Code is open. Its exact scheduled prompt pins the canonical `owner/repo`, PR number, confirmation mode, cumulative change-producing round count, and infrastructure rerun count. Every tick is expanded by the CLI through the bundled skill contract, then re-resolves both repository and current branch; a repository/branch/PR mismatch stops the watcher instead of retargeting it.
 
 ## Maintenance contract
 
-Each tick inspects the live PR, failed checks, and unresolved trusted feedback. CI is diagnosed from the failed step or job logs; unambiguous infrastructure failures may be re-run once, while ordinary timeouts and test/build failures remain code failures until proven otherwise.
+Each tick inspects the live PR, failed checks, and unresolved trusted feedback. CI is diagnosed from the failed step or job logs; unambiguous infrastructure failures may be re-run once in `auto-push` mode, with the attempt count carried in the watcher prompt, while ordinary timeouts and test/build failures remain code failures until proven otherwise.
 
 Review comments are triaged before edits:
 
@@ -30,9 +30,9 @@ The confirmation mode controls the result: `propose-only` leaves a verified patc
 
 ## Safety and visibility
 
-Only a direct user slash-command invocation can enable Autofix; the skill is hidden from model invocation. There is no global enablement or arbitrary-PR argument. Status reports mode, round count, and cron job ID. `/autofix off` verifies deletion by listing again and cannot report success while a matching job remains. Every tick reports evidence, triage decisions, changes, selected mode, commit/push result, verification, and watcher re-arm state.
+Only a direct user slash-command invocation can enable Autofix; the skill is hidden from model invocation. There is no global enablement or arbitrary-PR argument. Status reports repository, PR, mode, round count, infrastructure rerun count, and cron job ID. `/autofix off` verifies deletion by listing again and cannot report success while a matching job remains. Scheduled prompt text alone is not authority: the CLI requires a live matching cron job and injects the bundled skill plus an authority record before model execution. Every tick reports evidence, triage decisions, changes, selected mode, commit/push result, verification, and watcher re-arm state.
 
-The round count is carried in the scheduled prompt and incremented after each successful remote action or push. At five rounds, only blocking work may grow the diff; at ten, the watcher stops and asks the user to take over.
+The round count and infrastructure rerun count are carried in the scheduled prompt. The round count increments after each successful remote action or push; the infrastructure rerun count changes from zero to one after the sole permitted infrastructure rerun request. At five rounds, only blocking work may grow the diff; at ten, the watcher stops and asks the user to take over.
 
 ## Existing integrations
 

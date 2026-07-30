@@ -101,6 +101,7 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { resolveAutofixCronPrompt } from '../../utils/autofix.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -3900,36 +3901,49 @@ export const useGeminiStream = (
           id?: string;
           prompt: string;
           cronExpr?: string;
+          recurring?: boolean;
           missed?: boolean;
           todoWorkChainId?: string;
         }) => {
-          const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
-          const autonomousMode = detectAutonomousSentinel(job.prompt);
-          let label = job.prompt.slice(0, 40);
-          let modelText = job.prompt;
-          if (autonomousMode) {
-            if (job.missed) return;
-            const resolver = getAutonomousLoopTickResolver();
-            const tick = resolver.resolveAutonomous(autonomousMode);
-            label = 'Autonomous loop tick';
-            modelText = tick.modelText;
+          void (async () => {
+            const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+            const autonomousMode = detectAutonomousSentinel(job.prompt);
+            let label = job.prompt.slice(0, 40);
+            let modelText = job.prompt;
+            if (autonomousMode) {
+              if (job.missed) return;
+              const resolver = getAutonomousLoopTickResolver();
+              const tick = resolver.resolveAutonomous(autonomousMode);
+              label = 'Autonomous loop tick';
+              modelText = tick.modelText;
+              notificationQueueRef.current.push({
+                displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+                modelText,
+                sendMessageType: SendMessageType.Cron,
+                todoWorkChainId: job.todoWorkChainId,
+                onDelivered: () => resolver.markDelivered(),
+              });
+              setNotificationTrigger((n) => n + 1);
+              return;
+            }
+            const autofix = await resolveAutofixCronPrompt(config, {
+              id: job.id ?? '',
+              prompt: job.prompt,
+              recurring: job.recurring ?? false,
+              cronExpr: job.cronExpr ?? '',
+            });
+            if (autofix) {
+              label = autofix.displayText;
+              modelText = autofix.modelText;
+            }
             notificationQueueRef.current.push({
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
               modelText,
               sendMessageType: SendMessageType.Cron,
               todoWorkChainId: job.todoWorkChainId,
-              onDelivered: () => resolver.markDelivered(),
             });
             setNotificationTrigger((n) => n + 1);
-            return;
-          }
-          notificationQueueRef.current.push({
-            displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-            modelText,
-            sendMessageType: SendMessageType.Cron,
-            todoWorkChainId: job.todoWorkChainId,
-          });
-          setNotificationTrigger((n) => n + 1);
+          })();
         },
       );
     })();

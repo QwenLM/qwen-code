@@ -1072,6 +1072,61 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('expands live Autofix watcher ticks before queuing them', async () => {
+    const watcher = {
+      id: 'autofix-job',
+      prompt:
+        'autofix tick repo=QwenLM/qwen-code pr=4362 mode=propose-only rounds=0 infra-reruns=0',
+      cronExpr: '*/10 * * * *',
+      recurring: true,
+      createdAt: 1,
+      expiresAt: 2,
+      jitterMs: 0,
+    };
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn((callback: (job: typeof watcher) => void) => {
+        callback(watcher);
+      }),
+      stop: vi.fn(),
+      list: vi.fn(() => [watcher]),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+    Object.assign(mockConfig, {
+      getSkillManager: () => ({
+        loadSkillForRuntime: vi.fn().mockResolvedValue({
+          name: 'autofix',
+          description: 'Maintain the current PR',
+          level: 'bundled',
+          filePath: '/bundled/autofix/SKILL.md',
+          body: 'Autofix contract',
+          allowedTools: [],
+        }),
+      }),
+      getPermissionManager: () => null,
+    });
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Cron: Autofix: QwenLM/qwen-code#4362' },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = String(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('Autofix contract');
+    expect(sent).toContain(
+      '<autofix-authority source="cron" repo="QwenLM/qwen-code" pr="4362" mode="propose-only" rounds="0" infra-reruns="0" job="autofix-job" />',
+    );
+  });
+
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
     let schedulerCallback:
       | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)

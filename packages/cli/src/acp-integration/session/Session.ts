@@ -186,6 +186,7 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from '../extension-skills.js';
+import { resolveAutofixCronPrompt } from '../../utils/autofix.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -830,6 +831,7 @@ interface CronFire {
   id?: string;
   prompt: string;
   cronExpr?: string;
+  recurring?: boolean;
   missed?: boolean;
   /** The minute this fire was stamped for. The scheduler assigns it before
    * calling `onFire` and writes the run record under the same value, so it
@@ -4979,17 +4981,33 @@ export class Session implements SessionContext {
     scheduler.start((job: CronFire) => {
       if (this.cronDisabledByTokenLimit) return;
       if (job.missed && detectAutonomousSentinel(job.prompt)) return;
-      this.#enqueueCronPrompt({
+      const enqueue = (
+        autofix: Awaited<ReturnType<typeof resolveAutofixCronPrompt>>,
+      ) => {
+        this.#enqueueCronPrompt({
+          prompt: autofix?.modelText ?? job.prompt,
+          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+          ...(job.id ? { taskId: job.id } : {}),
+          ...(job.lastFiredAt !== undefined
+            ? { firedAt: job.lastFiredAt }
+            : {}),
+          ...(job.delivery ? { delivery: job.delivery } : {}),
+          ...(job.todoWorkChainId
+            ? { todoWorkChainId: job.todoWorkChainId }
+            : {}),
+        });
+        void this.#drainCronQueue();
+      };
+      if (!job.prompt.startsWith('autofix tick ')) {
+        enqueue(null);
+        return;
+      }
+      void resolveAutofixCronPrompt(this.config, {
+        id: job.id ?? '',
         prompt: job.prompt,
-        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
-        ...(job.id ? { taskId: job.id } : {}),
-        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
-        ...(job.delivery ? { delivery: job.delivery } : {}),
-        ...(job.todoWorkChainId
-          ? { todoWorkChainId: job.todoWorkChainId }
-          : {}),
-      });
-      void this.#drainCronQueue();
+        recurring: job.recurring ?? false,
+        cronExpr: job.cronExpr ?? '',
+      }).then(enqueue);
     });
   }
 

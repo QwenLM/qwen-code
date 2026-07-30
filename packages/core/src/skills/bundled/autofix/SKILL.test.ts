@@ -66,10 +66,9 @@ describe('bundled autofix skill', () => {
       'on auto-push',
       'off',
     ]);
-    expect(input).toContain('<skill-args-file>');
-    expect(input).toContain(
-      'Never infer arguments from surrounding conversation',
-    );
+    expect(input).toContain('validates the literal slash-command arguments');
+    expect(input).toContain('surrounding conversation text');
+    expect(input).toContain('<autofix-authority>');
     expect(input).toContain('Bare `on` uses `propose-only`');
     expect(input).toContain(
       'Usage: /autofix status | on [propose-only|auto-commit|auto-push] | off',
@@ -85,25 +84,21 @@ describe('bundled autofix skill', () => {
     const tick = section(body, 'Autofix tick');
 
     expect(body).toContain(
-      'gh pr view --json number,url,state,baseRefName,isCrossRepository,maintainerCanModify,author,statusCheckRollup,reviewDecision,latestReviews,headRefOid,updatedAt',
-    );
-    expect(body).toContain(
       'Do not accept or infer a pull request number or URL from the conversation.',
     );
-    expect(status).toContain(
-      'autofix tick pr=$PR_NUMBER mode=<propose-only|auto-commit|auto-push> rounds=<non-negative integer>',
-    );
+    expect(status).toContain('completed by the CLI');
+    expect(status).toContain('infrastructure rerun count');
     expect(on).toContain('`cron`: `*/10 * * * *`');
     expect(on).toContain(
-      '`prompt`: `autofix tick pr=$PR_NUMBER mode=$MODE rounds=0`',
+      '`prompt`: `autofix tick repo=$OWNER/$REPO pr=$PR_NUMBER mode=$MODE rounds=0 infra-reruns=0`',
     );
-    expect(on).toContain('Do not set `durable`');
-    expect(on).toContain('Run the first maintenance check immediately');
-    expect(off).toContain('Count only successful deletions');
-    expect(off).toContain('Call CronList again');
-    expect(tick).toContain(
-      'require the returned positive integer to equal the scheduled number',
-    );
+    expect(on).toContain('Do not create a second job');
+    expect(on).toContain('run the first maintenance check immediately');
+    expect(off).toContain('completed by the CLI');
+    expect(off).toContain('reports `off` only after none remain');
+    expect(tick).toContain('canonical `owner/repo`');
+    expect(tick).toContain('carrying the CLI-supplied');
+    expect(tick).toContain('require the PR to remain open');
     expect(tick).toContain('Never retarget silently');
     expect(body).not.toContain('@qwen-code /takeover');
     expect(body).not.toContain('gh pr comment "$PR_NUMBER"');
@@ -111,17 +106,7 @@ describe('bundled autofix skill', () => {
 
   it('documents CI, feedback, mode, commit, and stop guardrails', () => {
     const { body } = loadAutofixSkill();
-    const status = section(body, 'status');
     const tick = section(body, 'Autofix tick');
-    const failing = status.indexOf('1. `failing`');
-    const pending = status.indexOf('2. `pending`');
-    const passing = status.indexOf('3. `passing`');
-    const noChecks = status.indexOf('4. `no checks`');
-
-    expect([failing, pending, passing, noChecks]).toEqual(
-      [...[failing, pending, passing, noChecks]].sort((a, b) => a - b),
-    );
-    expect(status).toContain('no aggregate decision');
     expect(tick).toContain('Require the index to be empty');
     expect(tick).toContain('`act`');
     expect(tick).toContain('`reply-and-dismiss`');
@@ -136,6 +121,9 @@ describe('bundled autofix skill', () => {
     expect(tick).toContain('Push without force');
     expect(tick).toContain('round count is ten or greater');
     expect(tick).toContain('increment the round count by one');
+    expect(tick).toContain('infrastructure rerun count is below one');
+    expect(tick).toContain('`infra-reruns=1`');
+    expect(tick).toContain('current infrastructure rerun count');
     expect(tick).toContain('do not call LoopWakeup');
   });
 
