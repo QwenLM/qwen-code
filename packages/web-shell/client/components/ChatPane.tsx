@@ -442,6 +442,11 @@ export function ChatPane({
     },
     [actions, reportError],
   );
+  const handleAskUserConfirm = useCallback(
+    (id: string, selectedOption: string, answers?: Record<string, string>) =>
+      actions.submitPermission(id, selectedOption, answers),
+    [actions],
+  );
 
   const handleCancel = useCallback(() => {
     actions
@@ -747,7 +752,8 @@ export function ChatPane({
           <div className={styles.approval} data-testid="pane-approval">
             <AskUserQuestion
               request={pendingAskUserApproval}
-              onConfirm={handleConfirm}
+              onConfirm={handleAskUserConfirm}
+              onError={reportError}
               variant="floating"
               keyboardActive={false}
             />

@@ -1961,7 +1961,8 @@ describe('qwen-autofix workflow', () => {
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
     // the label-path non-main base refusal, the command-path non-main base
-    // refusal, the cap pause, the command-path direct engage ack (the
+    // refusal, the takeover cap pause, the standard-mode cap pause, the
+    // forced-dispatch cap refusal, the command-path direct engage ack (the
     // labeled event has been observed to not fire — #7999, #8002 — so the
     // command acks itself), the command-path direct release acks (all three
     // variants, mirroring the ack job — a loud add next to a mute stop
@@ -1971,7 +1972,7 @@ describe('qwen-autofix workflow', () => {
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(17);
+    expect(ackBodies).toHaveLength(19);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -2392,6 +2393,65 @@ describe('qwen-autofix workflow', () => {
     // guidance in the body.
     expect(reviewScanJob).toContain('<!-- takeover-cap-reached -->');
     expect(reviewScanJob).toContain('Takeover paused');
+    // The cap notice covers ALL managed PRs, not just takeover: standard
+    // bot PRs used to cap in silence (#7836 hit 10/10 with zero PR-visible
+    // notice), which let the shepherd's conflict dispatch die silently on
+    // a cap the PR page never mentioned. Same marker → same
+    // once-per-window dedup for both variants.
+    expect(reviewScanJob).toContain('AutoFix paused');
+    // Three sites: the dedup census read + BOTH notice bodies — the shared
+    // marker is what gives the two variants one once-per-window dedup.
+    expect(
+      reviewScanJob.split('<!-- takeover-cap-reached -->').length - 1,
+    ).toBe(3);
+    // A FORCED dispatch (shepherd conflict lever or a human) refused at the
+    // cap gate answers on the PR — observed on #7836: '🐑 dispatched the
+    // autofix loop' followed by a green run that did nothing, with the
+    // refusal visible only in the Actions log. Gated on workflow_dispatch:
+    // FORCED_PR is ALSO set for trusted pull_request_review submissions
+    // (route emits pr_number for those), and answering each one loudly
+    // spammed 7 refusals on #7836 — those stay covered by the
+    // once-per-window pause notice. No dedup on the dispatch itself: the
+    // shepherd sends at most one per head, and a human asking twice
+    // deserves two answers.
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+    );
+    expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
+    expect(reviewScanJob).toContain('Dispatch refused');
+    expect(reviewScanJob).toContain('DRY-RUN: would post cap-refused notice');
+    expect(reviewScanJob).toContain(
+      'cap-refused notice skipped: PAT authenticates as',
+    );
+    // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
+    // for trusted review submissions). Replay the guard VERBATIM so a
+    // dropped EVENT_NAME condition fails the test, not just a substring: a
+    // dispatch is answered, a review submission is left to the pause notice.
+    const refusedGuard = reviewScanJob.match(
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+    )?.[1];
+    expect(refusedGuard).toBeTruthy();
+    const refuses = (eventName) =>
+      execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
+        env: {
+          ...process.env,
+          FORCED_PR: '7836',
+          PR: '7836',
+          EVENT_NAME: eventName,
+        },
+        encoding: 'utf8',
+      }).trim();
+    expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('pull_request_review')).not.toContain('REFUSED');
+    // The standard-mode pause and the refusal both point at the actual
+    // recovery command as a printf ARG (the takeover variant keeps its
+    // takeover-command-only wording).
+    const capBodies =
+      reviewScanJob.match(/printf '[^']*takeover-cap-re[^']*'[^\n]*/g) ?? [];
+    expect(capBodies).toHaveLength(3);
+    expect(
+      capBodies.filter((b) => b.includes('"${RETRY_COMMAND}"')),
+    ).toHaveLength(2);
     expect(reviewScanJob).toMatch(
       /CAP_NOTICED=[\s\S]*?contains\("<!-- takeover-cap-reached -->"\)[\s\S]*?> \$rt/,
     );
@@ -2476,6 +2536,45 @@ describe('qwen-autofix workflow', () => {
     expect(noticed('2026-07-18T11:00:00Z', '2026-07-18T10:00:00Z')).toBe('1');
     // No key yet (lifetime dedup, rt='') → any prior notice suppresses.
     expect(noticed('2026-07-18T09:00:00Z', '')).toBe('1');
+    // The consent gate is the core behavioral change: standard bot PRs now
+    // receive cap notices (they used to be takeover-only). Replay the gate
+    // VERBATIM under all four label/takeover permutations so a dropped
+    // HAS_TAKEOVER guard or a reverted skip-wins condition fails the test,
+    // not just a substring assertion.
+    const consentGate = reviewScanJob.match(
+      /(if \[\[ " \$\{LIVE_LABELS\} " == \*" \$\{SKIP_LABEL\} "\* \]\] \\\n[\s\S]*?continue\n {16}fi)/,
+    )?.[1];
+    expect(consentGate).toBeTruthy();
+    const gate = (liveLabels, hasTakeover) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `for _ in 1; do\n${consentGate.replace(/\n {16}/g, '\n')}\necho PROCEED\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            LIVE_LABELS: liveLabels,
+            HAS_TAKEOVER: hasTakeover,
+            SKIP_LABEL: 'autofix/skip',
+            TAKEOVER_LABEL: 'autofix/takeover',
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // Standard bot PR, no skip label → NOT skipped (the #7836 case).
+    expect(gate('autofix/managed', 'false')).toContain('PROCEED');
+    // Standard bot PR + skip label → skipped everywhere.
+    expect(gate('autofix/managed autofix/skip', 'false')).toContain(
+      'cap notice skipped',
+    );
+    // Takeover PR with its label removed → skipped (stale consent).
+    expect(gate('autofix/managed', 'true')).toContain('cap notice skipped');
+    // Takeover PR with the label still present → NOT skipped.
+    expect(gate('autofix/managed autofix/takeover', 'true')).toContain(
+      'PROCEED',
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
@@ -2483,9 +2582,155 @@ describe('qwen-autofix workflow', () => {
     // starve the oldest tail forever once the pool exceeds the budget.
     expect(reviewScanJob).toContain('ROT_OFF=');
     expect(reviewScanJob).toContain('.[$o:] + .[:$o]');
-    expect(reviewScanJob).toMatch(
-      /BUSY_PRS[\s\S]{0,240}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
+    // The free skips (busy, idle-backoff) both live in the loop head,
+    // BEFORE the budget increment — assert on the slice, not a byte
+    // distance (comment growth must not red-light CI, and arbitrary code
+    // between the skips and the increment must).
+    const loopHead = reviewScanJob.slice(
+      reviewScanJob.indexOf('for PR in ${CANDIDATES}'),
+      reviewScanJob.indexOf('INSPECTED=$(( INSPECTED + 1 ))'),
     );
+    expect(loopHead).toContain("'busy'");
+    expect(loopHead).toContain("'idle-backoff'");
+    expect(loopHead).not.toContain('INSPECTED=');
+  });
+
+  it('backs off idle candidates without spending inspection budget', () => {
+    // Measured 2026-07-29: 28 open takeover PRs, 8 idle in "nothing new"
+    // state for 10+ hours. Every idle inspection costs a unit of the
+    // shared MAX_CANDIDATE_INSPECTIONS budget and a slice of the serial
+    // API walk (a few fewer gh round-trips per scan; the #8002 delay was
+    // queue/startup, which the candidate loop cannot recover). Candidates
+    // idle >24h are inspected on about one scan in four. The staleness
+    // signal is the list's own updatedAt — no API call, and no
+    // per-candidate process fork either: one jq builds the idle SET, and
+    // the loop tests membership like the busy skip does.
+    expect(
+      (reviewScanJob.match(/--json [^\n]*\bupdatedAt\b/g) ?? []).length,
+    ).toBe(2);
+    expect(reviewScanJob).toContain(`IDLE_CUTOFF="$(date -u -d '24 hours ago'`);
+    // The slot is a time quantum mod 4 keyed against PR % 4 (same quantum
+    // family as ROT_OFF). The exact quantum is deliberately NOT pinned:
+    // against the real irregular scan cadence (~40-70 min gaps, not */10)
+    // no constant quantum bounds the gap — the wait is geometric (measured
+    // median ~2h, p90 ~6h) — and 3600 s actually measures better on p90/max
+    // than 600 s, so CI must not forbid a future quantum change. The
+    // behavioral replay below (which passes slotNow explicitly) protects
+    // the slot logic; this pin only asserts the mod-4 time-quantum shape.
+    expect(reviewScanJob).toMatch(
+      /IDLE_SLOT_NOW="\$\(\(.*\$\(date -u \+%s\) \/ \d+\) % 4 \)\)"/,
+    );
+    expect(reviewScanJob).toContain(
+      'inspected ~1 scan in 4 (median ~2h, p90 ~6h)',
+    );
+    // Fail-open on the forced-dispatch path: it never builds the list
+    // files, so the set stays empty and a forced PR is always inspected.
+    expect(reviewScanJob).toContain("IDLE_PRS=' '");
+    expect(reviewScanJob).toMatch(
+      /if \[\[ -f "\$\{WORKDIR\}\/bot-prs\.json" && -f "\$\{WORKDIR\}\/takeover-prs\.json" \]\]; then\n\s+IDLE_CUTOFF=/,
+    );
+
+    // Behavioral replay of the set builder + skip predicate (the string
+    // pins alone cannot catch a flipped comparison or slot equality):
+    // run the real jq and the real predicate over four candidate shapes.
+    const setSrc = reviewScanJob.match(
+      /IDLE_PRS=" \$\(jq -rs[\s\S]*?\) "/,
+    )?.[0];
+    expect(setSrc).toBeTruthy();
+    expect(setSrc).toContain('takeover-prs.json');
+    const predSrc = reviewScanJob.match(
+      /if \[\[ "\$\{IDLE_PRS\}" == \*" \$\{PR\} "\* &&[^\n]*\]\]; then/,
+    )?.[0];
+    expect(predSrc).toBeTruthy();
+    const runBackoff = ({
+      pr,
+      updatedAt,
+      slotNow,
+      listed = true,
+      inTakeover = false,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'idle-backoff-'));
+      try {
+        const row = listed
+          ? [{ number: Number(pr), updatedAt }]
+          : [{ number: 99999, updatedAt: '2026-01-01T00:00:00Z' }];
+        writeFileSync(
+          join(dir, 'bot-prs.json'),
+          inTakeover ? '[]' : JSON.stringify(row),
+        );
+        writeFileSync(
+          join(dir, 'takeover-prs.json'),
+          inTakeover ? JSON.stringify(row) : '[]',
+        );
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `WORKDIR='${dir}'`,
+              `IDLE_CUTOFF='2026-07-28T12:00:00Z'`,
+              setSrc,
+              `IDLE_SLOT_NOW='${slotNow}'`,
+              `PR='${pr}'`,
+              `${predSrc} printf skip; else printf inspect; fi`,
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Idle and out of slot → deferred (8001 % 4 = 1).
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 0 }),
+    ).toBe('skip');
+    // Idle but IN its slot → inspected (its slot matched this scan).
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 1 }),
+    ).toBe('inspect');
+    // Fresh activity → inspected regardless of slot.
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-28T13:00:00Z', slotNow: 0 }),
+    ).toBe('inspect');
+    // Missing from the lookup (forced-dispatch shape) → inspected.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        listed: false,
+      }),
+    ).toBe('inspect');
+
+    // Null/empty updatedAt (defensive guard) → inspected, not idle.
+    expect(runBackoff({ pr: '8001', updatedAt: null, slotNow: 0 })).toBe(
+      'inspect',
+    );
+    // Idle candidate in takeover-prs.json (the cohort this targets) → deferred.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        inTakeover: true,
+      }),
+    ).toBe('skip');
+
+    // Visible in the fleet dashboard, like the busy skip.
+    expect(reviewScanJob).toContain("'idle-backoff'");
+    // The workflow comment must not claim the 10-target cap is relieved —
+    // idle candidates hit `continue` before the TARGETS append, so they
+    // never contend for it; the real win is inspection budget + walk
+    // latency, and the comment says so.
+    expect(reviewScanJob).toContain(
+      'Idle PRs never reach the\n          # 10-target budget',
+    );
+    // The two scan-only signals updatedAt cannot see are named, not
+    // papered over by an absolute invariant.
+    expect(reviewScanJob).toContain('base conflict');
+    expect(reviewScanJob).toContain('still-red checks');
   });
 
   it('behaviorally replays the takeover-command toggle across all four paths', () => {

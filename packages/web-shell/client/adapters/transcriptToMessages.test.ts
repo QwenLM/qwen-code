@@ -2173,6 +2173,93 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('treats switch-to-default permission resolutions as approved', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Present HTML',
+        options: [
+          {
+            optionId: 'proceed_once_and_switch_to_default',
+            label: 'Switch to Default Mode and allow once (recommended)',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+        toolCall: {
+          toolCallId: 'mcp-1',
+          kind: 'other',
+          _meta: { toolName: 'mcp__agentic-pai__present_html' },
+          rawInput: { path: 'interactive.html' },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:proceed_once_and_switch_to_default',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      callId: 'mcp-1',
+      status: 'in_progress',
+    });
+  });
+
+  it.each([
+    'selected:proceed_once',
+    'selected:proceed_once_and_switch_to_default',
+  ])(
+    'does not overwrite a completed tool with a later %s permission block',
+    (resolved) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('tool-1', 'mcp-1', 'completed', 1, {
+          toolName: 'mcp__agentic-pai__present_html',
+          rawOutput: '{"approved":true}',
+          updatedAt: 3,
+        }),
+        {
+          id: 'perm-1',
+          kind: 'permission',
+          requestId: 'req-1',
+          sessionId: 'sess-1',
+          title: 'Present HTML',
+          options: [
+            {
+              optionId: resolved.slice('selected:'.length),
+              label: 'Allow',
+              raw: { kind: 'allow_once' },
+            },
+          ],
+          toolCall: {
+            toolCallId: 'mcp-1',
+            kind: 'other',
+            _meta: { toolName: 'mcp__agentic-pai__present_html' },
+            rawInput: { path: 'interactive.html' },
+          },
+          preview: { kind: 'generic' as const },
+          resolved,
+          clientReceivedAt: 2,
+          createdAt: 2,
+          updatedAt: 4,
+        },
+      ]);
+
+      const tool =
+        messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+      expect(tool).toMatchObject({
+        callId: 'mcp-1',
+        status: 'completed',
+        rawOutput: '{"approved":true}',
+        endTime: 3,
+      });
+    },
+  );
+
   it('renders rejected permission as completed agent card', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'first thinking', 1),

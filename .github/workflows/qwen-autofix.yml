@@ -1689,6 +1689,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+          EVENT_NAME: '${{ github.event_name }}'
         run: |-
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
@@ -1758,10 +1759,10 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/bot-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify,updatedAt > "${WORKDIR}/bot-prs.json"
             gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/takeover-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify,updatedAt > "${WORKDIR}/takeover-prs.json"
             # Skip-labeled PRs are excluded HERE, not only at the address
             # gate: that gate discards without writing a marker, so the
             # watermark never advances and an unfiltered scan would re-emit
@@ -1904,6 +1905,44 @@ jobs:
           )
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
+          # Idle backoff, from the list's own updatedAt (no API call): a
+          # candidate with no activity for >24h is inspected on about one
+          # scan in four instead of every one. The pool doubled in two
+          # days (28 takeover PRs, 8 of them idle in "nothing new" state
+          # for 10+ hours), and every idle inspection costs a unit of the
+          # SHARED MAX_CANDIDATE_INSPECTIONS budget plus a slice of the
+          # serial API walk over the candidate list. The win is small: a
+          # few fewer gh round-trips per scan (~2-3 of the pool) and less
+          # rate-limit pressure. It does NOT recover the job's queue or
+          # startup latency, which dwarfed the walk in the #8002
+          # measurement that motivated this. Idle PRs never reach the
+          # 10-target budget (the "nothing new" branch continues before
+          # the TARGETS append), so that cap is NOT what this relieves.
+          # Safe because comments, reviews, labels, and pushes all bump
+          # updatedAt or route in real time; the two scan-only signals
+          # that do NOT bump it — a base conflict appearing when main
+          # moves, and still-red checks awaiting the redcheck marker —
+          # wait out the backoff on a PR nobody touched in a day, then
+          # self-correct (the eventual address run comments/pushes). The
+          # slot is keyed by PR number mod 4 against a 600s time quantum
+          # (same quantum as ROT_OFF), so each scan is an independent
+          # ~25% draw per idle PR — about one scan in four. This is NOT a
+          # bounded gap: the scheduled scan lands every ~40-70 min on
+          # this repo (not the */10 the cron implies), so the wait is
+          # geometric — measured median ~2h, p90 ~6h across 100 real
+          # scans. The forced-dispatch path never builds the list files,
+          # so a forced PR is always inspected (fail-open, like a PR
+          # missing from the set).
+          IDLE_PRS=' '
+          if [[ -f "${WORKDIR}/bot-prs.json" && -f "${WORKDIR}/takeover-prs.json" ]]; then
+            IDLE_CUTOFF="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+            IDLE_PRS=" $(jq -rs --arg cut "${IDLE_CUTOFF}" 'add | unique_by(.number)
+              | map(select((.updatedAt // "") != "" and .updatedAt < $cut) | .number | tostring)
+              | join(" ")' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json" 2> /dev/null || echo '') "
+          fi
+          IDLE_SLOT_NOW="$(( ($(date -u +%s) / 600) % 4 ))"
+
           TARGETS='[]'
           INSPECTED=0
           for PR in ${CANDIDATES}; do
@@ -1912,6 +1951,14 @@ jobs:
             if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
               fleet_row "${PR}" 'busy' 'address run in flight'
+              continue
+            fi
+            # The idle-backoff skip is free too (a bash substring test on
+            # the precomputed set, same idiom as the busy skip) — it must
+            # not consume inspection budget either.
+            if [[ "${IDLE_PRS}" == *" ${PR} "* && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then
+              echo "😴 #${PR}: idle >24h — deferring to its rotation slot (slot $(( PR % 4 )), current ${IDLE_SLOT_NOW}; inspected ~1 scan in 4)"
+              fleet_row "${PR}" 'idle-backoff' 'idle >24h; inspected ~1 scan in 4 (median ~2h, p90 ~6h)'
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
@@ -2201,43 +2248,85 @@ jobs:
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
               fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
-              # A MANAGED PR pausing at its cap deserves a visible reminder —
-              # maintainers otherwise learn about it only from workflow logs.
-              # Once per counting window: re-arming opens a fresh window and,
-              # if the cap is hit again, a fresh reminder. A failed post
-              # retries naturally on the next scan (marker still absent).
-              if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                # Dedup boundary = the current window key; with no engage ack
-                # yet (key 'none') fall back to LIFETIME dedup — created_at is
-                # never > 'none' lexically, which would flip this into posting
-                # every scan.
-                NOTICE_RT="${REARM_KEY}"
-                [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
-                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
-                  [ .[] | select((.user.login // "") == $ab)
-                    | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
-                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              # A FORCED dispatch refused here answers OUT LOUD. Observed on
+              # #7836: the fleet shepherd detected a merge conflict, posted
+              # "dispatched the autofix loop to resolve it", and the dispatch
+              # died right here with only the log line above — the PR page
+              # showed a promise, the run showed green, and the conflict sat
+              # unhandled for hours. The shepherd also dedups per head SHA,
+              # and a capped PR gets no pushes, so its head never changes:
+              # silence here freezes conflict handling until a human notices
+              # by accident. Gate on workflow_dispatch — that is the explicit
+              # dispatch lever (the shepherd's `gh workflow run` or a human).
+              # FORCED_PR is ALSO set for every trusted pull_request_review
+              # (route emits pr_number for those), which is not an explicit
+              # dispatch: answering each one here spammed 7 refusals on
+              # #7836, so review submissions stay covered by the
+              # once-per-window pause notice below. No dedup on the dispatch
+              # itself: the shepherd sends at most one per head, and a human
+              # asking twice deserves two answers.
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
-                  echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
-                elif [[ "${CAP_NOTICED}" == "0" ]]; then
-                  # Consent may have moved since PR_META: a takeover label
-                  # removed (or skip added) moments ago must not receive a
-                  # stale 'paused' notice.
-                  LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
-                  if [[ " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* || " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]]; then
-                    echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
-                    continue
-                  fi
-                  # Convention: verify the PAT identity before ANY write. A
-                  # rotated PAT would post under a foreign login the dedup
-                  # (which counts AUTOFIX_BOT comments only) can never see —
-                  # reposting the notice every scan. Memoized per scan run.
+                  echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
+                else
                   if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
                     SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
                   fi
                   if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
-                    echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-refused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-refused notice failed for #${PR}"
+                  fi
+                fi
+              fi
+              # A MANAGED PR pausing at its cap deserves a visible reminder —
+              # maintainers otherwise learn about it only from workflow logs.
+              # ALL managed PRs, not just takeover: the takeover-only gate
+              # left standard bot PRs capping in silence (#7836 hit 10/10
+              # with zero PR-visible notice), which is the root of the
+              # frozen-conflict chain above. Once per counting window:
+              # re-arming opens a fresh window and, if the cap is hit again,
+              # a fresh reminder. A failed post retries naturally on the
+              # next scan (marker still absent).
+              # Dedup boundary = the current window key; with no engage ack
+              # or re-arm yet (key 'none') fall back to LIFETIME dedup —
+              # created_at is never > 'none' lexically, which would flip
+              # this into posting every scan.
+              NOTICE_RT="${REARM_KEY}"
+              [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
+              CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                  | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              if [[ "${DRY_RUN}" == "true" ]]; then
+                echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
+              elif [[ "${CAP_NOTICED}" == "0" ]]; then
+                # Consent may have moved since PR_META: skip wins everywhere,
+                # and a takeover notice additionally requires the label to
+                # still be present — a label removed (or skip added) moments
+                # ago must not receive a stale 'paused' notice.
+                LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]] \
+                  || [[ "${HAS_TAKEOVER}" == "true" && " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* ]]; then
+                  echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
+                  continue
+                fi
+                # Convention: verify the PAT identity before ANY write. A
+                # rotated PAT would post under a foreign login the dedup
+                # (which counts AUTOFIX_BOT comments only) can never see —
+                # reposting the notice every scan. Memoized per scan run.
+                if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                  SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                fi
+                if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                  echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                else
+                  if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                    CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                  else
+                    CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                  fi
+                  if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
                     echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
                   fi
                 fi

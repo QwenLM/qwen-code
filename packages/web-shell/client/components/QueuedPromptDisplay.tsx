@@ -163,6 +163,7 @@ export function QueuedPromptDisplay({
         const imageCount = prompt.images?.length ?? 0;
         const isCommand = isCommandPrompt(prompt.text);
         const isSubmitting = prompt.serverState === 'submitting';
+        const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
         const isRemoving = prompt.isRemoving === true;
         const isBusy =
@@ -208,19 +209,23 @@ export function QueuedPromptDisplay({
               {imageCount > 0
                 ? ` ${t('queue.imageCount', { count: imageCount })}`
                 : ''}
-              {isSubmitting || prompt.isEditing || isRemoving ? (
-                <span className={styles.queuedPromptState}>
-                  <span className={styles.queuedPromptSpinner} />
+              {isSubmitting || isQueued || prompt.isEditing || isRemoving ? (
+                <span className={styles.queuedPromptState} role="status">
+                  {(isSubmitting || prompt.isEditing || isRemoving) && (
+                    <span className={styles.queuedPromptSpinner} />
+                  )}
                   {isRemoving
                     ? t('queue.removing')
                     : prompt.isEditing
                       ? t('queue.editing')
-                      : t('queue.submitting')}
+                      : isQueued
+                        ? t('queue.serverQueued')
+                        : t('queue.submitting')}
                 </span>
               ) : null}
             </span>
             <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
+              {imageCount === 0 && !isQueued && (
                 <button
                   type="button"
                   className={styles.queuedPromptAction}
