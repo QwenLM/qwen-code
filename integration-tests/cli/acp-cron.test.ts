@@ -11,24 +11,31 @@
  * and stream results back to the client via sessionUpdate notifications,
  * even after the originating prompt has already returned.
  *
- * The two tests share one ACP session to stay within 2 minutes total:
- *   1. Fast smoke test — cron tools available (no cron fire needed)
- *   2. Combined test — create job, verify session responsive, wait for
- *      cron fire, check content + _meta.source, then clean up
+ * Uses fake-openai-server for deterministic model responses, eliminating
+ * model output variance as a failure source. The cron scheduler still
+ * operates on real minute-boundary timing.
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, it, expect } from 'vitest';
-import { TestRig } from '../test-helper.js';
+import { TestRig, fakeServerHostOptions } from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  fakeToolCall,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 
 const IS_SANDBOX =
   process.env['QWEN_SANDBOX'] &&
   process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
+
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -69,15 +76,19 @@ type PermissionRequest = {
 };
 
 /**
- * Sets up an ACP test environment with cron support enabled.
+ * Sets up an ACP test environment with cron support enabled, backed by
+ * a fake-openai-server for deterministic model responses.
  */
-function setupAcpCronTest(rig: TestRig) {
+function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
   const sessionUpdates: (SessionUpdateNotification & {
     receivedAt: number;
   })[] = [];
   const stderr: string[] = [];
+
+  const qwenHome = join(rig.testDir!, '.qwen-home');
+  mkdirSync(qwenHome, { recursive: true });
 
   const agent = spawn(
     'node',
@@ -87,6 +98,13 @@ function setupAcpCronTest(rig: TestRig) {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        QWEN_HOME: qwenHome,
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
       },
     },
   );
@@ -303,13 +321,37 @@ async function initSession(
       const rig = new TestRig();
       rig.setup('acp-cron-e2e');
 
-      const {
-        sendRequest,
-        cleanup,
-        stderr,
-        // sessionUpdates available for debugging
-        waitForSessionUpdate,
-      } = setupAcpCronTest(rig);
+      // Scripted model responses:
+      //   0: cron_create tool call (first prompt asks to create a cron job)
+      //   1: confirmation text after cron_create tool result
+      //   2: interactive prompt response
+      //   3: cron-fired prompt response
+      //   4: cleanup prompt response
+      const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+        switch (requestIndex) {
+          case 0:
+            return {
+              toolCalls: [
+                fakeToolCall('cron_create', {
+                  cron: '*/1 * * * *',
+                  prompt: 'Say CRONFIRE7742 and nothing else',
+                  recurring: true,
+                }),
+              ],
+            };
+          case 1:
+            return { content: 'Cron job created.' };
+          case 2:
+            return { content: 'INTERACTIVE8899' };
+          case 3:
+            return { content: 'CRONFIRE7742' };
+          default:
+            return { content: 'Done.' };
+        }
+      }, FAKE_SERVER_OPTIONS);
+
+      const { sendRequest, cleanup, stderr, waitForSessionUpdate } =
+        setupAcpCronTest(rig, fakeServer);
 
       try {
         const sessionId = await initSession(sendRequest, rig.testDir!);
@@ -383,6 +425,7 @@ async function initSession(
         throw e;
       } finally {
         await cleanup();
+        await fakeServer.close();
       }
     },
     { timeout: 120_000, retry: 0 },
