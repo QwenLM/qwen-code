@@ -57,11 +57,25 @@ export default {
       return {};
     }
 
+    function checkSource(node) {
+      if (
+        node.source &&
+        typeof node.source.value === 'string' &&
+        resolvesToCoreRootBarrel(filename, node.source.value)
+      ) {
+        context.report({
+          node: node.source,
+          messageId: 'noCoreRootBarrelImport',
+        });
+      }
+    }
+
     return {
-      ImportDeclaration(node) {
-        if (resolvesToCoreRootBarrel(filename, node.source.value)) {
-          context.report({ node: node.source, messageId: 'noCoreRootBarrelImport' });
-        }
+      ImportDeclaration: checkSource,
+      ExportNamedDeclaration: checkSource,
+      ExportAllDeclaration: checkSource,
+      ImportExpression(node) {
+        if (node.source.type === 'Literal') checkSource(node);
       },
     };
   },
