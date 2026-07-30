@@ -19,10 +19,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type {
-  ChannelAgentBridge,
-  ChannelConfig,
-  Envelope,
+import {
+  getWorkspaceScopeDirName,
+  type ChannelAgentBridge,
+  type ChannelConfig,
+  type Envelope,
 } from '@qwen-code/channel-base';
 
 vi.mock('@octokit/rest', () => {
@@ -1280,11 +1281,17 @@ describe('GithubChannel', () => {
   });
 
   describe('publication contract', () => {
-    function pendingPath(): string {
+    const nameHash = createHash('sha256')
+      .update('test-github')
+      .digest('hex')
+      .slice(0, 16);
+
+    function pendingPath(cwd = '/tmp/test'): string {
       return join(
         process.env.QWEN_HOME!,
         'channels',
-        'test-github-github-pending-deliveries.json',
+        getWorkspaceScopeDirName(cwd),
+        `test-github-${nameHash}-github-pending-deliveries.json`,
       );
     }
 
@@ -1292,7 +1299,8 @@ describe('GithubChannel', () => {
       return join(
         process.env.QWEN_HOME!,
         'channels',
-        'test-github-github-audit.jsonl',
+        getWorkspaceScopeDirName('/tmp/test'),
+        `test-github-${nameHash}-github-audit.jsonl`,
       );
     }
 
@@ -1309,7 +1317,7 @@ describe('GithubChannel', () => {
     }
 
     function writePending(records: Array<Record<string, unknown>>): void {
-      mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
+      mkdirSync(join(pendingPath(), '..'), { recursive: true });
       writeFileSync(pendingPath(), JSON.stringify(records));
     }
 
@@ -1351,14 +1359,7 @@ describe('GithubChannel', () => {
       );
 
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
-      const audit = readFileSync(
-        join(
-          process.env.QWEN_HOME!,
-          'channels',
-          'test-github-github-audit.jsonl',
-        ),
-        'utf-8',
-      );
+      const audit = readFileSync(auditPath(), 'utf-8');
       expect(audit).toContain('"outcome":"suppressed"');
       expect(audit).not.toContain('<no-reply/>');
     });
@@ -1417,14 +1418,7 @@ describe('GithubChannel', () => {
         issue_number: 42,
         body: response,
       });
-      const audit = readFileSync(
-        join(
-          process.env.QWEN_HOME!,
-          'channels',
-          'test-github-github-audit.jsonl',
-        ),
-        'utf-8',
-      );
+      const audit = readFileSync(auditPath(), 'utf-8');
       expect(audit).toContain('"outcome":"posted"');
       expect(audit).toContain('issuecomment-2001');
       expect(audit).toContain(
@@ -1491,14 +1485,7 @@ describe('GithubChannel', () => {
       });
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(pendingPath())).toBe(false);
-      const audit = readFileSync(
-        join(
-          process.env.QWEN_HOME!,
-          'channels',
-          'test-github-github-audit.jsonl',
-        ),
-        'utf-8',
-      );
+      const audit = readFileSync(auditPath(), 'utf-8');
       expect(JSON.parse(audit)).toMatchObject({
         outcome: 'failed',
         failurePhase: 'delivery',
@@ -1507,7 +1494,10 @@ describe('GithubChannel', () => {
     });
 
     it.each([
-      Object.assign(new Error('rate limited'), { status: 429 }),
+      Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      }),
       Object.assign(new Error('rate limited'), {
         status: 403,
         response: { headers: { 'x-ratelimit-remaining': '0' } },
@@ -1550,7 +1540,10 @@ describe('GithubChannel', () => {
 
     it('deduplicates repeated pending final deliveries', async () => {
       await connectForPublication();
-      const error = Object.assign(new Error('rate limited'), { status: 429 });
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
       mockOctokit.rest.issues.createComment.mockRejectedValue(error);
       (
         channel as unknown as {
@@ -1587,7 +1580,10 @@ describe('GithubChannel', () => {
           abortableSleep: (ms: number) => Promise<void>;
         }
       ).abortableSleep = sleep;
-      const error = Object.assign(new Error('rate limited'), { status: 429 });
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
       mockOctokit.rest.issues.createComment.mockRejectedValue(error);
       const publish = (
         channel as unknown as {
@@ -1702,14 +1698,17 @@ describe('GithubChannel', () => {
     it('keeps a pending final when retry still definitely did not write', async () => {
       writePending([pendingRecord()]);
       mockOctokit.rest.issues.createComment.mockRejectedValue(
-        Object.assign(new Error('rate limited'), { status: 429 }),
+        Object.assign(new Error('rate limited'), {
+          status: 429,
+          response: { headers: { 'x-ratelimit-remaining': '0' } },
+        }),
       );
 
       await retryPendingForTest();
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
-        { id: 'pending', attempts: 1 },
+        { id: 'pending' },
       ]);
     });
 
@@ -1777,39 +1776,66 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('cancels a pending final retry before reconnecting', async () => {
+    it('does not replay an in-flight pending final on reconnect', async () => {
       writePending([pendingRecord()]);
-      let firstSignal: AbortSignal | undefined;
-      mockOctokit.rest.issues.createComment
-        .mockImplementationOnce(
-          (input: { request?: { signal?: AbortSignal } }) =>
-            new Promise((_resolve, reject) => {
-              firstSignal = input.request?.signal;
-              firstSignal?.addEventListener(
-                'abort',
-                () => reject(new Error('aborted')),
-                { once: true },
-              );
-            }),
-        )
-        .mockResolvedValueOnce({
-          data: {
-            id: 2002,
-            html_url:
-              'https://github.com/owner/repo/issues/42#issuecomment-2002',
-          },
-        });
+      const retry = Promise.withResolvers<{
+        data: { id: number; html_url: string };
+      }>();
+      mockOctokit.rest.issues.createComment.mockReturnValueOnce(retry.promise);
       mockOctokit.paginate.mockResolvedValue([]);
 
       await channel.connect();
       channel.disconnect();
       await channel.connect();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
 
-      expect(firstSignal?.aborted).toBe(true);
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+      retry.resolve({
+        data: {
+          id: 2002,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
+        },
+      });
+      const pendingRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      await pendingRetry;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(pendingPath())).toBe(false);
       channel.disconnect();
+    });
+    it('stops after an in-flight pending retry finishes during disconnect', async () => {
+      writePending([
+        pendingRecord(),
+        pendingRecord({ id: 'second', threadId: 'issue:43' }),
+      ]);
+      const retry = Promise.withResolvers<{
+        data: { id: number; html_url: string };
+      }>();
+      mockOctokit.rest.issues.createComment.mockReturnValueOnce(retry.promise);
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      channel.disconnect();
+      retry.resolve({
+        data: {
+          id: 2006,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2006',
+        },
+      });
+      const pendingRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      await pendingRetry;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toMatchObject([
+        { id: 'second', threadId: 'issue:43' },
+      ]);
     });
 
     it('does not burn retry budget when reconnect aborts cooldown', async () => {
@@ -1829,17 +1855,90 @@ describe('GithubChannel', () => {
 
       await channel.connect();
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      const previousRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
       channel.disconnect();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await previousRetry;
       await channel.connect();
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
       channel.disconnect();
     });
 
+    it('keeps bare 429 publication failures single-shot', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('secondary rate limit'), {
+        status: 429,
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('migrates legacy pending finals before retrying', async () => {
+      const legacyPath = join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-pending-deliveries.json',
+      );
+      mkdirSync(join(legacyPath, '..'), { recursive: true });
+      writeFileSync(legacyPath, JSON.stringify([pendingRecord()]));
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2007,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2007',
+        },
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      const pendingRetry = (
+        channel as unknown as {
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+        }
+      ).pendingFinalDeliveryRetry;
+      await pendingRetry;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+      expect(existsSync(legacyPath)).toBe(false);
+      channel.disconnect();
+    });
+
+    it('isolates pending finals by workspace', () => {
+      const other = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ cwd: '/tmp/other-workspace' }),
+        makeBridge(),
+      );
+      const otherPath = (
+        other as unknown as { pendingFinalDeliveriesPath: () => string }
+      ).pendingFinalDeliveriesPath();
+
+      expect(otherPath).toBe(pendingPath('/tmp/other-workspace'));
+      expect(otherPath).not.toBe(pendingPath());
+    });
+
     it('does not treat a same-body posted audit as a different pending retry', async () => {
       writePending([pendingRecord({ id: 'second-pending' })]);
-      mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
       writeFileSync(
         auditPath(),
         `${JSON.stringify({
@@ -1870,7 +1969,7 @@ describe('GithubChannel', () => {
 
     it('skips a pending final already recorded as posted', async () => {
       writePending([pendingRecord()]);
-      mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
       writeFileSync(
         auditPath(),
         `{"partial"\n${JSON.stringify({
@@ -1976,14 +2075,7 @@ describe('GithubChannel', () => {
 
       await publish('owner/repo', 'pr:99', '<no-reply/>', 'session-correlated');
 
-      const audit = readFileSync(
-        join(
-          process.env.QWEN_HOME!,
-          'channels',
-          'test-github-github-audit.jsonl',
-        ),
-        'utf-8',
-      );
+      const audit = readFileSync(auditPath(), 'utf-8');
       expect(audit).toContain('"sourceMessageId":"source-message"');
       expect(audit).toContain('"threadId":"pr:99"');
       expect(JSON.parse(audit)).toMatchObject({
@@ -2007,14 +2099,7 @@ describe('GithubChannel', () => {
         }
       ).publishFinalResponse.bind(channel);
       mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
-      mkdirSync(
-        join(
-          process.env.QWEN_HOME!,
-          'channels',
-          'test-github-github-audit.jsonl',
-        ),
-        { recursive: true },
-      );
+      mkdirSync(auditPath(), { recursive: true });
 
       await expect(
         publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),

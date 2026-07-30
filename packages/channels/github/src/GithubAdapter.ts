@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { Octokit } from '@octokit/rest';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -20,6 +21,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   getGlobalQwenDir,
+  getWorkspaceScopeDirName,
   PollingChannelBase,
   sanitizeLogText,
 } from '@qwen-code/channel-base';
@@ -195,7 +197,6 @@ interface PendingFinalDelivery {
   sourceMessageId?: string;
   actor?: string;
   triggerKind?: string;
-  attempts?: number;
 }
 
 class FinalPublicationError extends Error {}
@@ -222,8 +223,10 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
     status?: number;
     response?: { headers?: Record<string, string | number> };
   };
-  const remaining = Number(e.response?.headers?.['x-ratelimit-remaining']);
-  return e.status === 429 || (e.status === 403 && remaining === 0);
+  return (
+    (e.status === 403 || e.status === 429) &&
+    Number(e.response?.headers?.['x-ratelimit-remaining']) === 0
+  );
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -262,6 +265,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private readonly reactionsPendingRemoval = new Set<string>();
   private pendingFinalDeliveryRetry: Promise<void> | undefined;
   private pendingFinalDeliveryRetryAbort: AbortController | undefined;
+  private pendingFinalDeliveryRequestsActive = 0;
+  private pendingFinalDeliveryRetryStopRequested = false;
   private reasonFilter: Set<string> | null = null;
 
   constructor(
@@ -352,8 +357,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     this.gate.replaceAllowedUsers(allowed);
+    this.migrateLegacyPublicationState();
+    this.pendingFinalDeliveryRetryStopRequested = false;
     this.startPollLoop();
-    this.pendingFinalDeliveryRetryAbort?.abort();
+    if (this.pendingFinalDeliveryRetry) {
+      return;
+    }
     const retryAbort = new AbortController();
     const retry = this.retryPendingFinalDeliveries(retryAbort.signal)
       .catch((err) => {
@@ -378,7 +387,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   disconnect(): void {
     this.stopPollLoop();
-    this.pendingFinalDeliveryRetryAbort?.abort();
+    this.pendingFinalDeliveryRetryStopRequested = true;
+    if (this.pendingFinalDeliveryRequestsActive === 0) {
+      this.pendingFinalDeliveryRetryAbort?.abort();
+    }
   }
 
   async sendMessage(_chatId: string, _text: string): Promise<void> {
@@ -539,7 +551,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sourceMessageId: input.sourceMessageId,
       actor: input.actor,
       triggerKind: input.triggerKind,
-      attempts: 0,
     };
     try {
       const pending = this.readPendingFinalDeliveries().filter(
@@ -616,13 +627,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       } catch (err) {
         if (signal?.aborted) return;
         if (isDefiniteNoWriteGithubError(err)) {
-          this.updatePendingFinalDeliveries((current) =>
-            current.map((item) =>
-              item.id === record.id
-                ? { ...item, attempts: (item.attempts ?? 0) + 1 }
-                : item,
-            ),
-          );
           continue;
         }
         if (
@@ -719,7 +723,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       return;
     }
-    const dir = join(getGlobalQwenDir(), 'channels');
+    const dir = join(
+      getGlobalQwenDir(),
+      'channels',
+      getWorkspaceScopeDirName(this.config.cwd),
+    );
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
     const tmpPath = `${path}.${process.pid}.tmp`;
@@ -754,14 +762,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const issueNumber = Number(match[1]);
     const [owner, repo] = chatId.split('/');
     const response = await this.githubApi(
-      () =>
-        this.octokit.rest.issues.createComment({
-          owner,
-          repo,
-          issue_number: issueNumber,
-          body: text,
-          ...(signal ? { request: { signal } } : {}),
-        }),
+      async () => {
+        this.pendingFinalDeliveryRequestsActive += 1;
+        try {
+          return await this.octokit.rest.issues.createComment({
+            owner,
+            repo,
+            issue_number: issueNumber,
+            body: text,
+            ...(signal ? { request: { signal } } : {}),
+          });
+        } finally {
+          this.pendingFinalDeliveryRequestsActive -= 1;
+          if (
+            this.pendingFinalDeliveryRequestsActive === 0 &&
+            this.pendingFinalDeliveryRetryStopRequested
+          ) {
+            this.pendingFinalDeliveryRetryAbort?.abort();
+          }
+        }
+      },
       `createComment(${threadId})`,
       retries,
       shouldRetry,
@@ -1278,7 +1298,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected recordPublicationAudit(record: PublicationAuditRecord): void {
     try {
-      const dir = join(getGlobalQwenDir(), 'channels');
+      const dir = join(
+        getGlobalQwenDir(),
+        'channels',
+        getWorkspaceScopeDirName(this.config.cwd),
+      );
       const path = this.channelFilePath('github-audit.jsonl');
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
@@ -1297,9 +1321,48 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
+  private migrateLegacyPublicationState(): void {
+    const channelsRoot = join(getGlobalQwenDir(), 'channels');
+    const encodedName = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
+    const sentinel = this.channelFilePath('github-state-migrated');
+    if (existsSync(sentinel)) return;
+    mkdirSync(dirname(sentinel), { recursive: true, mode: 0o700 });
+    let migrated = true;
+    for (const suffix of [
+      'github-pending-deliveries.json',
+      'github-audit.jsonl',
+    ]) {
+      const legacyPath = join(channelsRoot, `${encodedName}-${suffix}`);
+      const scopedPath = this.channelFilePath(suffix);
+      try {
+        if (!existsSync(scopedPath) && existsSync(legacyPath)) {
+          renameSync(legacyPath, scopedPath);
+        }
+      } catch (err) {
+        migrated = false;
+        process.stderr.write(
+          `[Channel:${this.name}] legacy GitHub state migration failed: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+      }
+    }
+    if (migrated) writeFileSync(sentinel, '', { mode: 0o600 });
+  }
+
   private channelFilePath(suffix: string): string {
     const encodedName = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
-    return join(getGlobalQwenDir(), 'channels', `${encodedName}-${suffix}`);
+    const nameHash = createHash('sha256')
+      .update(this.name)
+      .digest('hex')
+      .slice(0, 16);
+    return join(
+      getGlobalQwenDir(),
+      'channels',
+      getWorkspaceScopeDirName(this.config.cwd),
+      `${encodedName}-${nameHash}-${suffix}`,
+    );
   }
 
   private extractFromSubjectUrl(
