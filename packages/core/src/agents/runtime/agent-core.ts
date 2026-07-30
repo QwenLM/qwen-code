@@ -573,7 +573,7 @@ export class AgentCore {
         // schemas would silently break existing `tools: ['*']` configs.
         //
         // ASK_USER_QUESTION is excluded from the wildcard path because
-        // background fork/general-purpose subagents use this path and have
+        // background fork subagents use this path and have
         // no mechanism to deliver questions to the user — they hang
         // indefinitely. Foreground subagents with explicit tool lists
         // (e.g. statusline-setup) go through the else branch below and
