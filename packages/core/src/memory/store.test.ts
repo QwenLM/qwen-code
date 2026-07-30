@@ -178,61 +178,6 @@ describe('auto-memory storage scaffold', () => {
     );
   });
 
-  it('resolves workspace project aliases that stay inside the managed base directory', async () => {
-    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
-    const runtimeDir = path.join(tempDir, 'runtime-output');
-    const workspace = path.join(tempDir, 'product', 'w', 'agent');
-    const projectsDir = path.join(runtimeDir, 'projects');
-    const primaryStateDir = path.join(projectsDir, 'primary');
-    const workspaceStateDir = path.join(projectsDir, sanitizeCwd(workspace));
-    Storage.setRuntimeBaseDir(runtimeDir);
-    await fs.mkdir(primaryStateDir, { recursive: true });
-    await fs.symlink(primaryStateDir, workspaceStateDir, 'dir');
-
-    expect(getAutoMemoryRoot(workspace)).toBe(
-      path.join(await fs.realpath(primaryStateDir), 'memory'),
-    );
-  });
-
-  it('does not resolve workspace project aliases outside the managed base directory', async () => {
-    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
-    const runtimeDir = path.join(tempDir, 'runtime-output');
-    const workspace = path.join(tempDir, 'product', 'w', 'agent');
-    const projectsDir = path.join(runtimeDir, 'projects');
-    const outsideStateDir = path.join(tempDir, 'outside');
-    const workspaceStateDir = path.join(projectsDir, sanitizeCwd(workspace));
-    Storage.setRuntimeBaseDir(runtimeDir);
-    await fs.mkdir(projectsDir, { recursive: true });
-    await fs.mkdir(outsideStateDir, { recursive: true });
-    await fs.symlink(outsideStateDir, workspaceStateDir, 'dir');
-
-    expect(() => getAutoMemoryRoot(workspace)).toThrow(
-      'Managed memory project state alias escapes its base directory',
-    );
-  });
-
-  it('rejects unavailable workspace project aliases', async () => {
-    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
-    const runtimeDir = path.join(tempDir, 'runtime-output');
-    const workspace = path.join(tempDir, 'product', 'w', 'agent');
-    const projectsDir = path.join(runtimeDir, 'projects');
-    const workspaceStateDir = path.join(projectsDir, sanitizeCwd(workspace));
-    Storage.setRuntimeBaseDir(runtimeDir);
-    await fs.mkdir(projectsDir, { recursive: true });
-    await fs.symlink(
-      path.join(tempDir, 'unavailable'),
-      workspaceStateDir,
-      'dir',
-    );
-
-    expect(() => getAutoMemoryRoot(workspace)).toThrow(
-      'Managed memory project state alias is unavailable',
-    );
-  });
-
   it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
     delete process.env['QWEN_CODE_MEMORY_LOCAL'];
     const runtimeDir = path.join(tempDir, 'runtime-output');

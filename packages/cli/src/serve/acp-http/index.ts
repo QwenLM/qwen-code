@@ -548,7 +548,7 @@ export interface AcpHttpHandle {
     acpConnections: number;
     memoryTasks: number;
   };
-  getWorkspaceRememberLane(
+  ensureWorkspaceRememberLane(
     workspaceId: string,
   ): WorkspaceRememberTaskLane | undefined;
   /** Commit memory teardown while sockets remain open for terminal events. */
@@ -2333,8 +2333,14 @@ export function mountAcpHttp(
         memoryTasks: mount?.workspaceRememberLane.pendingCount() ?? 0,
       };
     },
-    getWorkspaceRememberLane: (workspaceId) =>
-      mountForWorkspace(workspaceId)?.workspaceRememberLane,
+    ensureWorkspaceRememberLane: (workspaceId) => {
+      const existing = mountForWorkspace(workspaceId);
+      if (existing) return existing.workspaceRememberLane;
+      const rt = opts.workspaceRegistry?.getByWorkspaceId(workspaceId);
+      if (!rt) return undefined;
+      const mount = getOrCreateSecondaryMount(rt);
+      return mount?.workspaceRememberLane;
+    },
     commitWorkspaceRemoval: (workspaceId) => {
       const mount = secondaryMounts.get(workspaceId);
       mount?.workspaceRememberLane.dispose();

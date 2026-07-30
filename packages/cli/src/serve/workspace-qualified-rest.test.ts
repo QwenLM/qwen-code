@@ -1266,19 +1266,20 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('returns runtime unavailable when a workspace has no managed-memory lane', async () => {
+  it('creates a managed-memory lane on demand for a dynamically-added workspace', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {
       const lateCwd = canonicalizeWorkspace(path.join(h.scratch, 'late'));
       await fsp.mkdir(lateCwd, { recursive: true });
       const lateId = hashDaemonWorkspace(lateCwd);
+      const lateBridge = makeBridge();
       h.workspaceRegistry.add({
         workspaceId: lateId,
         workspaceCwd: lateCwd,
         primary: false,
         trusted: true,
         env: { mode: 'parent-process', overlayKeys: [] },
-        bridge: makeBridge(),
+        bridge: lateBridge,
         workspaceService: makeWorkspaceService('late'),
         routeFileSystemFactory: createWorkspaceFileSystemFactory({
           boundWorkspaces: [lateCwd],
@@ -1295,9 +1296,14 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host())
         .send({ content: 'Late workspace' });
 
-      expect(res.status).toBe(503);
-      expect(res.body.code).toBe('workspace_runtime_unavailable');
-      expect(res.headers['retry-after']).toBe('1');
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(lateBridge.runWorkspaceMemoryRemember).toHaveBeenCalledWith({
+          content: 'Late workspace',
+          contextMode: 'workspace',
+        });
+      });
+      expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

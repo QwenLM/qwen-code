@@ -1958,16 +1958,6 @@ async function runQwenServeImpl(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
-  if (
-    optsIn.memoryProjectScope !== undefined &&
-    optsIn.memoryProjectScope !== 'git-root' &&
-    optsIn.memoryProjectScope !== 'workspace'
-  ) {
-    throw new TypeError(
-      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
-        'Must be "git-root" or "workspace".',
-    );
-  }
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
     ...(optsIn.memoryProjectScope !== undefined
@@ -2555,6 +2545,16 @@ async function runQwenServeImpl(
   }
   if (opts.compactedReplayMaxBytes !== undefined) {
     normalizeCompactedReplayMaxBytes(opts.compactedReplayMaxBytes);
+  }
+  if (
+    opts.memoryProjectScope !== undefined &&
+    opts.memoryProjectScope !== 'git-root' &&
+    opts.memoryProjectScope !== 'workspace'
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(opts.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
   }
   if (opts.maxJournalEvents !== undefined) {
     normalizeMaxJournalEvents(opts.maxJournalEvents);

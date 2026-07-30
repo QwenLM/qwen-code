@@ -1397,12 +1397,8 @@ describe('runQwenServe telemetry validation', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
-      merged: {
-        env: {
-          QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace',
-        },
-      },
-    } as unknown as ReturnType<typeof settingsRuntime.loadSettings>);
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
       effective: { state: 'trusted' },
     } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);

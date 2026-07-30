@@ -192,6 +192,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
   resolveWorkspaceRuntimeFromParam,
+  sendWorkspaceRuntimeUnavailable,
 } from './workspace-route-runtime.js';
 import {
   registerWorkspaceLifecycleRoutes,
@@ -1428,17 +1429,11 @@ export function createServeApp(
       );
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
         return null;
-      const lane = acpHandleRef.current?.getWorkspaceRememberLane(
+      const lane = acpHandleRef.current?.ensureWorkspaceRememberLane(
         runtime.workspaceId,
       );
       if (!lane) {
-        res.set('Retry-After', '1');
-        res.status(503).json({
-          error: 'Workspace runtime is not active.',
-          code: 'workspace_runtime_unavailable',
-          workspaceCwd: runtime.workspaceCwd,
-          workspaceId: runtime.workspaceId,
-        });
+        sendWorkspaceRuntimeUnavailable(res, runtime);
         return null;
       }
       return {
