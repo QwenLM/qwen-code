@@ -2960,7 +2960,6 @@ describe('loadCliConfig with --mcp-config', () => {
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
-      cwd: config.getTargetDir(),
     });
     // Settings server should still be present
     expect(mcpServers['settings-server']).toEqual({

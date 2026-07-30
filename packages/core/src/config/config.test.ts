@@ -1874,7 +1874,7 @@ describe('Server Config (config.ts)', () => {
       expect(Object.keys(result!)).not.toContain('playwright');
     });
 
-    it('binds command MCP servers without an explicit cwd to the session target directory', () => {
+    it('getMcpServers does not stamp cwd — cwd binding happens in populateMcpServerCommand', () => {
       const explicitCwd = path.resolve('/explicit/mcp');
       const config = new Config({
         ...baseParams,
@@ -1888,16 +1888,12 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getMcpServers()).toMatchObject({
-        implicit: { cwd: path.resolve('/session/worktree') },
-        explicit: { cwd: explicitCwd },
-        remote: { httpUrl: 'https://example.test/mcp' },
-        sdk: { type: 'sdk', command: 'placeholder' },
-      });
-      expect(config.getSettingsMcpServers()?.['implicit']?.cwd).toBeUndefined();
-      expect(config.getMcpServers()?.['remote']?.cwd).toBeUndefined();
-      expect(config.getMcpServers()?.['sdk']?.cwd).toBeUndefined();
-      expect(config.getMcpServers()?.['tcpWithCommand']?.cwd).toBeUndefined();
+      const servers = config.getMcpServers()!;
+      expect(servers['implicit']?.cwd).toBeUndefined();
+      expect(servers['explicit']?.cwd).toBe(explicitCwd);
+      expect(servers['remote']?.cwd).toBeUndefined();
+      expect(servers['sdk']?.cwd).toBeUndefined();
+      expect(servers['tcpWithCommand']?.cwd).toBeUndefined();
     });
 
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
@@ -5229,7 +5225,6 @@ describe('Server Config (config.ts)', () => {
 
     await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
 
-    expect(config.getMcpServers()?.['local']?.cwd).toBe(newDir);
     expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledOnce();
     expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(config);
 

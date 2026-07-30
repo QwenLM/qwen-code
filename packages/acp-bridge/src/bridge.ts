@@ -7794,13 +7794,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Race the cwd queue against the caller's abort signal so a shell
       // command cannot park forever on a changeSessionCwd extMethod that
       // never settles (agent crash / deadlock / partitioned ACP channel).
-      await Promise.race([
-        entry.cwdChangeQueue,
-        new Promise<void>((resolve) => {
-          if (signal?.aborted) return resolve();
-          signal?.addEventListener('abort', () => resolve(), { once: true });
-        }),
-      ]);
+      let abortResolve: (() => void) | undefined;
+      const onAbort = () => abortResolve?.();
+      try {
+        await Promise.race([
+          entry.cwdChangeQueue,
+          new Promise<void>((resolve) => {
+            abortResolve = resolve;
+            if (signal?.aborted) return resolve();
+            signal?.addEventListener('abort', onAbort, { once: true });
+          }),
+        ]);
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+      }
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
       }

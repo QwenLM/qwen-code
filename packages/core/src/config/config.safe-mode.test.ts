@@ -327,7 +327,6 @@ describe('Config safe mode', () => {
         probe: {
           command: 'probe',
           args: [],
-          cwd: config.getTargetDir(),
         },
       });
     });
@@ -350,7 +349,6 @@ describe('Config safe mode', () => {
         probe: {
           command: 'probe',
           args: [],
-          cwd: config.getTargetDir(),
         },
       });
     });

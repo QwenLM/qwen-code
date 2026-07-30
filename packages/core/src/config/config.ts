@@ -5068,25 +5068,7 @@ export class Config {
     // The UI layer should check isMcpServerDisabled() to determine
     // whether to show a server as disabled.
 
-    // Stamp the session cwd onto implicit stdio servers so a worktree
-    // relocation rebinds them (cwd is part of the pool fingerprint). The
-    // predicate mirrors `mcpTransportOf`'s order — `tcp` before `command` —
-    // so a config carrying both stays a websocket server and is not stamped.
-    // Hand-rolled rather than a shared helper due to the config.ts ↔
-    // mcp-client-manager.ts import cycle.
-    return Object.fromEntries(
-      Object.entries(mcpServers).map(([name, server]) => [
-        name,
-        server.command !== undefined &&
-        server.httpUrl === undefined &&
-        server.url === undefined &&
-        server.tcp === undefined &&
-        server.type !== 'sdk' &&
-        server.cwd === undefined
-          ? { ...server, cwd: this.targetDir }
-          : server,
-      ]),
-    );
+    return mcpServers;
   }
 
   getExcludedMcpServers(): string[] | undefined {

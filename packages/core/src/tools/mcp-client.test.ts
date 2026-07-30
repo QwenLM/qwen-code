@@ -2354,6 +2354,44 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     it('should handle error if mcpServerCommand parsing fails', () => {
       expect(() => populateMcpServerCommand({}, 'derp && herp')).toThrowError();
     });
+
+    it('stamps cwd onto implicit stdio servers', () => {
+      const cwd = '/session/worktree';
+      const out = populateMcpServerCommand(
+        {
+          implicit: { command: 'node', args: ['server.js'] },
+          explicit: { command: 'node', cwd: '/explicit' },
+          remote: { httpUrl: 'https://example.test/mcp' },
+          sdk: { type: 'sdk', command: 'placeholder' },
+          tcpWithCommand: { tcp: 'tcp://example.test:9000', command: 'node' },
+        },
+        undefined,
+        cwd,
+      );
+      expect(out['implicit']).toEqual({
+        command: 'node',
+        args: ['server.js'],
+        cwd,
+      });
+      expect(out['explicit']?.cwd).toBe('/explicit');
+      expect(out['remote']?.cwd).toBeUndefined();
+      expect(out['sdk']?.cwd).toBeUndefined();
+      expect(out['tcpWithCommand']?.cwd).toBeUndefined();
+    });
+
+    it('does not stamp cwd when cwd is undefined', () => {
+      const servers = { local: { command: 'node', args: [] } };
+      const out = populateMcpServerCommand(servers, undefined);
+      expect(out['local']?.cwd).toBeUndefined();
+    });
+
+    it('does not mutate the input map', () => {
+      const servers = { local: { command: 'node', args: [] } };
+      const out = populateMcpServerCommand(servers, 'cmd --flag', '/wd');
+      expect(servers).toEqual({ local: { command: 'node', args: [] } });
+      expect(out['mcp']).toBeDefined();
+      expect(out['local']?.cwd).toBe('/wd');
+    });
   });
 
   describe('createTransport', () => {

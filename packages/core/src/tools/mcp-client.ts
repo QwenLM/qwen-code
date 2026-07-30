@@ -1189,20 +1189,40 @@ export function populateMcpServerCommand(
   mcpServerCommand: string | undefined,
   cwd?: string,
 ): Record<string, MCPServerConfig> {
+  let result = mcpServers;
   if (mcpServerCommand) {
     const cmd = mcpServerCommand;
     const args = parse(cmd, process.env) as string[];
     if (args.some((arg) => typeof arg !== 'string')) {
       throw new Error('failed to parse mcpServerCommand: ' + cmd);
     }
-    // use generic server name 'mcp'
-    mcpServers['mcp'] = {
-      command: args[0],
-      args: args.slice(1),
-      cwd,
+    result = {
+      ...result,
+      mcp: {
+        command: args[0],
+        args: args.slice(1),
+        cwd,
+      },
     };
   }
-  return mcpServers;
+  if (cwd === undefined) return result;
+  // Stamp the session cwd onto implicit stdio servers so a worktree
+  // relocation rebinds them (cwd is part of the pool fingerprint). The
+  // predicate mirrors mcpTransportOf's order — tcp before command — so a
+  // config carrying both stays a websocket server and is not stamped.
+  return Object.fromEntries(
+    Object.entries(result).map(([name, server]) => [
+      name,
+      server.command !== undefined &&
+      server.httpUrl === undefined &&
+      server.url === undefined &&
+      server.tcp === undefined &&
+      server.type !== 'sdk' &&
+      server.cwd === undefined
+        ? { ...server, cwd }
+        : server,
+    ]),
+  );
 }
 
 /**
