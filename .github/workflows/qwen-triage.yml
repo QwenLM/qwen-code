@@ -1850,12 +1850,24 @@ jobs:
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
       cancel-in-progress: false
-    # 60, not 45: the agent's own 25m timeout is the graceful budget (it
-    # ships a partial report); the job limit only guards infra hangs. At 45
-    # a slow npm ci + build (15m+ on this monorepo) could let the JOB
-    # timeout kill the container mid-run, bypassing the agent's
+    # The agent's own 120m timeout is the GRACEFUL budget — it ships a
+    # partial report on expiry. This job limit only guards infra hangs, so it
+    # must stay comfortably ABOVE `agent budget + everything before it`, or
+    # the JOB timeout kills the container mid-run and bypasses the
     # ship-what-ran path entirely.
-    timeout-minutes: 60
+    #
+    #   agent budget                 120m
+    #   install + build              ~6m measured (run 30284341325: npm ci
+    #                                3m00 + build 2m40), budget 15m for a
+    #                                cold cache or a heavier dependency tree
+    #   resolver/tools, checkout,
+    #   pin, upload, cleanup         ~5m
+    #   ------------------------------------
+    #   worst case                   ~140m  ⇒ 150 leaves 10m of headroom.
+    #
+    # Cost of the raise, stated so it is a decision and not a surprise: a
+    # verify run now occupies one ECS slot for up to 2.5h instead of 1h.
+    timeout-minutes: 150
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2962,12 +2974,15 @@ jobs:
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi
 
+          # The agent's graceful kill budget in minutes. The watchdog
+          # threshold below derives from it, so the two cannot drift apart.
+          AGENT_BUDGET_M=120
           # Elapsed time of the WATCHDOG CHILD only: $SECONDS includes proxy
           # and network setup, so an OOM kill late in the step could cross a
           # global threshold and be mislabeled a configured timeout.
           AGENT_START=$SECONDS
           set +e
-          timeout --kill-after=10s 25m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+          timeout --kill-after=10s "${AGENT_BUDGET_M}m" runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
             --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/verify-results/output.jsonl"
@@ -2983,6 +2998,7 @@ jobs:
           TEE_STATUS=${PIPE_STATUS[1]:-0}
           EXIT_CODE=$AGENT_STATUS
           set -e
+          AGENT_ELAPSED=$((SECONDS - AGENT_START))
 
           # Collect the skill's artifacts (report.md, verdict.txt,
           # assertions.json, harness scripts, raw logs) into the upload dir.
@@ -2994,10 +3010,12 @@ jobs:
 
           # 137 is ambiguous: the watchdog escalating past --kill-after looks
           # identical to an OOM kill. Use the elapsed budget to tell them
-          # apart instead of labelling every 137 a crash.
-          AGENT_ELAPSED=$((SECONDS - AGENT_START))
+          # apart instead of labelling every 137 a crash. The threshold is
+          # derived from AGENT_BUDGET_M so it cannot drift from the budget:
+          # a 137 at or after the full budget is the watchdog, an earlier
+          # 137 is an OOM.
           WATCHDOG_FIRED=false
-          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge 1500 ]; then
+          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge $((AGENT_BUDGET_M * 60)) ]; then
             WATCHDOG_FIRED=true
           fi
           if [ "$EXIT_CODE" -eq 124 ] || [ "$WATCHDOG_FIRED" = true ]; then
