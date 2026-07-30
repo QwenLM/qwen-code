@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
+import { DownloadIcon } from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -35,7 +36,10 @@ import {
   artifactKindLabel,
   formatArtifactSize,
   getArtifactLocation,
+  getArtifactImageMimeType,
+  getImageMimeTypeFromPath,
   normalizePath,
+  readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
 } from './artifactUtils';
 import {
@@ -1695,6 +1699,7 @@ function ArtifactDetail({
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
   const canPreviewWorkspaceFile =
     artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+  const imageMimeType = getArtifactImageMimeType(artifact);
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     return (
@@ -1703,12 +1708,15 @@ function ArtifactDetail({
         artifactVersion={artifact.updatedAt}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
+        imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
             ? 'html'
             : isMarkdownArtifact(artifact)
               ? 'markdown'
-              : 'source'
+              : imageMimeType
+                ? 'image'
+                : 'source'
         }
       />
     );
@@ -1804,21 +1812,29 @@ function WorkspaceFilePreview({
   artifactVersion,
   workspaceActions,
   previewContent,
-  previewKind = workspacePath.toLowerCase().endsWith('.html') ||
-  workspacePath.toLowerCase().endsWith('.htm')
-    ? 'html'
-    : workspacePath.toLowerCase().endsWith('.md') ||
-        workspacePath.toLowerCase().endsWith('.markdown')
-      ? 'markdown'
-      : 'source',
+  imageMimeType,
+  previewKind,
 }: {
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: DaemonWorkspaceActions;
   previewContent?: string;
-  previewKind?: 'html' | 'markdown' | 'source';
+  imageMimeType?: string;
+  previewKind?: 'html' | 'markdown' | 'image' | 'source';
 }) {
-  if (previewKind === 'html') {
+  const path = workspacePath.toLowerCase();
+  const resolvedImageMimeType =
+    imageMimeType ?? getImageMimeTypeFromPath(workspacePath);
+  const resolvedPreviewKind =
+    previewKind ??
+    (path.endsWith('.html') || path.endsWith('.htm')
+      ? 'html'
+      : path.endsWith('.md') || path.endsWith('.markdown')
+        ? 'markdown'
+        : resolvedImageMimeType
+          ? 'image'
+          : 'source');
+  if (resolvedPreviewKind === 'html') {
     return (
       <HtmlArtifactPreview
         workspacePath={workspacePath}
@@ -1828,7 +1844,7 @@ function WorkspaceFilePreview({
       />
     );
   }
-  if (previewKind === 'markdown') {
+  if (resolvedPreviewKind === 'markdown') {
     return (
       <MarkdownArtifactPreview
         workspacePath={workspacePath}
@@ -1838,12 +1854,92 @@ function WorkspaceFilePreview({
       />
     );
   }
+  if (resolvedPreviewKind === 'image' && resolvedImageMimeType) {
+    return (
+      <ImageArtifactPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        mimeType={resolvedImageMimeType}
+      />
+    );
+  }
   return (
     <FileArtifactPreview
       workspacePath={workspacePath}
       artifactVersion={artifactVersion}
       workspaceActions={workspaceActions}
     />
+  );
+}
+
+function ImageArtifactPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  mimeType,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: DaemonWorkspaceActions;
+  mimeType: string;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | undefined;
+    setSrc(null);
+    setError(null);
+    readWorkspaceFileAsBlob(
+      (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+      workspacePath,
+      mimeType,
+      {
+        statFile: (filePath) => workspaceActions.stat(filePath),
+        isCancelled: () => cancelled,
+      },
+    )
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifactVersion, mimeType, workspaceActions, workspacePath]);
+
+  return (
+    <div className={styles.imagePreviewWrap}>
+      {src ? (
+        <>
+          <img
+            className={styles.imagePreview}
+            src={src}
+            alt={fileName(workspacePath)}
+          />
+          <a
+            className={styles.imageDownloadButton}
+            href={src}
+            download={fileName(workspacePath)}
+            aria-label={`Download ${fileName(workspacePath)}`}
+            title="Download"
+          >
+            <DownloadIcon size={16} strokeWidth={1.8} />
+          </a>
+        </>
+      ) : !error ? (
+        <div className={styles.empty}>Loading image...</div>
+      ) : null}
+      {error && <div className={styles.previewError}>{error}</div>}
+    </div>
   );
 }
 
@@ -1919,7 +2015,7 @@ function HtmlArtifactPreview({
         <iframe
           className={styles.htmlPreview}
           referrerPolicy="no-referrer"
-          sandbox=""
+          sandbox="allow-scripts"
           srcDoc={withArtifactPreviewCsp(content)}
           title={`Preview ${workspacePath}`}
         />
