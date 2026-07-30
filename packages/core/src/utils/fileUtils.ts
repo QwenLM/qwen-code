@@ -1060,6 +1060,11 @@ export async function processSingleFileContent(
     displayPath = filePath,
   } = options;
   const rootDirectory = config.getTargetDir();
+  const relativePathForDisplay = (
+    path.isAbsolute(displayPath)
+      ? path.relative(rootDirectory, displayPath)
+      : displayPath
+  ).replace(/\\/g, '/');
   try {
     signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
@@ -1111,12 +1116,6 @@ export async function processSingleFileContent(
       'application/octet-stream';
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
-    const relativePathForDisplay = (
-      path.isAbsolute(displayPath)
-        ? path.relative(rootDirectory, displayPath)
-        : displayPath
-    ).replace(/\\/g, '/');
-
     const displayName = path.basename(displayPath);
     // Use optional call (`?.()`) so mock Configs that don't implement
     // getContentGeneratorConfig still work for non-media file types.
