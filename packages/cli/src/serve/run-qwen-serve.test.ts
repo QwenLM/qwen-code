@@ -3056,6 +3056,50 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('passes the desktop bootstrap marker from the daemon environment', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-desktop-bootstrap-env-')),
+    );
+    const originalDesktop = process.env['QWEN_CODE_DESKTOP'];
+    process.env['QWEN_CODE_DESKTOP'] = '1';
+    let desktopShellBootstrap: boolean | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        desktopShellBootstrap = deps?.desktopShellBootstrap;
+        return express();
+      },
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(desktopShellBootstrap).toBe(true);
+    } finally {
+      if (originalDesktop === undefined) {
+        delete process.env['QWEN_CODE_DESKTOP'];
+      } else {
+        process.env['QWEN_CODE_DESKTOP'] = originalDesktop;
+      }
+      await handle.close();
+    }
+  });
+
   it('rebuilds runtime env from the immutable daemon base after workspace reload', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),

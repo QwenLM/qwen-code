@@ -5135,6 +5135,7 @@ async function runQwenServeImpl(
       voiceCoordinator: workspaceVoiceCoordinator,
       bridge,
       webShellDir,
+      desktopShellBootstrap: daemonRuntimeBaseEnv['QWEN_CODE_DESKTOP'] === '1',
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,

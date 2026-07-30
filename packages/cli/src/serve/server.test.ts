@@ -2923,11 +2923,10 @@ describe('createServeApp', () => {
     });
 
     it('bootstraps authenticated browser navigation with an HttpOnly cookie', async () => {
-      const daemonEnv = { QWEN_CODE_DESKTOP: '1' };
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },
         undefined,
-        { webShellDir, daemonEnv },
+        { webShellDir, desktopShellBootstrap: true },
       );
       const bootstrap = await request(app)
         .get('/?token=desktop-secret')
@@ -2949,11 +2948,10 @@ describe('createServeApp', () => {
     });
 
     it('does not mint browser auth cookies outside the desktop shell', async () => {
-      const daemonEnv = {};
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },
         undefined,
-        { webShellDir, daemonEnv },
+        { webShellDir, desktopShellBootstrap: false },
       );
       const response = await request(app)
         .get('/?token=desktop-secret')
@@ -2964,11 +2962,10 @@ describe('createServeApp', () => {
     });
 
     it('does not accept an invalid browser bootstrap token', async () => {
-      const daemonEnv = { QWEN_CODE_DESKTOP: '1' };
       const app = createServeApp(
         { ...baseOpts, token: 'desktop-secret', requireAuth: true },
         undefined,
-        { webShellDir, daemonEnv },
+        { webShellDir, desktopShellBootstrap: true },
       );
       const response = await request(app)
         .get('/?token=wrong-secret')

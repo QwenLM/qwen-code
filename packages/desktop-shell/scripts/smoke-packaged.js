@@ -42,6 +42,9 @@ const child = spawn(executable, [], {
     QWEN_DESKTOP_TEST_RUNTIME_INFO: runtimeInfoPath,
     HOME: isolatedHome,
     XDG_STATE_HOME: isolatedState,
+    ...(process.platform === 'linux'
+      ? { NO_AT_BRIDGE: '1', GTK_A11Y: 'none' }
+      : {}),
     ...(process.platform === 'darwin'
       ? {}
       : {

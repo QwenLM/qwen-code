@@ -379,6 +379,8 @@ export interface ServeAppDeps {
    * are unaffected.
    */
   webShellDir?: string;
+  /** Enables the one-time desktop Web Shell token-to-cookie bootstrap. */
+  desktopShellBootstrap?: boolean;
   /**
    * Qwen Code version advertised to web/SDK clients. Production passes the
    * resolved CLI package version; tests/direct embeds may omit it.
@@ -1171,7 +1173,9 @@ export function createServeApp(
             o.startsWith('moz-extension://'),
         )
       : [];
-  if (webShellDir && opts.token && daemonEnv['QWEN_CODE_DESKTOP'] === '1') {
+  const desktopShellBootstrap =
+    deps.desktopShellBootstrap ?? daemonEnv['QWEN_CODE_DESKTOP'] === '1';
+  if (webShellDir && opts.token && desktopShellBootstrap) {
     const token = opts.token;
     app.use((req: Request, res: Response, next: NextFunction) => {
       if (!isDocumentNavigation(req) || req.query['token'] !== token) {
