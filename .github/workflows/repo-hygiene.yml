@@ -36,6 +36,7 @@ jobs:
   # ── Phase 0: Dedup (skip the whole patrol while a hygiene PR is open) ───
   dedup:
     name: 'Dedup'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
