@@ -358,6 +358,7 @@ describe('qwen serve — capabilities envelope', () => {
       'mcp_server_runtime_mutation',
       'workspace_file_read',
       'workspace_file_bytes',
+      'workspace_file_read_cursor',
       'workspace_file_write',
       'session_approval_mode_control',
       'workspace_tool_toggle',
