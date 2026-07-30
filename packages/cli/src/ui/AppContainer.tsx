@@ -119,7 +119,6 @@ const MCP_BATCH_FLUSH_MS = 16;
 const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
-import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
 import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
@@ -3245,8 +3244,12 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
-  // Repaint static history on the trailing edge of a resize burst (#4891).
-  useResizeSettleRepaint(terminalWidth, refreshStatic);
+  // Resize no longer repaints static history (#8004). The old settle →
+  // refreshStatic path wrote clearTerminal (destroying scrollback) and remounted
+  // <Static>, re-emitting all history in 50-item chunks — a scroll storm when
+  // the terminal's resize animation exceeded the debounce window (e.g. Ghostty
+  // panel toggle). Ink's dynamic region already re-renders on width changes via
+  // useTerminalSize; modern terminals reflow scrollback natively.
 
   // Repaint after the process resumes from OS sleep / suspend (lid close,
   // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but

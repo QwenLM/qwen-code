@@ -7159,6 +7159,79 @@ describe('useGeminiStream', () => {
         );
       });
 
+      it('keeps notifications from different Todo work chains in separate turns', async () => {
+        renderTestHook();
+
+        const callback = mockMonitorRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            status: string;
+            todoWorkChainId?: string;
+          },
+        ) => void;
+        mockSendMessageStream.mockClear();
+
+        await act(async () => {
+          callback(
+            'Monitor "logs" event #1: ready',
+            '<task-notification>first</task-notification>',
+            {
+              monitorId: 'mon_1',
+              status: 'completed',
+              todoWorkChainId: 'chain-1',
+            },
+          );
+          callback(
+            'Monitor "build" event #1: ready',
+            '<task-notification>second</task-notification>',
+            {
+              monitorId: 'mon_2',
+              status: 'completed',
+              todoWorkChainId: 'chain-2',
+            },
+          );
+        });
+
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+        );
+        const firstCall = mockSendMessageStream.mock.calls[0];
+        expect(JSON.stringify(firstCall[0])).toContain('first');
+        expect(JSON.stringify(firstCall[0])).not.toContain('second');
+        expect(firstCall[3]).toMatchObject({
+          type: SendMessageType.Notification,
+          todoWorkChainId: 'chain-1',
+        });
+
+        // A further chain-2 event re-triggers the drain; the two queued
+        // chain-2 items batch into a single turn.
+        await act(async () => {
+          callback(
+            'Monitor "build" event #2: done',
+            '<task-notification>third</task-notification>',
+            {
+              monitorId: 'mon_2',
+              status: 'completed',
+              todoWorkChainId: 'chain-2',
+            },
+          );
+        });
+
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+        );
+        const secondCall = mockSendMessageStream.mock.calls[1];
+        expect(JSON.stringify(secondCall[0])).toContain('second');
+        expect(JSON.stringify(secondCall[0])).toContain('third');
+        expect(secondCall[3]).toMatchObject({
+          type: SendMessageType.Notification,
+          todoWorkChainId: 'chain-2',
+        });
+      });
+
       // Regression for #7156: progress setState calls issued from inside a
       // background subagent's AsyncLocalStorage frame can batch with the
       // notification trigger into one React commit, so the drain effect
