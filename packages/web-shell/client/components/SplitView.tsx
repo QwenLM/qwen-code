@@ -16,7 +16,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
 import { useI18n } from '../i18n';
-import { ChatPane } from './ChatPane';
+import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 import type {
@@ -64,6 +64,11 @@ export interface SplitViewProps {
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /**
+   * Extra actions rendered in each pane header, before the built-in close
+   * button. See `ChatPaneProps.renderHeaderActions`.
+   */
+  renderPaneHeaderActions?: PaneHeaderActionsRenderer;
+  /**
    * Bumped by the parent whenever the session list changes elsewhere (create /
    * delete / rename). The "add pane" picker reloads on a change so it never
    * offers a session that has since been removed or misses one just created.
@@ -97,6 +102,7 @@ export function SplitView({
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
+  renderPaneHeaderActions,
   sessionListReloadToken,
   includeOtherWorkspaces = true,
   workspaceCwd,
@@ -499,6 +505,7 @@ export function SplitView({
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}
+                      renderHeaderActions={renderPaneHeaderActions}
                       hidden={isHidden}
                       voiceUserRevision={voiceUserRevision}
                       voiceWorkspaceRevisions={voiceWorkspaceRevisions}

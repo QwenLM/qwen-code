@@ -182,6 +182,21 @@ function parsePairingCode(
   return code.trim().toUpperCase();
 }
 
+function parsePairingSenderId(
+  body: Record<string, unknown>,
+  res: Response,
+): string | undefined {
+  const senderId = body['senderId'];
+  if (typeof senderId !== 'string' || senderId.length === 0) {
+    res.status(400).json({
+      error: '`senderId` must be a non-empty string.',
+      code: 'invalid_channel_pairing_sender_id',
+    });
+    return undefined;
+  }
+  return senderId;
+}
+
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') return undefined;
   try {
@@ -203,6 +218,7 @@ const ERROR_STATUS = new Map<string, number>([
   ['untrusted_workspace', 403],
   ['channel_instance_not_found', 404],
   ['channel_pairing_request_not_found', 404],
+  ['channel_pairing_approval_not_found', 404],
   ['channel_pairing_not_enabled', 409],
   ['channel_settings_conflict', 409],
   ['channel_runtime_owner_mismatch', 409],
@@ -272,6 +288,8 @@ export function registerWorkspaceChannelManagementRoutes(
   const register = (prefix: string, resolveRuntime: RuntimeResolver) => {
     const pairingRead = deps.mutate({ strict: true });
     const pairingApprove = deps.mutate({ strict: true });
+    const pairingApprovalsRead = deps.mutate({ strict: true });
+    const pairingRevoke = deps.mutate({ strict: true });
     const upsert = deps.mutate({ strict: true });
     const remove = deps.mutate({ strict: true });
     const startup = deps.mutate({ strict: true });
@@ -341,6 +359,44 @@ export function registerWorkspaceChannelManagementRoutes(
           res
             .status(200)
             .json(await resolved.service.approvePairing(name, code));
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
+
+    app.get(
+      `${prefix}/channels/:name/pairing-approvals`,
+      pairingApprovalsRead,
+      async (req, res) => {
+        const resolved = await target(req, res);
+        if (!resolved || !validateClient(req, res, resolved.runtime)) return;
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        try {
+          noStore(res);
+          res.status(200).json(await resolved.service.pairingApprovals(name));
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
+
+    app.delete(
+      `${prefix}/channels/:name/pairing-approvals`,
+      pairingRevoke,
+      async (req, res) => {
+        const resolved = await target(req, res);
+        if (!resolved || !validateClient(req, res, resolved.runtime)) return;
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        const senderId = parsePairingSenderId(deps.safeBody(req), res);
+        if (!senderId) return;
+        try {
+          noStore(res);
+          res
+            .status(200)
+            .json(await resolved.service.revokePairingApproval(name, senderId));
         } catch (error) {
           sendManagementError(res, error);
         }

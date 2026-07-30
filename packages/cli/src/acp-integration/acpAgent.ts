@@ -291,7 +291,10 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '@qwen-code/acp-bridge/status';
-import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  parseSessionSource,
+  SESSION_SOURCE_META_KEY,
+} from '@qwen-code/acp-bridge';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -621,6 +624,12 @@ function invalidArtifactPersistPayload(): Error {
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
+}
+
+function isChannelSessionRequest(params: { _meta?: unknown }): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  const value = meta?.[SESSION_SOURCE_META_KEY];
+  return isObjectRecord(value) && value['sourceType'] === 'channel';
 }
 
 function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
@@ -3451,7 +3460,7 @@ class QwenAgent implements Agent {
     const writerTerminals: Array<Promise<void>> = [];
     for (const config of configList) {
       try {
-        writerTerminals.push(config.closeSessionWriter());
+        writerTerminals.push(config.closeSessionWriter({ handoff: true }));
       } catch (error) {
         writerTerminals.push(Promise.reject(error));
       }
@@ -4327,6 +4336,7 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const isChannelSession = isChannelSessionRequest(params);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
       'qwen-code.daemon.session_start',
@@ -4344,7 +4354,7 @@ class QwenAgent implements Agent {
         );
         this.settings = settings;
         const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(cwd, mcpServers, settings),
+          this.newSessionConfig(cwd, mcpServers, settings, isChannelSession),
         );
         let session: Session;
         try {
@@ -4377,6 +4387,7 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    const isChannelSession = isChannelSessionRequest(params);
     // Load per-request settings BEFORE the existence check: the check must
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
@@ -4462,6 +4473,7 @@ class QwenAgent implements Agent {
       // a `null`/`undefined` would otherwise throw `TypeError`.
       params.mcpServers ?? [],
       settings,
+      isChannelSession,
       params.sessionId,
       true,
     );
@@ -4558,6 +4570,7 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
+    const isChannelSession = isChannelSessionRequest(params);
     // Same per-request settings discipline as `loadSession`.
     const settings = loadSettingsCached(params.cwd);
     const liveSession = this.sessions.get(params.sessionId);
@@ -4595,6 +4608,7 @@ class QwenAgent implements Agent {
       params.cwd,
       params.mcpServers ?? [],
       settings,
+      isChannelSession,
       params.sessionId,
       true,
     );
@@ -10575,6 +10589,7 @@ class QwenAgent implements Agent {
       [],
       settings,
       undefined,
+      undefined,
       false,
       {
         skipMcpDiscovery: true,
@@ -10621,6 +10636,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
+    isChannelSession?: boolean,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10637,6 +10653,7 @@ class QwenAgent implements Agent {
           cwd,
           mcpServers,
           settings,
+          isChannelSession,
           sessionId,
           resume,
           initializeOptions,
@@ -10658,6 +10675,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
+    isChannelSession?: boolean,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10728,6 +10746,7 @@ class QwenAgent implements Agent {
       experimental: {
         ...settings.merged.experimental,
         sessionWriterLease: this.sessionWriterLeaseEnabledAtStartup,
+        ...(isChannelSession ? { cron: false } : {}),
       },
     };
 
@@ -10776,6 +10795,7 @@ class QwenAgent implements Agent {
       this.assertManagedSessionAdmission();
       if (this.isTrustedManagedParent()) {
         config.setSessionWriterReclaimPolicy('never');
+        config.setSessionWriterTakeoverPolicy('certified');
       }
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>
