@@ -338,11 +338,8 @@ async function snapshotValidatedFile(
       await source.close();
     }
   } catch (error) {
+    result = undefined;
     if (signal?.aborted || isAbortError(error)) throw error;
-    if (result) {
-      await result.cleanup();
-      result = undefined;
-    }
     return undefined;
   } finally {
     if (snapshotDir && !result) {
