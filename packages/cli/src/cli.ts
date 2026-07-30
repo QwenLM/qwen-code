@@ -460,9 +460,10 @@ function writeStderrLine(line: string): void {
  * The entry a subprocess should call to reach THIS build, consumed by shell
  * children as `"${QWEN_CODE_CLI:-qwen}"` (see getShellContextEnvVars in core).
  * The npm bin wrapper (scripts/cli-entry.js) stamps installed launches, but a
- * workspace launch — `node dist/index.js`, `npm start` — never passes through
- * it, so every skill shell-out resolved `qwen` off PATH: a different install,
- * silently.
+ * workspace launch — a direct `node dist/index.js` — never passes through
+ * it (the npm `start` and `dev` scripts stamp QWEN_CODE_CLI in their own
+ * launchers), so every skill shell-out resolved `qwen` off PATH: a different
+ * install, silently.
  *
  * Stamps the bin entry (dist/index.js), not this module: cli.ts compiles to
  * dist/src/cli.js, which carries no shebang, and the spawn-time filter blanks

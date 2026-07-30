@@ -3663,6 +3663,13 @@ export class Config {
     if (process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
+    // Re-key the per-session model registry onto the new session id. Without
+    // this the entry stays keyed on the outgoing id, so after /clear (or
+    // /reset, /new, /resume) a non-owner Config's subprocesses resolve the
+    // model by the new id, miss, and fall back to another session's value.
+    // Drop the orphaned entry too — shutdown only unregisters the current id.
+    unregisterSessionModel(previousSessionId);
+    this.publishModelEnv();
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
     setDebugLogSession(this);

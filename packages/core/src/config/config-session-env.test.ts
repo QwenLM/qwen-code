@@ -263,4 +263,25 @@ describe('Config modelEnvClaimed guard', () => {
     expect(getSessionModel(first.getSessionId())).toBe('test-model');
     expect(getSessionModel(later.getSessionId())).toBe('other-model');
   });
+
+  it('re-keys the per-session model registry on startNewSession', async () => {
+    const { Config } = await import('./config.js');
+    const { getSessionModel } = await import('../utils/sessionIdContext.js');
+    // Owner boots first and claims the process-global slot; the side-session
+    // is the non-owner Config whose subprocesses read the per-session registry.
+    new Config({ ...baseParams });
+    const side = new Config({ ...baseParams, model: 'other-model' });
+    const oldSessionId = side.getSessionId();
+    expect(getSessionModel(oldSessionId)).toBe('other-model');
+
+    // /clear (and /reset, /new, /resume) flow through startNewSession, which
+    // mints a new session id. The registry entry must move with it — leaving
+    // it keyed on the old id would make the side-session's subprocesses miss
+    // and fall back to the owner's model.
+    const newSessionId = side.startNewSession();
+
+    expect(newSessionId).not.toBe(oldSessionId);
+    expect(getSessionModel(newSessionId)).toBe('other-model');
+    expect(getSessionModel(oldSessionId)).toBeUndefined();
+  });
 });

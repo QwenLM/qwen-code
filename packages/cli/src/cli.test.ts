@@ -381,8 +381,8 @@ describe('stampCliEntryEnv', () => {
   });
 
   it('stamps the built bin entry so skill shell-outs reach THIS build', () => {
-    // Workspace launches (`node dist/index.js`, `npm start`) never pass
-    // through scripts/cli-entry.js, so without this stamp every
+    // A direct workspace launch (`node dist/index.js`) never passes through
+    // scripts/cli-entry.js, so without this stamp every
     // `"${QWEN_CODE_CLI:-qwen}"` resolved a global install off PATH.
     const entry = path.join(tempDir, 'index.js');
     writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n');
