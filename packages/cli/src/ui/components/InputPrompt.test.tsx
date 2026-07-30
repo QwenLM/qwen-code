@@ -1497,35 +1497,46 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('inserts copied non-image files as references on the clipboard shortcut', async () => {
-      const filePath = 'C:\\Users\\mochi\\My Notes\\notes.txt';
-      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
-        filePath,
-      ]);
+    it.each([
+      {
+        pathKind: 'drive-letter',
+        filePath: 'C:\\Users\\mochi\\My Notes\\notes.txt',
+        expectedReference: '@C:/Users/mochi/My\\ Notes/notes.txt',
+      },
+      {
+        pathKind: 'UNC',
+        filePath: '\\\\server\\share\\My Report.txt',
+        expectedReference: '@//server/share/My\\ Report.txt',
+      },
+    ])(
+      'inserts copied $pathKind non-image files as references on the clipboard shortcut',
+      async ({ filePath, expectedReference }) => {
+        vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+          filePath,
+        ]);
 
-      const TestHarness = () => {
-        const buffer = useTextBuffer({
-          viewport: { width: 80, height: 20 },
-          isValidPath: (candidate) => candidate === filePath,
-          onChange: () => {},
-        });
-        return <InputPrompt {...props} buffer={buffer} />;
-      };
+        const TestHarness = () => {
+          const buffer = useTextBuffer({
+            viewport: { width: 80, height: 20 },
+            isValidPath: (candidate) => candidate === filePath,
+            onChange: () => {},
+          });
+          return <InputPrompt {...props} buffer={buffer} />;
+        };
 
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <TestHarness />,
-      );
-      await wait();
+        const { stdin, lastFrame, unmount } = renderWithProviders(
+          <TestHarness />,
+        );
+        await wait();
 
-      stdin.write(isWindows ? '\x1Bv' : '\x16');
-      await wait();
+        stdin.write(isWindows ? '\x1Bv' : '\x16');
+        await wait();
 
-      expect(stripAnsi(lastFrame() ?? '')).toContain(
-        '@C:/Users/mochi/My\\ Notes/notes.txt',
-      );
-      expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
-      unmount();
-    });
+        expect(stripAnsi(lastFrame() ?? '')).toContain(expectedReference);
+        expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
 
     it('promotes copied image files to attachments on the clipboard shortcut', async () => {
       const imagePath = 'C:\\Users\\mochi\\image.png';
