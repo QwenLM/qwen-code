@@ -494,6 +494,51 @@ describe('SessionTranscriptReader', () => {
     expect(page.nextCursorState).toBeUndefined();
   });
 
+  it('does not page into inherited side-task context', async () => {
+    const inheritedUser = {
+      ...record('parent-u1', 'source', 'parent prompt'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-u1',
+      },
+    };
+    const inheritedAssistant = {
+      ...record('parent-a1', 'parent-u1', 'parent answer'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-a1',
+      },
+    };
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+      systemPayload: {
+        sourceType: 'side_task',
+        sourceId: 'parent-session',
+      },
+    };
+    await writeRecords([
+      sessionSource,
+      inheritedUser,
+      inheritedAssistant,
+      record('side-u1', 'parent-a1', 'side prompt'),
+      record('side-a1', 'side-u1', 'side answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'side-u1',
+      'side-a1',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {
@@ -1226,7 +1271,6 @@ describe('SessionTranscriptReader', () => {
     });
 
     it('pages backward through records without a normal user turn start', async () => {
-
       await writeRecords([
         record('a1', null, 'orphan assistant reply'),
         record('u1', 'a1', 'second prompt'),

@@ -293,6 +293,28 @@
   gap: 6px;
 }
 
+.shellFields {
+  display: grid;
+  gap: 14px;
+}
+
+.shellFieldValue {
+  background: var(--muted);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.shellError {
+  background: color-mix(in srgb, var(--error-color) 7%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
 .monitorCommand {
   background: var(--muted);
   border: 1px solid var(--border);
