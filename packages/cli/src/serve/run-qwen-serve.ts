@@ -1957,6 +1957,18 @@ async function runQwenServeImpl(
           : 'not_scheduled',
     },
   };
+  // Validate before freezing the value into the immutable daemon base env so a
+  // bad scope can never be baked into a runtime, even transiently.
+  if (
+    optsIn.memoryProjectScope !== undefined &&
+    optsIn.memoryProjectScope !== 'git-root' &&
+    optsIn.memoryProjectScope !== 'workspace'
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
+  }
   preResolveServeFastPathHomeEnvOverrides();
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
@@ -2545,16 +2557,6 @@ async function runQwenServeImpl(
   }
   if (opts.compactedReplayMaxBytes !== undefined) {
     normalizeCompactedReplayMaxBytes(opts.compactedReplayMaxBytes);
-  }
-  if (
-    opts.memoryProjectScope !== undefined &&
-    opts.memoryProjectScope !== 'git-root' &&
-    opts.memoryProjectScope !== 'workspace'
-  ) {
-    throw new TypeError(
-      `Invalid memoryProjectScope: ${String(opts.memoryProjectScope)}. ` +
-        'Must be "git-root" or "workspace".',
-    );
   }
   if (opts.maxJournalEvents !== undefined) {
     normalizeMaxJournalEvents(opts.maxJournalEvents);

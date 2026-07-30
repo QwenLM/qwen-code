@@ -13,7 +13,7 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `--token <s>`                           | string                     | env                                              | Bearer token. Overrides `QWEN_SERVER_TOKEN` and is trimmed at boot. It appears in the process command line, so prefer env in deployments.                                                   |
 | `--require-auth`                        | boolean                    | `false`                                          | Extends bearer auth to loopback and `/health`; boot refuses to start without a token.                                                                                                       |
 | `--workspace <dir>`                     | absolute path / repeatable | `process.cwd()`                                  | Startup workspace runtime; repeat to register additional isolated runtimes. The first is primary. Every value must be absolute and a directory; canonicalized at boot.                      |
-| `--memory-project-scope <mode>`         | `git-root` / `workspace`   | —                                                | Project-memory partitioning. `git-root` shares memory among workspaces at the same Git root; `workspace` isolates by exact workspace directory. Overrides `QWEN_CODE_MEMORY_PROJECT_SCOPE`. |
+| `--memory-project-scope <mode>`         | `git-root` / `workspace`   | `git-root`                                       | Project-memory partitioning. `git-root` shares memory among workspaces at the same Git root; `workspace` isolates by exact workspace directory. Overrides `QWEN_CODE_MEMORY_PROJECT_SCOPE`. |
 | `--max-sessions <n>`                    | number                     | `20`                                             | Per-workspace active session cap. `0` / `Infinity` means unlimited; `NaN` / negative values throw.                                                                                          |
 | `--max-total-sessions <n>`              | number                     | derived for multiple startup/restored workspaces | Daemon-wide active session cap. When omitted, a finite default is derived once from the per-workspace cap and startup/restored workspace count. `0` / `Infinity` means unlimited.           |
 | `--max-pending-prompts-per-session <n>` | number                     | `5`                                              | Accepted but pending/running prompt cap per session. Excess prompt returns 503. `0` / `Infinity` means unlimited; negative or non-integer values throw.                                     |
@@ -43,18 +43,19 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 
 ### Read by `runQwenServe` / Express middleware
 
-| Env                                 | Effect                                                                                                                                                                   |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `QWEN_SERVER_TOKEN`                 | Bearer token; trimmed at boot.                                                                                                                                           |
-| `QWEN_SERVE_DEBUG`                  | `1` / `true` / `on` / `yes` (case-insensitive) enables verbose stderr logs. See [`19-observability.md`](./19-observability.md).                                          |
-| `QWEN_SERVE_NO_MCP_POOL`            | `1` disables the workspace MCP transport pool and falls back to per-session `McpClientManager`; capabilities stop advertising `mcp_workspace_pool` / `mcp_pool_restart`. |
-| `QWEN_SERVE_PROMPT_DEADLINE_MS`     | Env fallback for `--prompt-deadline-ms`.                                                                                                                                 |
-| `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` | Env fallback for `--writer-idle-timeout-ms`.                                                                                                                             |
-| `QWEN_SERVE_RATE_LIMIT`             | `1` / `true` enables per-tier HTTP rate limiting; CLI `--rate-limit` / `--no-rate-limit` wins.                                                                           |
-| `QWEN_SERVE_RATE_LIMIT_PROMPT`      | Env fallback for `--rate-limit-prompt`.                                                                                                                                  |
-| `QWEN_SERVE_RATE_LIMIT_MUTATION`    | Env fallback for `--rate-limit-mutation`.                                                                                                                                |
-| `QWEN_SERVE_RATE_LIMIT_READ`        | Env fallback for `--rate-limit-read`.                                                                                                                                    |
-| `QWEN_SERVE_RATE_LIMIT_WINDOW_MS`   | Env fallback for `--rate-limit-window-ms`.                                                                                                                               |
+| Env                                 | Effect                                                                                                                                                                                                                               |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `QWEN_SERVER_TOKEN`                 | Bearer token; trimmed at boot.                                                                                                                                                                                                       |
+| `QWEN_SERVE_DEBUG`                  | `1` / `true` / `on` / `yes` (case-insensitive) enables verbose stderr logs. See [`19-observability.md`](./19-observability.md).                                                                                                      |
+| `QWEN_SERVE_NO_MCP_POOL`            | `1` disables the workspace MCP transport pool and falls back to per-session `McpClientManager`; capabilities stop advertising `mcp_workspace_pool` / `mcp_pool_restart`.                                                             |
+| `QWEN_SERVE_PROMPT_DEADLINE_MS`     | Env fallback for `--prompt-deadline-ms`.                                                                                                                                                                                             |
+| `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` | Env fallback for `--writer-idle-timeout-ms`.                                                                                                                                                                                         |
+| `QWEN_SERVE_RATE_LIMIT`             | `1` / `true` enables per-tier HTTP rate limiting; CLI `--rate-limit` / `--no-rate-limit` wins.                                                                                                                                       |
+| `QWEN_SERVE_RATE_LIMIT_PROMPT`      | Env fallback for `--rate-limit-prompt`.                                                                                                                                                                                              |
+| `QWEN_SERVE_RATE_LIMIT_MUTATION`    | Env fallback for `--rate-limit-mutation`.                                                                                                                                                                                            |
+| `QWEN_SERVE_RATE_LIMIT_READ`        | Env fallback for `--rate-limit-read`.                                                                                                                                                                                                |
+| `QWEN_SERVE_RATE_LIMIT_WINDOW_MS`   | Env fallback for `--rate-limit-window-ms`.                                                                                                                                                                                           |
+| `QWEN_CODE_MEMORY_PROJECT_SCOPE`    | `workspace` keys project memory by the exact workspace dir; any other value keeps the `git-root` scope (unrecognized values warn once). Propagates via the runtime base env, not `childEnvOverrides`; `--memory-project-scope` wins. |
 
 ### Forwarded to the ACP child through `BridgeOptions.childEnvOverrides`
 
@@ -92,21 +93,22 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 `packages/cli/src/serve/types.ts` defines the typed options object accepted by both `runQwenServe` and `createServeApp`. It mirrors the CLI flags above and adds:
 
-| Field                         | Effect                                                                                        |
-| ----------------------------- | --------------------------------------------------------------------------------------------- |
-| `eventRingSize`               | Overrides the default per-session ring size.                                                  |
-| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                             |
-| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                |
-| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                       |
-| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                              |
-| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required. |
-| `promptDeadlineMs`            | Prompt wallclock limit.                                                                       |
-| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                      |
-| `channelIdleTimeoutMs`        | How long to keep the ACP child warm after the last session closes.                            |
-| `initializeTimeoutMs`         | ACP child request timeout, including the initialize handshake.                                |
-| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                 |
-| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                       |
-| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                      |
+| Field                         | Effect                                                                                                   |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `eventRingSize`               | Overrides the default per-session ring size.                                                             |
+| `memoryProjectScope`          | `'git-root' \| 'workspace'` project-memory partitioning; falls back to `QWEN_CODE_MEMORY_PROJECT_SCOPE`. |
+| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                        |
+| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                           |
+| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                                  |
+| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                                         |
+| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required.            |
+| `promptDeadlineMs`            | Prompt wallclock limit.                                                                                  |
+| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                                 |
+| `channelIdleTimeoutMs`        | How long to keep the ACP child warm after the last session closes.                                       |
+| `initializeTimeoutMs`         | ACP child request timeout, including the initialize handshake.                                           |
+| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                            |
+| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                                  |
+| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                                 |
 
 ## `BridgeOptions` (programmatic bridge embedding)
 

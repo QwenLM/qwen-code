@@ -714,9 +714,16 @@ async function validateManagedMemoryAvailable(
   }
 }
 
+interface WorkspaceRememberRouteResolveOptions {
+  /** POST routes create a lane on demand; GET routes must not allocate. */
+  creating: boolean;
+  kind: WorkspaceMemoryTaskKind;
+}
+
 type WorkspaceRememberRouteDepsResolver = (
   req: Request,
   res: Response,
+  options: WorkspaceRememberRouteResolveOptions,
 ) => WorkspaceRememberResolvedRouteDeps | null;
 
 function mountWorkspaceMemoryRememberRoutesAt(
@@ -729,7 +736,10 @@ function mountWorkspaceMemoryRememberRoutesAt(
     `${basePath}/remember`,
     mutate({ strict: true }),
     async (req, res) => {
-      const deps = resolveRouteDeps(req, res);
+      const deps = resolveRouteDeps(req, res, {
+        creating: true,
+        kind: 'remember',
+      });
       if (!deps) return;
       const assertGenerationOpen = deps.captureGenerationAssertion?.();
       if (!requireOpenGeneration(assertGenerationOpen, res)) return;
@@ -806,7 +816,10 @@ function mountWorkspaceMemoryRememberRoutesAt(
     `${basePath}/remember/:taskId`,
     mutate({ strict: true }),
     (req, res) => {
-      const deps = resolveRouteDeps(req, res);
+      const deps = resolveRouteDeps(req, res, {
+        creating: false,
+        kind: 'remember',
+      });
       if (!deps) return;
       const assertGenerationOpen = deps.captureGenerationAssertion?.();
       if (!requireOpenGeneration(assertGenerationOpen, res)) return;
@@ -830,7 +843,10 @@ function mountWorkspaceMemoryRememberRoutesAt(
   );
 
   app.post(`${basePath}/forget`, mutate({ strict: true }), async (req, res) => {
-    const deps = resolveRouteDeps(req, res);
+    const deps = resolveRouteDeps(req, res, {
+      creating: true,
+      kind: 'forget',
+    });
     if (!deps) return;
     const assertGenerationOpen = deps.captureGenerationAssertion?.();
     if (!requireOpenGeneration(assertGenerationOpen, res)) return;
@@ -890,7 +906,10 @@ function mountWorkspaceMemoryRememberRoutesAt(
     `${basePath}/forget/:taskId`,
     mutate({ strict: true }),
     (req, res) => {
-      const deps = resolveRouteDeps(req, res);
+      const deps = resolveRouteDeps(req, res, {
+        creating: false,
+        kind: 'forget',
+      });
       if (!deps) return;
       const assertGenerationOpen = deps.captureGenerationAssertion?.();
       if (!requireOpenGeneration(assertGenerationOpen, res)) return;
@@ -914,7 +933,10 @@ function mountWorkspaceMemoryRememberRoutesAt(
   );
 
   app.post(`${basePath}/dream`, mutate({ strict: true }), async (req, res) => {
-    const deps = resolveRouteDeps(req, res);
+    const deps = resolveRouteDeps(req, res, {
+      creating: true,
+      kind: 'dream',
+    });
     if (!deps) return;
     const assertGenerationOpen = deps.captureGenerationAssertion?.();
     if (!requireOpenGeneration(assertGenerationOpen, res)) return;
@@ -952,7 +974,10 @@ function mountWorkspaceMemoryRememberRoutesAt(
   });
 
   app.get(`${basePath}/dream/:taskId`, mutate({ strict: true }), (req, res) => {
-    const deps = resolveRouteDeps(req, res);
+    const deps = resolveRouteDeps(req, res, {
+      creating: false,
+      kind: 'dream',
+    });
     if (!deps) return;
     const assertGenerationOpen = deps.captureGenerationAssertion?.();
     if (!requireOpenGeneration(assertGenerationOpen, res)) return;

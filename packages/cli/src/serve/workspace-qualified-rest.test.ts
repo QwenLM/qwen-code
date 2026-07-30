@@ -1309,6 +1309,128 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('shares the singular lane for the primary workspace qualified route', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const queued = await request(h.app)
+        .post('/workspace/memory/remember')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Primary via singular' });
+      expect(queued.status).toBe(202);
+      const taskId = queued.body.taskId as string;
+
+      await vi.waitFor(() => {
+        expect(h.primaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalled();
+      });
+
+      const viaQualified = await request(h.app)
+        .get(`/workspaces/same-as-path/memory/remember/${taskId}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(viaQualified.status).toBe(200);
+      expect(viaQualified.body).toMatchObject({ taskId, status: 'completed' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 404 when reading a task id from another workspace', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const queued = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Secondary only' });
+      expect(queued.status).toBe(202);
+      const taskId = queued.body.taskId as string;
+
+      const crossRead = await request(h.app)
+        .get(`/workspaces/same-as-path/memory/remember/${taskId}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(crossRead.status).toBe(404);
+      expect(crossRead.body.code).toBe('remember_task_not_found');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed for unknown and draining workspace runtimes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const unknown = await request(h.app)
+        .post('/workspaces/does-not-exist/memory/remember')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'x' });
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+
+      const secondaryRuntime = h.workspaceRegistry.getByWorkspaceId(
+        h.secondaryId,
+      );
+      expect(secondaryRuntime).toBeDefined();
+      expect(h.workspaceRegistry.beginDrain(secondaryRuntime!)).toBe(true);
+
+      const draining = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'x' });
+      expect(draining.status).toBe(503);
+      expect(draining.body.code).toBe('workspace_runtime_unavailable');
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the primary qualified route alive when ACP HTTP is disabled', async () => {
+    const original = process.env['QWEN_SERVE_ACP_HTTP'];
+    process.env['QWEN_SERVE_ACP_HTTP'] = '0';
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const primary = await request(h.app)
+        .post('/workspaces/same-as-path/memory/remember')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Primary without ACP HTTP' });
+      expect(primary.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(h.primaryBridge.runWorkspaceMemoryRemember).toHaveBeenCalled();
+      });
+
+      const secondary = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Secondary without ACP HTTP' });
+      expect(secondary.status).toBe(501);
+      expect(secondary.body.code).toBe('workspace_memory_unavailable');
+      expect(secondary.headers['retry-after']).toBeUndefined();
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).not.toHaveBeenCalled();
+    } finally {
+      if (original === undefined) {
+        delete process.env['QWEN_SERVE_ACP_HTTP'];
+      } else {
+        process.env['QWEN_SERVE_ACP_HTTP'] = original;
+      }
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('rejects global and user scope on workspace-qualified memory routes', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {

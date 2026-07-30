@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryExtractCursorPath,
@@ -176,6 +176,50 @@ describe('auto-memory storage scaffold', () => {
     expect(getAutoMemoryRoot(workspaceB)).toBe(
       path.join(runtimeDir, 'projects', sanitizeCwd(workspaceB), 'memory'),
     );
+  });
+
+  it('normalizes the memory project scope value case-insensitively', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = '  Workspace  ';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    const repo = path.join(tempDir, 'repo');
+    const workspaceA = path.join(repo, 'workspaces', 'agent');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(workspaceA, { recursive: true });
+
+    expect(getAutoMemoryRoot(workspaceA)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(workspaceA), 'memory'),
+    );
+  });
+
+  it('falls back to git-root scope and warns once on an unrecognized scope value', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'exact';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const repo = path.join(tempDir, 'repo');
+      const workspaceA = path.join(repo, 'workspaces', 'agent');
+      await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+      await fs.mkdir(workspaceA, { recursive: true });
+
+      expect(getAutoMemoryRoot(workspaceA)).toBe(
+        path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+      );
+      expect(getAutoMemoryRoot(workspaceA)).toBe(
+        path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+      );
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain(
+        'QWEN_CODE_MEMORY_PROJECT_SCOPE',
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
