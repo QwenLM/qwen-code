@@ -382,7 +382,7 @@ export function ChannelPairingRequests({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={Boolean(approvingCode)}
+                  disabled={Boolean(approvingCode) || Boolean(revokingSenderId)}
                   aria-label={t('channels.editor.pairing.approveFor', {
                     sender: label,
                     code: request.code,
@@ -482,7 +482,7 @@ export function ChannelPairingRequests({
                 type="button"
                 size="sm"
                 variant="destructive"
-                disabled={Boolean(revokingSenderId)}
+                disabled={Boolean(revokingSenderId) || Boolean(approvingCode)}
                 aria-label={t('channels.editor.pairing.approvals.revokeFor', {
                   senderId,
                 })}
