@@ -114,7 +114,7 @@ describe('bundled autofix skill', () => {
       'no failure exists and any check has no conclusion',
     );
     expect(status).toContain(
-      'at least one check exists and every check is successful',
+      'at least one check exists, every CheckRun has a non-failing conclusion',
     );
     expect(status).toContain('rollup is absent or empty');
     expect([failing, pending, passing, noChecks]).toEqual(
