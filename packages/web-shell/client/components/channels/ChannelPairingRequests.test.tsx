@@ -130,6 +130,31 @@ describe('ChannelPairingRequests', () => {
     expect(container.textContent).toContain('configured-user');
   });
 
+  it('retries after loading pairing approvals fails', async () => {
+    const error = Object.assign(new Error('Approval list unavailable.'), {
+      status: 503,
+      body: { error: 'Approval list unavailable.' },
+    });
+    const listApprovals = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce({ senderIds: ['paired-user'] });
+    await renderRequests({ listApprovals });
+
+    expect(container.textContent).toContain('Approval list unavailable.');
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Try again',
+    );
+    await act(async () => {
+      retry?.click();
+    });
+
+    expect(listApprovals).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).not.toBeNull();
+  });
+
   it('confirms and revokes only the selected pairing approval', async () => {
     const revokeApproval = vi.fn().mockResolvedValue({
       revoked: 'paired-user',
@@ -169,6 +194,37 @@ describe('ChannelPairingRequests', () => {
     expect(container.textContent).toContain(
       'Pairing approval for paired-user was revoked.',
     );
+  });
+
+  it('keeps an approval visible when revoking it fails', async () => {
+    const revokeError = Object.assign(new Error('Revocation failed.'), {
+      status: 500,
+      body: { error: 'Revocation failed.' },
+    });
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValue({ senderIds: ['paired-user'] });
+    const revokeApproval = vi.fn().mockRejectedValue(revokeError);
+    await renderRequests({ listApprovals, revokeApproval });
+
+    const revoke = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke paired-user"]',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Revoke approval',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(container.textContent).toContain('Revocation failed.');
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).not.toBeNull();
+    expect(listApprovals).toHaveBeenCalledTimes(1);
   });
 
   it('approves a request and replaces the list with the daemon response', async () => {
