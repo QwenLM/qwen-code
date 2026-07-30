@@ -1045,6 +1045,9 @@ jobs:
           path: '${{ runner.temp }}/npm-cache'
           key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
           restore-keys: 'npm-ci-'
+          # TODO: add a save step in a trusted base-branch workflow (e.g. ci.yml
+          # on push to main) using actions/cache/save with this same key+path,
+          # or the restore will always miss.
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -2445,6 +2448,9 @@ jobs:
           path: '${{ runner.temp }}/npm-cache'
           key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
           restore-keys: 'npm-ci-'
+          # TODO: add a save step in a trusted base-branch workflow (e.g. ci.yml
+          # on push to main) using actions/cache/save with this same key+path,
+          # or the restore will always miss.
 
       - name: 'Install and build PR app'
         id: 'prepare'

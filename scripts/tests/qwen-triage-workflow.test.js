@@ -3863,13 +3863,18 @@ describe('qwen-triage tmux lane parity', () => {
       expect(prepare).toContain(
         'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
       );
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
       const cacheStep = stepIn(jobName, 'Restore npm cache');
       const cachePath = cacheStep.match(
         /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
       )?.[1];
-      const npmCache = prepare.match(/--cache "\$RUNNER_TEMP\/([^"]+)"/)?.[1];
       expect(cachePath).toBeTruthy();
-      expect(npmCache).toBe(cachePath);
+      const npmCaches = [
+        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      ].map((m) => m[1]);
+      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
+      for (const c of npmCaches) expect(c).toBe(cachePath);
     }
   });
 });

@@ -37,6 +37,7 @@ const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
 const verifyJob = doc.jobs.verify;
+const tmuxJob = doc.jobs['tmux-testing'];
 const verifyCleanupStep = verifyJob.steps.find(
   (s) => s.name === 'Clean up runner workspace',
 );
@@ -330,4 +331,54 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
   it('includes Risk field in the Stage 1 comment template', () => {
     assert.ok(prSkill.includes('Risk: <if Stage 1e matched'));
   });
+});
+
+describe('qwen-triage: npm cache restore-only invariant', () => {
+  for (const [jobName, jobDef] of [
+    ['verify', verifyJob],
+    ['tmux-testing', tmuxJob],
+  ]) {
+    it(`${jobName}: uses actions/cache/restore with no save path`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.ok(cacheStep, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.match(
+        cacheStep.uses,
+        /^actions\/cache\/restore@/,
+        'must use the restore-only variant (no post-save hook)',
+      );
+      for (const s of jobDef.steps) {
+        if (s.uses) {
+          assert.doesNotMatch(
+            s.uses,
+            /actions\/cache(\/save)?@/,
+            `${jobName} must not have a cache save or full cache action`,
+          );
+        }
+      }
+    });
+
+    it(`${jobName}: npm ci --cache matches the restored directory`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      const prepareStep = jobDef.steps.find(
+        (s) => s.name === 'Install and build PR app',
+      );
+      assert.ok(
+        prepareStep,
+        `'Install and build PR app' step must exist in ${jobName}`,
+      );
+      const dir = cacheStep.with.path.replace(
+        /^\$\{\{\s*runner\.temp\s*\}\}\//,
+        '',
+      );
+      assert.ok(dir, 'cache path must resolve to a directory name');
+      assert.ok(
+        prepareStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
+        `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
+      );
+    });
+  }
 });
