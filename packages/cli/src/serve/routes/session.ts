@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionService,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
@@ -1647,6 +1648,36 @@ export function registerSessionRoutes(
           ? { sessionId: requestedSessionId }
           : {}),
       });
+      // Defensive: the bridge/agent must honor a caller-supplied id. If it was
+      // dropped anywhere in the chain (older agent binary, coalesced attach),
+      // never return a surprise id — fail the request instead. Same silent-drop
+      // class as #7831, one layer down.
+      if (
+        requestedSessionId !== undefined &&
+        session.sessionId !== requestedSessionId
+      ) {
+        if (daemonLog) {
+          daemonLog.warn('session id not honored by agent', {
+            requested: requestedSessionId,
+            actual: session.sessionId,
+          });
+        }
+        if (!session.attached) {
+          await runWithWorkspaceRuntimeStorage(runtime, () =>
+            deleteDaemonSessionIfOrphan({
+              sessionId: session.sessionId,
+              service: createWorkspaceRuntimeSessionService(runtime),
+              bridge: runtime.bridge,
+              coordinator: archiveCoordinator,
+            }),
+          ).catch(() => false);
+        }
+        res.status(500).json({
+          error: 'Agent did not honor the requested session id',
+          code: 'session_id_not_honored',
+        });
+        return;
+      }
       try {
         runtime.generationGuard?.assertOpen();
       } catch (error) {

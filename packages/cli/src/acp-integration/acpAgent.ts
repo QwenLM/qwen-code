@@ -199,6 +199,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
+  SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
@@ -10890,6 +10891,9 @@ class QwenAgent implements Agent {
         );
       });
     } catch (error) {
+      if (error instanceof SessionIdConflictError) {
+        throw RequestError.invalidParams(undefined, error.message);
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -11015,6 +11019,12 @@ class QwenAgent implements Agent {
       // into the first <available_skills> at cold start.
       buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
+      // The daemon owns the settings watcher lifecycle.
+      undefined,
+      // A duplicate caller-supplied session id must fail this one request,
+      // not process.exit(1) the shared ACP child and every session on its
+      // channel. newSessionConfig maps the throw to a RequestError.
+      true,
     );
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);

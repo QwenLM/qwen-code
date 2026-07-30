@@ -1102,7 +1102,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const spawnImpl =
     opts.spawnImpl ??
     (async (req) => ({
-      sessionId: `fake-${calls.length}`,
+      sessionId: req.sessionId ?? `fake-${calls.length}`,
       workspaceCwd: req.workspaceCwd,
       attached: false,
       clientId: `client-${calls.length}`,
@@ -8631,6 +8631,29 @@ describe('createServeApp', () => {
       expect(bridge.calls[0]).toMatchObject({
         sessionId: '550e8400-e29b-41d4-a716-446655440000',
       });
+    });
+
+    it('500 when the bridge does not honor the requested sessionId', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => ({
+          sessionId: 'a-different-id-than-requested',
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-x',
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionId: '550e8400-e29b-41d4-a716-446655440000' });
+
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('session_id_not_honored');
     });
 
     it('409 when sessionId already exists (active or archived)', async () => {

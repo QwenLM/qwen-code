@@ -723,6 +723,14 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  SessionIdConflictError: class SessionIdConflictError extends Error {
+    sessionId: string;
+    constructor(sessionId: string, message: string) {
+      super(message);
+      this.name = 'SessionIdConflictError';
+      this.sessionId = sessionId;
+    }
+  },
 }));
 vi.mock('../ui/commands/contextCommand.js', () => ({
   collectContextData: vi.fn().mockResolvedValue({
@@ -843,13 +851,13 @@ import type {
   McpServer,
   ResumeSessionResponse,
 } from '@agentclientprotocol/sdk';
-import { AgentSideConnection } from '@agentclientprotocol/sdk';
+import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import {
   MAX_PERMISSION_RULE_LENGTH,
   MAX_PERMISSION_RULES_COUNT,
 } from '../config/permission-settings.js';
-import { loadCliConfig } from '../config/config.js';
+import { loadCliConfig, SessionIdConflictError } from '../config/config.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
@@ -2818,6 +2826,33 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(argv).toMatchObject({
       sessionId: '550e8400-e29b-41d4-a716-446655440000',
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps a duplicate sessionId conflict to a RequestError instead of crashing the child', async () => {
+    const conflict = new SessionIdConflictError(
+      '550e8400-e29b-41d4-a716-446655440000',
+      'Error: Session Id 550e8400-e29b-41d4-a716-446655440000 already exists (active or archived). Delete or unarchive it first.',
+    );
+    vi.mocked(loadCliConfig).mockRejectedValue(conflict);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toThrow('already exists');
+    expect(RequestError.invalidParams).toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
