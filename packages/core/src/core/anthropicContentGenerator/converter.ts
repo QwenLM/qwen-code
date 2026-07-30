@@ -127,6 +127,15 @@ export interface ConvertGeminiRequestToAnthropicOptions {
 export class AnthropicContentConverter {
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
+  /**
+   * Per-request tool ID sanitization state (see {@link resolveToolUseId}).
+   * The converter instance is long-lived across requests (constructed once
+   * per generator), so this state is reset at the top of every
+   * `convertGeminiRequestToAnthropic` call rather than at construction.
+   */
+  private readonly toolIdMap = new Map<string, string>();
+  private readonly usedToolIds = new Set<string>();
+  private generatedToolIdCounter = 0;
 
   constructor(
     _model: string,
@@ -144,6 +153,7 @@ export class AnthropicContentConverter {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
+    this.resetToolIdState();
     let messages: AnthropicMessageParam[] = [];
 
     const systemText = this.extractTextFromContentUnion(
@@ -414,7 +424,6 @@ export class AnthropicContentConverter {
     const parts = content.parts || [];
     const role = content.role === 'model' ? 'assistant' : 'user';
     const contentBlocks: AnthropicContentBlockParam[] = [];
-    let toolCallIndex = 0;
 
     for (const part of parts) {
       if (typeof part === 'string') {
@@ -452,11 +461,10 @@ export class AnthropicContentConverter {
         if (role === 'assistant') {
           contentBlocks.push({
             type: 'tool_use',
-            id: part.functionCall.id || `tool_${toolCallIndex}`,
+            id: this.resolveToolUseId(part.functionCall.id),
             name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
-          toolCallIndex += 1;
         }
       }
 
@@ -504,13 +512,82 @@ export class AnthropicContentConverter {
 
     return {
       type: 'tool_result',
-      tool_use_id: response.id || '',
+      tool_use_id: this.resolveToolUseId(response.id),
       content,
       ...(response.response &&
       Object.prototype.hasOwnProperty.call(response.response, 'error')
         ? { is_error: true }
         : {}),
     };
+  }
+
+  private resetToolIdState(): void {
+    this.toolIdMap.clear();
+    this.usedToolIds.clear();
+    this.generatedToolIdCounter = 0;
+  }
+
+  /**
+   * Resolve a `functionCall.id` / `functionResponse.id` into a wire-safe
+   * `tool_use.id` / `tool_result.tool_use_id`. Anthropic validates both
+   * fields against `^[a-zA-Z0-9_-]+$` server-side (HTTP 400 otherwise) and
+   * rejects the empty string the same way, since `+` requires at least one
+   * character. The Gemini lingua-franca's `id` field has no such
+   * constraint -- it can carry another provider's ID scheme, a
+   * composite/namespaced ID, or be entirely absent.
+   *
+   * The same source ID always resolves to the same wire ID within a
+   * request (memoized in `toolIdMap`), so a `tool_use`/`tool_result` pair
+   * that shares a source ID still links up correctly after sanitization.
+   * State is scoped to a single `convertGeminiRequestToAnthropic` call
+   * (reset via {@link resetToolIdState}), since the converter instance
+   * itself is long-lived across requests.
+   */
+  private resolveToolUseId(rawId?: string): string {
+    const sourceId = typeof rawId === 'string' ? rawId.trim() : '';
+    const existingId = sourceId ? this.toolIdMap.get(sourceId) : undefined;
+    if (existingId) {
+      return existingId;
+    }
+
+    const baseId = sourceId
+      ? this.sanitizeToolUseId(sourceId)
+      : this.nextGeneratedToolId();
+    const uniqueId = this.makeUniqueToolUseId(baseId);
+
+    if (sourceId) {
+      this.toolIdMap.set(sourceId, uniqueId);
+    }
+
+    return uniqueId;
+  }
+
+  private sanitizeToolUseId(id: string): string {
+    const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return cleaned || this.nextGeneratedToolId();
+  }
+
+  private nextGeneratedToolId(): string {
+    const id = `tool_${this.generatedToolIdCounter}`;
+    this.generatedToolIdCounter += 1;
+    return id;
+  }
+
+  private makeUniqueToolUseId(baseId: string): string {
+    if (!this.usedToolIds.has(baseId)) {
+      this.usedToolIds.add(baseId);
+      return baseId;
+    }
+
+    let suffix = 1;
+    let candidate = `${baseId}_${suffix}`;
+    while (this.usedToolIds.has(candidate)) {
+      suffix += 1;
+      candidate = `${baseId}_${suffix}`;
+    }
+
+    this.usedToolIds.add(candidate);
+    return candidate;
   }
 
   private createMediaBlockFromPart(

@@ -1189,6 +1189,155 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    describe('tool_use id sanitization', () => {
+      // Anthropic validates tool_use.id / tool_result.tool_use_id against
+      // ^[a-zA-Z0-9_-]+$ server-side (HTTP 400 otherwise), but the Gemini
+      // lingua-franca's functionCall.id / functionResponse.id has no such
+      // constraint. Verified live: sending an id containing characters
+      // outside that set, or an empty tool_use_id, both 400 with
+      // "String should match pattern '^[a-zA-Z0-9_-]+$'".
+      it('sanitizes a tool_use id containing characters outside [a-zA-Z0-9_-]', () => {
+        const rawId = 'call:abc.def/ghi?jkl';
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: { id: rawId, name: 'tool', args: { a: 1 } },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: rawId,
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const userBlocks = messages[2]?.content as Array<{
+          type: string;
+          tool_use_id?: string;
+        }>;
+        const toolUse = assistantBlocks.find((b) => b.type === 'tool_use');
+        const toolResult = userBlocks.find((b) => b.type === 'tool_result');
+
+        expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+        expect(toolUse?.id).not.toBe(rawId);
+        // The sanitized id links the pair back up.
+        expect(toolResult?.tool_use_id).toBe(toolUse?.id);
+      });
+
+      it('generates a non-empty fallback id when functionCall.id is missing (not an empty string)', () => {
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ functionCall: { name: 'tool', args: {} } }],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const toolUse = assistantBlocks.find((b) => b.type === 'tool_use');
+        expect(toolUse?.id).toBeTruthy();
+        expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+      });
+
+      // Note: there is no analogous standalone test for "functionResponse.id
+      // missing" here -- a tool_result with no id can't be linked to any
+      // tool_use by definition (which call is it responding to?), so it is
+      // always a genuine orphan and gets cleaned up by cleanOrphanedToolCalls
+      // regardless of this fix. tool_result.tool_use_id goes through the
+      // exact same resolveToolUseId/nextGeneratedToolId path exercised by
+      // the tool_use-side tests above, so the never-empty-string guarantee
+      // is already covered.
+
+      it('does not collide fallback ids generated for two different missing-id tool calls in the same request', () => {
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { functionCall: { name: 'tool_a', args: {} } },
+                { functionCall: { name: 'tool_b', args: {} } },
+              ],
+            },
+          ],
+        });
+
+        const assistantBlocks = messages[1]?.content as Array<{
+          type: string;
+          id?: string;
+        }>;
+        const ids = assistantBlocks
+          .filter((b) => b.type === 'tool_use')
+          .map((b) => b.id);
+        expect(ids).toHaveLength(2);
+        expect(new Set(ids).size).toBe(2);
+      });
+
+      it('resolves the same source id to the same sanitized id across tool_use and tool_result in different messages', () => {
+        const rawId = 'weird/id:1';
+        const { messages } = converter.convertGeminiRequestToAnthropic({
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [{ functionCall: { id: rawId, name: 'tool', args: {} } }],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: rawId,
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        const toolUseId = (
+          messages[1]?.content as Array<{ type: string; id?: string }>
+        ).find((b) => b.type === 'tool_use')?.id;
+        const toolResultId = (
+          messages[2]?.content as Array<{
+            type: string;
+            tool_use_id?: string;
+          }>
+        ).find((b) => b.type === 'tool_result')?.tool_use_id;
+
+        expect(toolUseId).toBeDefined();
+        expect(toolUseId).toBe(toolResultId);
+      });
+    });
+
     it('keeps tool results split across consecutive user messages', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
