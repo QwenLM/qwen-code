@@ -3099,6 +3099,38 @@ describe('Server Config (config.ts)', () => {
       expect(stop).toHaveBeenCalledOnce();
     });
 
+    it('aborts active workflows during shutdown', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+      const abortController = new AbortController();
+      const registry = config.getWorkflowRunRegistry();
+      registry.register({
+        runId: 'wf_1234',
+        meta: null,
+        status: 'running',
+        startTime: Date.now(),
+        outputFile: '/tmp/wf_1234.jsonl',
+        abortController,
+      });
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+        strictResourceCleanup: true,
+      });
+
+      expect(abortController.signal.aborted).toBe(true);
+      expect(registry.get('wf_1234')?.status).toBe('cancelled');
+    });
+
     it('allows a later shutdown to retry incomplete resource cleanup', async () => {
       const config = new Config(baseParams);
       const stop = vi

@@ -61,7 +61,7 @@ export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'scheduled_task',
 ];
 
-export type TurnOutputOpenRequest =
+export type TurnOutputOpenRequest = (
   | {
       id: 'review';
       kind: 'review';
@@ -99,7 +99,11 @@ export type TurnOutputOpenRequest =
       tool: ACPToolCall;
       sessionId: string;
       workspaceCwd?: string;
-    };
+    }
+) & {
+  /** Session whose transcript produced this output. */
+  sourceSessionId?: string;
+};
 
 interface TurnOutputsProps {
   turnId: string;

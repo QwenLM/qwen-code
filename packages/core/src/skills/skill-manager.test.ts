@@ -744,6 +744,23 @@ Skill 3 content`);
       ]);
     });
 
+    it('reads the committed cache without triggering discovery', async () => {
+      expect(manager.getCachedSkills()).toBeNull();
+      expect(fs.readdir).not.toHaveBeenCalled();
+
+      await manager.listSkills();
+      vi.mocked(fs.readdir).mockClear();
+      vi.mocked(fs.readFile).mockClear();
+
+      expect(manager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+        'skill1',
+        'skill2',
+        'skill3',
+      ]);
+      expect(fs.readdir).not.toHaveBeenCalled();
+      expect(fs.readFile).not.toHaveBeenCalled();
+    });
+
     it('should prioritize project level over user level', async () => {
       const skills = await manager.listSkills();
       const skill1 = skills.find((s) => s.name === 'skill1');
