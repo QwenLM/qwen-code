@@ -3355,6 +3355,11 @@ class QwenAgent implements Agent {
    * Default cwd for settings handlers when the client does not supply one.
    * Set to the worktree path when a session inside a worktree is created;
    * falls back to `null` (meaning `process.cwd()`) for regular sessions.
+   *
+   * Agent-global, last-session-wins: assumes at most one active worktree
+   * session. Safe today because clients pass an explicit `cwd` when multiple
+   * sessions coexist. For full multi-worktree support, resolve per-session
+   * via `Session.worktreeCwd` (requires `sessionId` in settings handlers).
    */
   private defaultSettingsCwd: string | null = null;
   private managedShuttingDown = false;
