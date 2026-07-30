@@ -12,6 +12,7 @@ import {
   safeRmWithin,
   probeCreateFailureDetail,
   probeCleanupFailureDetail,
+  findVitestBin,
 } from './test-efficacy.js';
 import {
   mkdtempSync,
@@ -155,6 +156,25 @@ describe('planTestEfficacy', () => {
     );
     expect(plan.probes).toEqual([]);
     expect(plan.revert).toEqual([]);
+  });
+});
+
+describe('findVitestBin', () => {
+  it('names the search root when vitest cannot be resolved', () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'no-vitest-'));
+
+    expect(() => findVitestBin(worktree)).toThrow(
+      `vitest not found searching up from ${worktree}`,
+    );
+  });
+
+  it('names the package when vitest declares no bin', () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'vitest-no-bin-'));
+    const vitestDir = join(worktree, 'node_modules', 'vitest');
+    mkdirSync(vitestDir, { recursive: true });
+    writeFileSync(join(vitestDir, 'package.json'), '{}');
+
+    expect(() => findVitestBin(worktree)).toThrow(/declares no "vitest" bin/);
   });
 });
 

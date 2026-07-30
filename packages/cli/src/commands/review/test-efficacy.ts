@@ -278,7 +278,7 @@ function gitOut(cwd: string, ...args: string[]): string {
  * same up-tree walk Node uses for the probe's own imports, so it also survives
  * non-hoisted layouts.
  */
-function findVitestBin(worktree: string): string {
+export function findVitestBin(worktree: string): string {
   const req = createRequire(join(worktree, 'noop.js'));
   let pkgPath: string;
   try {
