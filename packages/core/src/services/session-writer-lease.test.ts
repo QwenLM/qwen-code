@@ -209,6 +209,33 @@ let nextRequestId = 0;
 const children = new Set<ChildProcess>();
 const temporaryDirectories = new Set<string>();
 
+/**
+ * Inode ctime/mtime come from the kernel's coarse clock (4ms granularity on
+ * the Linux CI kernels), so a *same-value* chmod/chown very often produces NO
+ * observable timestamp change: the injected condition simply does not happen
+ * and the test asserting it fails. Repeat the operation until the drift is
+ * actually published, which keeps the condition under test intact.
+ */
+async function withObservedTimestampDrift(
+  filePath: string,
+  op: () => Promise<void>,
+): Promise<import('node:fs').Stats> {
+  const before = await fs.stat(filePath);
+  for (let attempt = 0; attempt < 200; attempt++) {
+    await op();
+    const after = await fs.stat(filePath);
+    if (
+      after.ctimeMs !== before.ctimeMs ||
+      after.mtimeMs !== before.mtimeMs ||
+      after.birthtimeMs !== before.birthtimeMs
+    ) {
+      return after;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  throw new Error(`no timestamp drift observed for ${filePath}`);
+}
+
 async function createFixture(sessionId = 'test-session'): Promise<{
   runtimeBaseDir: string;
   projectRoot: string;
@@ -1083,8 +1110,10 @@ describe('SessionWriterLease', () => {
       const lease = await SessionWriterLease.acquire(fixture.options);
       const initial = await fs.stat(fixture.transcriptPath);
 
-      await fs.chmod(fixture.transcriptPath, initial.mode);
-      const afterChmod = await fs.stat(fixture.transcriptPath);
+      const afterChmod = await withObservedTimestampDrift(
+        fixture.transcriptPath,
+        () => fs.chmod(fixture.transcriptPath, initial.mode),
+      );
       expect(afterChmod.ctimeMs).not.toBe(initial.ctimeMs);
       await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
 
@@ -1113,8 +1142,10 @@ describe('SessionWriterLease', () => {
       const lease = await SessionWriterLease.acquire(fixture.options);
       const initial = await fs.stat(fixture.transcriptPath);
 
-      await fs.chown(fixture.transcriptPath, initial.uid, initial.gid);
-      const afterChown = await fs.stat(fixture.transcriptPath);
+      const afterChown = await withObservedTimestampDrift(
+        fixture.transcriptPath,
+        () => fs.chown(fixture.transcriptPath, initial.uid, initial.gid),
+      );
       expect(afterChown.ctimeMs).not.toBe(initial.ctimeMs);
       await expect(lease.assertOwnedAndUnchanged()).resolves.toBeUndefined();
       await lease.release();
@@ -1129,8 +1160,10 @@ describe('SessionWriterLease', () => {
     await fs.utimes(fixture.transcriptPath, anchoredTime, anchoredTime);
     const lease = await SessionWriterLease.acquire(fixture.options);
 
-    await fs.writeFile(fixture.transcriptPath, '{"sEEd":true}\n');
-    await fs.utimes(fixture.transcriptPath, anchoredTime, anchoredTime);
+    await withObservedTimestampDrift(fixture.transcriptPath, async () => {
+      await fs.writeFile(fixture.transcriptPath, '{"sEEd":true}\n');
+      await fs.utimes(fixture.transcriptPath, anchoredTime, anchoredTime);
+    });
     await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
       SessionTranscriptChangedError,
     );
@@ -1781,12 +1814,18 @@ describe('SessionWriterLease', () => {
       const initial = await fs.stat(fixture.transcriptPath);
       const originalStat = nativeFileHandleStat;
       let statCalls = 0;
+      let injectedMtimeMs: number | undefined;
       const stat = vi
         .spyOn(fileHandlePrototype, 'stat')
         .mockImplementation(async function (this: fs.FileHandle, ...args) {
           statCalls++;
           if (statCalls === 2) {
-            await fs.chmod(fixture.transcriptPath, initial.mode);
+            await fs.utimes(
+              fixture.transcriptPath,
+              initial.atime,
+              new Date(initial.mtimeMs + 1000),
+            );
+            injectedMtimeMs = (await fs.stat(fixture.transcriptPath)).mtimeMs;
           }
           return originalStat.apply(this, args);
         });
@@ -1795,8 +1834,9 @@ describe('SessionWriterLease', () => {
         await expect(
           lease.appendJsonLine({ afterMetadataRace: true }),
         ).resolves.toBeUndefined();
-        expect((await fs.stat(fixture.transcriptPath)).ctimeMs).not.toBe(
-          initial.ctimeMs,
+        expect(injectedMtimeMs).not.toBe(initial.mtimeMs);
+        await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+          '{"seed":true}\n{"afterMetadataRace":true}\n',
         );
       } finally {
         stat.mockRestore();
