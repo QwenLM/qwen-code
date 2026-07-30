@@ -2324,7 +2324,7 @@ export function registerSessionRoutes(
               .killSession(result.sessionId, { requireZeroAttaches: true })
               .catch(() => false);
             if (killed) {
-              await new SessionService(runtime.workspaceCwd)
+              await createWorkspaceRuntimeSessionService(runtime)
                 .removeSession(result.sessionId)
                 .catch(() => {});
             }
@@ -2341,9 +2341,9 @@ export function registerSessionRoutes(
               .killSession(result.sessionId, { requireZeroAttaches: true })
               .then((killed) => {
                 if (!killed) return undefined;
-                return new SessionService(runtime.workspaceCwd!).removeSession(
-                  result.sessionId,
-                );
+                return createWorkspaceRuntimeSessionService(
+                  runtime,
+                ).removeSession(result.sessionId);
               })
               .catch(() => {});
           } else {
