@@ -225,7 +225,7 @@ export function QueuedPromptDisplay({
               ) : null}
             </span>
             <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
+              {imageCount === 0 && !isQueued && (
                 <button
                   type="button"
                   className={styles.queuedPromptAction}

@@ -73,9 +73,11 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).toContain('排队消息二');
   });
 
-  it('shows when an accepted prompt is queued on the server', () => {
+  it('shows server queue status without an insert action', () => {
+    const onInsert = vi.fn();
     const { container } = setup({
       prompts: [{ id: 1, text: '等待处理', serverState: 'queued' }],
+      onInsert,
     });
 
     expect(container.textContent).toContain('服务器排队中...');
@@ -83,11 +85,11 @@ describe('QueuedPromptDisplay', () => {
     expect(
       container.querySelector('[class*="queuedPromptSpinner"]'),
     ).toBeNull();
-    expect(
-      [...container.querySelectorAll('button')].every(
-        (button) => !button.disabled,
-      ),
-    ).toBe(true);
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+    expect(container.textContent).not.toContain('插入');
+    expect(onInsert).not.toHaveBeenCalled();
   });
 
   it('keeps the spinner while a prompt is still submitting', () => {
