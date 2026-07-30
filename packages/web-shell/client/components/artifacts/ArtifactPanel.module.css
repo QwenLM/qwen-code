@@ -806,6 +806,54 @@ button.treeRow:hover {
   overflow-wrap: anywhere;
 }
 
+.imagePreviewWrap {
+  position: relative;
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.imagePreview {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  object-fit: contain;
+}
+
+.imageDownloadButton {
+  position: absolute;
+  z-index: 1;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  text-decoration: none;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease;
+}
+
+.imagePreviewWrap:hover .imageDownloadButton,
+.imageDownloadButton:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.imageDownloadButton:hover {
+  background: var(--accent);
+}
+
 .htmlPreview {
   width: 100%;
   flex: 1 1 auto;

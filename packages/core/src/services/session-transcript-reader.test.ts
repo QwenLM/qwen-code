@@ -178,7 +178,7 @@ describe('SessionTranscriptReader', () => {
     expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
   });
 
-  it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
+  it.each([0, -1, NaN, Infinity, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
     'rejects invalid page limit %s',
     async (limit) => {
       await expect(
@@ -291,7 +291,7 @@ describe('SessionTranscriptReader', () => {
       limit: 2,
     });
     const second = await reader.readPage(sessionId, {
-      cursor: encodeCursor(first.nextCursorState!),
+      beforeRecordId: first.records[0]!.uuid,
       limit: 2,
     });
 
@@ -327,6 +327,145 @@ describe('SessionTranscriptReader', () => {
       position: 2,
       direction: 'backward',
     });
+  });
+
+  it('seeds backward replay from the latest authoritative Goal state', async () => {
+    const goalState: ChatRecord = {
+      ...record('goal-state', null, 'ignored'),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'create',
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'ship backward replay',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      },
+    };
+    const clearState: ChatRecord = {
+      ...record('goal-clear', 'u2', 'ignored'),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'clear',
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
+    };
+    await writeRecords([
+      goalState,
+      record('u1', 'goal-state', 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      clearState,
+      record('a2', 'goal-clear', 'second answer'),
+      record('u3', 'a2', 'third prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u3', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'goal-clear',
+      'a2',
+    ]);
+    expect(page.replay).toMatchObject({
+      goalState: {
+        v: 2,
+        activity: 'idle',
+        goal: { objective: 'ship backward replay' },
+      },
+    });
+  });
+
+  it('does not revive older Goal state when the latest state is malformed', async () => {
+    const validGoalState: ChatRecord = {
+      ...record('goal-state', null, 'ignored'),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'create',
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'do not revive me',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      },
+    };
+    const malformedGoalState: ChatRecord = {
+      ...record('goal-invalid', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'clear',
+        // Truthy but invalid: the parser only accepts `activity === 'idle'`,
+        // so a `running` snapshot must be rejected. A falsy `null` here would
+        // pass even with the validation deleted, leaving the guard untested.
+        snapshot: {
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'do not revive me',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    await writeRecords([
+      validGoalState,
+      record('u1', 'goal-state', 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      malformedGoalState,
+      record('u2', 'goal-invalid', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+      record('u3', 'a2', 'third prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u3', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(page.replay).toBeUndefined();
   });
 
   it('includes leading session metadata with the first backward page', async () => {
@@ -997,5 +1136,63 @@ describe('SessionTranscriptReader', () => {
         (r) => r.uuid,
       ),
     ).toEqual(['33333333', '44444444']);
+  });
+
+  describe('boundary and turn-start edge cases', () => {
+    it('makes exact turn-boundary cuts when limit aligns perfectly', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+      });
+
+      expect(first.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+      expect(first.hasMore).toBe(false);
+      expect(first.nextCursorState).toBeUndefined();
+    });
+
+    it('discovers backward boundary when beforeRecordId is an assistant record', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'a2',
+        limit: 2,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['u2']);
+      expect(page.direction).toBe('backward');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('pages backward through records without a normal user turn start', async () => {
+
+      await writeRecords([
+        record('a1', null, 'orphan assistant reply'),
+        record('u1', 'a1', 'second prompt'),
+        record('a2', 'u1', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'u1',
+        limit: 5,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['a1']);
+      expect(page.hasMore).toBe(false);
+    });
   });
 });

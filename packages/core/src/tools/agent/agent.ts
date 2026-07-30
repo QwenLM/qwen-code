@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import { extractParentToolNames } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -34,7 +34,7 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -208,6 +208,8 @@ export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type?: string;
+  /** User-defined model grade for this subagent invocation. */
+  model?: string;
   /**
    * Parent conversation turns inherited by a fork. Omitted or `all` inherits
    * everything; a positive integer string inherits that many recent user turns.
@@ -979,6 +981,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // Update the parameter schema by modifying the existing object
     const schema = this.parameterSchema as {
       properties?: {
+        model?: {
+          type: string;
+          enum: string[];
+          description: string;
+        };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       };
@@ -991,6 +998,20 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       } else {
         delete schema.properties.name;
         delete schema.properties.plan_mode_required;
+      }
+
+      const availableGrades = [
+        ...this.subagentManager.getAvailableModelGrades().keys(),
+      ];
+      if (availableGrades.length > 0) {
+        schema.properties.model = {
+          type: 'string',
+          enum: availableGrades,
+          description:
+            'User-defined model grade for this subagent. Custom agents with an explicit model keep their configured model. Omit it to use the agent default.',
+        };
+      } else {
+        delete schema.properties.model;
       }
     }
   }
@@ -1039,6 +1060,30 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
       }
     }
+
+    if (params.model !== undefined) {
+      if (typeof params.model !== 'string' || params.model.trim() === '') {
+        return 'Parameter "model" must be a non-empty model grade when set.';
+      }
+      if (params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE) {
+        return 'Parameter "model" cannot be used with subagent_type "fork".';
+      }
+      if (
+        params.name &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "model" is not supported for a named teammate.';
+      }
+      const availableGrades = this.subagentManager.getAvailableModelGrades();
+      if (!availableGrades.has(params.model)) {
+        return `Unknown model grade "${params.model}". Available: ${[
+          ...availableGrades.keys(),
+        ].join(', ')}.`;
+      }
+    }
+
     // Some models emit an empty placeholder for the unused optional field.
     // With isolation selected, normalize it away before downstream routing.
     if (
@@ -1533,8 +1578,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
-    promptConfig: PromptConfig;
-    toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
@@ -1633,25 +1676,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
-      // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // (including `agent` and cron tools) so the fork's system prompt,
-      // tools, and history exactly match the parent's and share its
-      // DashScope cache prefix. A fork is a context-sharing extension of
-      // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
-      // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
-      const parentToolDecls: FunctionDeclaration[] =
-        (
-          generationConfig.tools as Array<{
-            functionDeclarations?: FunctionDeclaration[];
-          }>
-        )
-          ?.flatMap((t) => t.functionDeclarations ?? [])
-          .filter(
-            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
-          ) ?? [];
+      // Keep the parent's current allowlist, but pass names rather than inline
+      // schemas so AgentCore resolves every declaration through the fork's
+      // current ToolRegistry. This preserves the parent's tool surface and
+      // cache prefix when schemas are unchanged without letting a persisted or
+      // stale declaration bypass the live registry.
+      const parentToolNames = extractParentToolNames(generationConfig);
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -1660,8 +1690,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         initialMessages,
       };
       toolConfig = {
-        tools:
-          parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
+        tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
       };
     } else {
       promptConfig = {
@@ -1681,7 +1710,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
+    return { subagent, initialMessages, taskPrompt };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds
@@ -2119,6 +2148,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
         );
+      } else if (this.params.model !== undefined) {
+        return this.buildSpawnBlockedResult(
+          'Error: "model" is not supported for a named teammate.',
+          'model is incompatible with a named teammate',
+        );
       } else if (this.params.working_dir !== undefined) {
         // A teammate spawns via TeamManager with cwd = getCwd() and returns
         // before the working_dir rebind below is reached, so the pin would be
@@ -2425,6 +2459,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           };
         }
         subagentConfig = loadedConfig;
+      }
+      const model = this.subagentManager.resolveModelGrade(
+        this.params.model,
+        subagentConfig,
+      );
+      if (model !== undefined && model !== subagentConfig.model) {
+        subagentConfig = { ...subagentConfig, model };
       }
       // Initialize the current display state
       this.currentDisplay = {
@@ -2821,8 +2862,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
       let initialMessages: Content[] | undefined;
-      let promptConfig: PromptConfig | undefined;
-      let toolConfig: ToolConfig | undefined;
 
       // Per-spawn cleanup the subagent manager returns. The caller MUST
       // invoke this in the same `finally` block that wraps `execute()` —
@@ -2840,8 +2879,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
         initialMessages = fork.initialMessages;
-        promptConfig = fork.promptConfig;
-        toolConfig = fork.toolConfig;
       } else {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
@@ -2941,8 +2978,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const bgSubagent = subagent;
         const bgInitialMessages = initialMessages;
         const bgTaskPrompt = taskPrompt;
-        const bgPromptConfig = promptConfig;
-        const bgToolConfig = toolConfig;
         const bgSubagentDispose = subagentDispose;
 
         const registry = this.config.getBackgroundTaskRegistry();
@@ -3064,11 +3099,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            bootstrapSystemInstruction: isFork
-              ? (bgPromptConfig?.renderedSystemPrompt ??
-                bgPromptConfig?.systemPrompt)
-              : undefined,
-            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );

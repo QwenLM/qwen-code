@@ -863,6 +863,7 @@
    16px font size is mandatory: iOS Safari auto-zooms the page when focusing
    any input with a smaller font. */
 .mobileTextarea {
+  field-sizing: content;
   width: 100%;
   min-height: var(--chat-editor-input-min-height, 44px);
   max-height: var(--chat-editor-input-max-height, 300px);
@@ -931,6 +932,15 @@
 .toolbarLeading {
   margin-left: -5px;
   min-width: 0;
+}
+
+.toolbar[data-mobile-voice-active='true'] .toolbarLeading,
+.toolbar[data-mobile-voice-active='true'] [data-hide-during-mobile-voice] {
+  display: none;
+}
+
+.toolbar[data-mobile-voice-active='true'] .toolbarRight {
+  margin-left: auto;
 }
 
 .toolbarStart {

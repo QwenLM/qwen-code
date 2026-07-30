@@ -385,7 +385,18 @@ export interface CancelSubmitInfo {
    * consecutive-duplicate user message (text alone would wrongly match
    * the older row).
    */
-  lastTurnUserItem: { id: number; text: string } | null;
+  lastTurnUserItem: {
+    id: number;
+    text: string;
+    submittedPrompt?: string;
+  } | null;
+  /**
+   * Whether removing the Logger's latest USER entry can only target
+   * `lastTurnUserItem`. A concurrent BTW command writes a newer USER entry,
+   * so the cancel handler must keep the log intact rather than remove the
+   * side-question by mistake.
+   */
+  canUndoLastLoggedUserMessage: boolean;
   /**
    * True if a content event landed during this turn, including during
    * the pre-cancel flush of throttle-buffered events. Lets the
@@ -454,7 +465,12 @@ export const useGeminiStream = (
   // messages while still returning a freshly-generated id — text alone
   // would let the auto-restore guard wrongly match an older USER row
   // when the user re-submits the same prompt.
-  const lastTurnUserItemRef = useRef<{ id: number; text: string } | null>(null);
+  const lastTurnUserItemRef = useRef<{
+    id: number;
+    text: string;
+    submittedPrompt?: string;
+  } | null>(null);
+  const canUndoLastLoggedUserMessageRef = useRef(false);
   // Set to true the first time a content event lands this turn — even
   // during the pre-cancel flush. AppContainer's auto-restore guard
   // can't otherwise see content that was just addItem'd inside flush
@@ -524,6 +540,13 @@ export const useGeminiStream = (
   // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
   // explicit choice mid-turn, so this takes precedence until the next user turn.
   const inlineModelOverrideActiveRef = useRef<boolean>(false);
+  const canUseToolResultFullTurnModel = useCallback((model: string) => {
+    const current = modelOverrideRef.current;
+    return (
+      !inlineModelOverrideActiveRef.current &&
+      (!current?.endsWith('\0') || current === model)
+    );
+  }, []);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
@@ -575,6 +598,7 @@ export const useGeminiStream = (
       config,
       getPreferredEditor,
       onEditorClose,
+      canUseToolResultFullTurnModel,
     );
 
   const pendingToolCallGroupDisplay = useMemo(
@@ -863,6 +887,7 @@ export const useGeminiStream = (
       onCancelSubmit({
         pendingItem: pendingItemAtCancel,
         lastTurnUserItem: lastTurnUserItemRef.current,
+        canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
         turnProducedMeaningfulContent: turnSawContentEventRef.current,
       });
     } finally {
@@ -974,6 +999,8 @@ export const useGeminiStream = (
       abortSignal: AbortSignal,
       prompt_id: string,
       submitType: SendMessageType,
+      submittedPrompt: string | undefined,
+      preserveTurnOwnership: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -989,7 +1016,9 @@ export const useGeminiStream = (
       // this — paths that don't add a USER history item (Cron /
       // Notification / slash submit_prompt) leave it null so cancel
       // never wrongly targets an older user item.
-      lastTurnUserItemRef.current = null;
+      if (!preserveTurnOwnership) {
+        lastTurnUserItemRef.current = null;
+      }
 
       let localQueryToSendToGemini: PartListUnion | null = null;
 
@@ -1024,6 +1053,8 @@ export const useGeminiStream = (
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        canUndoLastLoggedUserMessageRef.current =
+          !preserveTurnOwnership && logger != null;
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
@@ -1128,10 +1159,13 @@ export const useGeminiStream = (
           // skipped insertion (consecutive-duplicate user); the older
           // matching USER in history carries a DIFFERENT id, so the
           // mismatch makes auto-restore bail correctly in that case.
-          lastTurnUserItemRef.current = {
-            id: insertedId,
-            text: trimmedQuery,
-          };
+          if (!preserveTurnOwnership) {
+            lastTurnUserItemRef.current = {
+              id: insertedId,
+              text: trimmedQuery,
+              ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            };
+          }
 
           // Yield via macrotask to let Ink/React flush the user message
           // render before continuing with @-command processing and API
@@ -2230,6 +2264,8 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ActiveGoal:
               handleActiveGoalEvent(event.value);
               break;
+            case ServerGeminiEventType.GoalState:
+              break;
             default: {
               // enforces exhaustive switch-case
               const unreachable: never = event;
@@ -2626,9 +2662,11 @@ export const useGeminiStream = (
       prompt_id?: string,
       metadata?: {
         notificationDisplayText?: string;
+        todoWorkChainId?: string;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
         steerInput?: SteerInput;
+        submittedPrompt?: string;
       },
     ) => {
       const allowConcurrentBtwDuringResponse =
@@ -2639,6 +2677,10 @@ export const useGeminiStream = (
       const isTurnContinuation =
         submitType === SendMessageType.ToolResult ||
         submitType === SendMessageType.Steer;
+      const submittedPrompt =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.submittedPrompt
+          : undefined;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
@@ -2686,6 +2728,7 @@ export const useGeminiStream = (
       // turn that already owns its own snapshot.
       if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
+        canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
         duplicateProviderToolCallResponseIdsRef.current.clear();
@@ -2775,6 +2818,8 @@ export const useGeminiStream = (
                 abortSignal,
                 prompt_id!,
                 submitType,
+                submittedPrompt,
+                allowConcurrentBtwDuringResponse,
               );
 
         if (!shouldProceed || queryToSend === null) {
@@ -2865,19 +2910,22 @@ export const useGeminiStream = (
             dualOutput.emitUserMessage(userParts);
           }
 
+          const sendOptions = {
+            type: submitType,
+            notificationDisplayText: metadata?.notificationDisplayText,
+            todoWorkChainId: metadata?.todoWorkChainId,
+            modelOverride: modelOverrideRef.current,
+            steerInput: metadata?.steerInput,
+            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+              ? { getSteerInput: drainSteerAtBoundary }
+              : {}),
+          };
           const stream = geminiClient.sendMessageStream(
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            {
-              type: submitType,
-              notificationDisplayText: metadata?.notificationDisplayText,
-              modelOverride: modelOverrideRef.current,
-              steerInput: metadata?.steerInput,
-              ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
-                ? { getSteerInput: drainSteerAtBoundary }
-                : {}),
-            },
+            sendOptions,
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -3777,6 +3825,7 @@ export const useGeminiStream = (
       modelText: string;
       sendMessageType: SendMessageType;
       monitor?: { id: string; status: string };
+      todoWorkChainId?: string;
       onDelivered?: () => void;
       onDeliveryFailed?: () => void;
     }>
@@ -3852,6 +3901,7 @@ export const useGeminiStream = (
           prompt: string;
           cronExpr?: string;
           missed?: boolean;
+          todoWorkChainId?: string;
         }) => {
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
           const autonomousMode = detectAutonomousSentinel(job.prompt);
@@ -3867,6 +3917,7 @@ export const useGeminiStream = (
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
               modelText,
               sendMessageType: SendMessageType.Cron,
+              todoWorkChainId: job.todoWorkChainId,
               onDelivered: () => resolver.markDelivered(),
             });
             setNotificationTrigger((n) => n + 1);
@@ -3876,6 +3927,7 @@ export const useGeminiStream = (
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
             modelText,
             sendMessageType: SendMessageType.Cron,
+            todoWorkChainId: job.todoWorkChainId,
           });
           setNotificationTrigger((n) => n + 1);
         },
@@ -3895,11 +3947,12 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta?.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3911,11 +3964,12 @@ export const useGeminiStream = (
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundShellRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    registry.setNotificationCallback((displayText, modelText, meta) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        todoWorkChainId: meta?.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3937,6 +3991,7 @@ export const useGeminiStream = (
         modelText,
         sendMessageType: SendMessageType.Notification,
         monitor: { id: meta.monitorId, status: meta.status },
+        todoWorkChainId: meta.todoWorkChainId,
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3994,6 +4049,7 @@ export const useGeminiStream = (
           );
           submitQuery(item.modelText, item.sendMessageType, undefined, {
             notificationDisplayText: item.displayText,
+            todoWorkChainId: item.todoWorkChainId,
             onDelivered: item.onDelivered,
             onDeliveryFailed: item.onDeliveryFailed,
           });
@@ -4004,7 +4060,8 @@ export const useGeminiStream = (
         let splitIdx = 0;
         while (
           splitIdx < queue.length &&
-          queue[splitIdx]!.sendMessageType === targetType
+          queue[splitIdx]!.sendMessageType === targetType &&
+          queue[splitIdx]!.todoWorkChainId === queue[0]!.todoWorkChainId
         ) {
           splitIdx++;
         }
@@ -4022,6 +4079,7 @@ export const useGeminiStream = (
         const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
         submitQuery(combinedModelText, targetType, undefined, {
           notificationDisplayText: combinedDisplayText,
+          todoWorkChainId: batch[0]?.todoWorkChainId,
         });
       });
     }

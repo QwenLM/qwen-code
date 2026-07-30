@@ -1,0 +1,178 @@
+name: 'Auto-minimize spam comments'
+
+# Periodically scan recent issue/PR comments and minimize any from
+# users listed in .github/spam-blocklist.txt. This cleans up spam
+# comments that were posted before a block was applied, and catches
+# any that slip through during the window between a spam comment
+# and the manual block action.
+#
+# The blocklist is a plain-text file in the repo — one username per
+# line, case-insensitive, # for comments. No special API scopes
+# needed beyond issues:write + pull-requests:write.
+#
+# Note: the lookback window (LOOKBACK_HOURS) only filters issues —
+# the GraphQL pullRequests connection has no `since` filter, so PRs
+# are always scoped to the 100 most recently updated.
+#
+# Coverage limits: only issue-style comments are scanned — PR review
+# (inline) comments, review bodies, and Discussions are not.
+# comments(last: 30) means a >30-comment flood on a single thread is
+# only partially cleaned per run.
+
+on:
+  schedule:
+    - cron: '30 * * * *' # Every hour at :30
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'Look back this many hours (default 2)'
+        required: false
+        default: 2
+        type: 'number'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+concurrency:
+  group: 'auto-minimize-spam'
+  cancel-in-progress: false
+
+jobs:
+  minimize:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      - name: 'Checkout blocklist'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          sparse-checkout: '.github/spam-blocklist.txt'
+          persist-credentials: false
+
+      - name: 'Minimize comments from blocklisted users'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          LOOKBACK_HOURS: "${{ inputs.hours || '2' }}"
+        run: |-
+          set -euo pipefail
+
+          REPO="$GITHUB_REPOSITORY"
+          SINCE="$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          BLOCKLIST=".github/spam-blocklist.txt"
+
+          write_summary() {
+            {
+              echo "## Summary"
+              echo "- Scanned comments since: ${SINCE}"
+              echo "- Blocklisted users: ${BLOCKED_COUNT}"
+              echo "- Comments minimized: $1"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          echo "Scanning comments since $SINCE in $REPO"
+
+          # ── 1. Parse blocklist ────────────────────────────────────────
+          if [ ! -f "$BLOCKLIST" ]; then
+            echo "::notice::No blocklist file found at $BLOCKLIST; nothing to do."
+            exit 0
+          fi
+          # Strip comments, blank lines, whitespace; lowercase for matching.
+          # `|| true` keeps an all-comment/blank blocklist from tripping
+          # `set -e` (grep exits 1 when nothing passes the filter).
+          BLOCKED_USERS="$(
+            grep -v '^\s*#' "$BLOCKLIST" \
+              | grep -v '^\s*$' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | tr '[:upper:]' '[:lower:]' \
+              | sort -u \
+              || true
+          )"
+          BLOCKED_COUNT="$(printf '%s\n' "$BLOCKED_USERS" | grep -c . || true)"
+          echo "Blocklisted users: ${BLOCKED_COUNT}"
+          if [ "$BLOCKED_COUNT" -eq 0 ]; then
+            echo "Blocklist is empty; nothing to do."
+            exit 0
+          fi
+
+          # ── 2. Fetch recent unminimized comments via GraphQL ──────────
+          ALL_UNMINIMIZED="$(
+            gh api graphql -f query="
+              query {
+                repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") {
+                  issues(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}, filterBy: {since: \"${SINCE}\"}) {
+                    nodes {
+                      number
+                      comments(last: 30) {
+                        nodes { id author { login } isMinimized }
+                      }
+                    }
+                  }
+                  pullRequests(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                    nodes {
+                      number
+                      comments(last: 30) {
+                        nodes { id author { login } isMinimized }
+                      }
+                    }
+                  }
+                }
+              }
+            " --jq '
+              [
+                .data.repository.issues.nodes[].comments.nodes[],
+                .data.repository.pullRequests.nodes[].comments.nodes[]
+              ]
+              | map(select(.isMinimized == false and .author != null))
+              | .[] | "\(.author.login)\t\(.id)"
+            '
+          )"
+
+          MATCHED_IDS=""
+          MATCHED_COUNT=0
+          while IFS=$'\t' read -r login node_id; do
+            [ -z "$login" ] && continue
+            login_lc="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
+            if printf '%s\n' "$BLOCKED_USERS" | grep -qxF "$login_lc"; then
+              MATCHED_IDS="${MATCHED_IDS}${node_id}"$'\n'
+              MATCHED_COUNT=$((MATCHED_COUNT + 1))
+              echo "  matched: @${login} → ${node_id}"
+            fi
+          done <<< "$ALL_UNMINIMIZED"
+
+          echo "Unminimized comments from blocklisted users: ${MATCHED_COUNT}"
+          if [ "$MATCHED_COUNT" -eq 0 ]; then
+            echo "Nothing to minimize."
+            write_summary 0
+            exit 0
+          fi
+
+          # ── 3. Minimize each matched comment ──────────────────────────
+          SUCCESS=0
+          FAIL=0
+          while IFS= read -r node_id; do
+            [ -z "$node_id" ] && continue
+            result="$(
+              gh api graphql -f query="
+                mutation {
+                  minimizeComment(input: {subjectId: \"${node_id}\", classifier: OFF_TOPIC}) {
+                    minimizedComment { isMinimized }
+                  }
+                }
+              " --jq '.data.minimizeComment.minimizedComment.isMinimized' 2>&1
+            )" || true
+            if [ "$result" = "true" ]; then
+              SUCCESS=$((SUCCESS + 1))
+            else
+              FAIL=$((FAIL + 1))
+              echo "::warning::Failed to minimize ${node_id}: ${result}"
+            fi
+          done <<< "$MATCHED_IDS"
+
+          echo "Minimized ${SUCCESS} comments, ${FAIL} failed."
+          write_summary "$SUCCESS"
+          if [ "$FAIL" -gt 0 ]; then
+            echo "- Failures: ${FAIL}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

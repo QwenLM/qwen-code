@@ -14,6 +14,7 @@ function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
 }
 
 export function useBackgroundTasks(
+  sessionId: string | undefined,
   taskActivityKey: string,
   connected: boolean,
   refreshTrigger = 0,
@@ -23,41 +24,42 @@ export function useBackgroundTasks(
   const [pollingActive, setPollingActive] = useState(false);
   const [tasksPanelActive, setTasksPanelActive] = useState(false);
   const emptyPollsRef = useRef(0);
-  const tasksRefreshInFlightRef = useRef(false);
+  const tasksRefreshInFlightRef = useRef<{
+    sessionId: string;
+    request: object;
+  } | null>(null);
 
   useEffect(() => {
-    if (!connected) {
-      setTasks([]);
-      setPollingActive(false);
-      emptyPollsRef.current = 0;
-      return;
-    }
-  }, [connected]);
+    setTasks([]);
+    setPollingActive(false);
+    emptyPollsRef.current = 0;
+  }, [connected, sessionId]);
 
   useEffect(() => {
-    if (!connected || !taskActivityKey) return;
+    if (!connected || !sessionId || !taskActivityKey) return;
     emptyPollsRef.current = 0;
     setPollingActive(true);
-  }, [connected, taskActivityKey]);
+  }, [connected, sessionId, taskActivityKey]);
 
   useEffect(() => {
-    if (!connected || refreshTrigger === 0) return;
+    if (!connected || !sessionId || refreshTrigger === 0) return;
     emptyPollsRef.current = 0;
     setPollingActive(true);
-  }, [connected, refreshTrigger]);
+  }, [connected, refreshTrigger, sessionId]);
 
   useEffect(() => {
     if (tasksPanelActive) return;
-    if (!connected || !pollingActive) return;
+    if (!connected || !sessionId || !pollingActive) return;
 
     let disposed = false;
     const refresh = () => {
-      if (tasksRefreshInFlightRef.current) return;
-      tasksRefreshInFlightRef.current = true;
+      if (tasksRefreshInFlightRef.current?.sessionId === sessionId) return;
+      const request = {};
+      tasksRefreshInFlightRef.current = { sessionId, request };
       actions
         .getTasks()
         .then((snapshot) => {
-          if (disposed) return;
+          if (disposed || snapshot.sessionId !== sessionId) return;
           const composerTasks = snapshot.tasks.filter(isComposerTask);
           setTasks(composerTasks);
           if (composerTasks.length === 0) {
@@ -77,7 +79,9 @@ export function useBackgroundTasks(
           console.warn('[web-shell] failed to refresh tasks:', error);
         })
         .finally(() => {
-          tasksRefreshInFlightRef.current = false;
+          if (tasksRefreshInFlightRef.current?.request === request) {
+            tasksRefreshInFlightRef.current = null;
+          }
         });
     };
 
@@ -87,7 +91,7 @@ export function useBackgroundTasks(
       disposed = true;
       clearInterval(id);
     };
-  }, [actions, connected, pollingActive, tasksPanelActive]);
+  }, [actions, connected, pollingActive, sessionId, tasksPanelActive]);
 
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;

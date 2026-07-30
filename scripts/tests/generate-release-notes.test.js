@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   mkdtempSync,
   readFileSync,
@@ -14,16 +15,19 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  appendDegradedStepSummary,
   buildPullRequestQuery,
   classifyChange,
   createOpenAiCompleter,
   enrichEntries,
+  escapeWorkflowCommand,
   generateAiContent,
   generateReleaseNotes,
   parseGeneratedEntries,
   renderReleaseNotes,
+  tryAppendDegradedStepSummary,
 } from '../generate-release-notes.js';
 
 const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
@@ -35,10 +39,6 @@ const entry = (number, title, labels = []) => ({
   author: 'alice',
   labels,
   body: '',
-  files: [],
-  additions: 1,
-  deletions: 0,
-  changedFiles: 1,
 });
 
 describe('parseGeneratedEntries', () => {
@@ -236,6 +236,34 @@ describe('generateAiContent', () => {
     ]);
   });
 
+  it('sends only title, a bounded body excerpt, and category to the model', async () => {
+    const long = { ...entry(1, 'feat: long body'), body: 'x'.repeat(5000) };
+    const calls = [];
+    const complete = async (request) => {
+      calls.push(request);
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: request.entries.map((item) => ({
+            pr: item.number,
+            summary: 'Summary.',
+          })),
+        });
+      }
+      return JSON.stringify({ highlights: [] });
+    };
+
+    await generateAiContent([long], complete);
+
+    const [payload] = calls[0].entries;
+    expect(Object.keys(payload).sort()).toEqual([
+      'body',
+      'category',
+      'number',
+      'title',
+    ]);
+    expect(payload.body).toHaveLength(700);
+  });
+
   it('falls back to original titles for an invalid summary batch', async () => {
     const entries = [entry(1, 'feat: original'), entry(2, 'fix: original')];
     const complete = async (request) => {
@@ -355,17 +383,13 @@ describe('enrichEntries', () => {
         number: 1,
         body: 'Why it matters.',
         labels: [{ name: 'type/bug' }],
-        files: [{ path: 'packages/core/a.ts' }],
-        additions: 3,
-        deletions: 2,
-        changedFiles: 1,
       },
     ]);
 
     expect(enriched.map((item) => item.number)).toEqual([2, 1]);
     expect(enriched[0].body).toBe('');
     expect(enriched[1].body).toBe('Why it matters.');
-    expect(enriched[1].files).toEqual(['packages/core/a.ts']);
+    expect(enriched[1].labels).toEqual([{ name: 'type/bug' }]);
   });
 });
 
@@ -375,7 +399,8 @@ describe('buildPullRequestQuery', () => {
 
     expect(query).toContain('pr0: pullRequest(number: 12)');
     expect(query).toContain('pr1: pullRequest(number: 8)');
-    expect(query).toContain('files(first: 40)');
+    expect(query).toContain('labels(first: 20)');
+    expect(query).not.toContain('files(first: 40)');
     expect(query).not.toContain('pullRequest(number: undefined)');
   });
 });
@@ -465,6 +490,7 @@ describe('generateReleaseNotes', () => {
     try {
       const gh = join(dir, 'gh');
       const output = join(dir, 'notes.md');
+      const summaryPath = join(dir, 'summary.md');
       writeFileSync(
         gh,
         [
@@ -475,7 +501,7 @@ describe('generateReleaseNotes', () => {
           '  process.exit(0);',
           '}',
           "if (args[0] === 'api' && args[1] === 'graphql') {",
-          "  process.stdout.write(JSON.stringify({ data: { repository: { pr0: { number: 1, body: 'Body.', additions: 1, deletions: 0, changedFiles: 1, labels: { nodes: [] }, files: { nodes: [] } } } } }));",
+          "  process.stdout.write(JSON.stringify({ data: { repository: { pr0: { number: 1, body: 'Body.', labels: { nodes: [] } } } } }));",
           '  process.exit(0);',
           '}',
           'process.exit(1);',
@@ -483,7 +509,7 @@ describe('generateReleaseNotes', () => {
       );
       chmodSync(gh, 0o755);
 
-      execFileSync(
+      const cli = spawnSync(
         process.execPath,
         [
           'scripts/generate-release-notes.js',
@@ -492,9 +518,11 @@ describe('generateReleaseNotes', () => {
           `--output=${output}`,
         ],
         {
+          encoding: 'utf8',
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_STEP_SUMMARY: summaryPath,
             GITHUB_REPOSITORY: 'QwenLM/qwen-code',
             OPENAI_API_KEY: '',
             OPENAI_BASE_URL: '',
@@ -503,6 +531,13 @@ describe('generateReleaseNotes', () => {
         },
       );
 
+      expect(cli.status).toBe(0);
+      expect(cli.stderr).toContain(
+        '::warning::Model configuration is unavailable.',
+      );
+      expect(readFileSync(summaryPath, 'utf8')).toContain(
+        'Release notes: AI generation degraded',
+      );
       const markdown = readFileSync(output, 'utf8');
       expect(markdown).toContain('### Features');
       expect(markdown).toContain(
@@ -533,5 +568,480 @@ describe('generateReleaseNotes', () => {
       );
       expect(error.stderr).not.toContain('ERROR: ERROR:');
     }
+  });
+});
+
+describe('createOpenAiCompleter retries', () => {
+  const okResponse = {
+    ok: true,
+    json: async () => ({
+      choices: [{ message: { content: '{"summaries":[]}' } }],
+    }),
+  };
+
+  it('retries a 500 once and then succeeds', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1 ? { ok: false, status: 500 } : okResponse;
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).resolves.toBe(
+      '{"summaries":[]}',
+    );
+    expect(calls).toBe(2);
+  });
+
+  it('retries a timeout before giving up after maxRetries', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      maxRetries: 2,
+      fetchImpl: async () => {
+        calls += 1;
+        const error = new Error('timed out');
+        error.name = 'TimeoutError';
+        throw error;
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'timed out',
+    );
+    expect(calls).toBe(3);
+  });
+
+  it('does not retry a 400', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return { ok: false, status: 400 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'HTTP 400',
+    );
+    expect(calls).toBe(1);
+  });
+
+  it('retries HTTP 429 (rate limiting)', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1 ? { ok: false, status: 429 } : okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    expect(calls).toBe(2);
+  });
+
+  it('retries network errors without HTTP status', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error('fetch failed: ECONNRESET');
+        }
+        return okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    expect(calls).toBe(2);
+  });
+
+  it('does not retry content-validation errors', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        // Returns 200 OK but empty content — triggers content-validation error
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: '' } }] }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'Model response did not contain message content.',
+    );
+    expect(calls).toBe(1);
+  });
+
+  it('preserves original error in deadline-expired message', async () => {
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        return { ok: false, status: 503 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      /budget exhausted.*HTTP 503/,
+    );
+  });
+
+  it('preserves the original error as the deadline error cause', async () => {
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        return { ok: false, status: 503 };
+      },
+    });
+
+    const error = await complete({ kind: 'summaries', entries: [] }).catch(
+      (err) => err,
+    );
+    expect(error.message).toMatch(/budget exhausted.*HTTP 503/);
+    expect(error.cause?.message).toBe('Model request failed with HTTP 503.');
+  });
+
+  it('preserves original error when the deadline expires after backoff', async () => {
+    let now = 0;
+    let calls = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const timeout = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation((callback) => {
+        now = 1001;
+        callback();
+        return 0;
+      });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 1000,
+      fetchImpl: async () => {
+        calls += 1;
+        return { ok: false, status: 500 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      /budget exhausted.*HTTP 500/,
+    );
+    expect(calls).toBe(1);
+    clock.mockRestore();
+    random.mockRestore();
+    timeout.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('logs a retry line when backing off', async () => {
+    let calls = 0;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1
+          ? new Response('\n::error::forged', { status: 200 })
+          : okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    const retryLine = errSpy.mock.calls
+      .map((args) => args[0])
+      .find((line) => String(line).startsWith('Model request retry '));
+    expect(retryLine).toBeDefined();
+    expect(retryLine).not.toContain('\n');
+    expect(retryLine).toContain('%0A::error::forged');
+    errSpy.mockRestore();
+  });
+
+  it('stops retrying before the shared time budget expires', async () => {
+    let calls = 0;
+    const timeout = vi.spyOn(globalThis, 'setTimeout');
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        calls += 1;
+        return { ok: false, status: 500 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      /budget exhausted.*HTTP 500/,
+    );
+    expect(calls).toBe(1);
+    expect(timeout).not.toHaveBeenCalled();
+    timeout.mockRestore();
+  });
+
+  it('caps each request at the remaining shared time budget', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      timeoutMs: 10_000,
+      totalTimeoutMs: 1_000,
+      fetchImpl: async () => okResponse,
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    expect(timeout.mock.calls[0][0]).toBeLessThanOrEqual(1_000);
+    timeout.mockRestore();
+  });
+
+  it('shares the time budget across calls', async () => {
+    let now = 0;
+    let calls = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        calls += 1;
+        return okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    now = 51;
+    await expect(complete({ kind: 'highlights', entries: [] })).rejects.toThrow(
+      'Model generation time budget exhausted: unknown error',
+    );
+    expect(calls).toBe(1);
+    clock.mockRestore();
+  });
+});
+
+describe('generateAiContent circuit breaker', () => {
+  it('stops calling the model after consecutive batch failures', async () => {
+    const calls = [];
+    const failing = async (request) => {
+      calls.push(request.kind);
+      throw new Error('model down');
+    };
+    const entries = [
+      entry(1, 'one'),
+      entry(2, 'two'),
+      entry(3, 'three'),
+      entry(4, 'four'),
+      entry(5, 'five'),
+    ];
+
+    const result = await generateAiContent(entries, failing, { batchSize: 1 });
+
+    // 3 batch attempts, then the breaker opens: no more batch calls and no
+    // highlights call at all.
+    expect(calls).toEqual(['summaries', 'summaries', 'summaries']);
+    expect([...result.summaries.values()]).toEqual([
+      'one',
+      'two',
+      'three',
+      'four',
+      'five',
+    ]);
+    expect(
+      result.warnings.some((warning) =>
+        warning.includes('stopped after 3 consecutive failures'),
+      ),
+    ).toBe(true);
+    expect(
+      result.warnings.some((warning) =>
+        warning.includes('Highlights fallback: skipped'),
+      ),
+    ).toBe(true);
+  });
+
+  it('recovers without the breaker when a later batch succeeds', async () => {
+    const calls = [];
+    let summaryCalls = 0;
+    const flaky = async (request) => {
+      calls.push(request.kind);
+      if (request.kind === 'summaries') {
+        summaryCalls += 1;
+        if (summaryCalls !== 3) throw new Error('transient');
+        return JSON.stringify({
+          summaries: request.entries.map((entry) => ({
+            pr: entry.number,
+            summary: `${entry.title} summary`,
+          })),
+        });
+      }
+      return JSON.stringify({ highlights: [] });
+    };
+    const entries = [1, 2, 3, 4, 5].map((number) =>
+      entry(number, String(number)),
+    );
+
+    const result = await generateAiContent(entries, flaky, { batchSize: 1 });
+
+    expect(calls).toEqual([
+      'summaries',
+      'summaries',
+      'summaries',
+      'summaries',
+      'summaries',
+      'highlights',
+    ]);
+    expect(
+      result.warnings.some((warning) => warning.includes('stopped after')),
+    ).toBe(false);
+    expect(result.summaries.get(3)).toBe('3 summary');
+  });
+});
+
+describe('appendDegradedStepSummary', () => {
+  it('appends a degraded note when warnings exist', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
+    const summaryPath = join(dir, 'summary.md');
+    // test-setup mocks appendFileSync, so assert on the call instead of the file.
+    vi.mocked(appendFileSync).mockClear();
+    appendDegradedStepSummary(
+      { usedAi: false, warnings: ['Summary batch fallback: HTTP 500'] },
+      summaryPath,
+    );
+
+    expect(vi.mocked(appendFileSync)).toHaveBeenCalledTimes(1);
+    const [writtenPath, written] = vi.mocked(appendFileSync).mock.calls[0];
+    expect(writtenPath).toBe(summaryPath);
+    expect(written).toContain('AI generation degraded');
+    expect(written).toContain('Summary batch fallback: HTTP 500');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does nothing without warnings', async () => {
+    const fs = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
+    const summaryPath = join(dir, 'summary.md');
+    vi.mocked(appendFileSync).mockClear();
+    appendDegradedStepSummary({ usedAi: true, warnings: [] }, summaryPath);
+    expect(vi.mocked(appendFileSync)).not.toHaveBeenCalled();
+    expect(fs.existsSync(summaryPath)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not propagate summary write failures (tryAppend)', () => {
+    vi.mocked(appendFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() =>
+      tryAppendDegradedStepSummary(
+        { usedAi: false, warnings: ['Summary batch fallback: HTTP 500'] },
+        join(tmpdir(), 'summary.md'),
+      ),
+    ).not.toThrow();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('failed to write the degraded step summary'),
+    );
+    errSpy.mockRestore();
+  });
+});
+
+describe('escapeWorkflowCommand', () => {
+  it('percent-encodes newlines so model text cannot forge a runner command', () => {
+    const malicious = 'batch failed\n::error::forged annotation';
+    const escaped = escapeWorkflowCommand(malicious);
+    expect(escaped).not.toContain('\n');
+    expect(escaped).not.toContain('\r');
+    expect(escaped).toBe('batch failed%0A::error::forged annotation');
+  });
+
+  it('encodes percent signs so encoded sequences are not double-decoded', () => {
+    expect(escapeWorkflowCommand('100% done')).toBe('100%25 done');
+  });
+
+  it('encodes carriage returns', () => {
+    expect(escapeWorkflowCommand('a\rb')).toBe('a%0Db');
+  });
+});
+
+describe('appendDegradedStepSummary markdown hardening', () => {
+  it('renders warnings as escaped single-line code', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
+    const summaryPath = join(dir, 'summary.md');
+    vi.mocked(appendFileSync).mockClear();
+    appendDegradedStepSummary(
+      {
+        usedAi: true,
+        warnings: ['line1\n![x](https://evil.example/x.png) ```tick``` <b>&'],
+      },
+      summaryPath,
+    );
+    expect(vi.mocked(appendFileSync)).toHaveBeenCalledTimes(1);
+    const [, written] = vi.mocked(appendFileSync).mock.calls[0];
+    expect(written).toContain(
+      'AI generation was partially degraded; see the warnings on this run.',
+    );
+    expect(written).toContain(
+      '- ```` line1 ![x](https://evil.example/x.png) ```tick``` <b>& ````',
+    );
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('escapes the failed-summary warning through tryAppend', () => {
+    vi.mocked(appendFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    tryAppendDegradedStepSummary(
+      { usedAi: false, warnings: ['degraded'] },
+      join(tmpdir(), 'summary.md'),
+    );
+    const emitted = errSpy.mock.calls[0][0];
+    expect(emitted).toMatch(/^::warning::/);
+    expect(emitted).not.toContain('\n');
+    errSpy.mockRestore();
   });
 });

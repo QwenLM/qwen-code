@@ -24,6 +24,10 @@ import {
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import {
+  isQuotaExhaustedError,
+  formatQuotaExhaustedMessage,
+} from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -117,6 +121,7 @@ import {
   setToolCallPreparations,
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 
 export { InvalidStreamError };
 
@@ -134,6 +139,25 @@ function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
       (candidate.content?.parts?.length ?? 0) > 0,
   );
   return !hasCandidateOutput && !response.usageMetadata;
+}
+
+/**
+ * True when the chunk carries model output beyond ephemeral reasoning:
+ * any candidate part without the `thought` flag (text, functionCall,
+ * inlineData, …). Thought parts stream reasoning that is never recorded
+ * as the assistant's final response in history, so replaying a request
+ * that has produced only thought parts cannot duplicate user-visible
+ * output — the distinction the transport stream retry gate relies on
+ * (#7832).
+ */
+function hasNonThoughtCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => !part.thought),
+    ),
+  );
 }
 
 function syncFunctionCallsField(
@@ -2002,7 +2026,9 @@ export class GeminiChat {
     model: string,
     params: SendMessageParameters,
     prompt_id: string,
+    goalContext?: GoalTurnPermit,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
       ? await this.config
@@ -2350,6 +2376,7 @@ export class GeminiChat {
               this.lastPromptTokenCount,
               this.lastOutputTokenCount,
               imageTokenEstimate,
+              /* conservative= */ true,
             )
           : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
@@ -2458,6 +2485,7 @@ export class GeminiChat {
 
         for (;;) {
           let streamYieldedChunk = false;
+          let streamYieldedContentChunk = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
@@ -2475,6 +2503,7 @@ export class GeminiChat {
               params,
               prompt_id,
               requestOverrides,
+              turnGoalContext,
             );
 
             lastFinishReason = undefined;
@@ -2482,6 +2511,9 @@ export class GeminiChat {
               if (!isToolCallPreparationOnly(chunk)) {
                 streamYieldedChunk = true;
                 streamYieldedAnyChunk = true;
+              }
+              if (hasNonThoughtCandidateParts(chunk)) {
+                streamYieldedContentChunk = true;
               }
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
@@ -2503,6 +2535,26 @@ export class GeminiChat {
               authType: cgConfig?.authType,
               extraRetryErrorCodes,
             });
+
+            // Permanent quota exhaustion (e.g. Bailian token-plan "1-week
+            // quota has been exhausted, will reset at ...") can arrive
+            // mid-stream as a StreamContentError, bypassing retryWithBackoff
+            // (which only wraps stream establishment). Fast-fail before the
+            // rate-limit branch: its 429 code would otherwise schedule a 1-5
+            // minute delay on an error that cannot succeed until the reset
+            // time. Throws a plain Error (no .status) and skips model
+            // fallback, matching the retryWithBackoff fast-fail.
+            if (isQuotaExhaustedError(error)) {
+              debugLogger.warn('Quota exhausted mid-stream, fast-failing', {
+                retryPath: 'stream',
+                retryDecision: 'fail-fast',
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
+              });
+              throw new Error(formatQuotaExhaustedMessage(error), {
+                cause: error,
+              });
+            }
 
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit) {
@@ -2566,8 +2618,14 @@ export class GeminiChat {
               });
             }
 
-            // Replay only curated socket-level failures before any response
-            // chunk has reached callers.
+            // Replay only curated socket-level failures before any
+            // user-visible content has reached callers. Thinking-only
+            // output does not block the replay: thought parts are
+            // ephemeral (never recorded as the assistant's response in
+            // history), so retrying after them cannot duplicate visible
+            // output — and thinking models can spend minutes in that
+            // phase, exactly when gateways close long-lived SSE
+            // connections (#7832).
             const isRetryableStreamTransportError =
               classification.kind === 'transport' &&
               classification.transportCode !== undefined &&
@@ -2576,7 +2634,7 @@ export class GeminiChat {
               );
             if (
               isRetryableStreamTransportError &&
-              !streamYieldedChunk &&
+              !streamYieldedContentChunk &&
               transportStreamRetryCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
             ) {
@@ -2591,6 +2649,7 @@ export class GeminiChat {
                 attempt: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
                 retryDelayMs: delayMs,
+                yieldedNonContentChunks: streamYieldedChunk,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
               });
@@ -2600,13 +2659,14 @@ export class GeminiChat {
               continue;
             }
             if (isRetryableStreamTransportError) {
-              // Reached only when the retry above did not fire: either a chunk
-              // was already yielded (replaying would duplicate output) or the
-              // retry budget is exhausted. Either way the error propagates.
+              // Reached only when the retry above did not fire: either
+              // user-visible content was already yielded (replaying would
+              // duplicate it) or the retry budget is exhausted. Either way
+              // the error propagates.
               debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
-                retryDecision: streamYieldedChunk
-                  ? 'skipped_after_chunk'
+                retryDecision: streamYieldedContentChunk
+                  ? 'skipped_after_content'
                   : 'exhausted',
                 attempts: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
@@ -2863,6 +2923,7 @@ export class GeminiChat {
                 attemptState.params,
                 prompt_id,
                 requestOverrides,
+                turnGoalContext,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3044,6 +3105,7 @@ export class GeminiChat {
                     self.lastPromptTokenCount,
                     self.lastOutputTokenCount,
                     recoveryImageTokenEstimate,
+                    /* conservative= */ true,
                   )
                 : 0;
             self.history.push(recoveryUserContent);
@@ -3279,6 +3341,7 @@ export class GeminiChat {
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
+                    turnGoalContext,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -3432,6 +3495,7 @@ export class GeminiChat {
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
     },
+    goalContext?: GoalTurnPermit,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3468,6 +3532,15 @@ export class GeminiChat {
         // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
         if (isRateLimitError(error, extraRetryErrorCodes)) return true;
 
+        // Transient network errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP
+        // status and would otherwise fall through every predicate above.
+        if (
+          classifyRetryError(error, { extraRetryErrorCodes }).kind ===
+          'transport'
+        ) {
+          return true;
+        }
+
         return false;
       },
       authType,
@@ -3499,7 +3572,7 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse);
+    return this.processStreamResponse(model, streamResponse, goalContext);
   }
 
   private async *makeFallbackStream(
@@ -3510,6 +3583,7 @@ export class GeminiChat {
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
+    goalContext?: GoalTurnPermit,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
@@ -3517,6 +3591,7 @@ export class GeminiChat {
       params,
       prompt_id,
       { contentGenerator, retryAuthType, retryErrorCodes },
+      goalContext,
     );
 
     for await (const chunk of stream) {
@@ -3962,6 +4037,7 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    goalContext?: GoalTurnPermit,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4276,6 +4352,7 @@ export class GeminiChat {
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
         contextWindowSize,
+        ...(goalContext ? { goalContext: { ...goalContext } } : {}),
       };
       if (streamError !== null) {
         // Stream-error + tool-use partial: defer the JSONL append until

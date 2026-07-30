@@ -141,6 +141,20 @@ function assistantDoneFromTurnEvent(
 }
 
 function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
+  // A `history_truncated` marker may carry a `recordId` anchor stamped by
+  // the daemon's compaction engine — the last recordId it saw before the
+  // truncation point. This is the fallback used when the retained window
+  // lost every turn-boundary `session_update` (e.g. live-journal cap hit
+  // during a single long in-flight turn) and the client would otherwise
+  // have no `beforeRecordId` for transcript pagination.
+  if (event.type === 'history_truncated') {
+    try {
+      if (!isRecord(event.data)) return undefined;
+      return getString(event.data, 'recordId');
+    } catch {
+      return undefined;
+    }
+  }
   if (event.type !== 'session_update') {
     return undefined;
   }
@@ -170,12 +184,33 @@ function prependTranscriptHistory(
   maxBlocks: number,
 ): boolean {
   const current = store.getSnapshot();
+  // Drop fetched events whose source records are already displayed.
+  // `beforeRecordId` pagination is exclusive of the anchor but the anchor
+  // can sit inside the retained window (e.g. the daemon's transcript
+  // backfill for a live-journal overflow returns the latest recordId), so
+  // a page may include records the client already shows. Prepend has no
+  // other dedup, so without this filter those records would render twice.
+  const displayedRecordIds = new Set<string>();
+  for (const block of current.blocks) {
+    for (const recordId of block.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
+  const freshEvents =
+    displayedRecordIds.size === 0
+      ? events
+      : events.filter(
+          (event) =>
+            !event.sourceRecordIds?.some((recordId) =>
+              displayedRecordIds.has(recordId),
+            ),
+        );
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
     nextOrdinal: current.nextOrdinal,
     retainSubagentBlocks: current.retainSubagentBlocks,
   });
-  historyStore.dispatch(events);
+  historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
   if (history.blocks.length + current.blocks.length > maxBlocks) {
     return false;
@@ -1137,9 +1172,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          const firstPersistedRecordId = replayEvents
-            .map(getPersistedReplayRecordId)
-            .find((recordId): recordId is string => recordId !== undefined);
+          // Prefer a recordId carried by an actual `session_update` in the
+          // retained window; fall back to the `history_truncated` marker's
+          // stamped anchor only when no session_update has one. The marker
+          // sits at position 0, so a single `.find()` would let its (more
+          // recent) anchor win over earlier session_update recordIds still
+          // in the window, causing `beforeRecordId` to re-fetch records
+          // the client already displays. Last resort: the daemon's
+          // `historyAnchorRecordId` — the latest recordId it read from the
+          // persisted transcript — which covers live sessions whose
+          // in-flight turn capped the journal before any turn boundary
+          // (no recordId anywhere in the retained window or marker).
+          const firstPersistedRecordId =
+            replayEvents
+              .filter((e) => e.type === 'session_update')
+              .map(getPersistedReplayRecordId)
+              .find((recordId): recordId is string => recordId !== undefined) ??
+            replayEvents
+              .filter((e) => e.type === 'history_truncated')
+              .map(getPersistedReplayRecordId)
+              .find((recordId): recordId is string => recordId !== undefined) ??
+            activeSession.historyAnchorRecordId;
           const replayHistoryWasTruncated = replayEvents.some(
             hasFullTranscriptBeforeReplay,
           );
@@ -2401,6 +2454,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         ...eventOptionsRef.current,
         suppressOwnUserEcho: false,
       };
+      const nextBeforeRecordId = page.events
+        .map(getPersistedReplayRecordId)
+        .find((recordId): recordId is string => recordId !== undefined);
       const uiEvents: DaemonUiEvent[] = [];
       for (const replayEvent of page.events) {
         try {
@@ -2456,8 +2512,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
       history.capacityReached = page.hasMore && !hasCapacity;
-      history.cursor = page.nextCursor;
-      history.beforeRecordId = undefined;
+      history.cursor =
+        nextBeforeRecordId === undefined ? page.nextCursor : undefined;
+      history.beforeRecordId = nextBeforeRecordId;
       history.hasMore = page.hasMore && hasCapacity;
       history.loading = false;
       setTranscriptHistoryState({
@@ -2879,12 +2936,16 @@ export function useDaemonActiveTodoList() {
 }
 
 export function useDaemonStreamingState() {
-  const blocks = useDaemonTranscriptBlocks();
+  const store = useDaemonTranscriptStore();
   const promptStatus = useDaemonPromptStatus();
-
-  return useMemo(
-    () => selectDaemonStreamingState(blocks, promptStatus),
-    [blocks, promptStatus],
+  const getStreamingState = useCallback(
+    () => selectDaemonStreamingState(store.getSnapshot().blocks, promptStatus),
+    [promptStatus, store],
+  );
+  return useSyncExternalStore(
+    store.subscribe,
+    getStreamingState,
+    getStreamingState,
   );
 }
 

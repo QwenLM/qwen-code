@@ -1820,6 +1820,21 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     );
   });
 
+  it('gives the verifier the probe capability — run a claim, self-check the probe, tag [probe]', () => {
+    // Measured: read-only verification traced a real double-execute and called it
+    // correct. The verifier may RUN a probe for a runnable claim; the self-check
+    // (make the probe flip) is what keeps it evidence, and `Source: [probe]` is
+    // what makes compose-review treat it as deterministic.
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('do not just trace it — run it');
+    expect(p).toContain('write a **probe**');
+    expect(p).toContain('confirm the probe **flips**');
+    expect(p).toContain('Source: [probe]');
+    expect(p).toContain('Leave the tree as you found it');
+    // The capability is the verifier's; it must not bleed into a dimension brief.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('write a **probe**');
+  });
+
   it('carries the command-aware subprocess-injection correction into Agent 2', () => {
     // The all-role test sees only that Agent 2 gets the diff and the format; it
     // cannot see whether the `--` correction reached it. If a revert restores the

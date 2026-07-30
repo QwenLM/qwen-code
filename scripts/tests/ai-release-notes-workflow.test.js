@@ -12,6 +12,10 @@ const finalizeWorkflow = readFileSync(
   '.github/workflows/finalize-release.yml',
   'utf8',
 );
+const releaseNotesScript = readFileSync(
+  'scripts/generate-release-notes.js',
+  'utf8',
+);
 
 function getStep(workflow, name) {
   const match = new RegExp(
@@ -29,6 +33,14 @@ describe('stable release notes workflow', () => {
 
     expect(step).toContain('--notes-start-tag "${PREVIOUS_RELEASE_TAG}"');
     expect(step).toContain('--generate-notes');
+    expect(step).toContain(
+      'git merge-base --is-ancestor "${PREVIOUS_RELEASE_TAG}" HEAD',
+    );
+    expect(step).toContain('NOTES_START_TAG_FLAG=()');
+    expect(step).toContain(
+      'echo "::warning::PREVIOUS_RELEASE_TAG (${PREVIOUS_RELEASE_TAG}) is not an ancestor of HEAD; omitting --notes-start-tag"',
+    );
+    expect(step).toContain('"${NOTES_START_TAG_FLAG[@]}"');
     expect(step).toContain("GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
     expect(releaseWorkflow).not.toContain(
       "name: 'Generate AI-assisted stable release notes'",
@@ -58,8 +70,21 @@ describe('stable release notes workflow', () => {
     );
     expect(validate).toContain('is not a stable release tag');
     expect(validate).toContain('exit 1');
-    expect(generate).toContain('timeout-minutes: 15');
+    expect(generate).toContain('timeout-minutes: 35');
     expect(generate).toContain('continue-on-error: true');
+
+    // The step timeout must exceed the script's internal budget; otherwise
+    // the runner SIGKILLs the step and even the fallback notes are lost.
+    const stepTimeoutMin = Number(
+      generate.match(/timeout-minutes:\s*(\d+)/)[1],
+    );
+    const budgetMs = releaseNotesScript
+      .match(/totalTimeoutMs\s*=\s*([\d_]+)\s*\*\s*([\d_]+)/)
+      .slice(1)
+      .map((part) => Number(part.replace(/_/g, '')))
+      .reduce((a, b) => a * b, 1);
+    expect(stepTimeoutMin * 60_000).toBeGreaterThan(budgetMs);
+
     expect(generate).toContain('GitHub-generated notes');
     expect(generate).toContain('node scripts/generate-release-notes.js');
     expect(update).toContain('continue-on-error: true');
@@ -83,6 +108,22 @@ describe('stable release notes workflow', () => {
     expect(finalizeWorkflow).toContain(
       "name: 'Enable auto-merge for release PR'",
     );
+  });
+
+  it('comments released-in version only for squash-merge PR trailers', () => {
+    const step = getStep(
+      finalizeWorkflow,
+      'Comment released-in version on merged PRs',
+    );
+
+    expect(step).toContain('continue-on-error: true');
+    expect(step).toContain("grep -oE '\\(#[0-9]+\\)$'");
+    expect(step).toContain("tr -d '()#'");
+    expect(step).not.toContain("grep -oE '#[0-9]+'");
+    expect(step).toContain("marker='<!-- qwen-release-comment:v1 -->'");
+    expect(step).toContain('gh pr view "${num}" --json comments');
+    expect(step).toContain('grep -qF "${marker}" <<<"${existing}"');
+    expect(step).toContain('gh pr comment "${num}" --body "${body}"');
   });
 
   it('does not recreate an already merged release PR during retries', () => {

@@ -113,6 +113,12 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
+  # Suggestions may improve a young PR, but continuing to implement them after
+  # five change-producing rounds expands the diff and creates fresh review
+  # churn. From round 6 onward, only Critical findings, formally requested
+  # changes, failed checks, and base conflicts may drive code changes;
+  # lower-severity feedback is recorded and left open.
+  CRITICAL_ONLY_AFTER_ROUND: '5'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -184,6 +190,16 @@ env:
   # unbroken run of failures. Observed on #6723: 7 straight failed rounds (3
   # timeouts, 4 gate rejections) over 8 hours, heading for 100.
   CONSECUTIVE_FAILURE_CAP: '5'
+  # Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for
+  # the failure shape it cannot see: timeouts INTERLEAVED with successful
+  # rounds. A success resets the consecutive streak, but it does not make the
+  # next timeout any cheaper — each one burns a full agent budget (~50m of
+  # runner time) and pushes nothing. Observed on #7929: three timeouts with
+  # pushed rounds in between, so the consecutive cap never fired and the PR
+  # kept walking into the same wall; #7846 the same, twice. Counted over the
+  # current counting window (window-scoped like every other census), so a
+  # re-arm clears it along with the round counter.
+  TIMEOUT_WINDOW_CAP: '3'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -398,8 +414,8 @@ jobs:
               # applies TAKEOVER_LABEL, 'TAKEOVER_COMMAND stop' removes it —
               # nothing else. The label stays the single source of truth:
               # engagement and release happen ONLY via the label events
-              # below, so the command's whole blast radius is one label
-              # toggle. Exact match on the trimmed body (constants, never
+              # below; the command also posts acks directly in both
+              # directions (#7999, #8002). Exact match on the trimmed body (constants, never
               # user-input parsing); allowed senders: the PR author (who may
               # lack label access) or a write+ collaborator. This immediately
               # narrows a previously fully-closed surface reopened under
@@ -512,7 +528,19 @@ jobs:
                   else
                     DO_REVIEW=true
                     ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
-                    TAKEOVER_ACK='engaged'
+                    if [[ "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
+                      # The bot only applies this label from takeover-command,
+                      # which posts the engage ack ITSELF: the labeled event
+                      # has been observed to simply not fire (#7999 — the
+                      # author read the silence as failure and removed the
+                      # label; #8002), so the user-visible ack must not
+                      # depend on this round-trip. Suppress only the ack —
+                      # the immediate scan is this event's real work and
+                      # still routes.
+                      echo "🧭 engage ack skipped: label applied by ${AUTOFIX_BOT} — the command path already acked"
+                    else
+                      TAKEOVER_ACK='engaged'
+                    fi
                     echo "🧭 ${TAKEOVER_LABEL} applied by ${SENDER_LOGIN} on PR #${PR_NUMBER_EVENT} → review phase (takeover)"
                   fi
                 elif [[ "${EVENT_ACTION}" == 'unlabeled' ]]; then
@@ -527,6 +555,12 @@ jobs:
                     # fail its identity check — a red run for a label that
                     # never engaged anything. Log and stop.
                     echo "🧭 takeover release ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
+                  elif [[ "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
+                    # Mirror of the labeled-path suppression: the bot only
+                    # removes this label from takeover-command, which posts
+                    # the release ack itself — acking here too would
+                    # double-post on every command-driven stop.
+                    echo "🧭 release ack skipped: label removed by ${AUTOFIX_BOT} — the command path already acked"
                   else
                     TAKEOVER_ACK='released'
                     echo "🧭 ${TAKEOVER_LABEL} removed from PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} → released"
@@ -1381,9 +1415,26 @@ jobs:
           # State/base can change while this job sits in its per-PR queue —
           # re-verify what the route checked so a stale command cannot label
           # a closed or non-main PR.
-          if [[ "$(jq -r '.state // ""' <<< "${PR_INFO}")" != "OPEN" || "$(jq -r '.baseRefName // ""' <<< "${PR_INFO}")" != "main" ]]; then
-            echo "🧭 takeover command dropped: PR #${PR} is no longer an open main-targeting PR"
+          if [[ "$(jq -r '.state // ""' <<< "${PR_INFO}")" != "OPEN" ]]; then
+            echo "🧭 takeover command dropped: PR #${PR} is no longer an open PR"
             exit 0
+          fi
+          CMD_BASE_REF="$(jq -r '.baseRefName // ""' <<< "${PR_INFO}")"
+          if [[ "${CMD_BASE_REF}" != "main" ]]; then
+            if [[ "${CMD}" == 'add' ]]; then
+              # Refuse OUT LOUD — the silent drop made a /takeover on a
+              # stacked PR indistinguishable from a lost event. Mirrors the
+              # label path's base-refused ack, except no label was applied
+              # here, so the ask is to re-run the command after retargeting
+              # (not "the label is left in place").
+              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Retarget this PR to `main` once the base PR merges and re-run `%s` — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。待 base 的 PR 合入后将本 PR 改为面向 `main` 并重新执行 `%s`；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${CMD_BASE_REF}" "${TAKEOVER_COMMAND}" "${CMD_BASE_REF}" "${TAKEOVER_COMMAND}")"
+              echo "🧭 takeover command refused: PR #${PR} targets '${CMD_BASE_REF}' not 'main'"
+              exit 0
+            fi
+            # 'stop' proceeds: removing the label from a non-main PR is
+            # harmless and matches the latest intent — dropping it here left
+            # a manually-applied label stuck with no command able to remove
+            # it (the label path's release ack ignores non-main PRs too).
           fi
           # Skip wins over takeover EVERYWHERE — including here: engaging or
           # re-arming a skip-labeled PR would post an 'engaged' window anchor
@@ -1437,6 +1488,25 @@ jobs:
             else
               gh pr edit "${PR}" --repo "${REPO}" --add-label "${TAKEOVER_LABEL}"
               echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
+              # Ack HERE, not via the pull_request:labeled round-trip: that
+              # event has been observed to simply not fire (#7999 — the
+              # author read the silence as failure and removed the label;
+              # #8002 — no ack for hours), and fork label events could never
+              # ack at all (they carry no secrets). Every admission gate
+              # above has already passed, so 'engaged' is truthful for both
+              # in-repo and fork PRs. The route side suppresses the
+              # label-path ack when the label sender is the bot, and the
+              # scan's first-pickup ack dedups against this comment — and
+              # heals it on the next scan if this post fails, which is why
+              # a failure here only warns.
+              FORK_NOTE=''
+              FORK_NOTE_ZH=''
+              if [[ "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" ]]; then
+                FORK_NOTE=' This is a fork PR, so the first round comes from the next scheduled scan (usually within minutes).'
+                FORK_NOTE_ZH='本 PR 来自 fork，首轮处理将由下一次定时扫描执行（通常几分钟内）。'
+              fi
+              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${FORK_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")" \
+                || echo "::warning::engage ack comment failed on #${PR}; the scan's first-pickup ack heals it"
             fi
           else
             if [[ "${HAS}" != 'true' ]]; then
@@ -1444,13 +1514,38 @@ jobs:
             else
               gh pr edit "${PR}" --repo "${REPO}" --remove-label "${TAKEOVER_LABEL}"
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+              # Release ack, direct from the command — the exact mirror of
+              # the engage side above, for the same reason: the unlabeled
+              # round-trip is the thing we no longer trust, fork unlabeled
+              # events can never ack (no secrets), and a non-main release
+              # never even reaches the ack job. A loud add next to a mute
+              # stop would re-create the "did it work or did the event get
+              # lost?" ambiguity on the release side. Variant selection
+              # mirrors the ack job verbatim (live author + skip label from
+              # the same PR_INFO the gates used); the route side suppresses
+              # the unlabeled-path ack when the label sender is the bot.
+              REL_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_INFO}")"
+              REL_HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
+              if [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" && "${REL_HAS_SKIP}" == "true" ]]; then
+                REL_BODY="$(printf '👋 Takeover mode ended. This bot-authored PR also carries `%s`, which opts it out of standard bot management entirely — nothing will engage it until that label is removed.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束。本 bot 创建的 PR 同时带有 `%s`，已完全退出常规 bot 管理 —— 移除该标签前不会有任何介入。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${SKIP_LABEL}")"
+              elif [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
+                REL_BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+              else
+                REL_BODY="$(printf '👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply `%s` (or comment `%s`) to re-engage.\n\n<details>\n<summary>中文说明</summary>\n\n👋 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 `%s` 标签（或评论 `%s`）即可再次接管。\n\n</details>\n\n<!-- takeover-ack released -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+              fi
+              gh pr comment "${PR}" --repo "${REPO}" --body "${REL_BODY}" \
+                || echo "::warning::release ack comment failed on #${PR}"
             fi
           fi
 
   # ===========================================================================
   # TAKEOVER ACK — visible confirmation when a maintainer engages or releases
-  # a PR via the takeover label. Label events are explicit user actions, so
-  # every toggle acks (no dedup wanted). In-repo PRs only reach this job.
+  # a PR via the takeover label. Manual label toggles are explicit user
+  # actions, so every one acks (no dedup wanted). Command-driven toggles are
+  # acked by takeover-command itself in BOTH directions — the label event has
+  # been observed to not fire at all (#7999, #8002), so those acks cannot
+  # depend on this round-trip — and the route suppresses this job for them
+  # (label sender is the bot). In-repo PRs only reach this job.
   # ===========================================================================
   # Re-arm a stranded PR without deleting anything. Recovery previously meant
   # `gh api -X DELETE` on the bot's own autofix-eval marker comment: raw API
@@ -1663,10 +1758,10 @@ jobs:
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/bot-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify,updatedAt > "${WORKDIR}/bot-prs.json"
             gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
               --base main \
-              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/takeover-prs.json"
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify,updatedAt > "${WORKDIR}/takeover-prs.json"
             # Skip-labeled PRs are excluded HERE, not only at the address
             # gate: that gate discards without writing a marker, so the
             # watermark never advances and an unfiltered scan would re-emit
@@ -1809,6 +1904,44 @@ jobs:
           )
           [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
 
+          # Idle backoff, from the list's own updatedAt (no API call): a
+          # candidate with no activity for >24h is inspected on about one
+          # scan in four instead of every one. The pool doubled in two
+          # days (28 takeover PRs, 8 of them idle in "nothing new" state
+          # for 10+ hours), and every idle inspection costs a unit of the
+          # SHARED MAX_CANDIDATE_INSPECTIONS budget plus a slice of the
+          # serial API walk over the candidate list. The win is small: a
+          # few fewer gh round-trips per scan (~2-3 of the pool) and less
+          # rate-limit pressure. It does NOT recover the job's queue or
+          # startup latency, which dwarfed the walk in the #8002
+          # measurement that motivated this. Idle PRs never reach the
+          # 10-target budget (the "nothing new" branch continues before
+          # the TARGETS append), so that cap is NOT what this relieves.
+          # Safe because comments, reviews, labels, and pushes all bump
+          # updatedAt or route in real time; the two scan-only signals
+          # that do NOT bump it — a base conflict appearing when main
+          # moves, and still-red checks awaiting the redcheck marker —
+          # wait out the backoff on a PR nobody touched in a day, then
+          # self-correct (the eventual address run comments/pushes). The
+          # slot is keyed by PR number mod 4 against a 600s time quantum
+          # (same quantum as ROT_OFF), so each scan is an independent
+          # ~25% draw per idle PR — about one scan in four. This is NOT a
+          # bounded gap: the scheduled scan lands every ~40-70 min on
+          # this repo (not the */10 the cron implies), so the wait is
+          # geometric — measured median ~2h, p90 ~6h across 100 real
+          # scans. The forced-dispatch path never builds the list files,
+          # so a forced PR is always inspected (fail-open, like a PR
+          # missing from the set).
+          IDLE_PRS=' '
+          if [[ -f "${WORKDIR}/bot-prs.json" && -f "${WORKDIR}/takeover-prs.json" ]]; then
+            IDLE_CUTOFF="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+            IDLE_PRS=" $(jq -rs --arg cut "${IDLE_CUTOFF}" 'add | unique_by(.number)
+              | map(select((.updatedAt // "") != "" and .updatedAt < $cut) | .number | tostring)
+              | join(" ")' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json" 2> /dev/null || echo '') "
+          fi
+          IDLE_SLOT_NOW="$(( ($(date -u +%s) / 600) % 4 ))"
+
           TARGETS='[]'
           INSPECTED=0
           for PR in ${CANDIDATES}; do
@@ -1817,6 +1950,14 @@ jobs:
             if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
               fleet_row "${PR}" 'busy' 'address run in flight'
+              continue
+            fi
+            # The idle-backoff skip is free too (a bash substring test on
+            # the precomputed set, same idiom as the busy skip) — it must
+            # not consume inspection budget either.
+            if [[ "${IDLE_PRS}" == *" ${PR} "* && "$(( PR % 4 ))" != "${IDLE_SLOT_NOW}" ]]; then
+              echo "😴 #${PR}: idle >24h — deferring to its rotation slot (slot $(( PR % 4 )), current ${IDLE_SLOT_NOW}; inspected ~1 scan in 4)"
+              fleet_row "${PR}" 'idle-backoff' 'idle >24h; inspected ~1 scan in 4 (median ~2h, p90 ~6h)'
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
@@ -1978,13 +2119,29 @@ jobs:
                      | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
               if [[ -z "${LAST_ENGAGE_ACK_TS}" ]]; then
                 NEED_ENGAGE_ACK='true'
-                # In-repo label events have a DEDICATED ack job — the scan is
-                # only its healer. Within a short grace after the label lands,
-                # defer: a concurrent ack job must not be double-posted (that
-                # shifts the window anchor). A failed ack job is healed by the
-                # next scan, which is past the grace. Forks have no ack job,
-                # so no grace applies there.
-                if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" != "true" ]] \
+                # Grace windows keyed by WHO owns the missing ack, read from
+                # the label event's actor (pr-events.json is already here).
+                # A bot-applied label came from takeover-command, which posts
+                # the ack itself within seconds — fork or in-repo alike — so
+                # a SHORT grace covers the write's own latency and an
+                # ic.json snapshot taken between the label write and the ack
+                # landing; past it, the command's post failed and the next
+                # scheduled scan heals it (≤10 min), instead of waiting on
+                # a label event that may never arrive. A human-applied
+                # in-repo label is owned by the
+                # DEDICATED ack job, which needs job-spin-up time — the
+                # longer grace stands. A human-labeled fork has no other
+                # owner, so no grace: the scan posts right here.
+                LAST_LABELED_BY="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
+                  add | [.[] | select(.event == "labeled")
+                       | select((.label.name // "") == $lb)]
+                  | sort_by(.created_at) | last | .actor.login // ""' "${WORKDIR}/pr-events.json")"
+                if [[ "${LAST_LABELED_BY}" == "${AUTOFIX_BOT}" ]]; then
+                  if [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "$(date -u -d '45 seconds ago' +%Y-%m-%dT%H:%M:%SZ)" ]]; then
+                    echo "🧭 engage ack deferred for #${PR}: command-applied label <45s ago — the command's own ack is in flight"
+                    NEED_ENGAGE_ACK='false'
+                  fi
+                elif [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" != "true" ]] \
                   && [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "$(date -u -d '3 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" ]]; then
                   echo "🧭 engage ack deferred for #${PR}: in-repo label applied <3m ago — the ack job owns it"
                   NEED_ENGAGE_ACK='false'
@@ -2045,16 +2202,6 @@ jobs:
             RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
-                | {sha: .[0], at: ($c.created_at // "")} ]
-              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
-            # The head a gate-rejection handoff last parked this PR on (mirror of
-            # RED_HEAD). While it equals LIVE_HEAD the PR is parked on the CURRENT
-            # head: a later push writes a newer eval comment WITHOUT this marker,
-            # so the latest handoff head stops matching and the parking clears.
-            # Used only to auto-recover a stale-base parking (see the idle path).
-            HANDOFF_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                | [ scan("<!-- autofix-handoff head=([0-9a-f]+) -->") ] | .[]
                 | {sha: .[0], at: ($c.created_at // "")} ]
               | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
             # A maintainer '@qwen-code /retry' posts that marker to say
@@ -2269,15 +2416,11 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
-            # Per AGENTS.md's review policy, Suggestion-level findings ARE
-            # addressed during a PR's first ~5 review rounds; only past that are
-            # they deferred (with a recorded reason). The loop's MAX_ROUNDS cap is
-            # that same boundary — every round the loop actually runs is within
-            # the address-Suggestions window — so /review `**[Suggestion]**`
-            # inline comments count as actionable feedback here. The agent's
-            # triage still decides implement-vs-defer per finding and records the
-            # decision in its summary comment, and the MAX_ROUNDS handoff is the
-            # defer-to-a-human boundary.
+            # Per AGENTS.md's review policy, Suggestion-level findings are
+            # actionable during the first five change-producing rounds. The
+            # scan still selects later feedback so prepare can record and
+            # watermark its deferral; only the address job filters what may
+            # drive code changes.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -2289,7 +2432,7 @@ jobs:
             # bot's own eval markers, and known non-actionable bot comments
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
-            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             # Command-style comments (@qwen-code /takeover, /triage, /review …)
             # are INSTRUCTIONS to tooling, not review feedback on the diff:
             # counting them as actionable burns a full agent cycle to post a
@@ -2313,27 +2456,6 @@ jobs:
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
             if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
-              # Nothing new — but is this a stale-base PARKING? A gate-rejection
-              # handoff left an autofix-handoff marker on the head it parked on.
-              # While that still matches LIVE_HEAD (no push since) and the head is
-              # now BEHIND main, the build that failed may have failed on a
-              # since-changed dependency (#7471), not the fix. Merge main in and
-              # re-arm so the loop re-reads the feedback against fresh main. The
-              # forward case is handled in-round by the report step; this recovers
-              # a PR that was ALREADY parked when the base moved under it. Guarded
-              # by head-match (a push clears it) and behind-main (self-limiting:
-              # the update makes it current, so it cannot re-fire), and every API
-              # call is fail-safe — any failure just falls through to idle.
-              if [[ -n "${LIVE_HEAD}" && "${HANDOFF_HEAD}" == "${LIVE_HEAD}" ]]; then
-                UNPARK_CMP="$(gh api "repos/${REPO}/compare/${DEFAULT_BRANCH:-main}...${LIVE_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                if [[ "${UNPARK_CMP}" == 'behind' || "${UNPARK_CMP}" == 'diverged' ]] \
-                  && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${LIVE_HEAD}" > /dev/null 2>&1; then
-                  gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '♻️ AutoFix auto-recovered a stale base: this PR was parked after a fix failed to build, but its head was behind `%s`, so current main was merged in via update-branch and the next scan will re-read the feedback against it. A stale base can fail the build without being the fix at fault; if it still fails once current, it hands off to a human again.\n\n<details>\n<summary>中文说明</summary>\n\n♻️ AutoFix 自动恢复了陈旧 base:本 PR 因修复构建失败而被搁置,但其 head 落后于 `%s`,故已将当前 main 合入,下次扫描会对它重读反馈。陈旧 base 可能使构建失败而并非修复之过;若更新后仍失败,将再次交人。\n\n</details>\n\n<!-- autofix-rearm -->' "${DEFAULT_BRANCH:-main}" "${DEFAULT_BRANCH:-main}")" || echo "::warning::Failed to post stale-base recovery comment on PR #${PR}"
-                  echo "♻️ #${PR}: parked on a stale base (behind ${DEFAULT_BRANCH:-main}) — merged main + re-armed"
-                  fleet_row "${PR}" 'unparked' "stale-base parking recovered — merged ${DEFAULT_BRANCH:-main} + re-armed"
-                  continue
-                fi
-              fi
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
@@ -2397,7 +2519,7 @@ jobs:
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       contents: 'read'
     strategy:
@@ -2848,8 +2970,75 @@ jobs:
             STALE='true'
             echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
           fi
+          CRITICAL_ONLY='false'
+          if [[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]; then
+            CRITICAL_ONLY='true'
+          fi
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
           echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
+
+          rm -f "${WORKDIR}/deferred-feedback.md"
+          if [[ "${CRITICAL_ONLY}" == "true" ]]; then
+            PR_URL="https://github.com/${REPO}/pull/${PR}"
+            {
+              echo '## Deferred non-Critical feedback'
+              echo
+              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. Any items listed below stay open for human follow-up; do not modify code, resolve threads, or reply on their behalf."
+              echo
+              jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
+                .[]
+                | select((.submitted_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.state // "") == "COMMENTED")
+                | select(((.body // "") | contains("**[Critical]**")) | not)
+                | "- Review by @\(.user.login): \(.html_url // $pr_url)"' \
+                "${WORKDIR}/rv.json"
+              jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" \
+                --slurpfile reviews "${WORKDIR}/rv.json" '
+                add as $comments
+                | ($reviews | add) as $reviews
+                | $comments[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((
+                    ((.body // "") | contains("**[Critical]**"))
+                    or ((.in_reply_to_id // null) as $root
+                      | $root != null
+                      and any($comments[];
+                        .id == $root
+                        and ((.body // "") | contains("**[Critical]**"))))
+                    or ((.pull_request_review_id // null) as $review
+                      | $review != null
+                      and any($reviews[];
+                        .id == $review
+                        and ((.state // "") == "CHANGES_REQUESTED")))
+                  ) | not)
+                | "- Inline rc:\(.id) \(.path // "?"):\(.line // "?"): \(.html_url // $pr_url)"' \
+                "${WORKDIR}/rc.json"
+              jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" '
+                .[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)
+                | select(((.body // "") | contains("**[Critical]**")) | not)
+                | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
+                "${WORKDIR}/ic.json"
+              echo
+              echo '<details>'
+              echo '<summary>中文说明</summary>'
+              echo
+              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后，进入仅处理 Critical 的模式。以上内容保持开放，留待人工跟进；不要为其修改代码、解决线程或代为回复。"
+              echo
+              echo '</details>'
+            } > "${WORKDIR}/deferred-feedback.md"
+          fi
 
           # Render the actionable feedback into one prompt-ready file.
           {
@@ -2862,40 +3051,60 @@ jobs:
             echo
             echo "## Reviews"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.submitted_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))
+              | select(($critical_only | not)
+                  or (.state // "") == "CHANGES_REQUESTED"
+                  or ((.body // "") | contains("**[Critical]**")))
               | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
-            # Mirrors the review-scan gate: per AGENTS.md, Suggestion-level
-            # findings are actionable within the first ~5 review rounds (the
-            # loop's whole operating range), so they are rendered for the agent
-            # to triage — implement if valuable, otherwise record the deferral.
-            jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
-              .[]
+            jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
+              --slurpfile reviews "${WORKDIR}/rv.json" '
+              add as $comments
+              | ($reviews | add) as $reviews
+              | $comments[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select(($critical_only | not)
+                  or ((.body // "") | contains("**[Critical]**"))
+                  or ((.in_reply_to_id // null) as $root
+                    | $root != null
+                    and any($comments[];
+                      .id == $root
+                      and ((.body // "") | contains("**[Critical]**"))))
+                  or ((.pull_request_review_id // null) as $review
+                    | $review != null
+                    and any($reviews[];
+                      .id == $review
+                      and ((.state // "") == "CHANGES_REQUESTED"))))
               | "- [rc:\(.id)] \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo
             echo "## Issue-level comments"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-              --argjson trust "${TRUSTED_ASSOC}" '
+              --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
+              | select(($critical_only | not)
+                  or ((.body // "") | contains("**[Critical]**")))
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
+            if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
+              echo
+              cat "${WORKDIR}/deferred-feedback.md"
+            fi
             echo
             echo "## Failed checks"
             jq -r --arg wm "${WATERMARK}" '
@@ -2939,6 +3148,42 @@ jobs:
               echo 'Fix this first — the same change will be rejected again otherwise.'
               echo
               printf '%s\n' "${LAST_REJECTION}"
+            fi
+            # Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean
+            # the standard address-everything prompt is not converging at
+            # this budget: re-running it unchanged just walks into the same
+            # wall (#7929 burned three 50-minute timeouts that way, #7846
+            # two — each a full agent run with nothing pushed). From the
+            # second attempt on, tell the agent to narrow. Counted since
+            # the last pushed/no-change round, NOT cumulatively: a push
+            # falsifies "not converging" and resets the count, so a recovered
+            # PR stops seeing the warning; until a round pushes or no-ops it
+            # fires on every failing round (gate rejections included) —
+            # correctly, since nothing has converged yet. (The
+            # BREAKER in the report step stays cumulative — a push does not
+            # make the next timeout cheaper in budget terms.) Window-scoped
+            # like every other census (LIVE_REARM_KEY is the live window),
+            # so a re-arm clears it. The needle matches the emitted
+            # headline verbatim: first lines can embed provider error text
+            # (API_ERROR_DETAIL), so a loose phrase could count a model
+            # error message as a timeout.
+            PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- autofix-eval "))
+                | select(((.body // "") | contains("win=" + $key + " -->"))
+                    or ($key == "none" and (((.body // "") | contains("win=")) | not)))
+              ] | sort_by(.created_at)
+              | map((.body | gsub("\r"; "") | split("\n")[0]))
+              | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
+              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing")) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+            if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]; then
+              echo
+              echo '## Budget warning: previous round(s) ran out of time'
+              echo
+              echo "${PRIOR_TIMEOUTS} round(s) since the last successful round exhausted the agent time budget before finishing anything. Do NOT attempt everything at once this round:"
+              echo '- Address the smallest set of blocking (Critical) findings first, and commit as soon as that subset is done.'
+              echo '- Prefer minimal, focused diffs; decline refactors and nice-to-haves with a one-line reason rather than implementing them.'
+              echo '- If the remaining feedback cannot fit the budget, defer it the normal way: leave those findings out of resolved-comments.txt and record each deferral in comment-replies.json so every open thread gets its reason — never let a deferral live only in the summary.'
             fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
@@ -3001,11 +3246,12 @@ jobs:
         # revalidation in prepare) — no agent run, no marker, no comment.
         if: |-
           ${{ steps.prepare.outputs.stale != 'true' }}
-        # Bound the agent well below the 120-minute job timeout so a runaway agent
+        # Bound the agent well below the 150-minute job timeout so a runaway agent
         # fails THIS step (not the whole job), leaving the always() verify and
         # report steps time to run and post a handoff. A job-level timeout would
-        # cancel those steps too and leave the loop silent. 80 leaves ~40 minutes
-        # of headroom for setup (install/build) plus verify + report.
+        # cancel those steps too and leave the loop silent. The 80-minute primary
+        # attempt plus one 20-minute repair leaves ~50 minutes for setup, two
+        # verification passes, and reporting.
         timeout-minutes: 80
         env:
           PR: '${{ env.PR }}'
@@ -3081,8 +3327,137 @@ jobs:
         id: 'verify'
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
+        continue-on-error: true
         run: |-
           bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+
+      - name: 'Repair deterministic rejection'
+        id: 'repair'
+        if: |-
+          ${{ always() && steps.verify.outputs.retryable == 'true' }}
+        timeout-minutes: 20
+        env:
+          PR: '${{ env.PR }}'
+          ISSUE: '${{ env.ISSUE }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
+          QWEN_TIMEOUT_MS: '1080000'
+          CONFLICT: '${{ steps.prepare.outputs.conflict }}'
+          BASE: 'main'
+          SETTINGS_JSON: |-
+            {
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "read_many_files",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(git add)",
+                "run_shell_command(git checkout)",
+                "run_shell_command(git commit)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git merge)",
+                "run_shell_command(git status)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(npm run build)",
+                "run_shell_command(npm run typecheck)",
+                "run_shell_command(npm run lint)",
+                "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
+                "run_shell_command(pwd)"
+              ],
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          echo "attempted=true" >> "${GITHUB_OUTPUT}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
+          if [[ ! -s "${WORKDIR}/gate-rejection.md" ]]; then
+            echo '::error::Retryable verification rejection has no gate-rejection.md.'
+            exit 1
+          fi
+          {
+            cat "${WORKDIR}/feedback.md"
+            if [[ -s "${WORKDIR}/address-summary.md" ]]; then
+              echo
+              echo '## Previous attempt summary'
+              cat "${WORKDIR}/address-summary.md"
+            fi
+            echo
+            echo '## Same-run verification repair'
+            echo
+            echo 'The previous commit was rejected by deterministic verification.'
+            echo 'Keep that commit and add one follow-up commit that fixes this rejection:'
+            echo
+            cat "${WORKDIR}/gate-rejection.md"
+          } > "${WORKDIR}/feedback.retry.md"
+          mv "${WORKDIR}/feedback.retry.md" "${WORKDIR}/feedback.md"
+          rm -f \
+            "${WORKDIR}/address-summary.md" \
+            "${WORKDIR}/no-action.md" \
+            "${WORKDIR}/failure.md" \
+            "${WORKDIR}/handoff.md" \
+            "${WORKDIR}/gate-output.log" \
+            "${WORKDIR}/gate-rejection.md" \
+            "${WORKDIR}/agent-api-error" \
+            "${WORKDIR}/agent-api-error-kind" \
+            "${WORKDIR}/agent-timeout"
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          git config core.hooksPath .husky
+          node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
+            --mode address-review \
+            --pr "${PR}" \
+            --issue "${ISSUE}" \
+            --workdir "${WORKDIR}" \
+            --conflict "${CONFLICT}" \
+            --base "${BASE}"
+
+      - name: 'Repair verification gate'
+        id: 'verify_repair'
+        if: |-
+          ${{ always() && steps.repair.outputs.attempted == 'true' }}
+        continue-on-error: true
+        run: |-
+          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+
+      - name: 'Finalize verification'
+        id: 'final_verify'
+        if: |-
+          ${{ always() && steps.prepare.outputs.stale != 'true' }}
+        env:
+          FIRST_OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          FIRST_COMMITTED: '${{ steps.verify.outputs.committed }}'
+          REPAIR_ATTEMPTED: '${{ steps.repair.outputs.attempted }}'
+          REPAIR_OUTCOME: '${{ steps.verify_repair.outputs.outcome }}'
+          REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
+        run: |-
+          OUTCOME="${FIRST_OUTCOME}"
+          COMMITTED="${FIRST_COMMITTED}"
+          if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
+            OUTCOME="${REPAIR_OUTCOME}"
+            COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
+          fi
+          echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${COMMITTED}" ]]; then
+            echo "committed=${COMMITTED}" >> "${GITHUB_OUTPUT}"
+          fi
+          case "${OUTCOME}" in
+            fixed|noop) ;;
+            *) exit 1 ;;
+          esac
 
       - name: 'Show run artifacts'
         if: |-
@@ -3091,7 +3466,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3110,14 +3485,14 @@ jobs:
 
       - name: 'Push and report'
         if: |-
-          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
+          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.final_verify.outputs.outcome == 'fixed' || steps.final_verify.outputs.outcome == 'noop') }}
         env:
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) pushes the branch and
           # posts the report as qwen-code-dev-bot, the same identity that opened
           # the PR. The default GITHUB_TOKEN cannot do either on a bot-owned PR
           # in a way that re-triggers CI.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
@@ -3178,8 +3553,13 @@ jobs:
             # which already holds the PAT, maps each to its thread. Findings it
             # DECLINED or deferred are deliberately left open. Best-effort
             # throughout: a resolve failure must never fail a good push.
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              # first-100 page cap: threads beyond this page are not resolved
+            # Both this resolve block and the reply block below map an
+            # inline-comment id to its review thread, so the threads are
+            # fetched once here and shared. Hoisted above both so a round that
+            # only replies (no resolved-comments.txt) still has them.
+            # first-100 page cap: a comment in a thread past this page is not
+            # mapped, and each block falls back to the id as given.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
               THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
                 query($owner:String!,$name:String!,$pr:Int!){
                   repository(owner:$owner,name:$name){
@@ -3190,8 +3570,10 @@ jobs:
                 }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
               THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
               if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
-                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved"
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
               fi
+            fi
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
               RESOLVED_N=0
               while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
                 rc_id="${rc_id%$'\r'}"
@@ -3216,6 +3598,51 @@ jobs:
               done < "${WORKDIR}/resolved-comments.txt"
               echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
             fi
+            # The mirror of the resolve above: a finding the agent did NOT
+            # resolve keeps its thread open, and this answers it IN that thread.
+            # Without it the reason sits only in the round summary, so the
+            # reviewer who opens the still-open thread sees silence and cannot
+            # tell their finding was read. Same neutralisation as the summary
+            # body — a reply is model output posted verbatim under the bot
+            # identity, so it could otherwise smuggle a forged control marker.
+            # Best-effort: a reply failure must never fail a good push.
+            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
+              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
+              REPLIED_N=0
+              while IFS=$'\t' read -r rc_id reply_b64; do
+                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
+                # A finding cannot be both resolved and replied to; the resolve
+                # block above already closed anything in resolved-comments.txt,
+                # so skip it here rather than answer a thread we just resolved.
+                # Match tolerates the rc: prefix and a trailing CR, as the
+                # resolve block's own parsing does.
+                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
+                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
+                  grep -qxE "(rc:)?${rc_id}"; then
+                  continue
+                fi
+                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
+                [[ -n "${REPLY_BODY}" ]] || continue
+                # GitHub rejects a reply aimed at another reply ("Replies to
+                # replies are not supported"), and rc_id can itself be a reply
+                # id — the feedback step lists every review comment, replies
+                # included. Map to the thread's top-level comment (the one
+                # valid target), falling back to rc_id when the thread is past
+                # the first-100 page cap and so absent from THREADS_JSON.
+                root_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
+                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
+                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
+                  REPLIED_N=$(( REPLIED_N + 1 ))
+                else
+                  echo "::warning::could not reply to review comment ${rc_id}"
+                fi
+              done < <(jq -r '.[] | select(.id != null and .body != null)
+                | [(.id | tostring), (.body | @base64)] | @tsv' \
+                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
+              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
+            fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -3227,6 +3654,10 @@ jobs:
               # line, and jq scan() matches across newlines. The backslashes
               # render away in markdown, so the visible text is unchanged.
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
+              if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
+              fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
@@ -3246,6 +3677,10 @@ jobs:
               echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point: · 已审阅最新反馈——无需改动。逐点说明原因如下："
               echo
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
+              if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
+              fi
               echo
               echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
@@ -3259,6 +3694,89 @@ jobs:
           fi
 
           gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
+
+          # Takeover milestone digest — roughly every 10 rounds. The takeover
+          # cap (100) bounds runaway but says nothing about when a human
+          # should step in: #7469 ground to round 12 over 7 days with the
+          # only "this is burning budget" signal buried in Actions logs.
+          # Once 10+ rounds accumulate since the last digest, surface a
+          # window-scoped census on the PR so the maintainer who engaged it
+          # can decide: keep going, split the PR, or release. A SEPARATE
+          # comment with its OWN marker and WITHOUT the autofix-eval marker:
+          # every census (round, consec, watermark) selects on autofix-eval,
+          # so this comment is invisible to all of them, and the feedback
+          # filters drop bot comments, so the agent never sees it either.
+          # Best-effort: a digest failure must never fail a good push.
+          if [[ "${OUTCOME}" == "fixed" && "${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}" ]] \
+            && [[ "${NEXT_ROUND}" -ge 10 && -f "${WORKDIR}/ic.json" ]]; then
+            # Crossing trigger, not an equality test: failure rounds also
+            # advance the round counter, so `push@9, crash@10, push@11`
+            # would skip an exact %10 check forever — and a failure-heavy
+            # PR is the very PR the digest exists for. Post on the first
+            # PUSHED round once 10+ rounds have accumulated since the last
+            # digest in THIS window (or since the window opened).
+            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+              [ .[] | select((.user.login // "") == $ab) | (.body // "")
+                | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]
+                | select(.[1] == $win) | (.[0] | tonumber) ]
+              | max // 0' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+            if [[ "$(( NEXT_ROUND - MS_LAST ))" -ge 10 ]]; then
+              WIN_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                [.[] | select((.user.login // "") == $ab)
+                     | select((.body // "") | contains("<!-- autofix-eval "))
+                     | select(
+                         ((.body // "") | contains("win=" + $win + " -->"))
+                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                | sort_by(.created_at) | .[]
+                | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+              if [[ -z "${WIN_HEADS}" ]]; then
+                # Reaching round 10+ with zero window markers means the
+                # parse failed (prior markers must exist to be here) — a
+                # fabricated all-zero census is worse than no digest.
+                echo "::warning::milestone census found no window markers on #${PR}; skipping the digest"
+              else
+                N_PUSHED="$(grep -c 'Addressed the latest review feedback' <<< "${WIN_HEADS}" || true)"
+                # This round's own marker was posted just above but ic.json
+                # predates it — count it in by hand.
+                N_PUSHED=$(( N_PUSHED + 1 ))
+                N_NOOP="$(grep -c 'no changes needed' <<< "${WIN_HEADS}" || true)"
+                # Needle matches the emitted headline verbatim — first
+                # lines can embed provider error text.
+                N_TIMEOUT="$(grep -c 'AutoFix ran out of time before finishing' <<< "${WIN_HEADS}" || true)"
+                # Both wordings of the gate-rejection handoff, past and
+                # present — the census must not silently zero when the
+                # headline is reworded.
+                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)' <<< "${WIN_HEADS}" || true)"
+                # Every other outcome (crash, model error, gate error,
+                # infra) lands in a residual bucket: a window that burned
+                # 80% of its budget on crashes must be the LOUDEST line in
+                # the digest, not four zeros quieter than a healthy one.
+                N_TOTAL=$(( $(grep -c . <<< "${WIN_HEADS}" || true) + 1 ))
+                N_OTHER=$(( N_TOTAL - N_PUSHED - N_NOOP - N_TIMEOUT - N_REJECTED ))
+                (( N_OTHER < 0 )) && N_OTHER=0
+                # Base updates carry their own marker with no win= field;
+                # their window is recovered by timestamp (the window key IS
+                # the engage ack's created_at — 'none' means count all,
+                # and the header says so).
+                N_BASE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                  [.[] | select((.user.login // "") == $ab)
+                       | select((.body // "") | contains("<!-- autofix-base-updated -->"))
+                       | select($win == "none" or ((.created_at // "") > $win))]
+                  | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+                WIN_DESC='in the current window'
+                WIN_DESC_ZH='当前窗口'
+                if [[ "${WINDOW:-none}" == 'none' ]]; then
+                  WIN_DESC='since the PR opened (no counting window yet)'
+                  WIN_DESC_ZH='自 PR 创建以来（尚无计数窗口）'
+                fi
+                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '📊 Takeover milestone — round %s/%s, %s. Census: %s pushed fix(es), %s no-change review(s), %s timeout(s), %s rejected attempt(s), %s other round(s) (crash / model error / gate error / infra), %s base update(s).\n\nThis many rounds deserves a human look. Options: keep going (fine — nothing changes), split or reduce the PR if rounds keep accumulating, or release takeover (remove the `%s` label or comment `%s stop`). Management continues unchanged unless you act.\n\n<details>\n<summary>中文说明</summary>\n\n📊 接管里程碑 —— 第 %s/%s 轮（%s）。统计：推送修复 %s 次、审阅无需改动 %s 次、超时 %s 次、验证拒绝 %s 次、其他轮次（崩溃/模型错误/门错误/infra）%s 次、base 更新 %s 次。\n\n轮次到这个量值得人工看一眼。可选：继续（无需操作）；若轮次持续累积，考虑拆分或缩减 PR；或释放接管（移除 `%s` 标签或评论 `%s stop`）。不操作则托管照常继续。\n\n</details>\n\n<!-- autofix-milestone round=%s win=%s -->' "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC_ZH}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${WINDOW:-none}")"; then
+                  echo "📊 milestone digest posted on #${PR} (round ${NEXT_ROUND})"
+                else
+                  echo "::warning::milestone digest failed to post on PR #${PR}; the round report above already landed"
+                fi
+              fi
+            fi
+          fi
 
           {
             ISSUE_REF=""
@@ -3278,8 +3796,8 @@ jobs:
         if: |-
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
-          COMMITTED: '${{ steps.verify.outputs.committed }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.final_verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -3536,13 +4054,22 @@ jobs:
                   MARK_TS='9999-12-31T23:59:59Z'
                   HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
                 else
-                  HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
-                  # The gate rejected a real fix and the PR is up to date now, so
-                  # this is a genuine parking. Flag it head-scoped so a LATER
-                  # scan can auto-recover it if the base goes stale under it
-                  # (behind main → the build may have failed on a since-changed
-                  # dependency, not the fix). See the autofix-handoff marker.
-                  PARKED_STALE_CANDIDATE=true
+                  # Say what actually happens next. The old "A human should
+                  # take over this PR" read as a full release, but the loop
+                  # is NOT done with the PR: this feedback's watermark
+                  # advances (no automatic retry of THIS item), while
+                  # management continues for new feedback and base conflicts
+                  # — #7929 posted the old wording and then kept pushing
+                  # rounds, which read as a contradiction.
+                  # Name the gate ONLY when it actually ran: this branch is
+                  # reached for every outcome=failed verdict, but reject_fix
+                  # is the sole writer of gate-rejection.md — the failure.md /
+                  # dirty-tree / unchanged-branch / missing-summary paths made
+                  # no gate decision, so a blanket clause would repeat the very
+                  # wording-doesn't-match-behaviour bug this PR fixes.
+                  GATE_CLAUSE=''
+                  [[ -s "${WORKDIR}/gate-rejection.md" ]] && GATE_CLAUSE=' — the verification gate rejected the attempt'
+                  HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
@@ -3643,6 +4170,36 @@ jobs:
                 MARK_ROUND="${MAX_ROUNDS}"
                 HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that failed to push anything (timeouts and/or gate rejections). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
               fi
+              # CUMULATIVE timeout breaker — the sibling of the consecutive
+              # one above, for the failure shape it cannot see: timeouts
+              # interleaved with pushed rounds. A push resets CONSEC_FAIL,
+              # but it does not make the next timeout cheaper — each burns a
+              # full agent budget with nothing to show (observed on #7929:
+              # three timeouts with successes in between; #7846 twice). The
+              # census reuses PRIOR_HEADS, so it is window-scoped exactly
+              # like the consecutive one and a re-arm clears it. Only
+              # overrides a would-be RETRY: a round already terminal keeps
+              # its own headline (the consecutive breaker included).
+              if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]]; then
+                # Needle matches the emitted headline verbatim — first lines
+                # can embed provider error text (API_ERROR_DETAIL puts up to
+                # 200 bytes of it on the same line), so a loose phrase could
+                # count a model error message as a timeout.
+                TIMEOUT_N="$(grep -c 'AutoFix ran out of time before finishing' <<< "${PRIOR_HEADS}" || true)"
+                if [[ -n "${AGENT_TIMEOUT:-}" ]]; then
+                  TIMEOUT_N=$(( TIMEOUT_N + 1 ))
+                fi
+                if [[ "${TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
+                  MARK_ROUND="${MAX_ROUNDS}"
+                  # The headline states what the census MEASURED — the
+                  # window's cumulative count — not "stopped after N
+                  # timeouts": the round that trips this can itself have
+                  # failed differently (a gate rejection landing on a window
+                  # that already carries the cap — the exact rollout state
+                  # of #7929/#7846).
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing. A human should split or reduce the PR (or raise the agent time budget), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                fi
+              fi
             fi
             {
               echo "${HEADLINE}"
@@ -3703,18 +4260,6 @@ jobs:
               if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
                 echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
               fi
-              # A gate-REJECTION handoff (the agent produced a fix that failed
-              # verification, so the PR is now parked with the watermark
-              # advanced) is a stale-base recovery candidate: if this head later
-              # falls behind main, the build may have failed on something main
-              # has since changed (#7471's update-notifier), not the fix. The
-              # scan reads this head-scoped marker and, only while it still
-              # matches LIVE_HEAD (a later push clears it), auto-updates the base
-              # and re-arms. Head-scoped like autofix-redcheck, and only on this
-              # branch — a crash/timeout handoff produced no fix to re-verify.
-              if [[ "${PARKED_STALE_CANDIDATE:-false}" == 'true' ]]; then
-                echo "<!-- autofix-handoff head=${REPORT_HEAD} -->"
-              fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
@@ -3737,7 +4282,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # The id the announcement wrote. Empty means this round never
           # announced (its step was skipped, or the post itself failed) — then
