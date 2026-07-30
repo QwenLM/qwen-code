@@ -5235,6 +5235,14 @@ describe('qwen-autofix workflow', () => {
     // the local line, and retries a bounded number of times; the merge
     // result descends from the remote head so the retry is a fast-forward.
     expect(pushAndReportStep).toContain('for push_attempt in 1 2 3; do');
+    // A successful push breaks out of the loop immediately — without this
+    // pin, deleting the break survives: the loop range and give-up message
+    // are still asserted as strings, but a successful push then re-runs
+    // git push twice more and the salvage legs execute against a branch
+    // that was already pushed.
+    expect(pushAndReportStep).toMatch(
+      /if git push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+    );
     // BOTH push-URL constructions stay pinned — the fork one is pinned by
     // the fork-plumbing test, and the same-repo one lost its old
     // `origin "${BRANCH}"` pin in this rework: a mutation swapping ${REPO}
@@ -5275,11 +5283,29 @@ describe('qwen-autofix workflow', () => {
     // A genuine content conflict aborts cleanly and falls through to the
     // existing failure path — the salvage must never overwrite either side.
     expect(pushAndReportStep).toContain('git merge --abort || true');
+    expect(pushAndReportStep).toContain(
+      'the commits pushed during the run conflict with this fix',
+    );
     // The salvage is disclosed in the round report: the round's verification
-    // ran before the merge, so mid-run commits deserve a re-check.
+    // ran before the merge, so mid-run commits deserve a re-check. The
+    // structure pin keeps the warning conditional — making it unconditional
+    // (printed every round) passes presence-only checks but is the exact
+    // false-disclosure this head's own fix commit closes from the other side.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\{PUSH_RACE_MERGED\}" == .true. \]\]; then\n\s+echo\n\s+echo "⚠️ The branch received new commits/,
+    );
     expect(pushAndReportStep).toContain('PUSH_RACE_MERGED');
     expect(pushAndReportStep).toContain('verification predates that merge');
     // Bounded: the loop gives up after the last attempt instead of spinning.
+    // The structural pin connects the guard value to the error exit — a
+    // mutation of == 3 to == 4 survives presence-only checks: the loop
+    // range string is unchanged and the error message still exists as dead
+    // code, but execution falls through to the report section after 3
+    // failed attempts and posts a round-complete comment as if the push
+    // succeeded.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\{push_attempt\}" == 3 \]\]; then\n\s+echo "::error::push rejected/,
+    );
     expect(pushAndReportStep).toContain(
       'push rejected ${push_attempt} times; giving up',
     );
