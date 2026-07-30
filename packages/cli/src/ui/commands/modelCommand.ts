@@ -536,7 +536,7 @@ export const modelCommand: SlashCommand = {
 
       const availableModels = config
         .getAllConfiguredModels()
-        .filter((m) => !m.fastOnly && !m.imageOnly);
+        .filter((m) => !m.fastOnly && !m.imageOnly && !m.visionOnly);
       const matches = availableModels.filter((model) => model.id === modelName);
       if (matches.length === 0) {
         return {

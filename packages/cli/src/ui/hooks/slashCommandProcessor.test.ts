@@ -637,6 +637,25 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should handle "dialog: compaction-model" action', async () => {
+      const command = createTestCommand({
+        name: 'compactionmodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'compaction-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/compactionmodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        compactionModelMode: true,
+      });
+    });
+
     it('awaits direct resume session switching before returning handled', async () => {
       const actions = createMockActions();
       let resolveResume: (() => void) | undefined;
