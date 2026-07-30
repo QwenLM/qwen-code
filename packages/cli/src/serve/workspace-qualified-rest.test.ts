@@ -1280,6 +1280,7 @@ describe('workspace-qualified core REST', () => {
       h.workspaceRegistry.add({
         workspaceId: lateId,
         workspaceCwd: lateCwd,
+        sessionRuntimeBaseDir: path.join(lateCwd, '.runtime'),
         primary: false,
         trusted: true,
         env: { mode: 'parent-process', overlayKeys: [] },
