@@ -365,6 +365,21 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # Last resort when passwordless sudo is unavailable: rename
+          # unwriteable dirs aside.  rename() only needs write permission on
+          # the PARENT ($GITHUB_WORKSPACE, owned by the runner user), not on
+          # the dir itself, so this works even for root-owned directories.
+          for stale in .qwen .git; do
+            target="$GITHUB_WORKSPACE/$stale"
+            [ -d "$target" ] && [ ! -L "$target" ] || continue
+            if touch "$target/.probe" 2>/dev/null; then
+              rm -f "$target/.probe"
+              continue
+            fi
+            mv "$target" "${target}.stale.$$" 2>/dev/null \
+              && echo "::warning::renamed unwriteable ${stale} aside to ${stale}.stale.$$" \
+              || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
+          done
 
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),

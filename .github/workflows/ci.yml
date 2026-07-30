@@ -151,18 +151,43 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
-      # Pre-checkout cleanup: remove .qwen/ left by a previous job on a
-      # reused runner. Without this, git checkout fails with "unable to
-      # unlink old '.qwen/...': Permission denied" when the stale files
-      # have restrictive permissions (e.g. from a verify/tmux job that
-      # ran chmod -R a-w .qwen/).
+      # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
+      # verify) may leave root-owned, read-only files in the workspace.
+      # Restore ownership first; when passwordless sudo is unavailable, rename
+      # unwriteable dirs aside — rename() only needs write on the parent
+      # ($GITHUB_WORKSPACE, owned by the runner user), not on the dir itself.
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          for stale in .qwen .git; do
+            target="$GITHUB_WORKSPACE/$stale"
+            [ -d "$target" ] && [ ! -L "$target" ] || continue
+            if touch "$target/.probe" 2>/dev/null; then
+              rm -f "$target/.probe"
+              continue
+            fi
+            mv "$target" "${target}.stale.$$" 2>/dev/null \
+              && echo "::warning::renamed unwriteable ${stale} aside to ${stale}.stale.$$" \
+              || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
+          done
+
+      # Remove .qwen/ (and any .qwen.stale.* renamed aside above) so
+      # actions/checkout doesn't trip on restrictive permissions.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          if [ -d .qwen ]; then
-            chmod -R u+w .qwen 2>/dev/null || true
-            rm -rf .qwen
-          fi
+          for d in .qwen .qwen.stale.*; do
+            [ -d "$d" ] || continue
+            chmod -R u+w "$d" 2>/dev/null || true
+            rm -rf "$d" 2>/dev/null || true
+          done
 
 
       - name: 'Checkout'
