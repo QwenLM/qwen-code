@@ -2106,7 +2106,12 @@ describe('AnthropicContentConverter', () => {
           model: 'models/test',
           contents: [
             { role: 'user', parts: [{ text: 'Hi' }] },
-            { role: 'model', parts: [{ text: '' }] },
+            // Whitespace-only, not empty: processContent only emits a text
+            // block when part.text is truthy, so an actually-empty string
+            // never reaches this pass at all (the fixture would be
+            // vacuous). isEmptyAssistantMessage's `.trim()` check is what
+            // this test needs to exercise.
+            { role: 'model', parts: [{ text: '   ' }] },
           ],
         },
         { stripTrailingAssistantPrefill: true, enableCacheControl: false },

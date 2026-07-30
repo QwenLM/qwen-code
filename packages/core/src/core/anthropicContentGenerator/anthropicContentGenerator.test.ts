@@ -2329,6 +2329,99 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    describe('assistant-turn prefill stripping (generator wiring)', () => {
+      // stripTrailingAssistantPrefill is derived from
+      // modelSupportsAdaptiveThinking() (anthropicContentGenerator.ts),
+      // the same 4.6+ gate used for the thinking shape. These pin that the
+      // generator actually turns the converter option on/off per model,
+      // not just that the converter behaves correctly when told to.
+      it('strips a trailing assistant turn and appends a synthetic user turn on claude-opus-4-6', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-6',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-6',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        // enableCacheControl defaults to on at the generator level (unlike
+        // the converter-level tests above, which pass it explicitly), so
+        // the synthetic turn also picks up the same cache_control the
+        // trailing user message would otherwise carry.
+        expect(messages[messages.length - 1]).toEqual({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Continue.',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        });
+      });
+
+      it('leaves a trailing assistant turn untouched on claude-opus-4-5 (pre-4.6)', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-opus-4-5',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-4-5',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.anthropic.com',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'Sure, here you go.' }] },
+          ],
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        const messages = (anthropicRequest as { messages: unknown[] }).messages;
+        expect(messages[messages.length - 1]).toEqual({
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Sure, here you go.' }],
+        });
+      });
+    });
+
     it('omits thinking when request.config.thinkingConfig.includeThoughts is false', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue({
