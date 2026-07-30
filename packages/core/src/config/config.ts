@@ -190,7 +190,9 @@ import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from './clearContextDefaults.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import {
+  registerSessionModel,
   registerSessionProjectDir,
+  unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
@@ -250,6 +252,9 @@ const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+
+/** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
+const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 
 // Default `tools.toolSearch.threshold` (percent of the context window):
 // mirrors the settings-schema default in packages/cli.
@@ -1571,6 +1576,7 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 // processes to claim their own (they start with a fresh module scope).
 let sessionEnvClaimed = false;
 let projectDirEnvClaimed = false;
+let modelEnvClaimed = false;
 
 function resolveSensitiveSpanAttributeMaxLength(
   value: number | undefined,
@@ -1857,6 +1863,9 @@ export class Config {
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
+  private activeTodoReminders = new Map<string, string>();
+  private activeTodoWorkChainOwners = new Map<string, string>();
+  private activeTodoReminderTurns = new Map<string, number>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -2016,6 +2025,10 @@ export class Config {
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
+  // (first in this process); gates the global write in publishModelEnv so no
+  // other instance updates it. Per-session publishing is not gated on it.
+  private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
@@ -2341,6 +2354,20 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+
+    // Publish the active model id for shell subprocesses. Every Config
+    // publishes its own session's model — publishModelEnv registers it per
+    // session, like the project dir above, so daemon-mode subprocesses read
+    // theirs, not the first session's. The process-global slot is claimed
+    // first-writer-wins, as QWEN_CODE_SESSION_ID is, so a throwaway Config
+    // never clobbers the live session's global value. Done here rather than
+    // alongside the session ID because the value comes from the ModelsConfig
+    // just constructed.
+    if (!modelEnvClaimed && process.env) {
+      modelEnvClaimed = true;
+      this.ownsModelEnvSlot = true;
+    }
+    this.publishModelEnv();
 
     if (
       this.telemetrySettings.enabled &&
@@ -3561,6 +3588,9 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+    // Auth flows call refreshAuth directly — no model-change notification
+    // fires — and the resolved model can differ from the pre-auth one.
+    this.publishModelEnv();
 
     // Re-apply the user's reasoning effort that the provider sync above wiped.
     if (priorReasoningEffort) {
@@ -3666,8 +3696,18 @@ export class Config {
     if (process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
+    // Re-key the per-session model registry onto the new session id. Without
+    // this the entry stays keyed on the outgoing id, so after /clear (or
+    // /reset, /new, /resume) a non-owner Config's subprocesses resolve the
+    // model by the new id, miss, and fall back to another session's value.
+    // Drop the orphaned entry too — shutdown only unregisters the current id.
+    unregisterSessionModel(previousSessionId);
+    this.publishModelEnv();
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
+    this.getOwnActiveTodoReminders().clear();
+    this.getOwnActiveTodoWorkChainOwners().clear();
+    this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -3852,9 +3892,30 @@ export class Config {
   }
 
   private notifyModelChangeListeners(): void {
+    this.publishModelEnv();
     const model = this.getModel();
     for (const listener of this.modelChangeListeners) {
       listener(model);
+    }
+  }
+
+  // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
+  // has no other authoritative source: settings files miss /model switches and
+  // describe the wrong home under QWEN_HOME isolation. Published per session —
+  // every Config writes its OWN session's model, keyed on sessionId exactly
+  // like the project dir, so in daemon mode each session's subprocesses read
+  // theirs, not the first session's (a process-global slot alone would hold
+  // whichever session booted first). The process-global slot is the
+  // single-session CLI fallback, gated on the claiming instance so a throwaway
+  // Config never clobbers the live session's value there.
+  private publishModelEnv(): void {
+    if (!process.env) {
+      return;
+    }
+    const model = this.getModel();
+    registerSessionModel(this.sessionId, model);
+    if (this.ownsModelEnvSlot) {
+      process.env['QWEN_CODE_MODEL'] = model;
     }
   }
 
@@ -4746,6 +4807,10 @@ export class Config {
         unregisterSessionProjectDir(this.sessionId);
         this.sessionProjectDirRegistered = false;
       }
+      // Drop this session's model registry entry. It is registered at
+      // construction (publishModelEnv), so it is released on every shutdown —
+      // same daemon-mode leak rationale as the project dir above.
+      unregisterSessionModel(this.sessionId);
 
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.goalTurnHostUnbind?.();
@@ -4767,6 +4832,7 @@ export class Config {
       this.backgroundTaskRegistry.abortAll();
       this.monitorRegistry.abortAll({ notify: false });
       this.backgroundShellRegistry.abortAll();
+      this.workflowRunRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
@@ -6083,6 +6149,122 @@ export class Config {
 
   getGeminiClient(): GeminiClient {
     return this.geminiClient;
+  }
+
+  private getOwnActiveTodoReminders(): Map<string, string> {
+    if (!Object.prototype.hasOwnProperty.call(this, 'activeTodoReminders')) {
+      this.activeTodoReminders = new Map();
+    }
+    return this.activeTodoReminders;
+  }
+
+  private getOwnActiveTodoWorkChainOwners(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoWorkChainOwners')
+    ) {
+      this.activeTodoWorkChainOwners = new Map();
+    }
+    return this.activeTodoWorkChainOwners;
+  }
+
+  private getOwnActiveTodoReminderTurns(): Map<string, number> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoReminderTurns')
+    ) {
+      this.activeTodoReminderTurns = new Map();
+    }
+    return this.activeTodoReminderTurns;
+  }
+
+  getActiveTodoWorkChainOwner(
+    promptId: string,
+    fallbackOwner = promptId,
+  ): string {
+    return (
+      this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? fallbackOwner
+    );
+  }
+
+  getActiveTodoReminder(promptId: string): string | undefined {
+    return this.getOwnActiveTodoReminders().get(
+      this.getActiveTodoWorkChainOwner(promptId),
+    );
+  }
+
+  /**
+   * Reads the reminder for injection, re-issuing it only every
+   * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
+   * chat history permanently, so per-turn injection would grow the context
+   * linearly with tool turns. `force` is for turn-start injections (retry /
+   * related automatic turns), which always need the context and reset the
+   * cadence.
+   */
+  takeActiveTodoReminder(promptId: string, force = false): string | undefined {
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    const reminder = this.getOwnActiveTodoReminders().get(owner);
+    if (!reminder) return undefined;
+    const turns = this.getOwnActiveTodoReminderTurns();
+    const elapsed = (turns.get(owner) ?? 0) + 1;
+    if (!force && elapsed < ACTIVE_TODO_REMINDER_REFRESH_TURNS) {
+      turns.set(owner, elapsed);
+      return undefined;
+    }
+    turns.set(owner, 0);
+    return reminder;
+  }
+
+  setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    if (reminder) {
+      reminders.set(owner, reminder);
+      // The todo_write result itself just presented the full state.
+      this.getOwnActiveTodoReminderTurns().set(owner, 0);
+    } else {
+      reminders.delete(owner);
+      this.getOwnActiveTodoReminderTurns().delete(owner);
+    }
+  }
+
+  startActiveTodoWorkChain(promptId: string, continuedFrom?: string): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    if (!continuedFrom) {
+      reminders.clear();
+      owners.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
+      owners.set(promptId, promptId);
+      return;
+    }
+
+    const owner = this.getActiveTodoWorkChainOwner(continuedFrom);
+    for (const reminderOwner of reminders.keys()) {
+      if (reminderOwner !== owner) reminders.delete(reminderOwner);
+    }
+    owners.clear();
+    owners.set(promptId, owner);
+  }
+
+  startAutomaticActiveTodoWorkChain(
+    promptId: string,
+    continuedFrom?: string,
+  ): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = continuedFrom
+      ? this.getActiveTodoWorkChainOwner(continuedFrom)
+      : promptId;
+    owners.set(promptId, owner);
+    if (owner === promptId) reminders.delete(owner);
+  }
+
+  endAutomaticActiveTodoWorkChain(promptId: string): void {
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    owners.delete(promptId);
+    if (![...owners.values()].includes(owner)) {
+      this.getOwnActiveTodoReminders().delete(owner);
+    }
   }
 
   /**

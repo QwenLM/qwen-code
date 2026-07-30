@@ -1547,7 +1547,7 @@ describe('runNonInteractive', () => {
       4,
       [{ text: 'drain image a' }, { text: 'drain image b' }],
       expect.any(AbortSignal),
-      'prompt-drain',
+      'prompt-drain/automatic/3',
       { type: SendMessageType.ToolResult, modelOverride: first },
     );
   });
@@ -2275,6 +2275,12 @@ describe('runNonInteractive', () => {
     expect(exitCode).toBe(1);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    const drainPromptIds = mockGeminiClient.sendMessageStream.mock.calls
+      .slice(1)
+      .map((call) => call[2]);
+    expect(new Set(drainPromptIds)).toEqual(
+      new Set(['prompt-id-drain-dup-loop/automatic/2']),
+    );
 
     const duplicateParts = mockGeminiClient.sendMessageStream.mock
       .calls[2][0] as Part[];
@@ -3468,7 +3474,7 @@ describe('runNonInteractive', () => {
       2,
       [{ text: notificationXml }],
       expect.any(AbortSignal),
-      'prompt-monitor',
+      'prompt-monitor/automatic/2',
       {
         type: SendMessageType.Notification,
         modelOverride: undefined,
@@ -3504,6 +3510,111 @@ describe('runNonInteractive', () => {
       type: 'result',
       is_error: false,
     });
+  });
+
+  it('keeps notifications from different Todo work chains in separate batches', async () => {
+    setupMetricsMock();
+
+    const firstNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    const secondNotificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_2</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #2.</summary>\n' +
+      '<result>also ready</result>\n' +
+      '</task-notification>';
+
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (!cb) {
+        return;
+      }
+      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+        todoWorkChainId: 'chain-1',
+      });
+      cb('Monitor "build" event #1: ready', secondNotificationXml, {
+        monitorId: 'mon_2',
+        toolUseId: 'tool_mon_2',
+        status: 'running',
+        eventCount: 1,
+        todoWorkChainId: 'chain-2',
+      });
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Started.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'First notification.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Second notification.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Watch the logs',
+      'prompt-monitor-work-chains',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: firstNotificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor-work-chains/automatic/2',
+      expect.objectContaining({
+        todoWorkChainId: 'chain-1',
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: secondNotificationXml }],
+      expect.any(AbortSignal),
+      'prompt-monitor-work-chains/automatic/3',
+      expect.objectContaining({
+        todoWorkChainId: 'chain-2',
+      }),
+    );
   });
 
   it.skip('should emit a single user envelope when userEnvelope is provided', async () => {

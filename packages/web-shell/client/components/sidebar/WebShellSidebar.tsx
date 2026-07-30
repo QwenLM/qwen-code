@@ -92,6 +92,7 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
@@ -563,6 +564,9 @@ export function WebShellSidebar({
   const organizationEnabled = Boolean(
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const sourceMetadataEnabled = Boolean(
+    connection.capabilities?.features?.includes('session_source_metadata'),
+  );
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
@@ -604,6 +608,9 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    ...(sourceMetadataEnabled
+      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+      : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -624,6 +631,9 @@ export function WebShellSidebar({
       enabled: organizationEnabled && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
+      ...(sourceMetadataEnabled
+        ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+        : {}),
       view: 'organized',
       group: 'pinned',
     });
@@ -647,6 +657,9 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    ...(sourceMetadataEnabled
+      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+      : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -1053,6 +1066,9 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'active',
+            ...(sourceMetadataEnabled
+              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+              : {}),
             view: 'organized',
             group: 'pinned',
           });
@@ -1075,6 +1091,7 @@ export function WebShellSidebar({
   }, [
     displayedWorkspaces,
     organizationEnabled,
+    sourceMetadataEnabled,
     workspace.client,
     workspaceSessionsReloadToken,
   ]);
@@ -1126,6 +1143,9 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'archived',
+            ...(sourceMetadataEnabled
+              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+              : {}),
             ...(organizationEnabled
               ? { view: 'organized' as const, group: 'all' }
               : {}),
@@ -1166,6 +1186,7 @@ export function WebShellSidebar({
     organizationEnabled,
     secondaryArchivedReloadToken,
     sessionArchiveEnabled,
+    sourceMetadataEnabled,
     workspace.client,
     workspaceQualifiedRestCoreEnabled,
     workspaceSessionsReloadToken,
@@ -4175,6 +4196,7 @@ export function WebShellSidebar({
                             noSessionsLabel={t('sidebar.noSessions')}
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
+                            sourceMetadataEnabled={sourceMetadataEnabled}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
                             onRenameGroup={
                               canOrganizeWorkspace(ws.cwd)

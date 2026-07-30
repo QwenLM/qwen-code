@@ -277,6 +277,26 @@ The deterministic halves of the pipeline — argument parsing (`qwen review pars
 
 Every run ends with one machine-readable line (`Review complete: <target> — <disposition>`), so scripts and CI wrappers can detect completion and outcome with a single `^Review complete: ` match.
 
+## Headless runs (`qwen review run`)
+
+`/review` is interactive. When a script or CI job needs to run a review and act on its outcome, use the headless wrapper:
+
+```bash
+qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--quiet]
+```
+
+`target` is a PR number, a PR URL, or a file path; omit it to review the local working tree. The command runs this build's own CLI non-interactively (with stdin closed, so slash-command detection survives), streams the child's progress to **stderr**, and prints the verdict to **stdout** — or, with `--json`, the full result object. The verdict is read from the artifact `compose-review` writes (the same JSON the skill treats as the verdict authority), never parsed from the model's prose.
+
+The exit code is the contract a gate should read:
+
+| Exit | Meaning                                                                                           |
+| ---- | ------------------------------------------------------------------------------------------------- |
+| `0`  | The review completed (whatever it decided)                                                        |
+| `1`  | It never reached a verdict — the child failed, timed out, or left no composed artifact            |
+| `3`  | It completed with `REQUEST_CHANGES` **and** `--fail-on request-changes` was set (opt-in blocking) |
+
+`3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
+
 ## Cross-file Impact Analysis
 
 A dedicated cross-file tracer (Agent 1c) owns this walk end-to-end. When code changes modify exported functions, classes, or interfaces, it searches for all callers and checks compatibility:

@@ -115,6 +115,30 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+
+export interface WebShellChatHeaderOptions {
+  /** Built-in header actions to show. Defaults to all actions. */
+  items?: readonly WebShellChatHeaderItem[];
+}
+
+export type WebShellRightPanelItem = 'review' | 'sideTask';
+
+export interface WebShellRightPanelOptions {
+  /** Empty-state actions to show. Defaults to all actions. */
+  items?: readonly WebShellRightPanelItem[];
+}
+
+export type WebShellEnvironmentPanelItem =
+  | 'environment'
+  | 'subagents'
+  | 'backgroundTasks';
+
+export interface WebShellEnvironmentPanelOptions {
+  /** Sections to show. Defaults to all sections. */
+  items?: readonly WebShellEnvironmentPanelItem[];
+}
+
 /** Context passed to the chat header renderer. */
 export interface ChatHeaderRenderInfo {
   /** Current session id, if connected. */
@@ -123,11 +147,21 @@ export interface ChatHeaderRenderInfo {
   sessionName?: string;
   /** Workspace cwd for the current session. */
   workspaceCwd?: string;
+  /** Header actions enabled by the host. */
+  items: readonly WebShellChatHeaderItem[];
+  /** Whether the environment panel is currently open. */
+  environmentPanelOpen: boolean;
+  /** Whether the right extension panel is currently open. */
+  rightPanelOpen: boolean;
+  /** Opens or closes the environment panel. */
+  onEnvironmentPanelOpenChange: (open: boolean) => void;
+  /** Opens or closes the right extension panel. */
+  onRightPanelOpenChange: (open: boolean) => void;
 }
 
 /**
- * Custom renderer shown at the top of the chat view, above the message list.
- * Only rendered when a session is active (not in the welcome/empty state).
+ * Replaces the complete persistent chat header. Only rendered when a session
+ * is active (not in the welcome/empty state).
  */
 export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 

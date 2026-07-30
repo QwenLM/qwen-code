@@ -1,5 +1,6 @@
 .tableShell {
   position: relative;
+  --toolbar-height: 38px;
   max-width: 100%;
   margin: 8px 0;
   overflow: visible;
@@ -52,7 +53,7 @@
   gap: 8px;
   align-items: center;
   box-sizing: border-box;
-  height: 38px;
+  height: var(--toolbar-height);
   padding: 4px 10px;
   border-bottom: 1px solid var(--border);
   border-radius: 14px 14px 0 0;
@@ -128,6 +129,14 @@
   font-size: 12px;
 }
 
+.densityTrigger[data-state='open'] {
+  border-color: transparent;
+  box-shadow: none;
+  outline: none;
+  --tw-ring-color: transparent;
+  --tw-ring-shadow: 0 0 #0000;
+}
+
 .densityTrigger svg,
 .densityMenu svg {
   width: 14px;
@@ -160,6 +169,7 @@
 }
 
 .scroller {
+  position: relative;
   container: table-scroller / inline-size;
   max-width: 100%;
   max-height: min(75vh, 720px);
@@ -168,29 +178,60 @@
   outline: none;
 }
 
-.scrollerWithDetail {
-  max-height: none;
-}
-
 .scroller:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: -2px;
 }
 
+.frozenColumnShadow {
+  position: absolute;
+  top: var(--toolbar-height);
+  bottom: 0;
+  z-index: 9;
+  width: 14px;
+  pointer-events: none;
+  transform: translateX(-1px);
+  background: linear-gradient(90deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
+}
+
 .table {
   --action-column-width: 40px;
 
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   font-size: 13px;
+  table-layout: fixed;
+}
+
+.actionColumn {
+  width: var(--action-column-width);
+  min-width: var(--action-column-width);
+  max-width: var(--action-column-width);
+}
+
+.fillerColumn {
+  width: auto;
 }
 
 .headerCell,
 .cell {
   box-sizing: border-box;
   border-bottom: 1px solid var(--border);
+}
+
+.fillerHeaderCell,
+.fillerCell {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+.fillerHeaderCell {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 40px;
 }
 
 .headerCell {
@@ -368,6 +409,10 @@ tr:hover .cell {
   background: var(--subtle-bg-strong);
 }
 
+tr:hover .fillerCell {
+  background: var(--subtle-bg-strong);
+}
+
 .selectedCell,
 tr:hover .selectedCell {
   background: color-mix(in srgb, var(--agent-blue-500) 20%, transparent);
@@ -410,9 +455,7 @@ tr:hover .selectedCell {
 
 .hasFrozenColumn .frozenHeaderCell,
 .hasFrozenColumn .frozenCell {
-  box-shadow:
-    8px 0 14px -12px rgb(0 0 0 / 55%),
-    inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
+  box-shadow: inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
 }
 
 .stickyActionHeaderCell,
