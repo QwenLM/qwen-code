@@ -13,6 +13,7 @@ import {
 } from './types.js';
 import {
   getProjectSummaryPrompt,
+  isSubpath,
   runSideQuery,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemSummary } from '../types.js';
@@ -135,58 +136,63 @@ export const summaryCommand: SlashCommand = {
       return result.text;
     };
 
-    const saveSummaryToDisk = async (
-      markdownSummary: string,
-    ): Promise<{
+    const resolveSummaryTarget = async (): Promise<{
+      summaryPath: string;
       filePathForDisplay: string;
-      fullPath: string;
     }> => {
       const projectRoot = config.getProjectRoot();
       const customPath = args?.trim();
 
-      let summaryPath: string;
-      let filePathForDisplay: string;
-
-      if (customPath) {
-        // Resolve relative to project root
-        const resolved = path.isAbsolute(customPath)
-          ? customPath
-          : path.resolve(projectRoot, customPath);
-
-        // If the path ends with a separator or is an existing directory,
-        // append the default filename
-        const isDir =
-          customPath.endsWith('/') ||
-          customPath.endsWith(path.sep) ||
-          (await fsPromises
-            .stat(resolved)
-            .then((s) => s.isDirectory())
-            .catch(() => false));
-
-        if (isDir) {
-          summaryPath = path.join(resolved, 'PROJECT_SUMMARY.md');
-        } else {
-          summaryPath = resolved;
-        }
-
-        // Ensure parent directory exists
-        await fsPromises.mkdir(path.dirname(summaryPath), { recursive: true });
-
-        filePathForDisplay = path.isAbsolute(customPath)
-          ? summaryPath
-          : path.relative(projectRoot, summaryPath);
-      } else {
-        // Default: save to .qwen/PROJECT_SUMMARY.md
+      if (!customPath) {
         const qwenDir = path.join(projectRoot, '.qwen');
-        try {
-          await fsPromises.mkdir(qwenDir, { recursive: true });
-        } catch (_err) {
-          // Directory might already exist, ignore error
-        }
-        summaryPath = path.join(qwenDir, 'PROJECT_SUMMARY.md');
-        filePathForDisplay = '.qwen/PROJECT_SUMMARY.md';
+        await fsPromises.mkdir(qwenDir, { recursive: true, mode: 0o700 });
+        return {
+          summaryPath: path.join(qwenDir, 'PROJECT_SUMMARY.md'),
+          filePathForDisplay: '.qwen/PROJECT_SUMMARY.md',
+        };
       }
 
+      const resolved = path.isAbsolute(customPath)
+        ? customPath
+        : path.resolve(projectRoot, customPath);
+
+      if (!isSubpath(projectRoot, resolved)) {
+        throw new Error(t('Summary path must be within the project root.'));
+      }
+
+      const isDir =
+        customPath.endsWith('/') ||
+        customPath.endsWith(path.sep) ||
+        (await fsPromises
+          .stat(resolved)
+          .then((s) => s.isDirectory())
+          .catch(() => false));
+
+      const summaryPath = isDir
+        ? path.join(resolved, 'PROJECT_SUMMARY.md')
+        : resolved;
+
+      await fsPromises.mkdir(path.dirname(summaryPath), {
+        recursive: true,
+        mode: 0o700,
+      });
+
+      const filePathForDisplay = (
+        path.isAbsolute(customPath)
+          ? summaryPath
+          : path.relative(projectRoot, summaryPath)
+      ).replaceAll(path.sep, '/');
+
+      return { summaryPath, filePathForDisplay };
+    };
+
+    const saveSummaryToDisk = async (
+      markdownSummary: string,
+      target: { summaryPath: string; filePathForDisplay: string },
+    ): Promise<{
+      filePathForDisplay: string;
+      fullPath: string;
+    }> => {
       const summaryContent = `${markdownSummary}
 
 ---
@@ -195,11 +201,11 @@ export const summaryCommand: SlashCommand = {
 **Update time**: ${new Date().toISOString()}
 `;
 
-      await fsPromises.writeFile(summaryPath, summaryContent, 'utf8');
+      await fsPromises.writeFile(target.summaryPath, summaryContent, 'utf8');
 
       return {
-        filePathForDisplay,
-        fullPath: summaryPath,
+        filePathForDisplay: target.filePathForDisplay,
+        fullPath: target.summaryPath,
       };
     };
 
@@ -288,13 +294,17 @@ export const summaryCommand: SlashCommand = {
       markdownSummary: string;
       filePathForDisplay: string;
     }> => {
+      const target = await resolveSummaryTarget();
       emitInteractivePending('generating');
       const markdownSummary = await generateSummaryMarkdown(history);
       if (abortSignal?.aborted) {
         throw new DOMException('Summary generation cancelled.', 'AbortError');
       }
       emitInteractivePending('saving');
-      const { filePathForDisplay } = await saveSummaryToDisk(markdownSummary);
+      const { filePathForDisplay } = await saveSummaryToDisk(
+        markdownSummary,
+        target,
+      );
       completeInteractive(filePathForDisplay);
       return { markdownSummary, filePathForDisplay };
     };

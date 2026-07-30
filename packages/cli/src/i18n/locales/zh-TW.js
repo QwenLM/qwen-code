@@ -1302,6 +1302,7 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，請等待上一個請求完成',
   'No conversation found to summarize.': '未找到要總結的對話',
+  'Summary path must be within the project root.': '摘要路徑必須在專案根目錄內',
   'Failed to generate project context summary: {{error}}':
     '生成項目上下文摘要失敗：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

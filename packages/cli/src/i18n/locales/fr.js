@@ -1126,6 +1126,8 @@ export default {
     'Génération de résumé déjà en cours, attendez que la demande précédente se termine',
   'No conversation found to summarize.':
     'Aucune conversation trouvée à résumer.',
+  'Summary path must be within the project root.':
+    'Le chemin du résumé doit se trouver dans la racine du projet.',
   'Failed to generate project context summary: {{error}}':
     'Échec de la génération du résumé du contexte du projet : {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

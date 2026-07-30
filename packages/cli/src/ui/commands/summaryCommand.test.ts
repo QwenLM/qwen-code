@@ -12,10 +12,15 @@ import { summaryCommand } from './summaryCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  getProjectSummaryPrompt: () => 'summary prompt',
-  runSideQuery: vi.fn(async () => ({ text: 'SUMMARY BODY' })),
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    getProjectSummaryPrompt: () => 'summary prompt',
+    runSideQuery: vi.fn(async () => ({ text: 'SUMMARY BODY' })),
+  };
+});
 
 const makeContext = (projectRoot: string): CommandContext => {
   const chat = {
@@ -94,7 +99,7 @@ describe('summaryCommand custom export path', () => {
       await fileExists(path.join(projectRoot, 'docs', 'PROJECT_SUMMARY.md')),
     ).toBe(true);
     expect(await fileExists(path.join(projectRoot, 'docs'))).toBe(false);
-    expect(result.content).toContain(path.join('docs', 'PROJECT_SUMMARY.md'));
+    expect(result.content).toContain('docs/PROJECT_SUMMARY.md');
     expect(result.content).not.toContain(projectRoot);
   });
 
@@ -106,9 +111,7 @@ describe('summaryCommand custom export path', () => {
         path.join(projectRoot, 'existingdir', 'PROJECT_SUMMARY.md'),
       ),
     ).toBe(true);
-    expect(result.content).toContain(
-      path.join('existingdir', 'PROJECT_SUMMARY.md'),
-    );
+    expect(result.content).toContain('existingdir/PROJECT_SUMMARY.md');
     expect(result.content).not.toContain(projectRoot);
   });
 
@@ -117,5 +120,17 @@ describe('summaryCommand custom export path', () => {
     const result = await run(target);
     expect(await fileExists(target)).toBe(true);
     expect(result.content).toContain(target);
+  });
+
+  it('rejects a relative path that escapes the project root', async () => {
+    const result = await run('../outside/leak.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('within the project root');
+  });
+
+  it('rejects an absolute path outside the project root', async () => {
+    const result = await run('/tmp/summary-escape/leak.md');
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+    expect(result.content).toContain('within the project root');
   });
 });

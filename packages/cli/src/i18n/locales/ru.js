@@ -1008,6 +1008,8 @@ export default {
     'Генерация сводки уже выполняется, дождитесь завершения предыдущего запроса',
   'No conversation found to summarize.':
     'Не найдено диалогов для создания сводки.',
+  'Summary path must be within the project root.':
+    'Путь сводки должен находиться в корне проекта.',
   'Failed to generate project context summary: {{error}}':
     'Не удалось сгенерировать сводку контекста проекта: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

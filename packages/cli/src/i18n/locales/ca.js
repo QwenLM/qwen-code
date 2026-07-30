@@ -1120,6 +1120,8 @@ export default {
     "Ja s'està generant el resum, espereu que acabi la sol·licitud anterior",
   'No conversation found to summarize.':
     "No s'ha trobat cap conversa per resumir.",
+  'Summary path must be within the project root.':
+    'El camí del resum ha de ser dins de la arrel del projecte.',
   'Failed to generate project context summary: {{error}}':
     'Error en generar el resum del context del projecte: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':

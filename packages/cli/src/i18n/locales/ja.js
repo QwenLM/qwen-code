@@ -766,6 +766,8 @@ export default {
   'Already generating summary, wait for previous request to complete':
     'サマリー生成中です。前のリクエストの完了をお待ちください',
   'No conversation found to summarize.': '要約する会話が見つかりません',
+  'Summary path must be within the project root.':
+    'サマリーパスはプロジェクトルート内にある必要があります',
   'Failed to generate project context summary: {{error}}':
     'プロジェクトコンテキストサマリーの生成に失敗: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
