@@ -54,6 +54,10 @@ const AUTOFIX_PROMPT_PATTERN =
   /^autofix tick repo=([^\s]+) pr=([1-9]\d*) mode=(propose-only|auto-commit|auto-push) rounds=(\d+) infra-reruns=(\d+)$/;
 const OWNER_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
+export function isAutofixCronJob(job: Pick<CronJob, 'prompt'>): boolean {
+  return job.prompt.startsWith('autofix tick');
+}
+
 export function parseAutofixWatcher(job: CronJob): AutofixWatcher | null {
   if (!job.recurring || job.cronExpr !== AUTOFIX_CRON) return null;
   const match = AUTOFIX_PROMPT_PATTERN.exec(job.prompt);
@@ -235,7 +239,7 @@ export async function resolveAutofixCronPrompt(
   config: Config,
   job: Pick<CronJob, 'id' | 'prompt' | 'recurring' | 'cronExpr'>,
 ): Promise<ResolvedAutofixCronPrompt | null> {
-  if (!job.prompt.startsWith('autofix tick')) return null;
+  if (!isAutofixCronJob(job)) return null;
   try {
     const watcher = parseAutofixWatcher(job as CronJob);
     if (!watcher || !job.id) {

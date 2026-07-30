@@ -678,9 +678,17 @@ describe('BundledSkillLoader', () => {
         },
         {
           id: 'job-2',
+          cronExpr: '*/5 * * * *',
+          prompt: 'autofix tick mode=auto-push',
+          recurring: true,
+          createdAt: 1,
+          expiresAt: 2,
+          jitterMs: 0,
+        },
+        {
+          id: 'ordinary-job',
           cronExpr: '*/10 * * * *',
-          prompt:
-            'autofix tick repo=other/repo pr=99 mode=auto-push rounds=1 infra-reruns=0',
+          prompt: 'check the release status',
           recurring: true,
           createdAt: 1,
           expiresAt: 2,
@@ -693,6 +701,7 @@ describe('BundledSkillLoader', () => {
       expect(resolveCurrentAutofixPullRequest).not.toHaveBeenCalled();
       expect(scheduler.delete).toHaveBeenCalledTimes(2);
       expect(scheduler.list).toHaveBeenCalledTimes(2);
+      expect(scheduler.delete).not.toHaveBeenCalledWith('ordinary-job');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',

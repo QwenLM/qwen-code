@@ -15,8 +15,8 @@ import { dirname } from 'node:path';
 import {
   AUTOFIX_CRON,
   AUTOFIX_USAGE,
-  autofixWatchers,
   buildAutofixImmediatePrompt,
+  isAutofixCronJob,
   formatAutofixTick,
   matchingAutofixWatchers,
   resolveCurrentAutofixPullRequest,
@@ -120,26 +120,26 @@ export class BundledSkillLoader implements ICommandLoader {
           }
           if (match[1] === 'off') {
             const scheduler = this.config!.getCronScheduler();
-            const watchers = autofixWatchers(scheduler.list());
+            const jobs = scheduler.list().filter(isAutofixCronJob);
             const failures: string[] = [];
-            for (const watcher of watchers) {
+            for (const job of jobs) {
               try {
-                if (!(await scheduler.delete(watcher.job.id))) {
-                  failures.push(watcher.job.id);
+                if (!(await scheduler.delete(job.id))) {
+                  failures.push(job.id);
                 }
               } catch {
-                failures.push(watcher.job.id);
+                failures.push(job.id);
               }
             }
-            const remaining = autofixWatchers(scheduler.list());
+            const remaining = scheduler.list().filter(isAutofixCronJob);
             return remaining.length === 0 && failures.length === 0
               ? {
                   type: 'message',
                   messageType: 'info',
                   content:
-                    watchers.length === 0
+                    jobs.length === 0
                       ? 'Autofix watcher is already off.'
-                      : `Disabled ${watchers.length} Autofix watcher${watchers.length === 1 ? '' : 's'}.`,
+                      : `Disabled ${jobs.length} Autofix watcher${jobs.length === 1 ? '' : 's'}.`,
                 }
               : {
                   type: 'message',
@@ -147,7 +147,7 @@ export class BundledSkillLoader implements ICommandLoader {
                   content: `Autofix watcher could not be fully disabled. Failed jobs: ${[
                     ...new Set([
                       ...failures,
-                      ...remaining.map((watcher) => watcher.job.id),
+                      ...remaining.map((job) => job.id),
                     ]),
                   ].join(', ')}`,
                 };
