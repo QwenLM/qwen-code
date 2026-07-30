@@ -825,6 +825,61 @@ describe('selectMutants', () => {
     ]);
   });
 
+  it('keeps outer-template text after a nested template whose text holds a }', () => {
+    // The #8020 trigger. A `}` in the nested template's TEXT must not read as
+    // the end of the outer interpolation: with a depth counter it drained the
+    // depth to zero, the nested close backtick then read as the OUTER close,
+    // and the template text `sessions.clear();` — a non-executable line —
+    // became a deletion mutant whose survival was a guaranteed false finding.
+    const content = src([
+      'const x = `text ${ foo(`nested }`) };',
+      'sessions.clear();',
+      '`;',
+      'after.clear();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(4), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 4, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('tracks a nested template inside a nested interpolation (two levels)', () => {
+    // Same trigger one level deeper: the deep template's text `}` must only be
+    // text. A single nesting counter cannot represent this — it mis-assigns
+    // the `}` to the nested interpolation, reads the rest of the line out of
+    // phase, and either admits the template text `sessions.clear();` or ends
+    // the scan derailed and silently drops the REAL candidate on line 4. Only
+    // a stack of template/interpolation frames gets both lines right.
+    const content = src([
+      'const x = `text ${ foo(`nested ${ bar(`deep }`) } tail`) };',
+      'sessions.clear();',
+      '`;',
+      'after.clear();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(4), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 4, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('treats a lone ${ left unclosed at EOF as a derailed scan, not code', () => {
+    // An interpolation that never closes leaves every later line's state
+    // unknowable. The scan must end non-`code` so the file's candidates are
+    // dropped (and disclosed), never trusted.
+    const content = src(['const x = `text ${ foo(', 'sessions.clear();', '']);
+    const { selected, derailed } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(2), hasNewTests: false },
+    ]);
+    expect(selected).toEqual([]);
+    expect(derailed).toEqual(['src/s.ts']);
+  });
+
   it('does not read a single-line nested-template interpolation as code', () => {
     // The same nesting on one line: skipping from the outer backtick to the
     // NEXT backtick exposes the inner template's content (`key.reset(`) as
@@ -911,21 +966,32 @@ describe('selectMutants', () => {
     ]);
   });
 
-  it('discards ALL candidates from a file whose scan derails', () => {
+  it('discards ALL candidates from a file whose scan derails, and names the file', () => {
     // A backtick inside a regex literal flips the scanner into template state
     // through to EOF. Even the valid candidate before the derailment is
     // discarded — the scan is untrustworthy past it, and over-rejecting is the
-    // cheap error.
+    // cheap error. The file comes back in `derailed` so the caller can
+    // disclose the dropped candidates instead of reporting a silent zero. A
+    // clean sibling file's candidates are unaffected.
     const content = src([
       'state.clear();',
       'const re = /`/;',
       'other.clear();',
       '',
     ]);
-    const { selected: got } = selectMutants([
+    const { selected, derailed } = selectMutants([
       { file: 'src/s.ts', content, addedLines: [1, 2, 3], hasNewTests: false },
+      {
+        file: 'src/clean.ts',
+        content: src(['live.clear();', '']),
+        addedLines: [1],
+        hasNewTests: false,
+      },
     ]);
-    expect(got).toEqual([]);
+    expect(selected).toEqual([
+      { file: 'src/clean.ts', line: 1, statement: 'live.clear();' },
+    ]);
+    expect(derailed).toEqual(['src/s.ts']);
   });
 
   it('caps at MAX_MUTANTS, preferring files that also have new tests', () => {

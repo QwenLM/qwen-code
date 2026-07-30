@@ -299,17 +299,21 @@ interface FileScan {
  * `inLiteral`: without it, a safety-verb line inside a multi-line template (an
  * agent-brief string, a here-doc in a test) or a commented-out block would be
  * "deleted" without changing any behaviour — a guaranteed false survivor.
- * Interpolations (`${…}`) are treated as still-template, tracked by brace
- * depth so the backtick of a NESTED template inside `${…}` is not mistaken for
- * the outer close (which would flag the outer literal's remaining lines as
- * code and admit its text as candidates). A nested backtick opens a sub-scan
- * that keeps the nested template's text `}` from reaching the outer counter.
- * Quotes inside the interpolation are deliberately not skipped: a regex literal
+ * Interpolations (`${…}`) are treated as still-template, tracked with a STACK
+ * of frames — one per open template literal: `${` opens an interpolation on
+ * the innermost template, a backtick inside an interpolation opens a NESTED
+ * template, a `}` only closes the interpolation at the top of the stack, and a
+ * backtick in template text only closes the CURRENT template, never an outer
+ * one. A depth counter cannot represent this: a `}` in a nested template's
+ * TEXT drained it to zero, so the nested template's closing backtick read as
+ * the OUTER close and the outer literal's remaining text was admitted as code
+ * — still-template can only skip a candidate, never admit one.
+ * Quotes inside an interpolation are deliberately not skipped: a regex literal
  * (`/'/g`) is not a string, and skipping to its matching quote runs past the
  * interpolation's own `}`, derailing the scan and dropping every later candidate
- * in the file. A `}` in a plain string can still decrement depth — handling
- * that needs regex-literal awareness — but not skipping is what the corpus
- * shows is safe today.
+ * in the file. A `}` in a plain string can still close an interpolation early —
+ * handling that needs regex-literal awareness — but not skipping is what the
+ * corpus shows is safe today.
  *
  * `codeLines`: the selection checks are end-anchored — `endsWith(';')`, the
  * `$` alternatives in {@link SAFETY_VERB_RE}, the predecessor `/[;{}]$/` — so
@@ -328,13 +332,16 @@ interface FileScan {
 function scanFileLines(content: string): FileScan {
   const inLiteral: boolean[] = [];
   const codeLines: string[] = [];
-  let state: 'code' | 'template' | 'comment' = 'code';
-  let interpDepth = 0;
-  let nestedDepth = 0;
+  let state: 'code' | 'comment' = 'code';
+  // One entry per open template literal, innermost last: -1 while the scan is
+  // in that template's TEXT, otherwise the brace depth of its open `${…}`
+  // interpolation.
+  const templates: number[] = [];
   let buf = '';
   let lineStart = 0;
   let rawLine = false;
-  inLiteral.push(state !== 'code');
+  const inTemplateOrComment = () => state !== 'code' || templates.length > 0;
+  inLiteral.push(inTemplateOrComment());
   const endLine = (i: number) => {
     codeLines.push(rawLine ? content.slice(lineStart, i).trim() : buf.trim());
     buf = '';
@@ -345,39 +352,29 @@ function scanFileLines(content: string): FileScan {
     const ch = content[i];
     if (ch === '\n') {
       endLine(i);
-      inLiteral.push(state !== 'code');
+      inLiteral.push(inTemplateOrComment());
       continue;
     }
-    if (state === 'template') {
+    if (templates.length > 0) {
+      const top = templates.length - 1;
       if (ch === '\\' && content[i + 1] !== '\n') {
         i++;
-      } else if (interpDepth === 0) {
+      } else if (templates[top] < 0) {
+        // In the innermost template's text.
         if (ch === '`') {
-          state = 'code';
-          buf += '`';
+          templates.pop();
+          if (templates.length === 0) buf += '`';
         } else if (ch === '$' && content[i + 1] === '{') {
-          interpDepth = 1;
+          templates[top] = 0;
           i++;
         }
-      } else if (nestedDepth > 0) {
-        if (nestedDepth === 1) {
-          if (ch === '`') {
-            nestedDepth = 0;
-          } else if (ch === '$' && content[i + 1] === '{') {
-            nestedDepth = 2;
-            i++;
-          }
-        } else if (ch === '{') {
-          nestedDepth++;
-        } else if (ch === '}') {
-          nestedDepth--;
-        }
       } else if (ch === '`') {
-        nestedDepth = 1;
+        templates.push(-1);
       } else if (ch === '{') {
-        interpDepth++;
+        templates[top]++;
       } else if (ch === '}') {
-        interpDepth--;
+        if (templates[top] === 0) templates[top] = -1;
+        else templates[top]--;
       }
       continue;
     }
@@ -390,9 +387,7 @@ function scanFileLines(content: string): FileScan {
     }
     if (ch === '`') {
       buf += '`';
-      state = 'template';
-      interpDepth = 0;
-      nestedDepth = 0;
+      templates.push(-1);
     } else if (ch === '/' && content[i + 1] === '*') {
       state = 'comment';
       i++;
@@ -416,7 +411,11 @@ function scanFileLines(content: string): FileScan {
     }
   }
   endLine(content.length);
-  return { inLiteral, codeLines, endState: state };
+  return {
+    inLiteral,
+    codeLines,
+    endState: templates.length > 0 ? 'template' : state,
+  };
 }
 
 /**
@@ -512,18 +511,25 @@ export interface MutantSourceFile {
  * with new tests first, then diff order, then line order. Candidates the cap
  * cannot fit are counted in `skippedForCap`, not silently lost — a report that
  * omits them lets a capped `survived: 0` read as "every safety statement is
- * covered", the same false assurance `skippedForBudget` exists to prevent.
+ * covered", the same false assurance `skippedForBudget` exists to prevent. A
+ * file whose scan ends outside code state (a regex literal holding a quote or
+ * backtick derails it) has ALL its candidates dropped and is returned in
+ * `derailed` — the caller must disclose that zero for the same reason.
  */
 export function selectMutants(
   files: MutantSourceFile[],
   cap: number = MAX_MUTANTS,
-): { selected: MutantCandidate[]; skippedForCap: number } {
+): { selected: MutantCandidate[]; skippedForCap: number; derailed: string[] } {
   const preferred: MutantCandidate[] = [];
   const rest: MutantCandidate[] = [];
+  const derailed: string[] = [];
   for (const f of files) {
     const lines = f.content.split('\n');
     const { inLiteral, codeLines, endState } = scanFileLines(f.content);
-    if (endState !== 'code') continue;
+    if (endState !== 'code') {
+      derailed.push(f.file);
+      continue;
+    }
     for (const n of [...f.addedLines].sort((a, b) => a - b)) {
       const raw = lines[n - 1];
       if (raw === undefined) continue;
@@ -542,6 +548,7 @@ export function selectMutants(
   return {
     selected: eligible.slice(0, cap),
     skippedForCap: Math.max(0, eligible.length - cap),
+    derailed,
   };
 }
 
@@ -753,6 +760,9 @@ interface TestEfficacyArgs {
   worktree: string;
   base: string;
   out: string;
+  /** Injectable clock, for tests only — the budget math cannot be driven to
+   *  its cutoff in real time. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 function git(cwd: string, ...args: string[]): void {
@@ -943,11 +953,12 @@ function runProbeSuite(
   probeTree: string,
   probes: string[],
   deadlineAt?: number,
+  now: () => number = Date.now,
 ): {
   perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
   ms: number;
 } {
-  const started = Date.now();
+  const started = now();
   const timeout =
     deadlineAt !== undefined
       ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
@@ -978,7 +989,7 @@ function runProbeSuite(
       probes,
       `${r.stderr ?? ''}`,
     ),
-    ms: Date.now() - started,
+    ms: now() - started,
   };
 }
 
@@ -1002,6 +1013,7 @@ export function runOneMutant(
   mutant: MutantCandidate,
   probes: string[],
   deadlineAt?: number,
+  now: () => number = Date.now,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   const original = readFileSync(abs, 'utf8');
@@ -1020,7 +1032,7 @@ export function runOneMutant(
   lines.splice(mutant.line - 1, 1);
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
-    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt);
+    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
@@ -1035,7 +1047,8 @@ export function runOneMutant(
 }
 
 async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
-  const startedAt = Date.now();
+  const now = args.now ?? Date.now;
+  const startedAt = now();
   const { report, worktree, base, out } = args;
   const plan = JSON.parse(readFileSync(report, 'utf8')) as {
     files?: FileEntry[];
@@ -1077,6 +1090,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   let mutantsSkippedForCap = 0;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
+  // Notes can stack (a derailed file AND a red baseline); never clobber one
+  // disclosure with another.
+  const noteMutants = (note: string) => {
+    mutantsNote = mutantsNote ? `${mutantsNote}; ${note}` : note;
+  };
 
   if (probes.length > 0 && revert.length > 0) {
     // The probe reverts the PR's source to base and runs the tests against it —
@@ -1137,12 +1155,19 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         );
         candidates = selection.selected;
         mutantsSkippedForCap = selection.skippedForCap;
+        if (selection.derailed.length > 0) {
+          noteMutants(
+            `mutant selection dropped ${selection.derailed.length} file(s) whose literal scan derailed (${selection.derailed.join(', ')}) — a regex literal holding a quote or backtick can do this; their candidates were not probed`,
+          );
+        }
       }
     } catch (e) {
       // Selection is bookkeeping, not evidence: a diff that will not parse or a
       // blob that will not read says nothing about any test. Disclose and move
       // on — the probes and the unreachable findings do not depend on it.
-      mutantsNote = `mutant selection failed: ${e instanceof Error ? e.message : String(e)} — no mutants were run`;
+      noteMutants(
+        `mutant selection failed: ${e instanceof Error ? e.message : String(e)} — no mutants were run`,
+      );
       candidates = [];
     }
 
@@ -1186,7 +1211,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // 600s tool ceiling (540s budget: at most 240s here + 300s revert).
         const mutantDeadline =
           startedAt + TOTAL_BUDGET_MS - PROBE_RUN_TIMEOUT_MS;
-        const baseline = runProbeSuite(probeTree, probes, mutantDeadline);
+        const baseline = runProbeSuite(probeTree, probes, mutantDeadline, now);
         // A mutant is only evidence against a probe file that is green WITHOUT
         // it: against a file already red the mutant is "killed" by failures it
         // did not cause, and a file that collected nothing proves nothing. Gate
@@ -1199,19 +1224,20 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           .map((r) => r.file);
         if (greenProbes.length === 0) {
           mutantsSkippedForBaseline = candidates.length;
-          mutantsNote =
-            'mutants not run: no probe file was green in the unmutated baseline (every file was red or collected nothing), so a red mutant run would prove nothing';
+          noteMutants(
+            'mutants not run: no probe file was green in the unmutated baseline (every file was red or collected nothing), so a red mutant run would prove nothing',
+          );
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
           for (const c of candidates) {
-            const remaining = mutantDeadline - Date.now();
+            const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
                 candidates.length - mutantResults.length;
               break;
             }
             mutantResults.push(
-              runOneMutant(probeTree, c, greenProbes, mutantDeadline),
+              runOneMutant(probeTree, c, greenProbes, mutantDeadline, now),
             );
           }
         }
@@ -1249,7 +1275,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         for (const p of added) safeRmWithin(probeTree, p);
 
         results.push(
-          ...runProbeSuite(probeTree, probes, startedAt + TOTAL_BUDGET_MS)
+          ...runProbeSuite(probeTree, probes, startedAt + TOTAL_BUDGET_MS, now)
             .perFile,
         );
       } catch (e) {

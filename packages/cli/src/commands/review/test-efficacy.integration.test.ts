@@ -32,6 +32,7 @@ type Handler = (args: {
   worktree: string;
   base: string;
   out: string;
+  now?: () => number;
 }) => Promise<void>;
 const runHandler = testEfficacyCommand.handler as unknown as Handler;
 
@@ -592,11 +593,14 @@ process.stdout.write(JSON.stringify({
   it('reports mutants skipped for budget when time runs out mid-loop', async () => {
     // Three safety-verb candidates, but the budget expires after one: the
     // counter, the `skippedForBudget` report field, and the stdout line are
-    // exercised end-to-end. `Date.now()` is mocked to advance 50 s per call
-    // (the real budget is 540 s and a real run cannot reach it in a test):
-    // the mutant deadline is 290 s (540 − 300 revert reservation), the
-    // baseline measures 50 s, so `estimatedRunMs` is 65 s, and the remaining
-    // window drops below 65 s on the second loop check.
+    // exercised end-to-end. The injected clock advances 100 s per SUITE RUN
+    // (the fake runner logs each run; the real budget is 540 s and a real run
+    // cannot reach it in a test) — a simulated duration, not a count of
+    // `Date.now()` calls, so the implementation is free to consult the clock
+    // as often as it likes. The mutant deadline is 240 s (540 − 300 revert
+    // reservation), the baseline measures 100 s, so `estimatedRunMs` is
+    // 115 s; after the baseline and one mutant the clock reads 200 s and the
+    // remaining 40 s cannot fit another run.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
     write(
       'packages/lib/src/f.ts',
@@ -633,11 +637,32 @@ process.stdout.write(JSON.stringify({
       }),
     );
 
-    let mockNow = 0;
-    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
-      mockNow += 50_000;
-      return mockNow;
-    });
+    // The fake runner appends one line per invocation; the injected clock
+    // reads the log, so it moves only when a suite actually runs.
+    const runsLog = join(repo, 'runs.log');
+    const bin = join(repo, 'node_modules', '.bin', 'vitest');
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+fs.appendFileSync(${JSON.stringify(runsLog)}, 'run\\n');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+    chmodSync(bin, 0o755);
+    const suiteRuns = () =>
+      existsSync(runsLog)
+        ? readFileSync(runsLog, 'utf8').split('\n').filter(Boolean).length
+        : 0;
     // The skip must also be DISCLOSED on stdout — a capped run that stays
     // silent lets `survived: 0` read as "every safety statement is covered".
     const stdoutChunks: string[] = [];
@@ -653,9 +678,9 @@ process.stdout.write(JSON.stringify({
         worktree: wt,
         base,
         out: join(repo, 'out.json'),
+        now: () => suiteRuns() * 100_000,
       });
     } finally {
-      dateSpy.mockRestore();
       stdoutSpy.mockRestore();
     }
 
@@ -733,6 +758,245 @@ process.stdout.write(JSON.stringify({
     expect(stdoutChunks.join('')).toContain(
       '1 mutant(s) skipped: more candidates than the cap of 8',
     );
+  });
+
+  it('marks every candidate inconclusive when the runner dies mid-mutation, and still runs the revert probe', async () => {
+    // The mutation-phase catch: a runner killed (or failing to spawn) during a
+    // mutant run is not evidence about any statement. Every candidate that
+    // never got a verdict — the one being run AND the ones never attempted —
+    // must come back `inconclusive` with the reason, the revert probe must
+    // still run, and the report must still be written. The fake runner passes
+    // the baseline (run 1), floods stdout past spawnSync's 64 MiB maxBuffer on
+    // run 2 (the first mutant) so the runner spawn itself errors (ENOBUFS),
+    // and passes the revert probe (run 3).
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export const cache = new Set<string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export const cache = new Set<string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '  cache.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    const callsFile = join(repo, 'calls.txt');
+    const bin = join(repo, 'node_modules', '.bin', 'vitest');
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+let n = 0;
+try { n = parseInt(fs.readFileSync(${JSON.stringify(callsFile)}, 'utf8'), 10) || 0; } catch {}
+n += 1;
+fs.writeFileSync(${JSON.stringify(callsFile)}, String(n));
+if (n === 2) {
+  const big = Buffer.alloc(8 * 1024 * 1024, 97);
+  try { for (let i = 0; i < 10; i++) fs.writeSync(1, big); } catch {}
+  process.exit(0);
+}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+    chmodSync(bin, 0o755);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toHaveLength(2);
+    for (const m of out.mutants.probed as Array<{
+      verdict: string;
+      detail: string;
+    }>) {
+      expect(m.verdict).toBe('inconclusive');
+      expect(m.detail).toContain('mutation probe could not run');
+    }
+    expect(out.mutants.probed[0].detail).toContain('ENOBUFS');
+    expect(out.mutants.inconclusive).toBe(2);
+    expect(out.mutants.killed).toBe(0);
+    expect(out.mutants.survived).toBe(0);
+    expect(
+      (out.findings as Array<{ kind: string }>).some(
+        (f) => f.kind === 'mutant-survived',
+      ),
+    ).toBe(false);
+    // The revert probe still ran: a real verdict from run 3, not a propagated
+    // mutation failure.
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inert',
+      }),
+    ]);
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
+  it('still finds the survivor under hostile user git diff config', async () => {
+    // A developer's diff.srcPrefix/dstPrefix reshapes the `+++ b/…` headers
+    // parseAddedLines anchors on, diff.external replaces the unified diff with
+    // an external command's output (here one that dies outright), and
+    // core.quotePath octal-escapes every non-ASCII path — each one alone
+    // would turn selection into a silent zero or a selection failure. The
+    // invocation pins its own prefixes and disables ext-diff/textconv/quoting,
+    // so the survivor must still be found, in a non-ASCII path too.
+    git(repo, 'config', 'diff.srcPrefix', 'left/');
+    git(repo, 'config', 'diff.dstPrefix', 'right/');
+    git(repo, 'config', 'diff.external', 'false');
+    git(repo, 'config', 'core.quotePath', 'true');
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/fø.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/fø.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { it, expect } from "vitest"; it("t", () => expect(1).toBe(1));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/fø.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.note).toBeUndefined();
+    expect(out.mutants.survived).toBe(1);
+    expect(out.mutants.probed).toEqual([
+      {
+        file: 'packages/lib/src/fø.ts',
+        line: 3,
+        statement: 'state.clear();',
+        verdict: 'survived',
+        detail: expect.stringContaining('still PASSED'),
+      },
+    ]);
+  });
+
+  it('discloses the dropped candidates when a file derails the literal scan', async () => {
+    // A regex literal holding a backtick flips the whole-file scan into
+    // template state through to EOF, so every candidate in the file — here a
+    // genuinely ungated `state.clear()` — is dropped as untrustworthy. That
+    // zero must be DISCLOSED in `mutants.note`, never silent: a report that
+    // says `survived: 0` without it reads as "every safety statement is
+    // covered". The revert probe does not depend on selection and still runs.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export const TICK_RE = /`/;\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toEqual([]);
+    expect(out.mutants.note).toContain('literal scan derailed');
+    expect(out.mutants.note).toContain('packages/lib/src/f.ts');
+    expect(stdoutChunks.join('')).toContain('literal scan derailed');
+    // The revert probe still produced a real verdict.
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inert',
+      }),
+    ]);
   });
 
   it('discloses a selection failure and still runs the revert probe', async () => {
