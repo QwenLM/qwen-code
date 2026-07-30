@@ -119,6 +119,8 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const WORKSPACE_SKILLS_SNAPSHOT_TTL_MS = 5_000;
+
 /**
  * Walk up from `inputPath` until we find an ancestor that exists on disk,
  * then `realpath` it. Used by `initWorkspace` to canonicalize the parent
@@ -245,60 +247,113 @@ export function createDaemonWorkspaceService(
   // skill-backed slash commands (e.g. `/review`) keep autocompleting after
   // the child channel has been reaped. See `getWorkspaceSkillsStatus`.
   let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
+  let lastWorkspaceSkillsStatusAt = 0;
+  let workspaceSkillsGeneration = 0;
+  let inFlightWorkspaceSkillsStatus:
+    | {
+        generation: number;
+        promise: Promise<ServeWorkspaceSkillsStatus>;
+      }
+    | undefined;
   let inFlightAcpPreheat: Promise<void> | undefined;
 
-  const getWorkspaceSkillsStatus =
-    async (): Promise<ServeWorkspaceSkillsStatus> => {
-      let status: ServeWorkspaceSkillsStatus;
-      try {
-        status = await queryWorkspaceStatus(
-          SERVE_STATUS_EXT_METHODS.workspaceSkills,
-          () => createIdleWorkspaceSkillsStatus(boundWorkspace),
-        );
-      } catch (err) {
-        // The channel can die mid-RPC (`liveChannelInfo()` was valid at the
-        // check but the child exited before the call completed). Treat that
-        // like "no live child" and fall back to the cache / daemon-local
-        // enumeration below instead of failing the request — matching
-        // getWorkspaceEnvStatus / getWorkspacePreflightStatus.
-        writeStderrLine(
-          `qwen serve: getWorkspaceSkillsStatus query failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        status = createIdleWorkspaceSkillsStatus(boundWorkspace);
-      }
-      if (status.initialized) {
-        lastWorkspaceSkillsStatus = status;
-        return status;
-      }
-      // Live child unavailable. Prefer the last answer it produced (keeps the
-      // full, extension-aware list available across a reap)...
-      if (lastWorkspaceSkillsStatus) return lastWorkspaceSkillsStatus;
-      // ...then fall back to daemon-local enumeration, so a child that has not
-      // answered even once (e.g. a preheat that times out under `npm run dev`)
-      // still yields the on-disk skills — `/review` included. The provider
-      // handles its own errors, but it is injected, so guard the call too and
-      // degrade to the idle placeholder rather than failing the request —
-      // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
-      if (workspaceSkillsStatusProvider) {
-        try {
-          return await workspaceSkillsStatusProvider(boundWorkspace);
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
+  const invalidateWorkspaceSkillsSnapshot = () => {
+    workspaceSkillsGeneration += 1;
+    lastWorkspaceSkillsStatus = undefined;
+    lastWorkspaceSkillsStatusAt = 0;
+    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+  };
+
+  const readWorkspaceSkillsStatus = async (
+    generation: number,
+  ): Promise<ServeWorkspaceSkillsStatus> => {
+    let status: ServeWorkspaceSkillsStatus;
+    try {
+      status = await queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    } catch (err) {
+      // The channel can die mid-RPC (`liveChannelInfo()` was valid at the
+      // check but the child exited before the call completed). Treat that
+      // like "no live child" and fall back to the cache / daemon-local
+      // enumeration below instead of failing the request — matching
+      // getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+      writeStderrLine(
+        `qwen serve: getWorkspaceSkillsStatus query failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      status = createIdleWorkspaceSkillsStatus(boundWorkspace);
+    }
+    if (status.initialized && generation === workspaceSkillsGeneration) {
+      lastWorkspaceSkillsStatus = status;
+      lastWorkspaceSkillsStatusAt = Date.now();
       return status;
+    }
+    // Live child unavailable. Prefer the last answer it produced (keeps the
+    // full, extension-aware list available across a reap)...
+    if (lastWorkspaceSkillsStatus) {
+      lastWorkspaceSkillsStatusAt = Date.now();
+      return lastWorkspaceSkillsStatus;
+    }
+    // ...then fall back to daemon-local enumeration, so a child that has not
+    // answered even once (e.g. a preheat that times out under `npm run dev`)
+    // still yields the on-disk skills — `/review` included. The provider
+    // handles its own errors, but it is injected, so guard the call too and
+    // degrade to the idle placeholder rather than failing the request —
+    // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+    if (workspaceSkillsStatusProvider) {
+      try {
+        const localStatus = await workspaceSkillsStatusProvider(boundWorkspace);
+        if (
+          localStatus.initialized &&
+          generation === workspaceSkillsGeneration
+        ) {
+          lastWorkspaceSkillsStatus = localStatus;
+          lastWorkspaceSkillsStatusAt = Date.now();
+        }
+        return localStatus;
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return status;
+  };
+
+  const getWorkspaceSkillsStatus = (): Promise<ServeWorkspaceSkillsStatus> => {
+    const cacheAgeMs = Date.now() - lastWorkspaceSkillsStatusAt;
+    if (
+      lastWorkspaceSkillsStatus &&
+      cacheAgeMs >= 0 &&
+      cacheAgeMs < WORKSPACE_SKILLS_SNAPSHOT_TTL_MS
+    ) {
+      return Promise.resolve(lastWorkspaceSkillsStatus);
+    }
+
+    const generation = workspaceSkillsGeneration;
+    if (inFlightWorkspaceSkillsStatus?.generation === generation) {
+      return inFlightWorkspaceSkillsStatus.promise;
+    }
+
+    const promise = readWorkspaceSkillsStatus(generation);
+    inFlightWorkspaceSkillsStatus = { generation, promise };
+    const clearInFlight = () => {
+      if (inFlightWorkspaceSkillsStatus?.promise === promise) {
+        inFlightWorkspaceSkillsStatus = undefined;
+      }
     };
+    void promise.then(clearInFlight, clearInFlight);
+    return promise;
+  };
 
   const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
-    lastWorkspaceSkillsStatus = undefined;
-    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+    invalidateWorkspaceSkillsSnapshot();
     if (!(isChannelLive?.() ?? false)) return;
     try {
       await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
         SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: boundWorkspace },
+        { cwd: boundWorkspace, reason: 'content' },
       );
     } catch (err) {
       if (
@@ -309,6 +364,8 @@ export function createDaemonWorkspaceService(
           `qwen serve: workspace skill refresh after mutation failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    } finally {
+      invalidateWorkspaceSkillsSnapshot();
     }
   };
 
@@ -786,18 +843,18 @@ export function createDaemonWorkspaceService(
       let sessionsFailed = 0;
 
       if (persisted.changed) {
-        lastWorkspaceSkillsStatus = undefined;
-        workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+        invalidateWorkspaceSkillsSnapshot();
         if (channelLive) {
           try {
             const refreshed =
               await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-                { cwd: boundWorkspace },
+                { cwd: boundWorkspace, reason: 'settings' },
               );
             assertActiveGeneration();
             sessionsRefreshed = refreshed.sessionsRefreshed;
-            sessionsFailed = refreshed.sessionsFailed;
+            sessionsFailed =
+              refreshed.sessionsFailed + (refreshed.configsFailed ?? 0);
             if (sessionsFailed > 0) activation = 'partial';
           } catch (err) {
             if (
@@ -813,6 +870,7 @@ export function createDaemonWorkspaceService(
               );
             }
           }
+          invalidateWorkspaceSkillsSnapshot();
         }
 
         assertActiveGeneration();
@@ -1247,7 +1305,7 @@ export function createDaemonWorkspaceService(
     },
 
     invalidateWorkspaceSkillsStatus() {
-      lastWorkspaceSkillsStatus = undefined;
+      invalidateWorkspaceSkillsSnapshot();
     },
 
     async refreshExtensionsForAllSessions() {
@@ -1263,7 +1321,7 @@ export function createDaemonWorkspaceService(
         );
         return { refreshed: 0, failed: 1 };
       } finally {
-        lastWorkspaceSkillsStatus = undefined;
+        invalidateWorkspaceSkillsSnapshot();
       }
     },
   };

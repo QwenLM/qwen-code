@@ -4195,7 +4195,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ? MCPServerStatus.DISCONNECTED
         : MCPServerStatus.CONNECTED,
     );
-    const listSkills = vi.fn().mockResolvedValue([
+    const cachedSkills = [
       {
         name: 'review',
         description: 'Review code',
@@ -4242,13 +4242,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         body: 'display stale body',
         filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
       },
-    ]);
+    ];
+    const extensionRefreshCache = vi.fn().mockResolvedValue(undefined);
+    const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
+    const getCachedSkills = vi.fn().mockReturnValue(cachedSkills);
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
       getWorkingDir: vi.fn().mockReturnValue('/work/status'),
       getExtensionManager: vi.fn().mockReturnValue({
-        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCache: extensionRefreshCache,
       }),
       getMcpServers: vi.fn().mockReturnValue({
         docs: {
@@ -4280,8 +4283,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         .fn()
         .mockReturnValue(new Set(['disabled-skill'])),
       getSkillManager: vi.fn().mockReturnValue({
-        refreshCache: vi.fn().mockResolvedValue(undefined),
-        listSkills,
+        refreshCache: skillRefreshCache,
+        getCachedSkills,
       }),
       getExtensions: vi.fn().mockReturnValue([
         {
@@ -4386,6 +4389,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       { serverName: 'not-configured' },
     );
     const skills = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceSkills,
+      {},
+    )) as unknown as ServeWorkspaceSkillsStatus;
+    const skillsAgain = (await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.workspaceSkills,
       {},
     )) as unknown as ServeWorkspaceSkillsStatus;
@@ -4555,6 +4562,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
     ).toHaveLength(1);
+    expect(skillsAgain).toEqual(skills);
+    expect(getCachedSkills).toHaveBeenCalledTimes(2);
+    expect(extensionRefreshCache).not.toHaveBeenCalled();
+    expect(skillRefreshCache).not.toHaveBeenCalled();
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
     expect(JSON.stringify(skills)).not.toContain('manual secret body');
     expect(JSON.stringify(skills)).not.toContain('disabled secret body');
@@ -4592,6 +4603,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(JSON.stringify(providers)).not.toContain('sk-secret');
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns an uninitialized skills snapshot without warming a cold cache', async () => {
+    const extensionRefreshCache = vi.fn().mockResolvedValue(undefined);
+    const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
+    const listSkills = vi.fn().mockResolvedValue([]);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: extensionRefreshCache,
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: skillRefreshCache,
+        listSkills,
+        getCachedSkills: vi.fn().mockReturnValue(null),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+    ).resolves.toEqual({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: false,
+      skills: [],
+    });
+    expect(extensionRefreshCache).not.toHaveBeenCalled();
+    expect(skillRefreshCache).not.toHaveBeenCalled();
+    expect(listSkills).not.toHaveBeenCalled();
+
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -15610,6 +15667,11 @@ describe('sessionLanguage multi-session propagation', () => {
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshTools: vi.fn().mockResolvedValue(undefined),
+      }),
+      getSkillManager: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -16074,6 +16136,8 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const refresh1 = vi.fn().mockResolvedValue(undefined);
     const refresh2 = vi.fn().mockRejectedValue(new Error('client closed'));
+    const reload1 = vi.fn();
+    const reload2 = vi.fn();
 
     vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
     vi.mocked(loadCliConfig)
@@ -16085,6 +16149,7 @@ describe('sessionLanguage multi-session propagation', () => {
           getId: vi.fn().mockReturnValue(id),
           getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
           isIdle: vi.fn().mockReturnValue(false),
+          reloadSkillSettings: id === 'skill-1' ? reload1 : reload2,
           refreshSkillsFromSettings: id === 'skill-1' ? refresh1 : refresh2,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -16108,14 +16173,24 @@ describe('sessionLanguage multi-session propagation', () => {
     await agent.newSession({ cwd: '/skills', mcpServers: [] });
     await agent.newSession({ cwd: '/skills', mcpServers: [] });
     await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {}),
-    ).resolves.toEqual({ sessionsRefreshed: 1, sessionsFailed: 1 });
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+        reason: 'settings',
+      }),
+    ).resolves.toEqual({
+      sessionsRefreshed: 1,
+      sessionsFailed: 1,
+      configsRefreshed: 0,
+      configsFailed: 0,
+      reason: 'settings',
+    });
 
     expect(bootstrapSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
       SettingScope.Workspace,
     );
     expect(refresh1).toHaveBeenCalledOnce();
     expect(refresh2).toHaveBeenCalledOnce();
+    expect(reload1).toHaveBeenCalledOnce();
+    expect(reload2).toHaveBeenCalledOnce();
     expect(mockDebugLogger.warn).toHaveBeenCalledWith(
       'Session skill-2 skill refresh failed: Error: client closed',
     );
@@ -16124,7 +16199,109 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('refreshes extension state without a duplicate direct skill refresh', async () => {
+  it('refreshes skill content once per config before publishing session updates', async () => {
+    const bootstrapSettings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const bootstrapRefresh = vi.fn().mockResolvedValue(undefined);
+    const sessionRefresh = vi.fn().mockResolvedValue(undefined);
+    const publishSessionSkills = vi.fn().mockResolvedValue(undefined);
+    const reloadSessionSettings = vi.fn();
+    const bootstrapConfig = makeConfig({
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: bootstrapRefresh }),
+    });
+    const sessionConfig = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('skill-content'),
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: sessionRefresh }),
+    });
+
+    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      sessionConfig as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('skill-content'),
+          getConfig: vi.fn().mockReturnValue(sessionConfig),
+          isIdle: vi.fn().mockReturnValue(false),
+          reloadSkillSettings: reloadSessionSettings,
+          refreshSkillsFromSettings: publishSessionSkills,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      bootstrapConfig as unknown as Config,
+      bootstrapSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/skills', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+        reason: 'content',
+      }),
+    ).resolves.toEqual({
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      configsRefreshed: 2,
+      configsFailed: 0,
+      reason: 'content',
+    });
+
+    expect(bootstrapRefresh).toHaveBeenCalledOnce();
+    expect(sessionRefresh).toHaveBeenCalledOnce();
+    expect(bootstrapSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+    expect(publishSessionSkills).toHaveBeenCalledWith({
+      reloadSettings: false,
+      notifyConfigChanged: false,
+    });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {}),
+    ).resolves.toEqual({
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      configsRefreshed: 2,
+      configsFailed: 0,
+      reason: 'all',
+    });
+    expect(bootstrapRefresh).toHaveBeenCalledTimes(2);
+    expect(sessionRefresh).toHaveBeenCalledTimes(2);
+    expect(bootstrapSettings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+    );
+    expect(publishSessionSkills).toHaveBeenLastCalledWith({
+      reloadSettings: false,
+      notifyConfigChanged: false,
+    });
+    expect(reloadSessionSettings).toHaveBeenCalledOnce();
+    expect(reloadSessionSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      sessionRefresh.mock.invocationCallOrder[1]!,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('coalesces bootstrap extension refreshes without directly refreshing the session skills', async () => {
     const extensionManager = {
       refreshCache: vi.fn().mockResolvedValue(undefined),
       refreshTools: vi.fn().mockResolvedValue(undefined),
@@ -16134,6 +16311,20 @@ describe('sessionLanguage multi-session propagation', () => {
         .fn()
         .mockRejectedValue(new Error('direct skill refresh should not run')),
     };
+    let releaseBootstrapRefresh!: () => void;
+    const bootstrapRefreshGate = new Promise<void>((resolve) => {
+      releaseBootstrapRefresh = resolve;
+    });
+    const bootstrapExtensionManager = {
+      refreshCache: vi.fn().mockReturnValue(bootstrapRefreshGate),
+    };
+    const bootstrapSkillRefresh = vi.fn().mockResolvedValue(undefined);
+    const bootstrapConfig = makeConfig({
+      getExtensionManager: vi.fn().mockReturnValue(bootstrapExtensionManager),
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: bootstrapSkillRefresh }),
+    });
     const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-ext'),
@@ -16165,7 +16356,7 @@ describe('sessionLanguage multi-session propagation', () => {
     );
 
     const agentPromise = runAcpAgent(
-      makeConfig() as unknown as Config,
+      bootstrapConfig as unknown as Config,
       { merged: { mcpServers: {} } } as unknown as LoadedSettings,
       mockArgv,
     );
@@ -16177,21 +16368,54 @@ describe('sessionLanguage multi-session propagation', () => {
     });
 
     await agent.newSession({ cwd: '/ext', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
+    await vi.waitFor(() =>
+      expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce(),
+    );
+    sendAvailableCommandsUpdate.mockClear();
+    const firstRefresh = agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+      {
         sessionId: 's-ext',
-      }),
-    ).resolves.toEqual({ ok: true });
+      },
+    );
+    await vi.waitFor(() =>
+      expect(bootstrapExtensionManager.refreshCache).toHaveBeenCalledOnce(),
+    );
+    const secondRefresh = agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+      {
+        sessionId: 's-ext',
+      },
+    );
+    await vi.waitFor(() =>
+      expect(extensionManager.refreshTools).toHaveBeenCalledTimes(2),
+    );
+    await Promise.resolve();
+    releaseBootstrapRefresh();
+    await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual([
+      { ok: true },
+      { ok: true },
+    ]);
 
-    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshCache).toHaveBeenCalledTimes(2);
     expect(skillManager.refreshCache).not.toHaveBeenCalled();
-    expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshTools).toHaveBeenCalledTimes(2);
+    expect(bootstrapExtensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(bootstrapSkillRefresh).toHaveBeenCalledOnce();
     expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
-    expect(refreshSystemInstruction).toHaveBeenCalledOnce();
-    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(refreshSystemInstruction).toHaveBeenCalledTimes(2);
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledTimes(2);
     expect(
       extensionManager.refreshTools.mock.invocationCallOrder[0],
-    ).toBeLessThan(refreshSystemInstruction.mock.invocationCallOrder[0]!);
+    ).toBeLessThan(
+      bootstrapExtensionManager.refreshCache.mock.invocationCallOrder[0]!,
+    );
+    expect(
+      bootstrapExtensionManager.refreshCache.mock.invocationCallOrder[0],
+    ).toBeLessThan(bootstrapSkillRefresh.mock.invocationCallOrder[0]!);
+    expect(bootstrapSkillRefresh.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshSystemInstruction.mock.invocationCallOrder[0]!,
+    );
     expect(refreshSystemInstruction.mock.invocationCallOrder[0]).toBeLessThan(
       sendAvailableCommandsUpdate.mock.invocationCallOrder[0]!,
     );

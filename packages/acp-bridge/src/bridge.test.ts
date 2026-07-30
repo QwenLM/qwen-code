@@ -2017,14 +2017,16 @@ describe('createAcpSessionBridge', () => {
 
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
+    let failNextExtensionRefresh = true;
     const bridge = makeBridge({
       channelFactory: async () => {
         const h = makeChannel({
-          extMethodImpl: (method, params) => {
+          extMethodImpl: (method) => {
             if (
               method === 'qwen/control/workspace/extensions/refresh' &&
-              String(params['sessionId']).endsWith('#2')
+              failNextExtensionRefresh
             ) {
+              failNextExtensionRefresh = false;
               throw new Error('refresh failed');
             }
             return {};
@@ -2058,6 +2060,13 @@ describe('createAcpSessionBridge', () => {
       {
         method: 'qwen/control/workspace/extensions/refresh',
         params: { sessionId: first.sessionId },
+      },
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: {
+          sessionId: second.sessionId,
+          refreshBootstrap: false,
+        },
       },
       {
         method: 'qwen/control/workspace/extensions/refresh',

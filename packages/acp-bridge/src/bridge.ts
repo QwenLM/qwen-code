@@ -1896,7 +1896,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   >();
   const inFlightExtensionRefreshes = new Map<
     string,
-    { connection: ClientSideConnection; promise: Promise<void> }
+    {
+      connection: ClientSideConnection;
+      promise: Promise<void>;
+      refreshBootstrap: boolean;
+    }
   >();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
@@ -7065,50 +7069,98 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async refreshExtensionsForAllSessions(data) {
       const sessions = Array.from(byId.values());
+      const bootstrapRefreshConnections = new Set<
+        (typeof sessions)[number]['connection']
+      >();
+      const refreshSession = async (
+        entry: (typeof sessions)[number],
+        refreshBootstrap: boolean,
+      ) => {
+        let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+        if (
+          !inFlight ||
+          inFlight.connection !== entry.connection ||
+          (refreshBootstrap && !inFlight.refreshBootstrap)
+        ) {
+          const promise = (async () => {
+            await entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              {
+                sessionId: entry.sessionId,
+                ...(refreshBootstrap ? {} : { refreshBootstrap: false }),
+              },
+            );
+          })();
+          inFlight = {
+            connection: entry.connection,
+            promise,
+            refreshBootstrap,
+          };
+          inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
+          const clear = () => {
+            if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
+              inFlightExtensionRefreshes.delete(entry.sessionId);
+            }
+          };
+          void promise.then(clear, clear);
+        }
+        await Promise.race([
+          withTimeout(
+            inFlight.promise,
+            30_000,
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+      };
 
       const results = await Promise.all(
         sessions.map(async (entry) => {
           const info = channelInfoForEntry(entry);
           if (!info || info.isDying) {
-            return { refreshed: 0, failed: 0 };
+            return {
+              refreshed: 0,
+              failed: 0,
+              entry,
+              refreshBootstrap: false,
+            };
           }
+          const refreshBootstrap = !bootstrapRefreshConnections.has(
+            entry.connection,
+          );
+          bootstrapRefreshConnections.add(entry.connection);
           try {
-            let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
-            if (!inFlight || inFlight.connection !== entry.connection) {
-              const promise = (async () => {
-                await entry.connection.extMethod(
-                  SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-                  { sessionId: entry.sessionId },
-                );
-              })();
-              inFlight = { connection: entry.connection, promise };
-              inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
-              const clear = () => {
-                if (
-                  inFlightExtensionRefreshes.get(entry.sessionId) === inFlight
-                ) {
-                  inFlightExtensionRefreshes.delete(entry.sessionId);
-                }
-              };
-              void promise.then(clear, clear);
-            }
-            await Promise.race([
-              withTimeout(
-                inFlight.promise,
-                30_000,
-                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-              ),
-              getTransportClosedReject(entry),
-            ]);
-            return { refreshed: 1, failed: 0 };
+            await refreshSession(entry, refreshBootstrap);
+            return { refreshed: 1, failed: 0, entry, refreshBootstrap };
           } catch (err) {
             writeServeDebugLine(
               `refreshExtensions: session ${entry.sessionId} failed: ` +
                 `${err instanceof Error ? err.message : String(err)}`,
             );
-            return { refreshed: 0, failed: 1 };
+            return { refreshed: 0, failed: 1, entry, refreshBootstrap };
           }
         }),
+      );
+
+      await Promise.all(
+        results
+          .filter((result) => result.failed > 0 && result.refreshBootstrap)
+          .map(async (failedBootstrap) => {
+            const retry = results.find(
+              (result) =>
+                result.refreshed > 0 &&
+                result.entry.connection === failedBootstrap.entry.connection,
+            );
+            if (!retry) return;
+            try {
+              await refreshSession(retry.entry, true);
+            } catch (err) {
+              writeServeDebugLine(
+                `refreshExtensions: bootstrap retry via session ${retry.entry.sessionId} failed: ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }),
       );
 
       const refreshed = results.reduce(

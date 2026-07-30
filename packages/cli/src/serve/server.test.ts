@@ -4098,12 +4098,19 @@ describe('createServeApp', () => {
         const skillsRes = await request(app)
           .get('/workspace/skills')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const unchangedSkillsRes = await request(app)
+          .get('/workspace/skills')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('If-None-Match', skillsRes.headers['etag'] as string);
         const providersRes = await request(app)
           .get('/workspace/providers')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
 
         expect(skillsRes.status).toBe(200);
         expect(skillsRes.body).toEqual(skills);
+        expect(skillsRes.headers['etag']).toEqual(expect.any(String));
+        expect(unchangedSkillsRes.status).toBe(304);
+        expect(unchangedSkillsRes.text).toBe('');
         expect(providersRes.status).toBe(200);
         expect(providersRes.body).toMatchObject({
           v: 1,
@@ -20979,7 +20986,7 @@ describe('runQwenServe', () => {
       'https://anywhere.example.com',
     );
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, ETag',
     );
   });
 
@@ -22902,7 +22909,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     );
     expect(res.headers['access-control-max-age']).toBe('86400');
     expect(res.headers['access-control-expose-headers']).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, ETag',
     );
   });
 
@@ -22922,7 +22929,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     );
     expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
     expect(res.headers['access-control-expose-headers']).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, ETag',
     );
     expect(res.text).toBe('');
   });

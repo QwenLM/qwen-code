@@ -2773,6 +2773,12 @@ export class Config {
     recordStartupEvent('config_initialize_hooks_end');
 
     this.subagentManager = new SubagentManager(this);
+    recordStartupEvent('config_initialize_extensions_final_start');
+    if (!this.getBareMode() && !this.isSafeMode()) {
+      await this.extensionManager.refreshCache();
+    }
+    recordStartupEvent('config_initialize_extensions_final_end');
+
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
       this.skillManager = new SkillManager(this);
@@ -2802,12 +2808,6 @@ export class Config {
     if (this.sessionSubagents.length > 0) {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
-
-    recordStartupEvent('config_initialize_extensions_final_start');
-    if (!this.getBareMode() && !this.isSafeMode()) {
-      await this.extensionManager.refreshCache();
-    }
-    recordStartupEvent('config_initialize_extensions_final_end');
 
     recordStartupEvent('config_initialize_hierarchical_memory_start');
     await this.refreshHierarchicalMemory('session_start');
