@@ -1961,7 +1961,8 @@ describe('qwen-autofix workflow', () => {
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
     // the label-path non-main base refusal, the command-path non-main base
-    // refusal, the cap pause, the command-path direct engage ack (the
+    // refusal, the takeover cap pause, the standard-mode cap pause, the
+    // forced-dispatch cap refusal, the command-path direct engage ack (the
     // labeled event has been observed to not fire — #7999, #8002 — so the
     // command acks itself), the command-path direct release acks (all three
     // variants, mirroring the ack job — a loud add next to a mute stop
@@ -1971,7 +1972,7 @@ describe('qwen-autofix workflow', () => {
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(17);
+    expect(ackBodies).toHaveLength(19);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -2392,6 +2393,65 @@ describe('qwen-autofix workflow', () => {
     // guidance in the body.
     expect(reviewScanJob).toContain('<!-- takeover-cap-reached -->');
     expect(reviewScanJob).toContain('Takeover paused');
+    // The cap notice covers ALL managed PRs, not just takeover: standard
+    // bot PRs used to cap in silence (#7836 hit 10/10 with zero PR-visible
+    // notice), which let the shepherd's conflict dispatch die silently on
+    // a cap the PR page never mentioned. Same marker → same
+    // once-per-window dedup for both variants.
+    expect(reviewScanJob).toContain('AutoFix paused');
+    // Three sites: the dedup census read + BOTH notice bodies — the shared
+    // marker is what gives the two variants one once-per-window dedup.
+    expect(
+      reviewScanJob.split('<!-- takeover-cap-reached -->').length - 1,
+    ).toBe(3);
+    // A FORCED dispatch (shepherd conflict lever or a human) refused at the
+    // cap gate answers on the PR — observed on #7836: '🐑 dispatched the
+    // autofix loop' followed by a green run that did nothing, with the
+    // refusal visible only in the Actions log. Gated on workflow_dispatch:
+    // FORCED_PR is ALSO set for trusted pull_request_review submissions
+    // (route emits pr_number for those), and answering each one loudly
+    // spammed 7 refusals on #7836 — those stay covered by the
+    // once-per-window pause notice. No dedup on the dispatch itself: the
+    // shepherd sends at most one per head, and a human asking twice
+    // deserves two answers.
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+    );
+    expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
+    expect(reviewScanJob).toContain('Dispatch refused');
+    expect(reviewScanJob).toContain('DRY-RUN: would post cap-refused notice');
+    expect(reviewScanJob).toContain(
+      'cap-refused notice skipped: PAT authenticates as',
+    );
+    // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
+    // for trusted review submissions). Replay the guard VERBATIM so a
+    // dropped EVENT_NAME condition fails the test, not just a substring: a
+    // dispatch is answered, a review submission is left to the pause notice.
+    const refusedGuard = reviewScanJob.match(
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+    )?.[1];
+    expect(refusedGuard).toBeTruthy();
+    const refuses = (eventName) =>
+      execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
+        env: {
+          ...process.env,
+          FORCED_PR: '7836',
+          PR: '7836',
+          EVENT_NAME: eventName,
+        },
+        encoding: 'utf8',
+      }).trim();
+    expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('pull_request_review')).not.toContain('REFUSED');
+    // The standard-mode pause and the refusal both point at the actual
+    // recovery command as a printf ARG (the takeover variant keeps its
+    // takeover-command-only wording).
+    const capBodies =
+      reviewScanJob.match(/printf '[^']*takeover-cap-re[^']*'[^\n]*/g) ?? [];
+    expect(capBodies).toHaveLength(3);
+    expect(
+      capBodies.filter((b) => b.includes('"${RETRY_COMMAND}"')),
+    ).toHaveLength(2);
     expect(reviewScanJob).toMatch(
       /CAP_NOTICED=[\s\S]*?contains\("<!-- takeover-cap-reached -->"\)[\s\S]*?> \$rt/,
     );
@@ -2476,6 +2536,45 @@ describe('qwen-autofix workflow', () => {
     expect(noticed('2026-07-18T11:00:00Z', '2026-07-18T10:00:00Z')).toBe('1');
     // No key yet (lifetime dedup, rt='') → any prior notice suppresses.
     expect(noticed('2026-07-18T09:00:00Z', '')).toBe('1');
+    // The consent gate is the core behavioral change: standard bot PRs now
+    // receive cap notices (they used to be takeover-only). Replay the gate
+    // VERBATIM under all four label/takeover permutations so a dropped
+    // HAS_TAKEOVER guard or a reverted skip-wins condition fails the test,
+    // not just a substring assertion.
+    const consentGate = reviewScanJob.match(
+      /(if \[\[ " \$\{LIVE_LABELS\} " == \*" \$\{SKIP_LABEL\} "\* \]\] \\\n[\s\S]*?continue\n {16}fi)/,
+    )?.[1];
+    expect(consentGate).toBeTruthy();
+    const gate = (liveLabels, hasTakeover) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `for _ in 1; do\n${consentGate.replace(/\n {16}/g, '\n')}\necho PROCEED\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            LIVE_LABELS: liveLabels,
+            HAS_TAKEOVER: hasTakeover,
+            SKIP_LABEL: 'autofix/skip',
+            TAKEOVER_LABEL: 'autofix/takeover',
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // Standard bot PR, no skip label → NOT skipped (the #7836 case).
+    expect(gate('autofix/managed', 'false')).toContain('PROCEED');
+    // Standard bot PR + skip label → skipped everywhere.
+    expect(gate('autofix/managed autofix/skip', 'false')).toContain(
+      'cap notice skipped',
+    );
+    // Takeover PR with its label removed → skipped (stale consent).
+    expect(gate('autofix/managed', 'true')).toContain('cap notice skipped');
+    // Takeover PR with the label still present → NOT skipped.
+    expect(gate('autofix/managed autofix/takeover', 'true')).toContain(
+      'PROCEED',
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
