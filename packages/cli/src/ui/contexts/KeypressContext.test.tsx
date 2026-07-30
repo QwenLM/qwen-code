@@ -969,9 +969,9 @@ describe('KeypressContext - Kitty Protocol', () => {
 
     it('reports an unavailable native module for an empty paste', async () => {
       const keyHandler = vi.fn();
-      mockClipboardHasImage.mockImplementation(async (onUnavailable) => {
+      mockReadClipboardFiles.mockImplementation(async (onUnavailable) => {
         onUnavailable?.();
-        return false;
+        return [];
       });
       const { result } = renderHook(() => useKeypressContext(), { wrapper });
       act(() => result.current.subscribe(keyHandler));
@@ -986,6 +986,7 @@ describe('KeypressContext - Kitty Protocol', () => {
           }),
         );
       });
+      expect(mockClipboardHasImage).not.toHaveBeenCalled();
     });
 
     it.each([

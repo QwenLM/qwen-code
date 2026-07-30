@@ -31,6 +31,7 @@ import {
   type Config,
   Storage,
   createDebugLogger,
+  escapePath,
 } from '@qwen-code/qwen-code-core';
 import {
   parseInputForHighlighting,
@@ -102,6 +103,13 @@ export interface Attachment {
 }
 
 const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+function formatClipboardFileReference(filePath: string): string {
+  const normalizedPath = /^(?:[A-Za-z]:\\|\\\\)/.test(filePath)
+    ? filePath.replaceAll('\\', '/')
+    : filePath;
+  return `@${escapePath(normalizedPath)}`;
+}
 
 /**
  * Classify a pasted blob as image-file-path(s).
@@ -584,7 +592,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   }, []);
 
   const insertLargePastePlaceholder = useCallback(
-    (pasted: string): boolean => {
+    (pasted: string, expandedPasted = pasted): boolean => {
       const charCount = [...pasted].length;
       const lineCount = pasted.split('\n').length;
       if (
@@ -597,7 +605,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const placeholder = nextLargePastePlaceholder(charCount);
       setPendingPastes((prev) => {
         const next = new Map(prev);
-        next.set(placeholder, pasted);
+        next.set(placeholder, expandedPasted);
         return next;
       });
       buffer.insert(placeholder, { paste: false });
@@ -853,11 +861,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
 
     const pasted = clipboardFiles.join('\n');
+    const fileReferences = clipboardFiles
+      .map(formatClipboardFileReference)
+      .join(' ');
     const pastedImagePaths = classifyPastedImagePaths(pasted);
     if (pastedImagePaths.allImages) {
       await promotePastedImagePaths(pastedImagePaths.imagePaths, pasted);
-    } else if (!insertLargePastePlaceholder(pasted)) {
-      buffer.insert(pasted, { paste: false });
+    } else if (!insertLargePastePlaceholder(pasted, fileReferences)) {
+      buffer.insert(fileReferences, { paste: false });
     }
   }, [
     buffer,

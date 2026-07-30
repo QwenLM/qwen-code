@@ -1497,22 +1497,31 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('inserts copied non-image file paths on the clipboard shortcut', async () => {
+    it('inserts copied non-image files as references on the clipboard shortcut', async () => {
+      const filePath = 'C:\\Users\\mochi\\My Notes\\notes.txt';
       vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
-        'C:\\Users\\mochi\\notes.txt',
+        filePath,
       ]);
 
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
+      const TestHarness = () => {
+        const buffer = useTextBuffer({
+          viewport: { width: 80, height: 20 },
+          isValidPath: (candidate) => candidate === filePath,
+          onChange: () => {},
+        });
+        return <InputPrompt {...props} buffer={buffer} />;
+      };
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <TestHarness />,
       );
       await wait();
 
       stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
-      expect(mockBuffer.insert).toHaveBeenCalledWith(
-        'C:\\Users\\mochi\\notes.txt',
-        { paste: false },
+      expect(stripAnsi(lastFrame() ?? '')).toContain(
+        '@C:/Users/mochi/My\\ Notes/notes.txt',
       );
       expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
       unmount();
@@ -1547,7 +1556,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('collapses a large copied file list into a paste placeholder', async () => {
+    it('preserves references behind a large copied file list placeholder', async () => {
       const clipboardFiles = Array.from(
         { length: 11 },
         (_, index) => `C:\\Users\\mochi\\notes-${index}.txt`,
@@ -1556,22 +1565,40 @@ describe('InputPrompt', () => {
         clipboardFiles,
       );
 
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
+      const TestHarness = () => {
+        const buffer = useTextBuffer({
+          viewport: { width: 80, height: 20 },
+          isValidPath: (candidate) => clipboardFiles.includes(candidate),
+          onChange: () => {},
+        });
+        return <InputPrompt {...props} buffer={buffer} />;
+      };
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <TestHarness />,
       );
       await wait();
 
       stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
-      expect(mockBuffer.insert).toHaveBeenCalledWith(
-        expect.stringMatching(/^\[Pasted Content \d+ chars\]$/),
-        { paste: false },
+      expect(stripAnsi(lastFrame() ?? '')).toMatch(
+        /\[Pasted Content \d+ chars\]/,
       );
-      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
-        clipboardFiles.join('\n'),
-        expect.anything(),
-      );
+
+      stdin.write('\r');
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          clipboardFiles
+            .map((filePath) => `@${filePath.replaceAll('\\', '/')}`)
+            .join(' '),
+          expect.objectContaining({
+            submittedPrompt: expect.stringMatching(
+              /^\[Pasted Content \d+ chars\]$/,
+            ),
+          }),
+        );
+      });
       unmount();
     });
 
@@ -1599,7 +1626,7 @@ describe('InputPrompt', () => {
 
       await waitFor(() => {
         expect(props.onSubmit).toHaveBeenCalledWith(
-          '@.qwen/tmp/clipboard.png\n\ndescribe this image',
+          `@${path.join('.qwen', 'tmp', 'clipboard.png')}\n\ndescribe this image`,
           {
             deferUntilIdle: false,
             submittedPrompt: 'describe this image',

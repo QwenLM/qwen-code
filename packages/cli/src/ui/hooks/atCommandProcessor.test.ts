@@ -16,6 +16,7 @@ import {
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
   Storage,
+  escapePath,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
 import * as os from 'node:os';
@@ -409,6 +410,30 @@ describe('handleAtCommand', () => {
       expect(result.toolDisplays).toBeDefined();
       expect(result.toolDisplays).toHaveLength(1);
       expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'should resolve forward-slash Windows references with escaped spaces',
+    async () => {
+      const fileContent = 'Windows path with spaces';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'path with spaces', 'file.txt'),
+        fileContent,
+      );
+      const query = `@${escapePath(filePath.replaceAll('\\', '/'))}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 125,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.processedQuery).toContainEqual({ text: fileContent });
+      expect(result.toolDisplays?.[0].status).toBe(ToolCallStatus.Success);
     },
   );
 
