@@ -5256,9 +5256,11 @@ describe('qwen-autofix workflow', () => {
     );
     // Every failure path in the salvage loop is ::error::-annotated — a
     // deleted fork branch (or transient network error) must not kill the
-    // step with an unannotated exit 128 under bash -e.
-    expect(pushAndReportStep).toContain(
-      'could not fetch the moved head (attempt ${push_attempt})',
+    // step with an unannotated exit 128 under bash -e. The structural pin
+    // connects the message to its exit 1: deleting that exit 1 proceeds to
+    // `git merge FETCH_HEAD` against a stale FETCH_HEAD.
+    expect(pushAndReportStep).toMatch(
+      /echo "::error::could not fetch the moved head \(attempt \$\{push_attempt\}\)[^\n]*"\n\s+exit 1/,
     );
     // The disclosure flag keys on HEAD actually advancing: a transient
     // push failure on an unmoved branch no-ops the merge ("Already up to
@@ -5283,8 +5285,10 @@ describe('qwen-autofix workflow', () => {
     // A genuine content conflict aborts cleanly and falls through to the
     // existing failure path — the salvage must never overwrite either side.
     expect(pushAndReportStep).toContain('git merge --abort || true');
-    expect(pushAndReportStep).toContain(
-      'the commits pushed during the run conflict with this fix',
+    // Structural pin: deleting this exit 1 falls through to the report
+    // section and posts a round-complete comment as if the push succeeded.
+    expect(pushAndReportStep).toMatch(
+      /echo "::error::the commits pushed during the run conflict with this fix[^\n]*"\n\s+exit 1/,
     );
     // The salvage is disclosed in the round report: the round's verification
     // ran before the merge, so mid-run commits deserve a re-check. The
