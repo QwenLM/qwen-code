@@ -97,6 +97,7 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
-          npm run test:ci
+          npm run test:ci --workspaces --if-present --parallel
