@@ -42,17 +42,17 @@ export const USER_PROMPT_SUBMIT_CONTEXT_OPEN =
 export const USER_PROMPT_SUBMIT_CONTEXT_CLOSE =
   '</qwen:user-prompt-submit-context>';
 
-export interface UserTranscriptDisplayProjection {
+export interface UserTranscriptDisplayProjection<TPart = unknown> {
   /**
-   * Authoritative user-authored text when provenance metadata is present.
+   * Authoritative pre-hook display text when provenance metadata is present.
    * An empty string is meaningful and must not fall back to model-facing parts.
    */
   readonly displayText: string | undefined;
   /**
-   * User-visible model parts. With display metadata, text parts are replaced
-   * by `displayText` while non-text parts (for example images) are retained.
+   * User-visible model parts. With display metadata, text parts are omitted in
+   * favor of `displayText`; non-text parts (for example images) are retained.
    */
-  readonly parts: readonly unknown[];
+  readonly parts: readonly TPart[];
 }
 
 export interface TranscriptReplayGapInput {
@@ -149,18 +149,24 @@ function isUserPromptSubmitContextPart(part: unknown): boolean {
 /**
  * Selects the user-visible projection of a transcript record.
  *
- * New records use authoritative `systemPayload.displayText`. For tag-only
- * third-party records, only a complete final hook-context part is removed.
- * Legacy records without either shape retain their model-facing parts.
+ * New user-prompt records pair authoritative `systemPayload.displayText` with
+ * `hookContext` provenance. For tag-only third-party records, only a complete
+ * final hook-context part is removed. Legacy records without either shape
+ * retain their model-facing parts.
  */
-export function projectUserTranscriptForDisplay(
-  record: Pick<TranscriptRecordInput, 'message' | 'systemPayload'>,
-): UserTranscriptDisplayProjection {
+export function projectUserTranscriptForDisplay<TPart>(record: {
+  readonly message?: {
+    readonly parts?: readonly TPart[];
+  };
+  readonly systemPayload?: unknown;
+}): UserTranscriptDisplayProjection<TPart> {
   const payload = isObjectRecord(record.systemPayload)
     ? record.systemPayload
     : undefined;
+  const isUserPromptPayload =
+    payload && typeof payload['hookContext'] === 'string';
   const displayText =
-    payload && typeof payload['displayText'] === 'string'
+    isUserPromptPayload && typeof payload['displayText'] === 'string'
       ? payload['displayText']
       : undefined;
   if (displayText !== undefined) {

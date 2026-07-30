@@ -963,6 +963,7 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+// Keep these in sync with USER_PROMPT_SUBMIT_CONTEXT_OPEN/CLOSE in Qwen core.
 const QWEN_USER_PROMPT_CONTEXT_OPEN = '<qwen:user-prompt-submit-context>';
 const QWEN_USER_PROMPT_CONTEXT_CLOSE = '</qwen:user-prompt-submit-context>';
 
@@ -984,7 +985,10 @@ function projectQwenUserRecordText(record: JsonRecord): string {
   const payload = isRecord(record.systemPayload)
     ? record.systemPayload
     : undefined;
-  const displayText = payload ? asString(payload.displayText) : undefined;
+  const displayText =
+    payload && asString(payload.hookContext) !== undefined
+      ? asString(payload.displayText)
+      : undefined;
   if (displayText !== undefined) return displayText;
 
   const message = toRecord(record.message);

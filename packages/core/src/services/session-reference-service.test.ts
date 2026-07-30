@@ -90,6 +90,28 @@ describe('SessionReferenceService', () => {
     expect(res.text).not.toContain('hook-only context');
   });
 
+  it('keeps notification model text instead of its display label', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [{ text: 'notification model text' }],
+          },
+          systemPayload: { displayText: 'Background agent completed' },
+        },
+      ]),
+    );
+
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+
+    expect(res.text).toContain('User: notification model text');
+    expect(res.text).not.toContain('Background agent completed');
+  });
+
   it('collapses tool calls to one-line summaries without result bodies', async () => {
     const svc = makeSvc(
       fakeResumed([

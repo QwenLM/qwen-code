@@ -56,6 +56,16 @@ describe('adaptJSONLMessages user display projection', () => {
     expect(message?.content).toBe('');
   });
 
+  it('keeps notification model text instead of its display label', () => {
+    const [message] = adaptJSONLMessages([
+      userMessage([{ text: 'notification model text' }], {
+        displayText: 'Background agent completed',
+      }),
+    ]);
+
+    expect(message?.content).toBe('notification model text');
+  });
+
   it('strips a complete final tag-only context part', () => {
     const [message] = adaptJSONLMessages([
       userMessage([

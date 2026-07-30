@@ -403,9 +403,12 @@ export interface NotificationRecordPayload {
 }
 
 export interface UserPromptRecordPayload {
-  /** User-authored prompt projection, before hook augmentation. */
+  /**
+   * TUI submittedPrompt projection when available; otherwise the expanded
+   * pre-hook prompt.
+   */
   displayText: string;
-  /** Sanitized context appended by UserPromptSubmit for the model. */
+  /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
 }
 

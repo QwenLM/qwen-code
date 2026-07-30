@@ -249,7 +249,10 @@ describe('resumeHistoryUtils', () => {
               } as Part,
             ],
           },
-          systemPayload: { displayText: 'raw @file prompt' },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
         },
       ],
     } as unknown as ConversationRecord;
@@ -261,6 +264,44 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
     expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+  });
+
+  it('projects the user turn when legacy @-command metadata has no userText', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'at_command',
+          systemPayload: { filesRead: [], status: 'success' },
+        },
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'expanded model prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items.find((item) => item.type === 'user')).toMatchObject({
+      text: 'expanded model prompt',
+    });
+    expect(JSON.stringify(items)).not.toContain('hook-only context');
   });
 
   it('strips a complete final hook-context part without metadata', () => {
@@ -339,7 +380,10 @@ describe('resumeHistoryUtils', () => {
               } as Part,
             ],
           },
-          systemPayload: { displayText: '' },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'hook-only context',
+          },
         },
       ],
     } as unknown as ConversationRecord;

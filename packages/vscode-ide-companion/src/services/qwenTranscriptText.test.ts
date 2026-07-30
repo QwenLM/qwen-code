@@ -38,6 +38,16 @@ describe('qwenRecordToText', () => {
     ).toBe('');
   });
 
+  it('keeps synthetic user model text instead of its display label', () => {
+    expect(
+      qwenRecordToText({
+        type: 'user',
+        message: { parts: [{ text: 'notification model text' }] },
+        systemPayload: { displayText: 'Background agent completed' },
+      }),
+    ).toBe('notification model text');
+  });
+
   it('strips a complete final tag-only context part', () => {
     expect(
       qwenRecordToText({

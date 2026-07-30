@@ -151,6 +151,34 @@ describe('DataProcessor', () => {
       expect(result).not.toContain('hook-only context');
     });
 
+    it('should keep notification model text instead of its display label', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [{ text: 'notification model text' }],
+          },
+          systemPayload: { displayText: 'Background agent completed' },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: notification model text');
+      expect(result).not.toContain('Background agent completed');
+    });
+
     it('should strip a complete final tag-only context part without metadata', () => {
       const records: ChatRecord[] = [
         {

@@ -359,9 +359,10 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
+          const projection = projectUserTranscriptForDisplay(record);
           const text =
             payload.userText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+            (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -386,8 +387,7 @@ function convertToHistoryItems(
 
         const projection = projectUserTranscriptForDisplay(record);
         const text =
-          projection.displayText ??
-          extractTextFromParts(projection.parts as readonly Part[]);
+          projection.displayText ?? extractTextFromParts(projection.parts);
         if (text) {
           items.push({ type: 'user', text });
         }

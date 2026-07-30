@@ -169,7 +169,7 @@ export class SessionReferenceService {
     if (projection.displayText !== undefined) {
       return projection.displayText.trim();
     }
-    return this.visibleTextParts(projection.parts as readonly Part[]);
+    return this.visibleTextParts(projection.parts);
   }
 
   private visibleTextParts(parts: readonly Part[]): string {

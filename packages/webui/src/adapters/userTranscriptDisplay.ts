@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Keep these in sync with USER_PROMPT_SUBMIT_CONTEXT_OPEN/CLOSE in core.
 const USER_PROMPT_CONTEXT_OPEN = '<qwen:user-prompt-submit-context>';
 const USER_PROMPT_CONTEXT_CLOSE = '</qwen:user-prompt-submit-context>';
 
@@ -39,14 +40,17 @@ function isHookContextPart(part: unknown): boolean {
  */
 export function getUserTranscriptDisplayText(
   record: UserTranscriptRecord,
-  separator = '',
 ): string | undefined {
   if (record.type !== 'user') return undefined;
 
   const payload = isRecord(record.systemPayload)
     ? record.systemPayload
     : undefined;
-  if (payload && typeof payload.displayText === 'string') {
+  if (
+    payload &&
+    typeof payload.hookContext === 'string' &&
+    typeof payload.displayText === 'string'
+  ) {
     return payload.displayText;
   }
 
@@ -62,5 +66,5 @@ export function getUserTranscriptDisplayText(
     .map((part) =>
       isRecord(part) && typeof part.text === 'string' ? part.text : '',
     )
-    .join(separator);
+    .join('');
 }

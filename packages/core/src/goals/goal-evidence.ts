@@ -548,9 +548,7 @@ function evidenceContent(
     return projection.displayText.trim();
   }
   const content: string[] = [];
-  const parts = (projection?.parts ??
-    record.message?.parts ??
-    []) as readonly Part[];
+  const parts = projection?.parts ?? record.message?.parts ?? [];
   for (const part of parts) {
     if (part.thought !== true && typeof part.text === 'string') {
       content.push(part.text);
@@ -582,9 +580,7 @@ function evidencePreview(
     preview += `${separator}${value}`.slice(0, remaining);
   };
 
-  const parts = (projection?.parts ??
-    record.message?.parts ??
-    []) as readonly Part[];
+  const parts = projection?.parts ?? record.message?.parts ?? [];
   for (const part of parts) {
     if (part.thought !== true && typeof part.text === 'string') {
       append(part.text);

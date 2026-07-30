@@ -193,6 +193,31 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it('preserves cron display text and source metadata during replay', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('cron-1', 'user', {
+        subtype: 'cron',
+        message: {
+          role: 'user',
+          parts: [{ text: 'cron model text' }],
+        },
+        systemPayload: { displayText: 'Cron job fired' },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'Cron job fired' },
+        _meta: {
+          source: 'cron',
+          qwenTranscript: { sourceRecordIds: ['cron-1'] },
+        },
+      },
+    ]);
+  });
+
   it('uses clean user display metadata while preserving image parts', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(
@@ -201,13 +226,13 @@ describe('createTranscriptReplayMachine', () => {
         message: {
           role: 'user',
           parts: [
-            { text: 'expanded model prompt' },
             {
               inlineData: {
                 data: 'image-data',
                 mimeType: 'image/png',
               },
             },
+            { text: 'expanded model prompt' },
             {
               text: [
                 '<qwen:user-prompt-submit-context>',
@@ -227,15 +252,15 @@ describe('createTranscriptReplayMachine', () => {
     expect(projected).toMatchObject([
       {
         sessionUpdate: 'user_message_chunk',
-        content: { type: 'text', text: 'raw @file prompt' },
-      },
-      {
-        sessionUpdate: 'user_message_chunk',
         content: {
           type: 'image',
           data: 'image-data',
           mimeType: 'image/png',
         },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'raw @file prompt' },
       },
     ]);
   });

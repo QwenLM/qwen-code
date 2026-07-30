@@ -220,9 +220,19 @@ describe('projectUserTranscriptForDisplay', () => {
             { text: wrapUserPromptSubmitContext('hook context') },
           ],
         },
-        systemPayload: { displayText: '' },
+        systemPayload: { displayText: '', hookContext: 'hook context' },
       }),
     ).toEqual({ displayText: '', parts: [imagePart] });
+  });
+
+  it('does not treat notification display labels as user prompt metadata', () => {
+    const modelPart = { text: 'notification model text' };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [modelPart] },
+        systemPayload: { displayText: 'Background agent completed' },
+      }),
+    ).toEqual({ displayText: undefined, parts: [modelPart] });
   });
 
   it('removes only a complete final tag-only context part', () => {

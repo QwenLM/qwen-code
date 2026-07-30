@@ -219,17 +219,18 @@ export class DataProcessor {
     for (const record of records) {
       if (record.type === 'user') {
         const projection = projectUserTranscriptForDisplay(record);
-        const fallbackText = projection.parts
-          .map((part: unknown) =>
-            typeof part === 'object' &&
-            part !== null &&
-            'text' in part &&
-            typeof part.text === 'string'
-              ? part.text
-              : '',
-          )
-          .join('');
-        const text = projection.displayText ?? fallbackText;
+        const text =
+          projection.displayText ??
+          projection.parts
+            .map((part) =>
+              typeof part === 'object' &&
+              part !== null &&
+              'text' in part &&
+              typeof part.text === 'string'
+                ? part.text
+                : '',
+            )
+            .join('');
         output += `[User]: ${text}\n`;
       } else if (record.type === 'assistant') {
         if (record.message?.parts) {

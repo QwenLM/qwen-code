@@ -401,6 +401,29 @@ describe('Goal evidence catalog', () => {
     );
   });
 
+  it('keeps mid-turn model text instead of its display label', () => {
+    const modelText =
+      '[User message received during tool execution]: save logs';
+    const user = record('user', 'user', {
+      provenance: 'real_user',
+      subtype: 'mid_turn_user_message',
+      turnId: 'turn-3',
+      text: `\n${modelText}`,
+    });
+    user.systemPayload = { displayText: 'save logs' };
+    const records = [record('cursor', 'system'), user];
+
+    const catalog = buildGoalEvidenceCatalog({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+    const validated = validate(records, complete(['user']));
+
+    expect(catalog.entries[0]?.preview).toBe(modelText);
+    expect(validated.citedRecords[0]?.content).toBe(modelText);
+  });
+
   it.each([
     ['cursor_unset', null, [record('root', 'system')]],
     ['cursor_not_found', 'absent', [record('root', 'system')]],
