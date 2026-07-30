@@ -16,9 +16,9 @@ import {
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
   Storage,
-  escapePath,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
+import { formatClipboardFileReference } from '../utils/clipboardUtils.js';
 import * as os from 'node:os';
 import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -414,14 +414,14 @@ describe('handleAtCommand', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'should resolve forward-slash Windows references with escaped spaces',
+    'should resolve clipboard-formatted Windows references with escaped spaces',
     async () => {
       const fileContent = 'Windows path with spaces';
       const filePath = await createTestFile(
         path.join(testRootDir, 'path with spaces', 'file.txt'),
         fileContent,
       );
-      const query = `@${escapePath(filePath.replaceAll('\\', '/'))}`;
+      const query = formatClipboardFileReference(filePath);
 
       const result = await handleAtCommand({
         query,

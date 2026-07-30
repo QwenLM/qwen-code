@@ -9,12 +9,19 @@ import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, escapePath } from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
 const PROCESS_TIMEOUT_MS = 5000;
+
+export function formatClipboardFileReference(filePath: string): string {
+  const normalizedPath = /^(?:[A-Za-z]:\\|\\\\)/.test(filePath)
+    ? filePath.replaceAll('\\', '/')
+    : filePath;
+  return `@${escapePath(normalizedPath)}`;
+}
 
 /**
  * Write text to clipboard via OSC 52 escape sequence (works over SSH).

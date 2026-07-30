@@ -46,6 +46,7 @@ import {
 } from '../utils/platformConstants.js';
 import {
   clipboardHasImage,
+  formatClipboardFileReference,
   readClipboardFiles,
 } from '../utils/clipboardUtils.js';
 
@@ -793,7 +794,7 @@ export function KeypressProvider({
         paste: true,
         pasteImage: hasImage,
         clipboardImageUnavailable,
-        sequence: clipboardFiles.join('\n'),
+        sequence: clipboardFiles.map(formatClipboardFileReference).join('\n'),
       });
     };
 

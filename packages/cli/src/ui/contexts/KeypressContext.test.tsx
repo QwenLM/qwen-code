@@ -27,7 +27,8 @@ const { mockClipboardHasImage, mockReadClipboardFiles } = vi.hoisted(() => ({
   mockReadClipboardFiles: vi.fn(),
 }));
 
-vi.mock('../utils/clipboardUtils.js', () => ({
+vi.mock('../utils/clipboardUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/clipboardUtils.js')>()),
   clipboardHasImage: mockClipboardHasImage,
   readClipboardFiles: mockReadClipboardFiles,
 }));
@@ -997,8 +998,8 @@ describe('KeypressContext - Kitty Protocol', () => {
       async (_path, pasteWorkaround) => {
         const keyHandler = vi.fn();
         mockReadClipboardFiles.mockResolvedValue([
-          'C:\\Users\\mochi\\image.png',
-          'C:\\Users\\mochi\\notes.txt',
+          'C:\\Users\\mochi\\My Notes\\notes.txt',
+          '\\\\server\\share\\My Report.txt',
         ]);
         const { result } = renderHook(() => useKeypressContext(), {
           wrapper: ({ children }) => wrapper({ children, pasteWorkaround }),
@@ -1013,7 +1014,7 @@ describe('KeypressContext - Kitty Protocol', () => {
               paste: true,
               pasteImage: false,
               sequence:
-                'C:\\Users\\mochi\\image.png\nC:\\Users\\mochi\\notes.txt',
+                '@C:/Users/mochi/My\\ Notes/notes.txt\n@//server/share/My\\ Report.txt',
             }),
           );
         });

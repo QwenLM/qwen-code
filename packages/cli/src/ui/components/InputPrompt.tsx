@@ -31,7 +31,6 @@ import {
   type Config,
   Storage,
   createDebugLogger,
-  escapePath,
 } from '@qwen-code/qwen-code-core';
 import {
   parseInputForHighlighting,
@@ -43,6 +42,7 @@ import {
   saveClipboardImage,
   cleanupOldClipboardImages,
   readClipboardFiles,
+  formatClipboardFileReference,
 } from '../utils/clipboardUtils.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
@@ -103,13 +103,6 @@ export interface Attachment {
 }
 
 const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
-
-function formatClipboardFileReference(filePath: string): string {
-  const normalizedPath = /^(?:[A-Za-z]:\\|\\\\)/.test(filePath)
-    ? filePath.replaceAll('\\', '/')
-    : filePath;
-  return `@${escapePath(normalizedPath)}`;
-}
 
 /**
  * Classify a pasted blob as image-file-path(s).

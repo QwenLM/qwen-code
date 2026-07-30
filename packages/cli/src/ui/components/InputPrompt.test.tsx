@@ -71,7 +71,13 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
-vi.mock('../utils/clipboardUtils.js');
+vi.mock('../utils/clipboardUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/clipboardUtils.js')>()),
+  clipboardHasImage: vi.fn(),
+  saveClipboardImage: vi.fn(),
+  cleanupOldClipboardImages: vi.fn(),
+  readClipboardFiles: vi.fn(),
+}));
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
   stat: mockFsStat,
@@ -1437,6 +1443,18 @@ describe('InputPrompt', () => {
 
   describe('clipboard image paste', () => {
     const isWindows = process.platform === 'win32';
+    const copiedNonImageFileCases = [
+      {
+        pathKind: 'drive-letter',
+        filePath: 'C:\\Users\\mochi\\My Notes\\notes.txt',
+        expectedReference: '@C:/Users/mochi/My\\ Notes/notes.txt',
+      },
+      {
+        pathKind: 'UNC',
+        filePath: '\\\\server\\share\\My Report.txt',
+        expectedReference: '@//server/share/My\\ Report.txt',
+      },
+    ];
 
     beforeEach(() => {
       vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([]);
@@ -1497,18 +1515,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it.each([
-      {
-        pathKind: 'drive-letter',
-        filePath: 'C:\\Users\\mochi\\My Notes\\notes.txt',
-        expectedReference: '@C:/Users/mochi/My\\ Notes/notes.txt',
-      },
-      {
-        pathKind: 'UNC',
-        filePath: '\\\\server\\share\\My Report.txt',
-        expectedReference: '@//server/share/My\\ Report.txt',
-      },
-    ])(
+    it.each(copiedNonImageFileCases)(
       'inserts copied $pathKind non-image files as references on the clipboard shortcut',
       async ({ filePath, expectedReference }) => {
         vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
@@ -1533,6 +1540,37 @@ describe('InputPrompt', () => {
         await wait();
 
         expect(stripAnsi(lastFrame() ?? '')).toContain(expectedReference);
+        expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
+
+    it.each(copiedNonImageFileCases)(
+      'keeps copied $pathKind references resolvable through an empty bracketed paste',
+      async ({ filePath, expectedReference }) => {
+        vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+          filePath,
+        ]);
+        let bufferText = '';
+
+        const TestHarness = () => {
+          const buffer = useTextBuffer({
+            viewport: { width: 80, height: 20 },
+            isValidPath: (candidate) => candidate === filePath,
+            onChange: () => {},
+          });
+          bufferText = buffer.text;
+          return <InputPrompt {...props} buffer={buffer} />;
+        };
+
+        const { stdin, unmount } = renderWithProviders(<TestHarness />);
+        await wait();
+
+        stdin.write('\x1B[200~\x1B[201~');
+
+        await waitFor(() => {
+          expect(bufferText).toBe(expectedReference);
+        });
         expect(clipboardUtils.clipboardHasImage).not.toHaveBeenCalled();
         unmount();
       },
