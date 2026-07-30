@@ -31,6 +31,7 @@ import {
   type Config,
   Storage,
   createDebugLogger,
+  unescapePath,
 } from '@qwen-code/qwen-code-core';
 import {
   parseInputForHighlighting,
@@ -131,9 +132,10 @@ export function classifyPastedImagePaths(pasted: string): {
   const imagePaths: string[] = [];
   let allImages = tokens.length > 0;
   for (const token of tokens) {
-    const normalized = token
+    const normalized = unescapePath(
+      token.replace(/^["']|["']$/g, ''), // strip surrounding quotes
+    )
       .replace(/^@/, '') // strip the `@` reference prefix
-      .replace(/^["']|["']$/g, '') // strip surrounding quotes
       .replace(/\\ /g, ' '); // unescape shell-escaped spaces
     if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
       imagePaths.push(normalized);

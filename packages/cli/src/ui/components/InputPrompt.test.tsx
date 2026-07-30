@@ -1576,6 +1576,37 @@ describe('InputPrompt', () => {
       },
     );
 
+    it('promotes a copied image with shell metacharacters through an empty bracketed paste', async () => {
+      const imagePath = 'C:\\Photos\\image(1).png';
+      const normalizedImagePath = imagePath.replaceAll('\\', '/');
+      const expectedSource = path.isAbsolute(normalizedImagePath)
+        ? normalizedImagePath
+        : path.resolve(props.config.getTargetDir(), normalizedImagePath);
+      vi.mocked(clipboardUtils.readClipboardFiles).mockResolvedValue([
+        imagePath,
+      ]);
+      mockFsStat.mockResolvedValue({
+        isFile: () => true,
+      });
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B[200~\x1B[201~');
+
+      await waitFor(() => {
+        expect(mockFsStat).toHaveBeenCalledWith(expectedSource);
+      });
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expectedSource,
+        expect.stringMatching(/clipboard-\d+-0\.png$/),
+      );
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('promotes copied image files to attachments on the clipboard shortcut', async () => {
       const imagePath = 'C:\\Users\\mochi\\image.png';
       const expectedSource = path.isAbsolute(imagePath)
@@ -5868,9 +5899,16 @@ function clean(str: string | undefined): string {
 
 describe('classifyPastedImagePaths', () => {
   it('recognizes a Windows image path read from the file clipboard', () => {
-    const imagePath = 'C:\\Users\\mochi\\image.png';
+    const imagePath = 'C:\\Users\\mochi\\image(1).png';
     expect(classifyPastedImagePaths(imagePath)).toEqual({
       imagePaths: [imagePath],
+      allImages: true,
+    });
+  });
+
+  it('unescapes a normalized Windows image reference before promotion', () => {
+    expect(classifyPastedImagePaths('@C:/Photos/image\\(1\\).png')).toEqual({
+      imagePaths: ['C:/Photos/image(1).png'],
       allImages: true,
     });
   });
