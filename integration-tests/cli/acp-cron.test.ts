@@ -17,12 +17,12 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, it, expect } from 'vitest';
-import { TestRig, fakeServerHostOptions } from '../test-helper.js';
+import { TestRig } from '../test-helper.js';
 import {
   startFakeOpenAIServer,
   fakeToolCall,
@@ -34,8 +34,6 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const IS_SANDBOX =
   process.env['QWEN_SANDBOX'] &&
   process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
-
-const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -87,7 +85,12 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
   })[] = [];
   const stderr: string[] = [];
 
-  const qwenHome = join(rig.testDir!, '.qwen-home');
+  // Keep the global config dir outside the agent's workspace cwd so workspace
+  // scans (memory discovery, file tooling) never see it.
+  const qwenHome = join(
+    dirname(rig.testDir!),
+    `${basename(rig.testDir!)}-home`,
+  );
   mkdirSync(qwenHome, { recursive: true });
 
   const agent = spawn(
@@ -103,6 +106,7 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
         OPENAI_BASE_URL: fakeServer.baseUrl,
         OPENAI_MODEL: 'fake-model',
         QWEN_MODEL: 'fake-model',
+        // Defends against an ambient proxy intercepting the local fake server.
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
       },
@@ -281,6 +285,7 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
     await waitForExit();
+    rmSync(qwenHome, { recursive: true, force: true });
   };
 
   return {
@@ -340,72 +345,92 @@ async function initSession(
           };
         }
         return { content: 'Done.' };
-      }, FAKE_SERVER_OPTIONS);
-
-      const { sendRequest, cleanup, stderr, waitForSessionUpdate } =
-        setupAcpCronTest(rig, fakeServer);
+      });
 
       try {
-        const sessionId = await initSession(sendRequest, rig.testDir!);
+        const { sendRequest, cleanup, stderr, waitForSessionUpdate } =
+          setupAcpCronTest(rig, fakeServer);
 
-        // --- Part 1: Create a cron job that fires every minute ---
-        const createResult = (await sendRequest('session/prompt', {
-          sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: 'Call cron_create with cron expression "*/1 * * * *" and prompt "Say CRONFIRE7742 and nothing else" and recurring true. Confirm briefly.',
-            },
-          ],
-        })) as { stopReason: string };
-        expect(createResult.stopReason).toBe('end_turn');
+        try {
+          const sessionId = await initSession(sendRequest, rig.testDir!);
 
-        const promptDoneAt = Date.now();
+          // --- Part 1: Create a cron job that fires every minute ---
+          const createResult = (await sendRequest('session/prompt', {
+            sessionId,
+            prompt: [
+              {
+                type: 'text',
+                text: 'Call cron_create with cron expression "*/1 * * * *" and prompt "Say CRONFIRE7742 and nothing else" and recurring true. Confirm briefly.',
+              },
+            ],
+          })) as { stopReason: string };
+          expect(createResult.stopReason).toBe('end_turn');
 
-        // --- Part 2: Session stays responsive while cron is pending ---
-        const interactiveResult = (await sendRequest('session/prompt', {
-          sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: 'Say INTERACTIVE8899 and nothing else.',
-            },
-          ],
-        })) as { stopReason: string };
-        expect(interactiveResult.stopReason).toBe('end_turn');
+          // Fail fast if the cron_create tool call was not served to the first
+          // user prompt. An internal model call before the first prompt (title
+          // generation, a classifier pass) would shift dispatch and otherwise
+          // surface only as an opaque 75s timeout in Part 3.
+          expect(
+            JSON.stringify(fakeServer.requests[0]?.body['messages']),
+            'requestIndex 0 was not the cron_create prompt — dispatch shifted',
+          ).toContain('CRONFIRE7742');
 
-        // --- Part 3: Wait for cron-fired notification (up to 75s) ---
-        // The cron fires at the next minute boundary. The model response
-        // should stream back as sessionUpdate notifications after the
-        // originating prompt has already returned.
+          const promptDoneAt = Date.now();
 
-        // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
-        const cronUserMsg = await waitForSessionUpdate(
-          (u) =>
-            u.update?.sessionUpdate === 'user_message_chunk' &&
-            (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
-            u.receivedAt > promptDoneAt,
-          'cron-fired user_message_chunk with CRONFIRE7742',
-          75_000,
-        );
-        expect(cronUserMsg.update?._meta).toBeDefined();
-        expect(cronUserMsg.update?._meta?.source).toBe('cron');
+          // --- Part 2: Session stays responsive while cron is pending ---
+          const interactiveResult = (await sendRequest('session/prompt', {
+            sessionId,
+            prompt: [
+              {
+                type: 'text',
+                text: 'Say INTERACTIVE8899 and nothing else.',
+              },
+            ],
+          })) as { stopReason: string };
+          expect(interactiveResult.stopReason).toBe('end_turn');
 
-        // 3b: Check for agent_message_chunk after the cron user message
-        // (the model's response to the cron prompt)
-        const cronAgentMsg = await waitForSessionUpdate(
-          (u) =>
-            u.update?.sessionUpdate === 'agent_message_chunk' &&
-            u.receivedAt > cronUserMsg.receivedAt,
-          'agent_message_chunk after cron fire',
-          15_000, // should already be here by now
-        );
-        expect(cronAgentMsg.receivedAt).toBeGreaterThan(promptDoneAt);
-      } catch (e) {
-        if (stderr.length) console.error('Agent stderr:', stderr.join(''));
-        throw e;
+          // --- Part 3: Wait for cron-fired notification (up to 75s) ---
+          // The cron fires at the next minute boundary. The model response
+          // should stream back as sessionUpdate notifications after the
+          // originating prompt has already returned.
+
+          // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
+          const cronUserMsg = await waitForSessionUpdate(
+            (u) =>
+              u.update?.sessionUpdate === 'user_message_chunk' &&
+              (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
+              u.receivedAt > promptDoneAt,
+            'cron-fired user_message_chunk with CRONFIRE7742',
+            75_000,
+          );
+          expect(cronUserMsg.update?._meta).toBeDefined();
+          expect(cronUserMsg.update?._meta?.source).toBe('cron');
+
+          // 3b: Check for agent_message_chunk after the cron user message
+          // (the model's response to the cron prompt)
+          const cronAgentMsg = await waitForSessionUpdate(
+            (u) =>
+              u.update?.sessionUpdate === 'agent_message_chunk' &&
+              u.receivedAt > cronUserMsg.receivedAt,
+            'agent_message_chunk after cron fire',
+            15_000, // should already be here by now
+          );
+          expect(cronAgentMsg.receivedAt).toBeGreaterThan(promptDoneAt);
+        } catch (e) {
+          if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+          console.error(
+            'Fake server requests:',
+            fakeServer.requests.map((r, i) => ({
+              index: i,
+              model: r.body['model'],
+              messages: JSON.stringify(r.body['messages']).slice(0, 300),
+            })),
+          );
+          throw e;
+        } finally {
+          await cleanup();
+        }
       } finally {
-        await cleanup();
         await fakeServer.close();
       }
     },
