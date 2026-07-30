@@ -4243,6 +4243,11 @@ export class GeminiChat {
       .join('')
       .trim();
 
+    // Deferred until after the throw sites below so a protocol-tag leak
+    // or stream-validation failure cannot dispatch a recovered call that
+    // the retry path would then execute a second time.
+    let recoveredChunk: GenerateContentResponse | null = null;
+
     // XML tool call fallback: some models (e.g. qwen3.8-max-preview in very
     // long contexts) occasionally emit tool calls as raw XML in the content
     // field instead of using the structured tool_calls array. Detect and
@@ -4250,6 +4255,7 @@ export class GeminiChat {
     if (
       streamError === null &&
       !hasToolCall &&
+      hasFinishReason &&
       contentText &&
       containsXmlToolCalls(contentText)
     ) {
@@ -4285,8 +4291,8 @@ export class GeminiChat {
           .join('')
           .trim();
         contentParts = consolidatedHistoryParts;
-        // Yield a synthetic chunk so the agent loop (turn.ts) actually
-        // executes the recovered tool calls.
+        // Build a synthetic chunk so the agent loop (turn.ts) actually
+        // executes the recovered tool calls; yielded after the throw sites.
         const syntheticChunk = {
           candidates: [
             {
@@ -4295,7 +4301,7 @@ export class GeminiChat {
           ],
         } as GenerateContentResponse;
         syncFunctionCallsField(syntheticChunk, recovery.functionCallParts);
-        yield syntheticChunk;
+        recoveredChunk = syntheticChunk;
         debugLogger.warn(
           `XML tool call fallback: recovered ${recovery.functionCallParts.length} tool call(s) from plain text content`,
         );
@@ -4346,6 +4352,10 @@ export class GeminiChat {
         'Model stream ended with empty response text.',
         'NO_RESPONSE_TEXT',
       );
+    }
+
+    if (recoveredChunk) {
+      yield recoveredChunk;
     }
 
     // Record assistant turn with raw Content and metadata. Gate matches

@@ -13046,44 +13046,51 @@ describe('GeminiChat', async () => {
       expect(parts.some((p) => p.inlineData)).toBe(true);
     });
 
-    it('recovers XML tool calls when the stream ends without a finish reason (#8003 shape)', async () => {
-      const xml =
-        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield xmlChunk(xml); // no finishReason — the #8003 shape
-        })(),
-      );
+    it('does not recover XML tool calls when the stream lacks a finish reason', async () => {
+      vi.useFakeTimers();
+      try {
+        const xml =
+          '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          (async function* () {
+            yield xmlChunk(xml); // no finishReason
+          })(),
+        );
 
-      const stream = await chat.sendMessageStream(
-        'gemini-pro',
-        { message: 'read the file' },
-        'prompt-xml-fallback-no-finish',
-      );
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'read the file' },
+          'prompt-xml-fallback-no-finish',
+        );
 
-      const chunks: GenerateContentResponse[] = [];
-      for await (const event of stream) {
-        if (event.type === StreamEventType.CHUNK) {
-          chunks.push(event.value);
-        }
+        // Without a finish reason the recovery gate must not fire; the
+        // stream-validation block throws NO_FINISH_REASON so the retry
+        // path handles the truncated stream.
+        const chunks: GenerateContentResponse[] = [];
+        const collecting = (async () => {
+          for await (const event of stream) {
+            if (event.type === StreamEventType.CHUNK) {
+              chunks.push(event.value);
+            }
+          }
+        })();
+        const resultPromise = (async () => {
+          await expect(collecting).rejects.toThrow('finish reason');
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
+
+        // No synthetic tool-call chunk may be dispatched.
+        const recoveredChunk = chunks.find((c) =>
+          c.candidates?.[0]?.content?.parts?.some((p) =>
+            p.functionCall?.id?.startsWith('xml-recovered-'),
+          ),
+        );
+        expect(recoveredChunk).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
       }
-
-      const syntheticChunk = chunks.find((c) =>
-        c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
-      );
-      expect(syntheticChunk).toBeDefined();
-      expect(syntheticChunk!.functionCalls).toHaveLength(1);
-      const fc =
-        syntheticChunk!.candidates![0]!.content!.parts![0]!.functionCall!;
-      expect(fc.name).toBe('read_file');
-      expect(fc.args).toEqual({ file_path: 'a.ts' });
-
-      const history = chat.getHistory();
-      const lastEntry = history[history.length - 1]!;
-      expect(lastEntry.parts?.some((p) => p.functionCall)).toBe(true);
-      expect(
-        lastEntry.parts?.some((p) => p.text && p.text.includes('<invoke')),
-      ).toBe(false);
     });
   });
 });
