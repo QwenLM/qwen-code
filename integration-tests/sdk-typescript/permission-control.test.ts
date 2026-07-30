@@ -1156,16 +1156,17 @@ describe('Permission Control (E2E)', () => {
       it(
         'should not invoke canUseTool callback for write/edit tools',
         async () => {
-          let callbackInvoked = false;
+          const callbackToolNames: string[] = [];
 
           const q = query({
-            prompt: 'Create a file named test-auto-edit-no-callback.txt',
+            prompt:
+              'Use the write_file tool to create a file named test-auto-edit-no-callback.txt',
             options: {
               ...SHARED_TEST_OPTIONS,
               permissionMode: 'auto-edit',
               cwd: testDir,
               canUseTool: async (toolName, input) => {
-                callbackInvoked = true;
+                callbackToolNames.push(toolName);
                 return {
                   behavior: 'allow',
                   updatedInput: input,
@@ -1180,9 +1181,17 @@ describe('Permission Control (E2E)', () => {
               messages.push(message);
             }
 
-            // auto-edit mode should auto-approve write/edit tools without invoking callback
+            // auto-edit auto-approves write/edit tools without invoking the
+            // callback, but the model may still issue a non-edit tool (e.g.
+            // run_shell_command) that legitimately routes through canUseTool.
+            // Assert only that no write/edit tool was gated on the callback.
             expect(hasSuccessfulToolResults(messages)).toBe(true);
-            expect(callbackInvoked).toBe(false);
+            const WRITE_EDIT_TOOLS = ['write_file', 'edit'];
+            expect(
+              callbackToolNames.filter((name) =>
+                WRITE_EDIT_TOOLS.includes(name),
+              ),
+            ).toEqual([]);
           } finally {
             await q.close();
           }
