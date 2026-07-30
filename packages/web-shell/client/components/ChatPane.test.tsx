@@ -36,7 +36,7 @@ const clearFollowup = vi.fn();
 const insertText = vi.fn();
 const transcriptDispatch = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
-const submitPermission = vi.fn(async () => {});
+const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);

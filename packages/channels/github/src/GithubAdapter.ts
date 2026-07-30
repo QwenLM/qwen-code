@@ -22,6 +22,24 @@ interface GithubConfig extends ChannelConfig {
   reasonFilter?: unknown;
 }
 
+const KNOWN_NOTIFICATION_REASONS = new Set([
+  'mention',
+  'review_requested',
+  'assign',
+  'author',
+  'comment',
+  'ci_activity',
+  'manual',
+  'state_change',
+  'subscribed',
+  'team_mention',
+  'security_alert',
+  'approval_requested',
+  'invitation',
+  'member_feature_requested',
+  'security_advisory_credit',
+]);
+
 interface GithubCursor {
   lastProcessedAt: string;
   metaFloor?: string;
@@ -85,13 +103,41 @@ interface NotificationContext {
   reason: string;
 }
 
-function normalizeReasonFilter(config: GithubConfig): Set<string> | null {
-  if (!Array.isArray(config.reasonFilter)) return null;
+interface WorkingReaction {
+  owner: string;
+  repo: string;
+  commentId: number;
+  reactionId?: number;
+}
+
+function normalizeReasonFilter(
+  config: GithubConfig,
+  channelName: string,
+): Set<string> | null {
+  if (config.reasonFilter === undefined) return null;
+  if (!Array.isArray(config.reasonFilter)) {
+    throw new Error(
+      `reasonFilter for channel ${channelName} must be an array of GitHub notification reasons.`,
+    );
+  }
+  if (config.reasonFilter.some((reason) => typeof reason !== 'string')) {
+    throw new Error(
+      `reasonFilter entries for channel ${channelName} must be strings.`,
+    );
+  }
   const reasons = config.reasonFilter
     .filter((reason): reason is string => typeof reason === 'string')
     .map((reason) => reason.trim().toLowerCase())
     .filter((reason) => reason.length > 0);
-  return new Set(reasons);
+  const unknownReasons = reasons.filter(
+    (reason) => !KNOWN_NOTIFICATION_REASONS.has(reason),
+  );
+  if (unknownReasons.length > 0) {
+    throw new Error(
+      `Unrecognized reasonFilter values for channel ${channelName}: ${unknownReasons.join(', ')}`,
+    );
+  }
+  return reasons.length > 0 ? new Set(reasons) : null;
 }
 
 interface PostedGithubComment {
@@ -165,6 +211,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
+  private readonly activeReactions = new Map<string, WorkingReaction>();
+  private readonly reactionsPendingRemoval = new Set<string>();
   private reasonFilter: Set<string> | null = null;
 
   constructor(
@@ -212,7 +260,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
-    this.reasonFilter = normalizeReasonFilter(cfg);
+    this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
@@ -399,6 +447,89 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return response.data;
   }
 
+  /**
+   * Adds GitHub's eyes reaction to accepted comment prompts, then removes it
+   * when the prompt ends. Both operations are best-effort and never block the
+   * agent response.
+   */
+  protected override onPromptStart(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId || !/^\d+$/.test(messageId)) return;
+    const [owner, repo] = chatId.split('/');
+    if (!owner || !repo) return;
+    const commentId = Number(messageId);
+    const key = this.reactionKey(chatId, commentId);
+    if (this.activeReactions.has(key)) return;
+    const reaction: WorkingReaction = { owner, repo, commentId };
+    this.activeReactions.set(key, reaction);
+    void this.githubApi(
+      () =>
+        this.octokit.rest.reactions.createForIssueComment({
+          owner,
+          repo,
+          comment_id: commentId,
+          content: 'eyes',
+        }),
+      `acknowledgeComment(${messageId})`,
+    )
+      .then(({ data }) => {
+        reaction.reactionId = data.id;
+        if (this.reactionsPendingRemoval.delete(key)) {
+          this.removeReaction(key, reaction);
+        }
+      })
+      .catch((err) => {
+        this.activeReactions.delete(key);
+        this.reactionsPendingRemoval.delete(key);
+        process.stderr.write(
+          `[Channel:${this.name}] failed to acknowledge comment ${messageId}: ${err}\n`,
+        );
+      });
+  }
+
+  protected override onPromptEnd(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId || !/^\d+$/.test(messageId)) return;
+    const key = this.reactionKey(chatId, Number(messageId));
+    const reaction = this.activeReactions.get(key);
+    if (!reaction) return;
+    if (reaction.reactionId === undefined) {
+      this.reactionsPendingRemoval.add(key);
+      return;
+    }
+    this.removeReaction(key, reaction);
+  }
+
+  private reactionKey(chatId: string, commentId: number): string {
+    return `${chatId}:${commentId}`;
+  }
+
+  private removeReaction(key: string, reaction: WorkingReaction): void {
+    const { reactionId } = reaction;
+    if (reactionId === undefined) return;
+    this.activeReactions.delete(key);
+    void this.githubApi(
+      () =>
+        this.octokit.rest.reactions.deleteForIssueComment({
+          owner: reaction.owner,
+          repo: reaction.repo,
+          comment_id: reaction.commentId,
+          reaction_id: reactionId,
+        }),
+      `removeAcknowledgement(${reaction.commentId})`,
+    ).catch((err) => {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to remove acknowledgement from comment ${reaction.commentId}: ${err}\n`,
+      );
+    });
+  }
+
   protected async pollOnce(): Promise<void> {
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
     const since = new Date(
@@ -444,6 +575,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const lastReadAt = notification.last_read_at;
       const reason = String(notification.reason ?? '').toLowerCase();
       if (this.reasonFilter && !this.reasonFilter.has(reason)) {
+        process.stderr.write(
+          `[Channel:${this.name}] skipping notification (reason=${reason} not in reasonFilter, subject=${notification.subject.url})\n`,
+        );
         this.logDebugPayload('Github', {
           event: 'reasonFilter.skip',
           chatId,
@@ -568,7 +702,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       senderName: trigger.actor,
       chatId: ctx.chatId,
       threadId: ctx.threadId,
-      messageId: String(trigger.id),
+      // GitHub issue-event IDs are not comment IDs. Prefix them so lifecycle
+      // acknowledgements only target real comment messages.
+      messageId: `event-${trigger.id}`,
       text:
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
