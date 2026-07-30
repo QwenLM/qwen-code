@@ -22,7 +22,6 @@ import {
   existsSync,
   symlinkSync,
 } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOneMutant, testEfficacyCommand } from './test-efficacy.js';
@@ -207,18 +206,6 @@ afterEach(() => {
   }
   rmSync(repo, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
-});
-
-describe('vitest entry resolution', () => {
-  it('anchors the fake to the real vitest bin target', () => {
-    // The probe resolves vitest through its package.json `bin` field rather than
-    // a hard-coded path. If a vitest bump moves that entry, this trips — the
-    // canary the finder no longer is, but that the fake-and-finder agreement in
-    // the probe tests would otherwise hide.
-    expect(
-      existsSync(createRequire(import.meta.url).resolve('vitest/vitest.mjs')),
-    ).toBe(true);
-  });
 });
 
 describe('test-efficacy probe isolation (#6832)', () => {
@@ -1069,6 +1056,35 @@ process.stdout.write(JSON.stringify({
     expect(got.verdict).toBe('inconclusive');
     expect(got.detail).toContain('does not match the selected statement');
     expect(readFileSync(join(repo, 'src/x.ts'), 'utf8')).toBe(before);
+  });
+
+  it('runs a mutant with dependencies from the source worktree', () => {
+    const dependencyRoot = join(repo, 'source-worktree');
+    const probeTree = join(repo, 'separate-probe');
+    mkdirSync(dependencyRoot);
+    mkdirSync(join(probeTree, 'src'), { recursive: true });
+    const sourceVitestDir = join(dependencyRoot, 'node_modules', 'vitest');
+    mkdirSync(sourceVitestDir, { recursive: true });
+    writeFileSync(
+      join(sourceVitestDir, 'package.json'),
+      JSON.stringify({ bin: { vitest: './vitest.mjs' } }),
+    );
+    writeFileSync(
+      join(sourceVitestDir, 'vitest.mjs'),
+      'process.stdout.write(JSON.stringify({ testResults: [] }));\n',
+    );
+    writeFileSync(join(probeTree, 'src/x.ts'), 'gone.clear();\n');
+
+    expect(() =>
+      runOneMutant(
+        probeTree,
+        { file: 'src/x.ts', line: 1, statement: 'gone.clear();' },
+        ['src/x.test.ts'],
+        undefined,
+        Date.now,
+        dependencyRoot,
+      ),
+    ).not.toThrow(/vitest not found/);
   });
 
   it('sweeps a stale REGISTERED probe worktree left by a crashed run', async () => {

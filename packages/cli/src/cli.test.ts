@@ -418,18 +418,21 @@ describe('stampCliEntryEnv', () => {
     expect(process.env['QWEN_CODE_CLI']).toBe(entry);
   });
 
-  it('grants the execute bit tsc never emits, so the spawn filter passes the stamp', () => {
-    // tsc writes dist/index.js as 0644 and only npm's bin-link chmods it; the
-    // spawn-time filter in core blanks a shebang-bearing entry without X_OK,
-    // which would turn this stamp into a no-op on every plain-build checkout.
-    const entry = path.join(tempDir, 'index.js');
-    writeFileSync(entry, '#!/usr/bin/env node\n', { mode: 0o644 });
+  it.skipIf(process.platform === 'win32')(
+    'grants the execute bit tsc never emits, so the spawn filter passes the stamp',
+    () => {
+      // tsc writes dist/index.js as 0644 and only npm's bin-link chmods it; the
+      // spawn-time filter in core blanks a shebang-bearing entry without X_OK,
+      // which would turn this stamp into a no-op on every plain-build checkout.
+      const entry = path.join(tempDir, 'index.js');
+      writeFileSync(entry, '#!/usr/bin/env node\n', { mode: 0o644 });
 
-    stampCliEntryEnv(entry);
+      stampCliEntryEnv(entry);
 
-    expect(process.env['QWEN_CODE_CLI']).toBe(entry);
-    expect(statSync(entry).mode & 0o111).not.toBe(0);
-  });
+      expect(process.env['QWEN_CODE_CLI']).toBe(entry);
+      expect(statSync(entry).mode & 0o111).not.toBe(0);
+    },
+  );
 
   it('leaves the slot unset when the derived entry does not exist', () => {
     stampCliEntryEnv(path.join(tempDir, 'no', 'such', 'index.js'));

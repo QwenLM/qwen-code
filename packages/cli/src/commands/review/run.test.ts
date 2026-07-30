@@ -202,6 +202,7 @@ describe('review run (handler)', () => {
   }
 
   beforeEach(() => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     dir = mkdtempSync(join(tmpdir(), 'run-handler-'));
     cwd = process.cwd();
     process.chdir(dir);

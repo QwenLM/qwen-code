@@ -32,15 +32,9 @@ describe('sessionMentionRef', () => {
     });
   });
 
-  it('unescapes delimiters in a title', () => {
-    expect(parseSessionRef('session:My\\ Chat')).toEqual({ title: 'My Chat' });
-  });
-
-  it('unescapes the full shared shell-special set, not a subset', () => {
-    // `&` is in SHELL_SPECIAL_CHARS but is the kind of char a hand-rolled subset
-    // would drop, leaving `@session:a\&b` as the literal title `a\&b`. Assert the
-    // shared unescaper keeps the full set so every shell special is released.
-    expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a&b' });
+  it('preserves the already-normalized title passed by the command parser', () => {
+    expect(parseSessionRef('session:My Chat')).toEqual({ title: 'My Chat' });
+    expect(parseSessionRef('session:a\\&b')).toEqual({ title: 'a\\&b' });
   });
 
   it('treats an empty remainder as null (lone prefix)', () => {

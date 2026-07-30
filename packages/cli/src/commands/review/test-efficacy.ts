@@ -992,6 +992,7 @@ function runProbeSuite(
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): {
   perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
   ms: number;
@@ -1003,7 +1004,7 @@ function runProbeSuite(
       : PROBE_RUN_TIMEOUT_MS;
   const r = spawnSync(
     process.execPath,
-    [findVitestBin(probeTree), 'run', '--reporter=json', ...probes],
+    [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
     {
       cwd: probeTree,
       encoding: 'utf8',
@@ -1056,6 +1057,7 @@ export function runOneMutant(
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   const original = readFileSync(abs, 'utf8');
@@ -1074,7 +1076,13 @@ export function runOneMutant(
   lines.splice(mutant.line - 1, 1);
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
-    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
+    const { perFile } = runProbeSuite(
+      probeTree,
+      probes,
+      deadlineAt,
+      now,
+      dependencyRoot,
+    );
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
@@ -1253,7 +1261,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // 600s tool ceiling (540s budget: at most 240s here + 300s revert).
         const mutantDeadline =
           startedAt + TOTAL_BUDGET_MS - PROBE_RUN_TIMEOUT_MS;
-        const baseline = runProbeSuite(probeTree, probes, mutantDeadline, now);
+        const baseline = runProbeSuite(
+          probeTree,
+          probes,
+          mutantDeadline,
+          now,
+          worktree,
+        );
         // A mutant is only evidence against a probe file that is green WITHOUT
         // it: against a file already red the mutant is "killed" by failures it
         // did not cause, and a file that collected nothing proves nothing. Gate
@@ -1279,7 +1293,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               break;
             }
             mutantResults.push(
-              runOneMutant(probeTree, c, greenProbes, mutantDeadline, now),
+              runOneMutant(
+                probeTree,
+                c,
+                greenProbes,
+                mutantDeadline,
+                now,
+                worktree,
+              ),
             );
           }
         }
@@ -1317,8 +1338,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         for (const p of added) safeRmWithin(probeTree, p);
 
         results.push(
-          ...runProbeSuite(probeTree, probes, startedAt + TOTAL_BUDGET_MS, now)
-            .perFile,
+          ...runProbeSuite(
+            probeTree,
+            probes,
+            startedAt + TOTAL_BUDGET_MS,
+            now,
+            worktree,
+          ).perFile,
         );
       } catch (e) {
         // The probe could not be set up or run. That is not evidence about any

@@ -333,12 +333,11 @@ describe('classifyProbeRun', () => {
     expect(only(got).verdict).toBe('gated');
   });
 
-  // The backslash normalisation this exercises runs only on win32 (see
-  // classifyProbeRun): there backslash is a separator. On POSIX the same input
-  // is a legal filename and must NOT match — the next test pins that.
-  it.skipIf(process.platform !== 'win32')(
-    'matches Windows result paths to repository-relative probes',
-    () => {
+  it('matches Windows result paths to repository-relative probes', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
       const got = classifyProbeRun(
         0,
         json({
@@ -352,12 +351,16 @@ describe('classifyProbeRun', () => {
         ['packages/lib/src/inert.test.ts'],
       );
       expect(only(got).verdict).toBe('inert');
-    },
-  );
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
 
-  it.skipIf(process.platform === 'win32')(
-    'does not treat a POSIX backslash filename as a path separator',
-    () => {
+  it('does not treat a POSIX backslash filename as a path separator', () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('linux');
+    try {
       // On POSIX a backslash is a legal filename character. The win32-only
       // normalisation must not run here, or `/w/vendor/other\src/a.test.ts`
       // would collapse into `/w/vendor/other/src/a.test.ts` and satisfy the
@@ -378,8 +381,10 @@ describe('classifyProbeRun', () => {
         ),
       );
       expect(got.verdict).toBe('inconclusive');
-    },
-  );
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
 
   it('does not let a gating test cover for an inert one in the same run', () => {
     // The bug the LIVE run found and the unit tests did not. One `vitest run`

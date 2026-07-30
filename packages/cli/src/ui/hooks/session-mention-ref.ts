@@ -22,13 +22,14 @@ export function isSessionId(value: string): boolean {
 
 export function parseSessionRef(pathName: string): SessionRef | null {
   if (!pathName.startsWith(SESSION_MENTION_PREFIX)) return null;
-  // unescapePath is a no-op on win32 (backslash is a path separator there), so
-  // an escaped mention like `@session:My\ Chat` would reach here still escaped.
-  // Use the platform-independent shared unescaper so the escape set matches the
-  // rest of the codebase on every OS.
-  const remainder = unescapeShellSpecials(
-    pathName.slice(SESSION_MENTION_PREFIX.length).trim(),
-  );
+  // parseAllAtCommands has already unescaped POSIX tokens. On Windows,
+  // unescapePath preserves backslashes because they are path separators, so
+  // session mentions need the shared shell-special unescaper here instead.
+  const rawRemainder = pathName.slice(SESSION_MENTION_PREFIX.length).trim();
+  const remainder =
+    process.platform === 'win32'
+      ? unescapeShellSpecials(rawRemainder)
+      : rawRemainder;
   if (remainder.length === 0) return null;
   return isSessionId(remainder) ? { id: remainder } : { title: remainder };
 }
