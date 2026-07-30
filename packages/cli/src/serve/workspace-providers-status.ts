@@ -250,12 +250,33 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 /**
- * A `user:password@` prefix, where the password may contain spaces. The
- * negative lookahead rejects `host:8443 ` so a port is not read as the start of
- * a password — that is the only way a colon in the authority can be followed by
- * whitespace and still not be credentials.
+ * A host a provider base URL can address: a dotted name, a bracketed IPv6
+ * literal, or `localhost`, with an optional port. A bare single label is not
+ * included, so the `s` in `p@s s@host.example` cannot pass for one.
  */
-const CREDENTIAL_PREFIX_PATTERN = /^[^\s/?#'"`<>]+:(?!\d+(?:\s|$))[^/?#]*@/;
+const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|localhost|[A-Za-z\d-]+(?:\.[A-Za-z\d-]+)+)(?::\d+)?(?:[/?#\s]|$)`;
+
+/**
+ * A `user:password@` prefix, where the password may contain spaces.
+ *
+ * Two decisions are encoded here, and each is load-bearing on its own.
+ *
+ * Whether there is a userinfo at all: a colon must appear before any
+ * whitespace, and the negative lookahead rejects digits that read as a port
+ * rather than the start of a password. `:8443 ` alone is not enough to tell
+ * the two apart — a password may also begin with digits and a space
+ * (`user:123 secret@host`) — so the digits count as a port only at end of span
+ * or when a further space follows before the `@`, which is prose rather than a
+ * one-space password.
+ *
+ * Which `@` ends the userinfo: neither greediness setting is right, because a
+ * greedy tail runs past the host into an `@` in trailing prose while a lazy one
+ * stops at an `@` inside the password. So the `@` is chosen structurally — it
+ * must be followed by something addressable as a host.
+ */
+const CREDENTIAL_PREFIX_PATTERN = new RegExp(
+  String.raw`^[^\s/?#'"\`<>]+:(?!\d+(?:$|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+);
 
 /**
  * Strips credentials from every URL in a free-text warning or error message.
@@ -297,6 +318,12 @@ function sanitizeProviderWarning(warning: string): string {
  * except that a recognised `user:password@` prefix is consumed first: a
  * password may legally contain spaces, and finding those is the whole reason
  * the message is split into spans rather than matched with a URL regex.
+ *
+ * Consuming that prefix is also what keeps the host intact. Were the whole span
+ * handed over, `sanitizeProviderBaseUrl` would strip at the last `@` in the
+ * authority it computes and rewrite the host from the prose — turning
+ * `https://user:pass@host.com — contact admin@example.com` into
+ * `https://example.com`.
  */
 function findUrlEnd(segment: string, markerLength: number): number {
   const credentials = CREDENTIAL_PREFIX_PATTERN.exec(

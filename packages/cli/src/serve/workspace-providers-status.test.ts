@@ -676,6 +676,88 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('sec ret');
   });
 
+  it('keeps the host when a pathless URL carries credentials and prose has an email', async () => {
+    // Both `@`s are candidates for the end of the userinfo. Taking the later one
+    // deleted the prose and rewrote the host from it, so the credentials were
+    // stripped but the message named the wrong server.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://user:pass@host.example — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://host.example — contact admin@example.com',
+    );
+    expect(JSON.stringify(result)).not.toContain('pass@');
+  });
+
+  it('strips a password that begins with digits and a space', async () => {
+    // `user:123 ` is shaped exactly like `host:8443 `, so the guard that stops a
+    // port being read as a password rejected this password and leaked it.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:123 secret@broken.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://broken.example/v1',
+    );
+    expect(JSON.stringify(result)).not.toContain('123 secret');
+  });
+
+  it('strips a password containing both an at sign and a space', async () => {
+    // The two failure modes meet here: a greedy tail runs past the host into the
+    // prose, a lazy one stops at the `@` inside the password and leaves `s s@`
+    // behind. Only choosing the `@` by what follows it handles both.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:p@s s@broken.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://broken.example/v1',
+    );
+    expect(JSON.stringify(result)).not.toContain('p@s s');
+    expect(JSON.stringify(result)).not.toContain('s s@');
+  });
+
+  it('keeps a pathless URL on localhost with a port and the email after it intact', async () => {
+    // `localhost` and a dotted IPv4 are hosts too, so the port heuristic has to
+    // survive them as well as a dotted name.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://localhost:8443 — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://localhost:8443 — contact admin@example.com',
+    );
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
