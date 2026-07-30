@@ -79,6 +79,8 @@ async function renderDialog(
           onReload={vi.fn().mockResolvedValue(undefined)}
           listPairingRequests={vi.fn().mockResolvedValue({ requests: [] })}
           approvePairingRequest={vi.fn()}
+          listPairingApprovals={vi.fn().mockResolvedValue({ senderIds: [] })}
+          revokePairingApproval={vi.fn()}
           {...props}
         />
       </I18nProvider>,

@@ -11,7 +11,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationResult,
 } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -37,6 +39,9 @@ async function renderRequests({
   channelName = 'release-bot',
   list = vi.fn().mockResolvedValue(PENDING),
   approve = vi.fn(),
+  listApprovals = vi.fn().mockResolvedValue({ senderIds: ['paired-user'] }),
+  revokeApproval = vi.fn(),
+  staticAllowedUsers = [],
   language = 'en',
 }: {
   channelName?: string;
@@ -45,6 +50,14 @@ async function renderRequests({
     name: string,
     code: string,
   ) => Promise<DaemonChannelPairingApprovalResult>;
+  listApprovals?: (
+    name: string,
+  ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revokeApproval?: (
+    name: string,
+    senderId: string,
+  ) => Promise<DaemonChannelPairingRevocationResult>;
+  staticAllowedUsers?: readonly string[];
   language?: 'en' | 'zh-CN';
 } = {}) {
   await act(async () => {
@@ -54,11 +67,14 @@ async function renderRequests({
           channelName={channelName}
           listRequests={list}
           approveRequest={approve}
+          listApprovals={listApprovals}
+          revokeApproval={revokeApproval}
+          staticAllowedUsers={staticAllowedUsers}
         />
       </I18nProvider>,
     );
   });
-  return { list, approve };
+  return { list, approve, listApprovals, revokeApproval };
 }
 
 beforeEach(() => {
@@ -77,9 +93,10 @@ afterEach(() => {
 
 describe('ChannelPairingRequests', () => {
   it('loads and displays pending requests for the selected Channel', async () => {
-    const { list } = await renderRequests();
+    const { list, listApprovals } = await renderRequests();
 
     expect(list).toHaveBeenCalledWith('release-bot');
+    expect(listApprovals).toHaveBeenCalledWith('release-bot');
     expect(container.textContent).toContain('Pending requests');
     expect(container.textContent).toContain('Ada');
     expect(container.textContent).toContain('user-42');
@@ -96,13 +113,75 @@ describe('ChannelPairingRequests', () => {
     );
   });
 
+  it('shows pairing approvals and distinguishes configured allowlist access', async () => {
+    await renderRequests({
+      listApprovals: vi.fn().mockResolvedValue({
+        senderIds: ['paired-user', 'second-user'],
+      }),
+      staticAllowedUsers: ['configured-user'],
+    });
+
+    expect(container.textContent).toContain('Pairing approvals');
+    expect(container.textContent).toContain('paired-user');
+    expect(container.textContent).toContain('second-user');
+    expect(container.textContent).toContain(
+      'Configured allowlist users remain allowed after a pairing approval is revoked.',
+    );
+    expect(container.textContent).toContain('configured-user');
+  });
+
+  it('confirms and revokes only the selected pairing approval', async () => {
+    const revokeApproval = vi.fn().mockResolvedValue({
+      revoked: 'paired-user',
+      senderIds: ['second-user'],
+    });
+    await renderRequests({
+      listApprovals: vi.fn().mockResolvedValue({
+        senderIds: ['paired-user', 'second-user'],
+      }),
+      revokeApproval,
+    });
+
+    const revoke = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.getAttribute('aria-label') === 'Revoke paired-user',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      'Revoke pairing approval for paired-user?',
+    );
+    expect(revokeApproval).not.toHaveBeenCalled();
+
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Revoke approval',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(revokeApproval).toHaveBeenCalledWith('release-bot', 'paired-user');
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('second-user');
+    expect(container.textContent).toContain(
+      'Pairing approval for paired-user was revoked.',
+    );
+  });
+
   it('approves a request and replaces the list with the daemon response', async () => {
     const approval: DaemonChannelPairingApprovalResult = {
       approved: PENDING.requests[0],
       requests: [],
     };
     const approve = vi.fn().mockResolvedValue(approval);
-    await renderRequests({ approve });
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValueOnce({ senderIds: [] })
+      .mockResolvedValueOnce({ senderIds: ['user-42'] });
+    await renderRequests({ approve, listApprovals });
 
     const button = Array.from(container.querySelectorAll('button')).find(
       (item) => item.textContent?.trim() === 'Approve',
@@ -115,6 +194,45 @@ describe('ChannelPairingRequests', () => {
     expect(container.textContent).toContain('Ada can now use this Channel.');
     expect(container.textContent).toContain('No pending requests');
     expect(container.textContent).not.toContain('ABCD1234');
+    expect(listApprovals).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('button[aria-label="Revoke user-42"]'),
+    ).not.toBeNull();
+  });
+
+  it('refreshes pairing approvals when a revoke target is already gone', async () => {
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValueOnce({ senderIds: ['paired-user'] })
+      .mockResolvedValueOnce({ senderIds: [] });
+    const revokeError = Object.assign(new Error('Approval is gone.'), {
+      status: 404,
+      body: {
+        error: 'Pairing approval was not found.',
+        code: 'channel_pairing_approval_not_found',
+      },
+    });
+    const revokeApproval = vi.fn().mockRejectedValue(revokeError);
+    await renderRequests({ listApprovals, revokeApproval });
+
+    const revoke = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke paired-user"]',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Revoke approval',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(listApprovals).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Pairing approval was not found.');
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).toBeNull();
   });
 
   it('keeps a request visible when approval fails', async () => {
