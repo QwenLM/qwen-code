@@ -471,6 +471,24 @@ export class AnthropicContentConverter {
     }
 
     if (contentBlocks.length > 0) {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use -- it doesn't scan past a leading
+      // non-tool_result block to find the result later in the same
+      // message. The source Gemini parts can arrive in any order (e.g. a
+      // text part preceding the functionResponse part within the same
+      // Content), so move tool_result blocks to the front of a user
+      // message whenever any are present. A stable sort preserves the
+      // relative order of multiple tool_result blocks against each other.
+      if (
+        role === 'user' &&
+        contentBlocks.some((b) => b.type === 'tool_result')
+      ) {
+        contentBlocks.sort((a, b) => {
+          if (a.type === 'tool_result' && b.type !== 'tool_result') return -1;
+          if (a.type !== 'tool_result' && b.type === 'tool_result') return 1;
+          return 0;
+        });
+      }
       messages.push({ role, content: contentBlocks });
     }
   }
