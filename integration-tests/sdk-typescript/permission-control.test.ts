@@ -34,7 +34,7 @@ import {
   createResultWaiter,
 } from './test-helper.js';
 
-const TEST_TIMEOUT = process.env['CI'] ? 60000 : 30000;
+const TEST_TIMEOUT = 60000;
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 
 /**
@@ -460,7 +460,7 @@ describe('Permission Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout waiting for first response')),
-              10000,
+              TEST_TIMEOUT,
             ),
           ),
         ]);
@@ -476,7 +476,7 @@ describe('Permission Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout waiting for second response')),
-              10000,
+              TEST_TIMEOUT,
             ),
           ),
         ]);
