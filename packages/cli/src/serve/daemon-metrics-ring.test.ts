@@ -7,9 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   DaemonMetricsRing,
-  computeCpuPercent,
   type DaemonMetricsGauges,
 } from './daemon-metrics-ring.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 
 const GAUGES: DaemonMetricsGauges = {
   cpuPercent: 12,

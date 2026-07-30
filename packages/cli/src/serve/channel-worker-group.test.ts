@@ -25,7 +25,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
-import type { ChannelDeliveryRequest } from './channel-delivery-ipc.js';
+import type { ChannelDeliveryRequest } from '../runtime/channel-delivery-ipc.js';
 
 const PRIMARY = '/ws/primary';
 const SECONDARY = '/ws/secondary';

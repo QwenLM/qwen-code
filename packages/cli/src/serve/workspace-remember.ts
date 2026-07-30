@@ -21,12 +21,12 @@ import {
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
-} from './workspace-remember-errors.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+} from '../runtime/workspace-remember-errors.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
 import {
   formatWorkspaceMemoryDreamSummary,
   formatWorkspaceMemoryForgetSummary,
-} from './workspace-memory-summaries.js';
+} from '../runtime/workspace-memory-summaries.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
 

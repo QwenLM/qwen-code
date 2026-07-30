@@ -86,8 +86,8 @@ import {
   publicErrorStatus,
   type WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
-import { extractRememberErrorCode } from '../workspace-remember-errors.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
+import { extractRememberErrorCode } from '../../runtime/workspace-remember-errors.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../../runtime/workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {

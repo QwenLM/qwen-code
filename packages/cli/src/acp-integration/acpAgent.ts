@@ -206,9 +206,9 @@ import {
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
-} from '../serve/workspace-remember-errors.js';
-import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
-import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
+} from '../runtime/workspace-remember-errors.js';
+import { formatWorkspaceMemoryForgetSummary } from '../runtime/workspace-memory-summaries.js';
+import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
@@ -315,9 +315,9 @@ import {
   endAcpBootstrapConfigProfiling,
   markAcpStartup,
 } from '../utils/acp-startup-profiler.js';
-import { isValidServerName } from '../serve/validate-server-name.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
-import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
+import { isValidServerName } from '../runtime/validate-server-name.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import {
   collectContextData,
   formatContextUsageText,

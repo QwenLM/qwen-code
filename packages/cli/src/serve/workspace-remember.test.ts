@@ -23,7 +23,7 @@ import {
   WorkspaceRememberTaskLane,
   type WorkspaceRememberRouteDeps,
 } from './workspace-remember.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
 
 const { mockDebugLogger } = vi.hoisted(() => ({
   mockDebugLogger: {
