@@ -167,8 +167,9 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.WORKFLOW,
   // ASK_USER_QUESTION is NOT in the global exclusion set because foreground
   // subagents with explicit tool lists (e.g. statusline-setup) legitimately
-  // use it. It is instead excluded below in the wildcard tool-list path,
-  // which is what background fork/general-purpose agents use. #7835.
+  // use it. It is instead excluded below in both the wildcard tool-list path
+  // and the no-toolConfig default path, which together cover background
+  // fork/general-purpose agents. #7835.
 ]);
 
 /**
