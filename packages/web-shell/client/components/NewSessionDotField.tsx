@@ -149,8 +149,14 @@ export function NewSessionDotField() {
 
     const onPointerMove = (event: PointerEvent) => {
       const rect = root.getBoundingClientRect();
-      pointer.x = event.clientX - rect.left;
-      pointer.y = event.clientY - rect.top;
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      if (pointer.previousX === -9999) {
+        pointer.previousX = x;
+        pointer.previousY = y;
+      }
+      pointer.x = x;
+      pointer.y = y;
     };
 
     const resizeObserver = new ResizeObserver(resize);

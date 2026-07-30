@@ -38,10 +38,15 @@ describe('composer visual effects fallback', () => {
       );
     }
 
+    const requestAnimationFrameSpy = vi.spyOn(window, 'requestAnimationFrame');
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
     mounted.push({ container, root });
+    requestAnimationFrameSpy.mockClear();
+    setIntervalSpy.mockClear();
     act(() => root.render(<Harness />));
 
     expect(
@@ -53,12 +58,15 @@ describe('composer visual effects fallback', () => {
     expect(
       container.querySelector('[data-web-shell-new-session-dot-field] canvas'),
     ).not.toBeNull();
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
   });
 
   it('erases dots for the pointer glow regardless of the background color', () => {
     vi.useFakeTimers();
     const addColorStop = vi.fn();
     const compositeOperations: string[] = [];
+    const globalAlphas: number[] = [];
     const contextStub = {
       arc: vi.fn(),
       beginPath: vi.fn(),
@@ -73,6 +81,11 @@ describe('composer visual effects fallback', () => {
       configurable: true,
       get: () => compositeOperations.at(-1) ?? 'source-over',
       set: (value: string) => compositeOperations.push(value),
+    });
+    Object.defineProperty(contextStub, 'globalAlpha', {
+      configurable: true,
+      get: () => globalAlphas.at(-1) ?? 1,
+      set: (value: number) => globalAlphas.push(value),
     });
     const context = contextStub as unknown as CanvasRenderingContext2D;
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
@@ -98,10 +111,22 @@ describe('composer visual effects fallback', () => {
       ),
     );
 
+    // Move the pointer across two speed samples so the field measures a real
+    // non-zero speed instead of relying on the unset previous-position seed.
     act(() => {
       window.dispatchEvent(
         new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
       );
+    });
+    act(() => {
+      vi.advanceTimersByTime(20);
+    });
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 300, clientY: 300 }),
+      );
+    });
+    act(() => {
       vi.advanceTimersByTime(20);
       drawFrame?.(0);
     });
@@ -109,6 +134,9 @@ describe('composer visual effects fallback', () => {
     expect(addColorStop).toHaveBeenCalledWith(0, 'rgba(0, 0, 0, 1)');
     expect(addColorStop).toHaveBeenCalledWith(1, 'rgba(0, 0, 0, 0)');
     expect(compositeOperations).toEqual(['destination-out', 'source-over']);
+    expect(globalAlphas).toHaveLength(2);
+    expect(globalAlphas[0]).toBeLessThan(1);
+    expect(globalAlphas[1]).toBe(1);
   });
 
   it('keeps both animation layers inert under prefers-reduced-motion', () => {
@@ -166,6 +194,47 @@ describe('composer visual effects fallback', () => {
     ).not.toBeNull();
     expect(setIntervalSpy).not.toHaveBeenCalled();
     expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancels the dot field interval and animation frame on unmount', () => {
+    vi.useFakeTimers();
+    const contextStub = {
+      arc: vi.fn(),
+      beginPath: vi.fn(),
+      clearRect: vi.fn(),
+      createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+      fill: vi.fn(),
+      fillRect: vi.fn(),
+      moveTo: vi.fn(),
+      setTransform: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      contextStub as unknown as CanvasRenderingContext2D,
+    );
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+    const cancelAnimationFrameSpy = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation(() => {});
+    const clearIntervalSpy = vi
+      .spyOn(window, 'clearInterval')
+      .mockImplementation(() => {});
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() =>
+      root.render(
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <NewSessionDotField />
+        </ThemeProvider>,
+      ),
+    );
+
+    act(() => root.unmount());
+    container.remove();
+
+    expect(clearIntervalSpy).toHaveBeenCalled();
+    expect(cancelAnimationFrameSpy).toHaveBeenCalled();
   });
 });
 
@@ -335,5 +404,55 @@ describe('dot field settled skip', () => {
 
     expect(contextStub.arc.mock.calls.length).toBe(arcCallsAfterSettle);
     expect(contextStub.fill.mock.calls.length).toBe(fillCallsAfterSettle);
+  });
+});
+
+describe('dot field pointer speed baseline', () => {
+  it('does not report a phantom speed burst on the first pointer move', () => {
+    vi.useFakeTimers();
+    const addColorStop = vi.fn();
+    const contextStub = {
+      arc: vi.fn(),
+      beginPath: vi.fn(),
+      clearRect: vi.fn(),
+      createRadialGradient: vi.fn(() => ({ addColorStop })),
+      fill: vi.fn(),
+      fillRect: vi.fn(),
+      moveTo: vi.fn(),
+      setTransform: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      contextStub as unknown as CanvasRenderingContext2D,
+    );
+
+    let drawFrame: FrameRequestCallback | undefined;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      drawFrame = callback;
+      return 1;
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    act(() =>
+      root.render(
+        <ThemeProvider value={WebShellThemeId.Dark}>
+          <NewSessionDotField />
+        </ThemeProvider>,
+      ),
+    );
+
+    // A lone first pointer move must seed the previous position so the speed
+    // sample stays zero and no glow burst is drawn.
+    act(() => {
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 100, clientY: 100 }),
+      );
+      vi.advanceTimersByTime(20);
+      drawFrame?.(0);
+    });
+
+    expect(addColorStop).not.toHaveBeenCalled();
   });
 });

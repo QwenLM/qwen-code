@@ -262,7 +262,9 @@ export function SpecularComposerEffect({
           ? angle
           : pointerAngle;
       const difference =
-        ((targetAngle - angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        ((((targetAngle - angle + Math.PI) % (Math.PI * 2)) + Math.PI * 2) %
+          (Math.PI * 2)) -
+        Math.PI;
       angle += difference * (1 - Math.exp(-delta * 7));
       const targetBrightness = focused ? 1.4 : proximity;
       brightness +=
