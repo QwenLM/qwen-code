@@ -98,16 +98,38 @@ describe('Autofix watcher prompt', () => {
 });
 
 describe('Autofix prompt authority', () => {
+  function promptConfig(
+    watcherJob: CronJob,
+    overrides: {
+      jobs?: CronJob[];
+      disabled?: ReadonlySet<string>;
+      loadSkillForRuntime?: ReturnType<typeof vi.fn>;
+      deleteJob?: ReturnType<typeof vi.fn>;
+      addSessionAllowRule?: ReturnType<typeof vi.fn>;
+    } = {},
+  ): { config: Config; deleteJob: ReturnType<typeof vi.fn> } {
+    const deleteJob = overrides.deleteJob ?? vi.fn().mockResolvedValue(true);
+    const config = {
+      getCronScheduler: () => ({
+        list: () => overrides.jobs ?? [watcherJob],
+        delete: deleteJob,
+      }),
+      getDisabledSkillNames: () => overrides.disabled ?? new Set<string>(),
+      getSkillManager: () => ({
+        loadSkillForRuntime:
+          overrides.loadSkillForRuntime ?? vi.fn().mockResolvedValue(skill()),
+      }),
+      getPermissionManager: () => ({
+        addSessionAllowRule: overrides.addSessionAllowRule ?? vi.fn(),
+      }),
+    } as unknown as Config;
+    return { config, deleteJob };
+  }
+
   it('expands a live scheduled tick through the bundled skill contract', async () => {
     const watcherJob = job();
     const addSessionAllowRule = vi.fn();
-    const config = {
-      getCronScheduler: () => ({ list: () => [watcherJob] }),
-      getSkillManager: () => ({
-        loadSkillForRuntime: vi.fn().mockResolvedValue(skill()),
-      }),
-      getPermissionManager: () => ({ addSessionAllowRule }),
-    } as unknown as Config;
+    const { config } = promptConfig(watcherJob, { addSessionAllowRule });
 
     const result = await resolveAutofixCronPrompt(config, watcherJob);
 
@@ -120,34 +142,53 @@ describe('Autofix prompt authority', () => {
     expect(addSessionAllowRule).toHaveBeenCalledWith('cron_list');
   });
 
-  it('does not authorize stale or user-entered prompt text', async () => {
-    const watcherJob = job();
-    const loadSkillForRuntime = vi.fn();
-    const config = {
-      getCronScheduler: () => ({ list: () => [] }),
-      getSkillManager: () => ({ loadSkillForRuntime }),
-    } as unknown as Config;
-
-    await expect(
-      resolveAutofixCronPrompt(config, watcherJob),
-    ).resolves.toBeNull();
-    expect(loadSkillForRuntime).not.toHaveBeenCalled();
-  });
-
-  it('turns a live watcher into a safe stop prompt when the skill is unavailable', async () => {
-    const watcherJob = job();
-    const config = {
-      getCronScheduler: () => ({ list: () => [watcherJob] }),
-      getSkillManager: () => ({
-        loadSkillForRuntime: vi.fn().mockResolvedValue(null),
-      }),
-    } as unknown as Config;
+  it.each([
+    ['malformed', job({ prompt: 'autofix tick mode=auto-push' })],
+    ['stale', job()],
+  ])('rejects and disables a %s Autofix tick', async (_label, watcherJob) => {
+    const { config, deleteJob } = promptConfig(watcherJob, {
+      jobs: _label === 'stale' ? [] : [watcherJob],
+    });
 
     const result = await resolveAutofixCronPrompt(config, watcherJob);
 
-    expect(result?.displayText).toBe('Autofix disabled: QwenLM/qwen-code#4362');
-    expect(result?.modelText).toContain('Delete this watcher with cron_delete');
-    expect(result?.modelText).toContain('no maintenance action was attempted');
+    expect(result?.displayText).toBe('Autofix rejected: job-1');
+    expect(result?.modelText).toContain('No maintenance action was authorized');
+    expect(result?.modelText).toContain('The watcher was disabled');
+    expect(deleteJob).toHaveBeenCalledWith('job-1');
+  });
+
+  it('disables a live watcher when Autofix is disabled at runtime', async () => {
+    const watcherJob = job();
+    const loadSkillForRuntime = vi.fn();
+    const { config, deleteJob } = promptConfig(watcherJob, {
+      disabled: new Set(['autofix']),
+      loadSkillForRuntime,
+    });
+
+    const result = await resolveAutofixCronPrompt(config, watcherJob);
+
+    expect(result?.displayText).toBe('Autofix rejected: job-1');
+    expect(result?.modelText).toContain('the Autofix skill is disabled');
+    expect(deleteJob).toHaveBeenCalledWith('job-1');
+    expect(loadSkillForRuntime).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when bundled skill loading rejects', async () => {
+    const watcherJob = job();
+    const { config, deleteJob } = promptConfig(watcherJob, {
+      loadSkillForRuntime: vi
+        .fn()
+        .mockRejectedValue(new Error('skill storage unavailable')),
+    });
+
+    const result = await resolveAutofixCronPrompt(config, watcherJob);
+
+    expect(result?.displayText).toBe('Autofix rejected: job-1');
+    expect(result?.modelText).toContain(
+      'watcher expansion failed: skill storage unavailable',
+    );
+    expect(deleteJob).toHaveBeenCalledWith('job-1');
   });
 
   it('pins repository identity in the immediate user-authorized prompt', () => {

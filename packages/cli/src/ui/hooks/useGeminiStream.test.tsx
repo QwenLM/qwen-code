@@ -291,6 +291,7 @@ describe('useGeminiStream', () => {
       getArenaAgentClient: vi.fn(() => null),
       isCronEnabled: vi.fn(() => false),
       getCronScheduler: vi.fn(() => null),
+      getDisabledSkillNames: vi.fn(() => new Set<string>()),
       getEmitToolUseSummaries: vi.fn(() => false),
       getFastModel: vi.fn(() => undefined),
       getBackgroundTaskRegistry: vi.fn(() => ({

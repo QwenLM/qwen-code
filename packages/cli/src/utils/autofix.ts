@@ -13,7 +13,7 @@ import type {
 import {
   applySkillAllowedTools,
   buildSkillLlmContent,
-  fetchGitHubPullRequests,
+  parseGhPrList,
   resolveBranchName,
 } from '@qwen-code/qwen-code-core';
 import { execFile } from 'node:child_process';
@@ -23,6 +23,8 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 1024 * 1024;
+const GH_CURRENT_PR_FIELDS =
+  'number,title,url,author,headRefName,headRepositoryOwner,isDraft,isCrossRepository,reviewDecision,statusCheckRollup,updatedAt,state';
 
 export const AUTOFIX_CRON = '*/10 * * * *';
 export const AUTOFIX_USAGE =
@@ -79,19 +81,21 @@ export function formatAutofixTick(
   return `autofix tick repo=${repo} pr=${pr} mode=${mode} rounds=${rounds} infra-reruns=${infraReruns}`;
 }
 
+export function autofixWatchers(jobs: readonly CronJob[]): AutofixWatcher[] {
+  return jobs
+    .map(parseAutofixWatcher)
+    .filter((watcher): watcher is AutofixWatcher => watcher !== null);
+}
+
 export function matchingAutofixWatchers(
   jobs: readonly CronJob[],
   repo: string,
   pr: number,
 ): AutofixWatcher[] {
-  return jobs
-    .map(parseAutofixWatcher)
-    .filter(
-      (watcher): watcher is AutofixWatcher =>
-        watcher !== null &&
-        watcher.repo.toLowerCase() === repo.toLowerCase() &&
-        watcher.pr === pr,
-    );
+  return autofixWatchers(jobs).filter(
+    (watcher) =>
+      watcher.repo.toLowerCase() === repo.toLowerCase() && watcher.pr === pr,
+  );
 }
 
 async function resolveRepository(cwd: string): Promise<string> {
@@ -113,6 +117,53 @@ async function resolveRepository(cwd: string): Promise<string> {
   return repo;
 }
 
+async function resolveCurrentPullRequest(
+  cwd: string,
+  branch: string,
+): Promise<{
+  pullRequest: GitHubPullRequest;
+  headRepositoryOwner: string;
+}> {
+  const { stdout } = await execFileAsync(
+    'gh',
+    ['pr', 'view', '--json', GH_CURRENT_PR_FIELDS],
+    {
+      cwd,
+      timeout: GH_TIMEOUT_MS,
+      maxBuffer: GH_MAX_BUFFER,
+      windowsHide: true,
+      encoding: 'utf8',
+    },
+  );
+  const parsed = JSON.parse(stdout) as {
+    state?: unknown;
+    headRefName?: unknown;
+    headRepositoryOwner?: { login?: unknown } | null;
+    isCrossRepository?: unknown;
+  };
+  if (parsed.state !== 'OPEN' || parsed.headRefName !== branch) {
+    throw new Error(
+      `No open pull request is associated with branch ${branch}.`,
+    );
+  }
+  if (
+    parsed.isCrossRepository ||
+    typeof parsed.headRepositoryOwner?.login !== 'string'
+  ) {
+    throw new Error(
+      'Autofix requires the current branch to belong to the canonical repository.',
+    );
+  }
+  const [pullRequest] = parseGhPrList(JSON.stringify([parsed]));
+  if (!pullRequest) {
+    throw new Error('GitHub CLI returned invalid pull request metadata.');
+  }
+  return {
+    pullRequest,
+    headRepositoryOwner: parsed.headRepositoryOwner.login,
+  };
+}
+
 export async function resolveCurrentAutofixPullRequest(
   config: Config,
 ): Promise<CurrentAutofixPullRequestResult> {
@@ -122,52 +173,21 @@ export async function resolveCurrentAutofixPullRequest(
     return { kind: 'error', message: 'Autofix requires a checked-out branch.' };
   }
 
-  const result = await fetchGitHubPullRequests(cwd);
-  if (result.kind !== 'ok') {
-    switch (result.kind) {
-      case 'not_a_repo':
-        return {
-          kind: 'error',
-          message: 'Autofix requires a Git repository.',
-        };
-      case 'cli_unavailable':
-        return {
-          kind: 'error',
-          message: 'Autofix requires the GitHub CLI (`gh`).',
-        };
-      case 'failed':
-        return {
-          kind: 'error',
-          message: `Unable to read pull requests: ${result.message}`,
-        };
-      default:
-        return {
-          kind: 'error',
-          message: 'Unable to read pull requests.',
-        };
-    }
-  }
-
-  const matches = result.pullRequests.filter(
-    (pullRequest) => pullRequest.headRefName === branch,
-  );
-  if (matches.length !== 1) {
-    return {
-      kind: 'error',
-      message:
-        matches.length === 0
-          ? `No open pull request is associated with branch ${branch}.`
-          : `More than one open pull request uses branch ${branch}; Autofix will not guess.`,
-    };
-  }
-
   try {
+    const repo = await resolveRepository(cwd);
+    const currentPullRequest = await resolveCurrentPullRequest(cwd, branch);
+    const owner = repo.slice(0, repo.indexOf('/'));
+    if (
+      owner.toLowerCase() !==
+      currentPullRequest.headRepositoryOwner.toLowerCase()
+    ) {
+      throw new Error(
+        'The current pull request does not belong to the canonical repository.',
+      );
+    }
     return {
       kind: 'ok',
-      value: {
-        pullRequest: matches[0],
-        repo: await resolveRepository(cwd),
-      },
+      value: { pullRequest: currentPullRequest.pullRequest, repo },
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -176,7 +196,7 @@ export async function resolveCurrentAutofixPullRequest(
       message:
         code === 'ENOENT'
           ? 'Autofix requires the GitHub CLI (`gh`).'
-          : `Unable to resolve the GitHub repository: ${error instanceof Error ? error.message : String(error)}`,
+          : `Unable to resolve the current pull request: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
@@ -191,35 +211,81 @@ export interface ResolvedAutofixCronPrompt {
   modelText: string;
 }
 
+async function rejectedAutofixCronPrompt(
+  config: Config,
+  job: Pick<CronJob, 'id' | 'prompt'>,
+  reason: string,
+): Promise<ResolvedAutofixCronPrompt> {
+  const id = job.id || 'unknown';
+  let stopped = false;
+  if (job.id) {
+    try {
+      stopped = await config.getCronScheduler().delete(job.id);
+    } catch {
+      stopped = false;
+    }
+  }
+  return {
+    displayText: `Autofix rejected: ${id}`,
+    modelText: `Autofix watcher ${id} was rejected by the CLI: ${reason}. No maintenance action was authorized.${stopped ? ' The watcher was disabled.' : ' The watcher could not be confirmed disabled; use /autofix off.'}`,
+  };
+}
+
 export async function resolveAutofixCronPrompt(
   config: Config,
   job: Pick<CronJob, 'id' | 'prompt' | 'recurring' | 'cronExpr'>,
 ): Promise<ResolvedAutofixCronPrompt | null> {
-  const watcher = parseAutofixWatcher(job as CronJob);
-  if (!watcher || !job.id) return null;
-  const live = config
-    .getCronScheduler()
-    .list()
-    .some(
-      (candidate) => candidate.id === job.id && candidate.prompt === job.prompt,
-    );
-  if (!live) return null;
+  if (!job.prompt.startsWith('autofix tick')) return null;
+  try {
+    const watcher = parseAutofixWatcher(job as CronJob);
+    if (!watcher || !job.id) {
+      return rejectedAutofixCronPrompt(config, job, 'invalid watcher metadata');
+    }
+    const live = config
+      .getCronScheduler()
+      .list()
+      .some(
+        (candidate) =>
+          candidate.id === job.id && candidate.prompt === job.prompt,
+      );
+    if (!live) {
+      return rejectedAutofixCronPrompt(
+        config,
+        job,
+        'the watcher is no longer live',
+      );
+    }
 
-  const skill = await config
-    .getSkillManager()
-    ?.loadSkillForRuntime('autofix', 'bundled');
-  if (!skill) {
+    if (config.getDisabledSkillNames().has('autofix')) {
+      return rejectedAutofixCronPrompt(
+        config,
+        job,
+        'the Autofix skill is disabled',
+      );
+    }
+    const skill = await config
+      .getSkillManager()
+      ?.loadSkillForRuntime('autofix', 'bundled');
+    if (!skill) {
+      return rejectedAutofixCronPrompt(
+        config,
+        job,
+        'the bundled Autofix skill is unavailable',
+      );
+    }
+    applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools);
+    const content = buildSkillLlmContent(dirname(skill.filePath), skill.body);
     return {
-      displayText: `Autofix disabled: ${watcher.repo}#${watcher.pr}`,
-      modelText: `The live Autofix watcher ${job.id} for ${watcher.repo}#${watcher.pr} cannot run because the bundled Autofix skill is unavailable or disabled. Delete this watcher with cron_delete and report that no maintenance action was attempted.`,
+      displayText: `Autofix: ${watcher.repo}#${watcher.pr}`,
+      modelText: `${content}\n${job.prompt}\n<autofix-authority source="cron" repo="${watcher.repo}" pr="${watcher.pr}" mode="${watcher.mode}" rounds="${watcher.rounds}" infra-reruns="${watcher.infraReruns}" job="${job.id}" />`,
     };
+  } catch (error) {
+    return rejectedAutofixCronPrompt(
+      config,
+      job,
+      `watcher expansion failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  applySkillAllowedTools(config.getPermissionManager(), skill.allowedTools);
-  const content = buildSkillLlmContent(dirname(skill.filePath), skill.body);
-  return {
-    displayText: `Autofix: ${watcher.repo}#${watcher.pr}`,
-    modelText: `${content}\n${job.prompt}\n<autofix-authority source="cron" repo="${watcher.repo}" pr="${watcher.pr}" mode="${watcher.mode}" rounds="${watcher.rounds}" infra-reruns="${watcher.infraReruns}" job="${job.id}" />`,
-  };
 }
 
 export function buildAutofixImmediatePrompt(

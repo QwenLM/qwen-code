@@ -664,8 +664,7 @@ describe('BundledSkillLoader', () => {
       expect(scheduler.create).not.toHaveBeenCalled();
     });
 
-    it('deletes every matching watcher and verifies none remain', async () => {
-      resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
+    it('deletes every Autofix watcher without requiring live PR resolution', async () => {
       schedulerJobs.push(
         {
           id: 'job-1',
@@ -681,7 +680,7 @@ describe('BundledSkillLoader', () => {
           id: 'job-2',
           cronExpr: '*/10 * * * *',
           prompt:
-            'autofix tick repo=QwenLM/qwen-code pr=4362 mode=auto-push rounds=1 infra-reruns=0',
+            'autofix tick repo=other/repo pr=99 mode=auto-push rounds=1 infra-reruns=0',
           recurring: true,
           createdAt: 1,
           expiresAt: 2,
@@ -691,17 +690,17 @@ describe('BundledSkillLoader', () => {
 
       const result = await invokeAutofix('off');
 
+      expect(resolveCurrentAutofixPullRequest).not.toHaveBeenCalled();
       expect(scheduler.delete).toHaveBeenCalledTimes(2);
       expect(scheduler.list).toHaveBeenCalledTimes(2);
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: 'Autofix watcher is off for QwenLM/qwen-code#4362.',
+        content: 'Disabled 2 Autofix watchers.',
       });
     });
 
-    it('reports a failed kill switch while a matching watcher remains', async () => {
-      resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
+    it('reports a failed kill switch while any Autofix watcher remains', async () => {
       schedulerJobs.push({
         id: 'job-stuck',
         cronExpr: '*/10 * * * *',
@@ -716,11 +715,12 @@ describe('BundledSkillLoader', () => {
 
       const result = await invokeAutofix('off');
 
+      expect(resolveCurrentAutofixPullRequest).not.toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
         content:
-          'Autofix watcher could not be fully disabled for QwenLM/qwen-code#4362. Failed jobs: job-stuck',
+          'Autofix watcher could not be fully disabled. Failed jobs: job-stuck',
       });
     });
   });

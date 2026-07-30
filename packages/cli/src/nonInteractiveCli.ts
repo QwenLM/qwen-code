@@ -2192,11 +2192,26 @@ export async function runNonInteractive(
                   return;
                 }
                 void (async () => {
-                  const autofix = await resolveAutofixCronPrompt(config, job);
-                  const label = autofix?.displayText ?? job.prompt.slice(0, 40);
+                  let label = job.prompt.slice(0, 40);
+                  let modelText = job.prompt;
+                  try {
+                    const autofix = await resolveAutofixCronPrompt(config, job);
+                    if (autofix) {
+                      label = autofix.displayText;
+                      modelText = autofix.modelText;
+                    }
+                  } catch (error) {
+                    debugLogger.error(
+                      'Failed to expand scheduled Autofix tick',
+                      error,
+                    );
+                    label = `Autofix rejected: ${job.id ?? 'unknown'}`;
+                    modelText =
+                      'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.';
+                  }
                   localQueue.push({
                     displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
-                    modelText: autofix?.modelText ?? job.prompt,
+                    modelText,
                     sendMessageType: SendMessageType.Cron,
                     todoWorkChainId: job.todoWorkChainId,
                   });

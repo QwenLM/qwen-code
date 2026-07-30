@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import {
   AUTOFIX_CRON,
   AUTOFIX_USAGE,
+  autofixWatchers,
   buildAutofixImmediatePrompt,
   formatAutofixTick,
   matchingAutofixWatchers,
@@ -117,6 +118,40 @@ export class BundledSkillLoader implements ICommandLoader {
               content: AUTOFIX_USAGE,
             };
           }
+          if (match[1] === 'off') {
+            const scheduler = this.config!.getCronScheduler();
+            const watchers = autofixWatchers(scheduler.list());
+            const failures: string[] = [];
+            for (const watcher of watchers) {
+              try {
+                if (!(await scheduler.delete(watcher.job.id))) {
+                  failures.push(watcher.job.id);
+                }
+              } catch {
+                failures.push(watcher.job.id);
+              }
+            }
+            const remaining = autofixWatchers(scheduler.list());
+            return remaining.length === 0 && failures.length === 0
+              ? {
+                  type: 'message',
+                  messageType: 'info',
+                  content:
+                    watchers.length === 0
+                      ? 'Autofix watcher is already off.'
+                      : `Disabled ${watchers.length} Autofix watcher${watchers.length === 1 ? '' : 's'}.`,
+                }
+              : {
+                  type: 'message',
+                  messageType: 'error',
+                  content: `Autofix watcher could not be fully disabled. Failed jobs: ${[
+                    ...new Set([
+                      ...failures,
+                      ...remaining.map((watcher) => watcher.job.id),
+                    ]),
+                  ].join(', ')}`,
+                };
+          }
           const resolved = await (
             this.options.resolveCurrentAutofixPullRequest ??
             resolveCurrentAutofixPullRequest
@@ -147,35 +182,6 @@ export class BundledSkillLoader implements ICommandLoader {
                 `Review: ${pullRequest.reviewDecision ?? 'no aggregate decision'}`,
               ].join('\n'),
             };
-          }
-
-          if (match[1] === 'off') {
-            const failures: string[] = [];
-            for (const watcher of watchers) {
-              try {
-                if (!(await scheduler.delete(watcher.job.id))) {
-                  failures.push(watcher.job.id);
-                }
-              } catch {
-                failures.push(watcher.job.id);
-              }
-            }
-            const remaining = matchingAutofixWatchers(
-              scheduler.list(),
-              repo,
-              pullRequest.number,
-            );
-            return remaining.length === 0 && failures.length === 0
-              ? {
-                  type: 'message',
-                  messageType: 'info',
-                  content: `Autofix watcher is off for ${repo}#${pullRequest.number}.`,
-                }
-              : {
-                  type: 'message',
-                  messageType: 'error',
-                  content: `Autofix watcher could not be fully disabled for ${repo}#${pullRequest.number}. Failed jobs: ${[...new Set([...failures, ...remaining.map((watcher) => watcher.job.id)])].join(', ')}`,
-                };
           }
 
           if (watchers.length > 0) {

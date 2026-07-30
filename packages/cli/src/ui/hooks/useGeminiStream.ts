@@ -3926,15 +3926,25 @@ export const useGeminiStream = (
               setNotificationTrigger((n) => n + 1);
               return;
             }
-            const autofix = await resolveAutofixCronPrompt(config, {
-              id: job.id ?? '',
-              prompt: job.prompt,
-              recurring: job.recurring ?? false,
-              cronExpr: job.cronExpr ?? '',
-            });
-            if (autofix) {
-              label = autofix.displayText;
-              modelText = autofix.modelText;
+            try {
+              const autofix = await resolveAutofixCronPrompt(config, {
+                id: job.id ?? '',
+                prompt: job.prompt,
+                recurring: job.recurring ?? false,
+                cronExpr: job.cronExpr ?? '',
+              });
+              if (autofix) {
+                label = autofix.displayText;
+                modelText = autofix.modelText;
+              }
+            } catch (error) {
+              debugLogger.error(
+                'Failed to expand scheduled Autofix tick',
+                error,
+              );
+              label = `Autofix rejected: ${job.id ?? 'unknown'}`;
+              modelText =
+                'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.';
             }
             notificationQueueRef.current.push({
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
@@ -3943,7 +3953,9 @@ export const useGeminiStream = (
               todoWorkChainId: job.todoWorkChainId,
             });
             setNotificationTrigger((n) => n + 1);
-          })();
+          })().catch((error) => {
+            debugLogger.error('Failed to enqueue scheduled cron tick', error);
+          });
         },
       );
     })();

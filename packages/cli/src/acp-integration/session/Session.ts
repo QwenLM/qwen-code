@@ -5013,7 +5013,16 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         recurring: job.recurring ?? false,
         cronExpr: job.cronExpr ?? '',
-      }).then(enqueue);
+      })
+        .then(enqueue)
+        .catch((error) => {
+          debugLogger.error('Failed to expand scheduled Autofix tick', error);
+          enqueue({
+            displayText: `Autofix rejected: ${job.id ?? 'unknown'}`,
+            modelText:
+              'Autofix watcher expansion failed in the CLI. No maintenance action was authorized; use /autofix off and restart the watcher.',
+          });
+        });
     });
   }
 
