@@ -230,6 +230,23 @@ describe('GET /file', () => {
     expect(res.body.errorKind).toBe('binary_file');
   });
 
+  it('returns 422 binary_file for large non-UTF-8 text even with a finite limit', async () => {
+    const { MAX_READ_BYTES } = await import('../fs/policy.js');
+    const body = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('中文日志行\n'.repeat(30_000), 'utf16le'),
+    ]);
+    expect(body.length).toBeGreaterThan(MAX_READ_BYTES);
+    await fsp.writeFile(path.join(h.workspace, 'large-utf16.txt'), body);
+
+    const res = await request(h.app)
+      .get('/file?path=large-utf16.txt&line=1&limit=20')
+      .set('Host', loopbackHost());
+
+    expect(res.status).toBe(422);
+    expect(res.body.errorKind).toBe('binary_file');
+  });
+
   it('truncates content above maxBytes and reports truncated=true', async () => {
     await fsp.writeFile(path.join(h.workspace, 'big.txt'), 'a'.repeat(2048));
     const res = await request(h.app)

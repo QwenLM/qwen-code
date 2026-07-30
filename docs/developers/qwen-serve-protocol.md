@@ -1582,7 +1582,10 @@ Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
 `limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
 cap require a finite `limit`; no-limit, line-only, and maxBytes-only requests
 remain `file_too_large`. A finite large-file window is streamed and its returned
-UTF-8 content remains capped at 256 KiB. `maxBytes` always applies to the UTF-8
+UTF-8 content remains capped at 256 KiB. The handle-bound reader underneath
+treats an omitted or infinite `limit` as read-to-end-of-file (still capped at
+256 KiB); the finite-`limit` admission above is what keeps a no-limit
+`GET /file` at `file_too_large`. `maxBytes` always applies to the UTF-8
 response bytes after decoding, including when the source uses another supported
 encoding within the full-snapshot cap. Large text in an encoding the route
 cannot decode returns `binary_file` rather than `file_too_large` — retrying

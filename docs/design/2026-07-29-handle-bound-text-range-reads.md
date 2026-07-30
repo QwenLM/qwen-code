@@ -5,27 +5,16 @@
 PR #7947 let the Serve workspace filesystem return bounded line windows from
 text files above `MAX_READ_BYTES` (256 KiB). To keep those reads pinned to one
 inode across validation, binary probing, and streaming, it threaded a
-caller-owned `FileHandle` down into `readTextRange` as an optional field, and
-added a second optional field, `forceStreaming`, to suppress the buffering fast
-path that would otherwise defeat the memory bound.
+caller-owned `FileHandle` down into `readTextRange` as an optional field. When
+the field was set the read always streamed — the buffering fast path does not
+apply to a handle read — through a private `readFileHandleChunks(handle,
+sourceSize, signal)` bounded by the size captured at `open`.
 
-Two optional fields on one entry point produced four combinations, of which one
-is meaningful, one is unreachable, and one is unsafe:
-
-| `fileHandle` | `forceStreaming` | Result                                                                 |
-| ------------ | ---------------- | ---------------------------------------------------------------------- |
-| unset        | unset            | ordinary path read                                                     |
-| unset        | set              | streams a small file — used by one test                                |
-| set          | set              | the Serve boundary's read                                              |
-| set          | unset            | buffers the whole file through the handle — **no caller can reach it** |
-
-The unreachable combination carried a dedicated helper, `readFileHandleBuffer`,
-with no test coverage. Separately, `readFileWithLineAndLimit` accepted the same
-`fileHandle` but could only honor it on its range branch: an unbounded read fell
-through to a by-path `readFileWithEncodingInfo`, silently returning bytes from
-whatever the path resolved to at that moment rather than from the pinned inode.
-PR #7947's follow-up commit guarded that with a runtime `RangeError`, which
-documented the trap without removing it.
+An optional field on a shared entry point expressed the handle path as a branch
+inside `readTextRange` rather than as its own operation: the request type still
+carried `path` and `stats` that a handle read never uses, and the streaming
+implementation chose between `createReadStream` and the handle chunk reader by
+testing whether the field was present.
 
 Encoding detection had forked for the same reason. `detectFileEncoding` takes a
 path and opens its own descriptor, so the handle path could not use it; a
@@ -39,10 +28,11 @@ refuse the file, with different messages.
 ## Goals
 
 - One encoding detector, usable from a path or a borrowed descriptor.
-- No mode flags on the range reader; make the unreachable combination
-  unrepresentable rather than merely unused.
-- Make the by-path fallthrough structurally impossible instead of guarded.
-- No observable change at the Serve boundary or in the `read_file` tool.
+- No mode flags and no optional handle field on the range reader; the handle
+  path is its own entry point, so a path read and a handle read can no longer
+  share a request shape.
+- No observable change at the Serve boundary or in the `read_file` tool, apart
+  from the deliberately disclosed deltas listed below.
 
 ## Non-goals
 
@@ -50,8 +40,10 @@ refuse the file, with different messages.
   variant is a deliberate public-API compatibility shim
   ([`lazy-first-use-dependencies.md`](./lazy-first-use-dependencies.md)) pinned
   by a parity test.
-- Any change to what the Serve boundary returns. This is preparation for
-  byte-cursor paging, not that feature.
+- Any change to what the Serve boundary admits. The large-file admission
+  contract (a finite `limit` is required above `MAX_READ_BYTES`) is #7947's and
+  is not revisited here; this is preparation for byte-cursor paging, not that
+  feature.
 
 ## Design
 
@@ -96,22 +88,67 @@ file — and the borrowing boundary decides which reads to admit.
 
 Both delegate to the same streaming implementation, which now takes
 `source: string | FileHandle` and selects `createReadStream` or
-`chunksFromHandle` accordingly. `readFileHandleBuffer` and the branch that
-called it are deleted.
+`chunksFromHandle` accordingly. The old handle chunk reader
+(`readFileHandleChunks`) becomes `chunksFromHandle(fh, from)`: it gains a start
+offset and drops the open-time size bound, and allocates a fresh buffer per
+chunk instead of reusing one. Both changes are detailed under Behaviour deltas.
 
-### The fallthrough disappears
+### The service layer
 
-`readFileWithLineAndLimit` loses `fileHandle` and `forceStreaming` — its single
-production caller passes neither.
 `StandardFileSystemService.readTextFileFromHandle` now calls
-`readTextRangeFromHandle` directly, and the two read paths share a
-`toReadTextFileResponse` helper so their metadata shaping cannot drift. With no
-`fileHandle` parameter left to ignore, the `RangeError` guard is removed: the
-trap it described can no longer be expressed.
+`readTextRangeFromHandle` directly instead of routing through `readTextRange`
+with an optional handle field, and `readTextFile`'s body is extracted to a
+module-level `readTextFileStandard`. Both read paths share a
+`toReadTextFileResponse` helper — typed structurally rather than as a union of
+the two result shapes — so their metadata shaping cannot drift.
+
+The argument-validation `RangeError` guards are kept, rewired so
+`maxOutputBytes` is the required positive-finite field while `limit` becomes
+optional and `Infinity`-tolerant (a caller may read to end of file). The
+`limit: Infinity` admission this introduces is disclosed under Behaviour deltas.
 
 `readTextFileFromHandle` stays off the `FileSystemService` interface, so
 `AcpFileSystemService` and the typed fallback mock in `filesystem.test.ts` are
 untouched.
+
+## Behaviour deltas
+
+The refactor is meant to be unobservable at the Serve boundary, and the
+`packages/cli/src/serve/fs/` suites pass against it unchanged apart from the one
+assertion noted in Testing. Four changes are nonetheless observable in principle
+and are disclosed here rather than left implicit in the diff:
+
+1. **Handle reads run to live EOF.** #7947 bounded the handle chunk reader by
+   the size captured at `open` (`while (position < sourceSize)`); this PR reads
+   until a zero-byte read (`while (true)`). Bytes appended after the handle is
+   opened now land inside the decoded window. Today this is client-safe because
+   the Serve boundary re-stats after the read and refuses the whole read with
+   `hash_mismatch` on any size/mtime/ctime change, so no post-snapshot byte
+   reaches a client; supporting a file that grows while it is read (live logs)
+   is the reason to keep it. The exposure is the next caller — byte-cursor
+   paging — which must re-stat or supply its own end bound. Pinned by
+   `reads to live EOF: bytes appended after open are returned`.
+2. **Fresh buffer per chunk.** #7947 reused one 512 KiB buffer across
+   iterations, so a yielded view was valid only until the next read.
+   `chunksFromHandle` allocates a fresh buffer per chunk, so a yielded chunk
+   stays valid after the generator advances. This is the safer contract.
+3. **`limit: Infinity` is admitted at the handle boundary.** #7947 rejected a
+   non-finite `limit` with a `RangeError`; this PR accepts
+   `Number.POSITIVE_INFINITY` (and an omitted `limit`) as "read to end of
+   file," still capped at `maxOutputBytes`. The ACP bridge adapter only filters
+   `limit > 0`, and `JSON.parse('1e400')` yields `Infinity`, so the path is
+   reachable from a client; it now resolves with a capped window instead of
+   escaping as a non-`FsError` `RangeError`. The `GET /file` route's finite-`limit`
+   admission is unchanged, so a no-limit `GET /file` still returns
+   `file_too_large`.
+4. **Large undecodable text maps to `binary_file`, not `file_too_large`.** A
+   large file in an encoding the text route cannot decode previously surfaced as
+   `file_too_large` (413); it is now `binary_file` (422), matching sniffed
+   binary content. A client that retries a 413 with a smaller window can never
+   exit that loop for an encoding problem; `readBytes` is the same remedy that
+   already applies to binary content. Documented in
+   `docs/developers/daemon/07-workspace-filesystem.md` and
+   `docs/developers/qwen-serve-protocol.md`, and asserted at the HTTP layer.
 
 ## Blast radius
 
@@ -122,9 +159,11 @@ untouched.
 - `detectFileEncoding` is public via `export * from './utils/fileUtils.js'`.
   Widening a parameter is source-compatible.
 - The only cross-package importer of the touched modules is
-  `packages/cli/src/serve/fs/workspace-file-system.ts`. Its only change is
-  dropping two arguments the handle path no longer accepts — see below; the
-  `decodeBufferWithEncodingInfoAsync` import it also carries is untouched.
+  `packages/cli/src/serve/fs/workspace-file-system.ts`. Its only changes are
+  dropping the two arguments the handle path no longer accepts (`path`,
+  `stats`) and mapping `LargeNonUtf8TextError` to `binary_file` (Behaviour
+  deltas #4); the `decodeBufferWithEncodingInfoAsync` import it also carries is
+  untouched.
 
 ### `CoreReadTextFileHandleRequest` becomes standalone
 
@@ -153,8 +192,16 @@ cross-package call site named above.
 The existing suites are the specification: the whole point is that the Serve
 boundary cannot tell. `packages/cli/src/serve/fs/` and the bridge adapter pass
 against the refactor unchanged apart from one assertion updated for the
-deliberate non-UTF-8 → `binary_file` mapping, as does the full `packages/core`
-`src/utils` + `src/services` run.
+deliberate non-UTF-8 → `binary_file` mapping (Behaviour deltas #4), as does the
+full `packages/core` `src/utils` + `src/services` run. The HTTP route suite also
+gains a case asserting that a large non-UTF-8 file requested with a finite
+`limit` returns `422 binary_file`.
+
+The new handle-path contracts are pinned directly in `read-text-range.test.ts`:
+a deep multi-chunk read with a byte cap, a multi-byte character straddling the
+8 KiB encoding-probe boundary, read-to-EOF (bytes appended after `open` are
+returned), an omitted/`Infinity` `limit` reading the whole file, and aborts
+landing before and during a handle-bound stream.
 
 Two tests in `read-text-range.test.ts` moved to `readTextRangeFromHandle`. One
 of them changed meaning. It previously passed a handle for one
@@ -177,4 +224,6 @@ are kept — they need no mock.
 
 `chunksFromHandle` gained a `from` parameter that nothing yet passes a non-zero
 value for. It is the single seam byte-cursor text paging needs, and that is the
-change this refactor exists to enable.
+change this refactor exists to enable. Because the reader now runs to live EOF
+(Behaviour deltas #1), that follow-up must either supply its own end bound or
+keep re-statting after the read, exactly as the Serve boundary does today.

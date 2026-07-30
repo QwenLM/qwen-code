@@ -447,4 +447,44 @@ describe('readTextRange', () => {
 
     await expect(promise).rejects.toThrow(/abort/i);
   });
+
+  it('propagates a pre-aborted signal to a handle-bound read', async () => {
+    const filePath = await writeFile('handle-abort.log', largeUtf8Lines(2_000));
+    const fileHandle = await fs.open(filePath, 'r');
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await expect(
+        readTextRangeFromHandle(fileHandle, {
+          offset: 0,
+          limit: 3,
+          maxOutputBytes: 10_000,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    } finally {
+      await fileHandle.close();
+    }
+  });
+
+  it('propagates an abort that lands during a handle-bound stream', async () => {
+    const filePath = await writeFile(
+      'handle-abort-stream.log',
+      largeUtf8Lines(80_000),
+    );
+    const fileHandle = await fs.open(filePath, 'r');
+    const controller = new AbortController();
+    try {
+      const promise = readTextRangeFromHandle(fileHandle, {
+        offset: 70_000,
+        limit: 10,
+        maxOutputBytes: 10_000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 0);
+      await expect(promise).rejects.toThrow(/abort/i);
+    } finally {
+      await fileHandle.close();
+    }
+  });
 });
