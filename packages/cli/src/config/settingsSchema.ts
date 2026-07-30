@@ -1925,6 +1925,17 @@ const SETTINGS_SCHEMA = {
           "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
         showInDialog: false,
       },
+      agentMaxTurns: {
+        type: 'number',
+        label: 'Memory Agent Max Turns',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 0,
+        description:
+          "Max turns for background dream and skill-review agents. Unset uses each agent's built-in default (8); 0 disables the turn limit.",
+        showInDialog: false,
+      },
       enableTeamMemory: {
         type: 'boolean',
         label: 'Enable Team Memory',

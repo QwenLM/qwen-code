@@ -871,6 +871,11 @@
           "type": "number",
           "minimum": 0
         },
+        "agentMaxTurns": {
+          "description": "Max turns for background dream and skill-review agents. Unset uses each agent's built-in default (8); 0 disables the turn limit.",
+          "type": "number",
+          "minimum": 0
+        },
         "enableTeamMemory": {
           "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
           "type": "boolean",

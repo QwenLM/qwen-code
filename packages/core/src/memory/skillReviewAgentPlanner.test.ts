@@ -390,11 +390,15 @@ describe('runSkillReviewByAgent timeout wiring', () => {
   let tempDir: string;
   let projectRoot: string;
 
-  function makeConfig(timeoutMinutes: number | undefined): Config {
+  function makeConfig(
+    timeoutMinutes: number | undefined,
+    maxTurns: number | undefined = undefined,
+  ): Config {
     return {
       getProjectRoot: () => projectRoot,
       getPermissionManager: () => undefined,
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(timeoutMinutes),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(maxTurns),
     } as unknown as Config;
   }
 
@@ -423,6 +427,18 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('uses the configured memory agent turn limit when maxTurns is omitted', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig(undefined, 25),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
     );
   });
 

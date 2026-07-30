@@ -1254,6 +1254,11 @@ export interface ConfigParameters {
    */
   memoryAgentTimeoutMinutes?: number;
   /**
+   * Max turns for background memory agents (dream and skill review). Unset
+   * means each agent uses its built-in default; 0 disables the turn limit.
+   */
+  memoryAgentMaxTurns?: number;
+  /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
    * the main session model, reducing latency and cost.
@@ -2006,6 +2011,7 @@ export class Config {
   private enableAutoSkill: boolean;
   private readonly autoSkillConfirm: boolean;
   private readonly memoryAgentTimeoutMinutes: number | undefined;
+  private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
@@ -2450,6 +2456,12 @@ export class Config {
       params.memoryAgentTimeoutMinutes !== undefined &&
       params.memoryAgentTimeoutMinutes >= 0
         ? params.memoryAgentTimeoutMinutes
+        : undefined;
+    this.memoryAgentMaxTurns =
+      params.memoryAgentMaxTurns !== undefined &&
+      Number.isInteger(params.memoryAgentMaxTurns) &&
+      params.memoryAgentMaxTurns >= 0
+        ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.webSearchSettings = params.webSearch;
@@ -6710,6 +6722,15 @@ export class Config {
    */
   getMemoryAgentTimeoutMinutes(): number | undefined {
     return this.memoryAgentTimeoutMinutes;
+  }
+
+  /**
+   * Max turns for background memory agents (dream and skill review). Resolves
+   * the `memory.agentMaxTurns` setting. Unset means each agent's built-in
+   * default; 0 disables the turn limit.
+   */
+  getMemoryAgentMaxTurns(): number | undefined {
+    return this.memoryAgentMaxTurns;
   }
 
   getPreventSystemSleepEnabled(): boolean {

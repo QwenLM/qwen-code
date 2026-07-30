@@ -371,7 +371,10 @@ export async function runSkillReviewByAgent(params: {
     config: scopedConfig,
     taskPrompt: await buildTaskPrompt(params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
-    maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
+    maxTurns:
+      params.maxTurns ??
+      params.config.getMemoryAgentMaxTurns() ??
+      DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
       params.timeoutMs !== undefined
         ? params.timeoutMs / 60_000

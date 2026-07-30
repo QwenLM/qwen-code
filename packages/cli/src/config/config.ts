@@ -2286,6 +2286,7 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
+    memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
