@@ -17,7 +17,6 @@ import type {
   DaemonChannelPairingRequestsSnapshot,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { extractErrorDetail } from '../../utils/errorDetail';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Badge } from '../ui/badge';
@@ -36,6 +35,26 @@ export interface ChannelPairingRequestsProps {
 
 function senderLabel(request: DaemonChannelPairingRequest): string {
   return request.senderName.trim() || request.senderId;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const body = (error as { body?: unknown }).body;
+  if (!body || typeof body !== 'object') return undefined;
+  const code = (body as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function pairingErrorDetail(error: unknown, unavailable: string): string {
+  if (!error || typeof error !== 'object' || !('status' in error)) {
+    return unavailable;
+  }
+  const body = (error as { body?: unknown }).body;
+  const message =
+    body && typeof body === 'object'
+      ? (body as { error?: unknown }).error
+      : undefined;
+  return typeof message === 'string' && message ? message : unavailable;
 }
 
 export function ChannelPairingRequests({
@@ -77,14 +96,19 @@ export function ChannelPairingRequests({
       },
       (loadError: unknown) => {
         if (!active) return;
-        setError(extractErrorDetail(loadError));
+        setError(
+          pairingErrorDetail(
+            loadError,
+            t('channels.editor.pairing.unavailable'),
+          ),
+        );
         setLoading(false);
       },
     );
     return () => {
       active = false;
     };
-  }, [channelName, listRequests, reloadToken]);
+  }, [channelName, listRequests, reloadToken, t]);
 
   const approve = async (request: DaemonChannelPairingRequest) => {
     if (approvingCode) return;
@@ -107,7 +131,39 @@ export function ChannelPairingRequests({
       if (!mounted.current || currentChannelName.current !== approvalChannel) {
         return;
       }
-      setError(extractErrorDetail(approvalError));
+      if (errorCode(approvalError) === 'channel_pairing_request_not_found') {
+        try {
+          const snapshot = await listRequests(approvalChannel);
+          if (
+            mounted.current &&
+            currentChannelName.current === approvalChannel
+          ) {
+            setRequests(snapshot.requests);
+          }
+        } catch (refreshError) {
+          if (
+            mounted.current &&
+            currentChannelName.current === approvalChannel
+          ) {
+            setError(
+              pairingErrorDetail(
+                refreshError,
+                t('channels.editor.pairing.unavailable'),
+              ),
+            );
+          }
+          return;
+        }
+      }
+      if (!mounted.current || currentChannelName.current !== approvalChannel) {
+        return;
+      }
+      setError(
+        pairingErrorDetail(
+          approvalError,
+          t('channels.editor.pairing.unavailable'),
+        ),
+      );
     } finally {
       if (mounted.current && currentChannelName.current === approvalChannel) {
         setApprovingCode(undefined);
@@ -206,6 +262,10 @@ export function ChannelPairingRequests({
                   type="button"
                   size="sm"
                   disabled={Boolean(approvingCode)}
+                  aria-label={t('channels.editor.pairing.approveFor', {
+                    sender: label,
+                    code: request.code,
+                  })}
                   onClick={() => void approve(request)}
                 >
                   {approvingCode === request.code ? <Spinner /> : null}

@@ -276,7 +276,10 @@ describe('createChannelWorkerGroup', () => {
     const error = await group
       .deliverChannelMessage(deliveryRequest, SECONDARY)
       .catch((value: unknown) => value);
-    expect(error).toMatchObject({ code: 'channel_worker_unavailable' });
+    expect(error).toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'No channel worker for the selected workspace owns channel "b".',
+    });
     expect((error as Error).message).not.toContain(SECONDARY);
     expect(
       recorded[0]!.supervisor.deliverChannelMessage,
@@ -310,7 +313,11 @@ describe('createChannelWorkerGroup', () => {
 
     await expect(
       group.deliverChannelMessage(deliveryRequest, SECONDARY),
-    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message:
+        'Channel worker for channel "b" is unavailable while its workspace is draining.',
+    });
     expect(
       recorded[1]!.supervisor.deliverChannelMessage,
     ).not.toHaveBeenCalled();
@@ -369,6 +376,8 @@ describe('createChannelWorkerGroup', () => {
     group.beginWorkspaceDrain(SECONDARY);
     await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
       code: 'channel_worker_unavailable',
+      message:
+        'Channel worker for channel "b" is unavailable while its workspace is draining.',
     });
     await expect(group.reconcile(groups, { force: true })).rejects.toThrow(
       'cannot change while a workspace is draining',
@@ -399,6 +408,7 @@ describe('createChannelWorkerGroup', () => {
     ]);
     await expect(group.enqueueWebhookTask(webhookTask)).rejects.toMatchObject({
       code: 'channel_worker_unavailable',
+      message: 'No channel worker owns channel "b".',
     });
 
     await group.stop();
