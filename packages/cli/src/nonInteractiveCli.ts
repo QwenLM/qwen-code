@@ -465,6 +465,7 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      todoWorkChainId?: string;
       monitorId?: string;
       sdkNotification?: {
         task_id: string;
@@ -977,6 +978,7 @@ export async function runNonInteractive(
           displayText,
           modelText,
           sendMessageType: SendMessageType.Notification,
+          todoWorkChainId: meta.todoWorkChainId,
           sdkNotification: {
             task_id: meta.agentId,
             tool_use_id: meta.toolUseId,
@@ -1022,6 +1024,7 @@ export async function runNonInteractive(
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
+              todoWorkChainId: meta.todoWorkChainId,
               monitorId: meta.monitorId,
               sdkNotification: {
                 task_id: meta.monitorId,
@@ -1709,6 +1712,7 @@ export async function runNonInteractive(
         };
       };
 
+      let currentPromptId = prompt_id;
       while (true) {
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
@@ -1762,13 +1766,16 @@ export async function runNonInteractive(
         } else {
           sendType = SendMessageType.ToolResult;
         }
+        if (isTeammateTurn) {
+          currentPromptId = `${prompt_id}/teammate/${turnCount}`;
+        }
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
-          prompt_id,
+          currentPromptId,
           {
             type: sendType,
             modelOverride,
@@ -1983,7 +1990,9 @@ export async function runNonInteractive(
             if (splitIdx === 0) {
               while (
                 splitIdx < localQueue.length &&
-                localQueue[splitIdx]!.sendMessageType === targetType
+                localQueue[splitIdx]!.sendMessageType === targetType &&
+                localQueue[splitIdx]!.todoWorkChainId ===
+                  localQueue[0]!.todoWorkChainId
               ) {
                 splitIdx++;
               }
@@ -2002,6 +2011,7 @@ export async function runNonInteractive(
               displayText: batch.map((i) => i.displayText).join('; '),
               modelText: batch.map((i) => i.modelText).join('\n\n'),
               sendMessageType: targetType,
+              todoWorkChainId: batch[0]?.todoWorkChainId,
             };
 
             turnCount++;
@@ -2018,6 +2028,7 @@ export async function runNonInteractive(
             ];
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
+            const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
 
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
@@ -2025,7 +2036,7 @@ export async function runNonInteractive(
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
-                prompt_id,
+                itemPromptId,
                 {
                   type: itemIsFirstTurn
                     ? item.sendMessageType
@@ -2033,6 +2044,7 @@ export async function runNonInteractive(
                   modelOverride: itemModelOverride,
                   ...(itemIsFirstTurn && {
                     notificationDisplayText: item.displayText,
+                    todoWorkChainId: item.todoWorkChainId,
                   }),
                 },
               );
@@ -2268,6 +2280,7 @@ export async function runNonInteractive(
                   displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
+                  todoWorkChainId: job.todoWorkChainId,
                 });
                 drainLocalQueue().then(checkCronDone, onDrainError);
               });

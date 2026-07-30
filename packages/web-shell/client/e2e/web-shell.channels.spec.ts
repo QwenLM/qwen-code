@@ -154,6 +154,31 @@ test('creates and deletes a typed Channel configuration', async ({
         body: { code: 'ABCD1234' },
       }),
     ]);
+  await expect(
+    page.getByRole('button', { name: 'Revoke user-42' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Revoke user-42' }).click();
+  const revokeConfirmation = page.getByRole('alertdialog');
+  await expect(revokeConfirmation).toContainText(
+    'Only the approval created through pairing will be removed.',
+  );
+  await revokeConfirmation
+    .getByRole('button', { name: 'Revoke approval' })
+    .click();
+  await expect(page.getByText('No pairing approvals')).toBeVisible();
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'DELETE' &&
+          request.path.endsWith('/channels/release-bot/pairing-approvals'),
+      ),
+    )
+    .toEqual([
+      expect.objectContaining({
+        body: { senderId: 'user-42' },
+      }),
+    ]);
   await page.getByRole('button', { name: 'Close' }).click();
 
   await page.getByRole('button', { name: 'Delete release-bot' }).click();

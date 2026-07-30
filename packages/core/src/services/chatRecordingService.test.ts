@@ -111,6 +111,7 @@ describe('ChatRecordingService', () => {
       ),
       assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
       release: vi.fn().mockResolvedValue(undefined),
+      sealForHandoff: vi.fn().mockResolvedValue(undefined),
     } as unknown as SessionWriterLease;
     chatRecordingService = activateRecording(
       new ChatRecordingService(mockConfig),
@@ -156,6 +157,32 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+    });
+
+    it('stores hook display provenance in systemPayload only when provided', async () => {
+      const taggedParts: Part[] = [
+        { text: 'my prompt' },
+        {
+          text: '<qwen:user-prompt-submit-context>\nextra\n</qwen:user-prompt-submit-context>',
+        },
+      ];
+      chatRecordingService.recordUserMessage(taggedParts, undefined, {
+        displayText: 'my prompt',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'plain prompt' }]);
+      await chatRecordingService.flush();
+
+      const calls = vi.mocked(jsonl.writeLine).mock.calls;
+      const augmented = calls[0][1] as ChatRecord;
+      const plain = calls[1][1] as ChatRecord;
+
+      // The model-bound parts are stored verbatim; the user-authored
+      // projection travels separately in the payload.
+      expect(augmented.message).toEqual({ role: 'user', parts: taggedParts });
+      expect(augmented.systemPayload).toEqual({
+        displayText: 'my prompt',
+      });
+      expect(plain.systemPayload).toBeUndefined();
     });
 
     it('blocks later turns after a generic durable write failure', async () => {
@@ -1880,6 +1907,30 @@ describe('ChatRecordingService', () => {
   });
 
   describe('close', () => {
+    it('seals instead of releasing after a successful handoff drain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'durable' }]);
+
+      await expect(
+        chatRecordingService.close({ handoff: true }),
+      ).resolves.toBeUndefined();
+      expect(mockLease.sealForHandoff).toHaveBeenCalledOnce();
+      expect(mockLease.release).not.toHaveBeenCalled();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('retains ownership when a handoff drain fails', async () => {
+      const failure = new SessionTranscriptChangedError();
+      vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
+      chatRecordingService.recordUserMessage([{ text: 'not durable' }]);
+
+      await expect(chatRecordingService.close({ handoff: true })).rejects.toBe(
+        failure,
+      );
+      expect(mockLease.sealForHandoff).not.toHaveBeenCalled();
+      expect(mockLease.release).not.toHaveBeenCalled();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(true);
+    });
+
     it('releases the writer lease before reporting a flush failure', async () => {
       const failure = new SessionTranscriptChangedError();
       vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);

@@ -61,9 +61,11 @@ const multiRequest: PermissionRequest = {
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
+let onError: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
-  onConfirm = vi.fn();
+  onConfirm = vi.fn().mockResolvedValue(true);
+  onError = vi.fn();
 });
 
 afterEach(() => {
@@ -83,6 +85,7 @@ function rerender(
         <AskUserQuestion
           request={req}
           onConfirm={onConfirm}
+          onError={onError}
           keyboardActive={keyboardActive}
         />
       </I18nProvider>,
@@ -111,7 +114,11 @@ function optionButtons(): HTMLButtonElement[] {
 function submitButton(): HTMLButtonElement | null {
   return (
     Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(
-      (b) => b.textContent === 'Submit' || b.textContent === '提交',
+      (b) =>
+        b.textContent === 'Submit' ||
+        b.textContent === 'Submitting...' ||
+        b.textContent === '提交' ||
+        b.textContent === '提交中...',
     ) ?? null
   );
 }
@@ -120,6 +127,20 @@ function pressKey(target: Element, key: string): void {
   act(() => {
     target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
   });
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('AskUserQuestion accessibility', () => {
@@ -404,6 +425,118 @@ describe('AskUserQuestion accessibility', () => {
     );
     act(() => submit.click());
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+
+  it('keeps an accepted submission locked while awaiting resolution', async () => {
+    const pending = deferred<boolean>();
+    onConfirm.mockReturnValue(pending.promise);
+    render(undefined);
+
+    act(() => {
+      submitButton()!.click();
+      submitButton()!.click();
+    });
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(submitButton()!.disabled).toBe(true);
+    expect(submitButton()!.textContent).toBe('Submitting...');
+
+    await act(async () => {
+      pending.resolve(true);
+      await pending.promise;
+    });
+
+    expect(submitButton()!.disabled).toBe(true);
+  });
+
+  it('reports a rejected submit and allows retrying', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('network unavailable'))
+      .mockResolvedValueOnce(true);
+    render(undefined);
+
+    await act(async () => {
+      submitButton()!.click();
+      await Promise.resolve();
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'network unavailable' }),
+      'Failed to submit answer',
+    );
+    expect(submitButton()!.disabled).toBe(false);
+
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports an unaccepted submit and allows retrying', async () => {
+    onConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    render(undefined);
+
+    await act(async () => {
+      submitButton()!.click();
+      await Promise.resolve();
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Failed to submit answer' }),
+      'Failed to submit answer',
+    );
+    expect(submitButton()!.disabled).toBe(false);
+
+    act(() => {
+      submitButton()!.click();
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a stale failure after a new request starts submitting', async () => {
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    onConfirm
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    render(undefined);
+
+    act(() => {
+      submitButton()!.click();
+    });
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => {
+      submitButton()!.click();
+    });
+
+    await act(async () => {
+      first.reject(new Error('stale failure'));
+      try {
+        await first.promise;
+      } catch {
+        // Expected: the stale attempt rejects.
+      }
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(submitButton()!.disabled).toBe(true);
+  });
+
+  it('reports a missing submit option without calling onConfirm', () => {
+    render(undefined, {
+      ...request,
+      options: request.options.filter((option) => option.kind !== 'allow_once'),
+    });
+
+    act(() => {
+      submitButton()!.click();
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Submit option is unavailable' }),
+      'Submit option is unavailable',
+    );
   });
 });
 

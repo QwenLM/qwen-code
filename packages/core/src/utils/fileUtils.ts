@@ -385,11 +385,21 @@ export async function readFileWithLineAndLimit(params: {
  * Detect the encoding of a file by reading a sample from its beginning.
  * Returns the encoding name (e.g. 'utf-8', 'gbk', 'shift_jis').
  * Uses BOM detection first, then UTF-8 validation, then chardet as fallback.
+ *
+ * Accepts an already-open handle so a caller that has pinned an inode can be
+ * told the encoding of *that* inode rather than of whatever the path resolves
+ * to now. A supplied handle is borrowed: reads go through explicit positions so
+ * the caller's file position is untouched, and it is never closed here.
  */
-export async function detectFileEncoding(filePath: string): Promise<string> {
-  let fh: fs.promises.FileHandle | null = null;
+export async function detectFileEncoding(
+  source: string | fs.promises.FileHandle,
+): Promise<string> {
+  let opened: fs.promises.FileHandle | null = null;
   try {
-    fh = await fs.promises.open(filePath, 'r');
+    const fh =
+      typeof source === 'string'
+        ? (opened = await fs.promises.open(source, 'r'))
+        : source;
     const stats = await fh.stat();
     if (stats.size === 0) return 'utf-8';
 
@@ -402,22 +412,7 @@ export async function detectFileEncoding(filePath: string): Promise<string> {
 
     // 1. Check for BOM
     const bom = detectBOM(sample);
-    if (bom) {
-      switch (bom.encoding) {
-        case 'utf8':
-          return 'utf-8';
-        case 'utf16le':
-          return 'utf-16le';
-        case 'utf16be':
-          return 'utf-16be';
-        case 'utf32le':
-          return 'utf-32le';
-        case 'utf32be':
-          return 'utf-32be';
-        default:
-          return 'utf-8';
-      }
-    }
+    if (bom) return bomEncodingToName(bom.encoding);
 
     // 2. Validate UTF-8
     if (isValidUtf8(sample)) return 'utf-8';
@@ -433,9 +428,10 @@ export async function detectFileEncoding(filePath: string): Promise<string> {
     // If file can't be read, default to UTF-8
     return 'utf-8';
   } finally {
-    if (fh) {
+    // Only what we opened. A borrowed handle outlives this call.
+    if (opened) {
       try {
-        await fh.close();
+        await opened.close();
       } catch {
         // Ignore close errors
       }
