@@ -178,7 +178,7 @@ describe('SessionTranscriptReader', () => {
     expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
   });
 
-  it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
+  it.each([0, -1, NaN, Infinity, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
     'rejects invalid page limit %s',
     async (limit) => {
       await expect(
@@ -1136,5 +1136,62 @@ describe('SessionTranscriptReader', () => {
         (r) => r.uuid,
       ),
     ).toEqual(['33333333', '44444444']);
+  });
+
+  describe('boundary and turn-start edge cases', () => {
+    it('makes exact turn-boundary cuts when limit aligns perfectly', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+      });
+
+      expect(first.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+      expect(first.hasMore).toBe(false);
+      expect(first.nextCursorState).toBeUndefined();
+    });
+
+    it('discovers backward boundary when beforeRecordId is an assistant record', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'a2',
+        limit: 2,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['u2']);
+      expect(page.direction).toBe('backward');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('pages backward through records without a normal user turn start', async () => {
+      await writeRecords([
+        record('a1', null, 'orphan assistant reply'),
+        record('u1', 'a1', 'second prompt'),
+        record('a2', 'u1', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'u1',
+        limit: 5,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['a1']);
+      expect(page.hasMore).toBe(false);
+    });
   });
 });

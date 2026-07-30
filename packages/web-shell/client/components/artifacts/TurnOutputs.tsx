@@ -1,12 +1,24 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  FileAudioIcon,
+  FileCode2Icon,
+  FileIcon,
+  FileImageIcon,
+  FileTextIcon,
+  FileVideoIcon,
+  LinkIcon,
+  NotebookTabsIcon,
+  type LucideIcon,
+} from 'lucide-react';
 import { memo, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
   formatArtifactSize,
   getArtifactTypeLabel,
+  getImageMimeTypeFromPath,
   isSamePath,
   stripWorkspacePath,
 } from './artifactUtils';
@@ -212,24 +224,33 @@ function TurnOutputsComponent({
                 />
               </svg>
             </span>
-            <div>
+            <div
+              className={[
+                styles.reviewSummary,
+                totals ? styles.reviewSummaryWithStats : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            >
               <div className={styles.title}>
                 {t('turnOutputs.filesEdited', { count: changes.length })}
               </div>
-              <LineStats
-                additions={totals?.additions}
-                deletions={totals?.deletions}
-                className={styles.lineStats}
-                additionsClassName={styles.additions}
-                deletionsClassName={styles.deletions}
-              />
-              <button
-                type="button"
-                className={styles.linkButton}
-                onClick={() => openReview()}
-              >
-                {t('turnOutputs.viewChanges')} ↗
-              </button>
+              <div className={styles.reviewMeta}>
+                <LineStats
+                  additions={totals?.additions}
+                  deletions={totals?.deletions}
+                  className={styles.lineStats}
+                  additionsClassName={styles.additions}
+                  deletionsClassName={styles.deletions}
+                />
+                <button
+                  type="button"
+                  className={styles.linkButton}
+                  onClick={() => openReview()}
+                >
+                  {t('turnOutputs.viewChanges')} ↗
+                </button>
+              </div>
             </div>
             <div className={styles.actions}>
               <button
@@ -312,11 +333,16 @@ function ArtifactCard({
 }) {
   const { t } = useI18n();
   const size = formatArtifactSize(artifact.sizeBytes);
+  const FormatIcon = getArtifactFormatIcon(artifact.kind);
   return (
     <div className={styles.card}>
       <div className={styles.summary}>
         <span className={styles.icon} aria-hidden="true">
-          <DocumentIcon />
+          {FormatIcon ? (
+            <FormatIcon className={styles.iconSvg} strokeWidth={1.8} />
+          ) : (
+            <DocumentIcon />
+          )}
         </span>
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
@@ -337,6 +363,21 @@ function ArtifactCard({
       </div>
     </div>
   );
+}
+
+const ARTIFACT_FORMAT_ICONS: Readonly<Record<string, LucideIcon>> = {
+  file: FileIcon,
+  link: LinkIcon,
+  html: FileCode2Icon,
+  image: FileImageIcon,
+  video: FileVideoIcon,
+  audio: FileAudioIcon,
+  pdf: FileTextIcon,
+  notebook: NotebookTabsIcon,
+};
+
+export function getArtifactFormatIcon(kind: string): LucideIcon | undefined {
+  return ARTIFACT_FORMAT_ICONS[kind];
 }
 
 function ScheduledTaskCard({
@@ -504,7 +545,8 @@ export function isRenderedFilePath(value: string) {
     path.endsWith('.html') ||
     path.endsWith('.htm') ||
     path.endsWith('.md') ||
-    path.endsWith('.markdown')
+    path.endsWith('.markdown') ||
+    getImageMimeTypeFromPath(path) !== undefined
   );
 }
 

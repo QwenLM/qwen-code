@@ -50,7 +50,7 @@ import {
 } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -200,6 +200,8 @@ export interface SendMessageOptions {
   };
   /** Display text for notification messages (persisted for session resume). */
   notificationDisplayText?: string;
+  /** Todo work chain that owns this automatic turn, when it is related. */
+  todoWorkChainId?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
   /** Exact runtime permit authorizing this Goal-bound turn. */
@@ -325,6 +327,8 @@ export class GeminiClient {
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
+  private activeTodoWorkChainPromptId: string | undefined;
+  private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private recentCompletedToolNames: string[] = [];
@@ -1067,6 +1071,50 @@ export class GeminiClient {
   }
 
   /**
+   * Preloads (reveals) every deferred tool — bundled built-ins and MCP
+   * alike — at session start when the combined estimated size of their
+   * schemas fits within `tools.toolSearch.threshold` percent of the
+   * context window. A small deferred set is cheaper to declare upfront
+   * than to load on demand: with nothing left for ToolSearch to reveal,
+   * the declaration list stays stable for the whole session and no
+   * reveal ever invalidates the prompt-cache prefix.
+   *
+   * Deliberately NOT called from setTools(): revealing a tool the startup
+   * reminder already announced would make queueAddedMcpToolsReminder flag
+   * it as removed, and a mid-session declaration change busts the very
+   * cache this preload exists to protect. Tools from servers that connect
+   * later stay deferred until the next session start.
+   */
+  private preloadDeferredToolsWithinBudget(): void {
+    const toolRegistry = this.config.getToolRegistry();
+    // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
+    // reveals everything — there is no budget decision to make.
+    if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
+      return;
+    }
+    const thresholdPercent = this.config.getToolSearchThreshold();
+    if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
+      return;
+    }
+    // Symmetric upper guard to the non-finite / `<= 0` lower one: the setting
+    // is a percentage of the context window, so a value above 100 (a typo or
+    // misreading of the "(%)" label) would make the budget exceed the whole
+    // window and preload every deferred tool unconditionally. Cap it at 100%
+    // — the schema also bounds it, but clamp here so a hand-edited settings
+    // file can't slip past.
+    const boundedPercent = Math.min(thresholdPercent, 100);
+    const contextWindow =
+      this.config.getContentGeneratorConfig()?.contextWindowSize ??
+      tokenLimit(this.config.getModel(), 'input');
+    if (!contextWindow || contextWindow <= 0) {
+      return;
+    }
+    toolRegistry.preloadDeferredToolsWithinBudget(
+      Math.floor((contextWindow * boundedPercent) / 100),
+    );
+  }
+
+  /**
    * Computes the deferred-tools list that should be announced through
    * user-role system reminders.
    *
@@ -1454,6 +1502,12 @@ export class GeminiClient {
             }
           }
         }
+      });
+      // Budget-based deferred-tool preload runs BEFORE the deferred
+      // reminder is resolved so preloaded tools are filtered out of the
+      // startup reminder and never enter the announced set.
+      profiler.timeSync('deferred_tool_preload', () => {
+        this.preloadDeferredToolsWithinBudget();
       });
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder();
@@ -2397,6 +2451,30 @@ export class GeminiClient {
     // Notifications start a fresh Turn with a new prompt_id, so the loop
     // detector must reset — otherwise a prior turn's count can trip
     // LoopDetected early on the notification turn.
+    if (messageType === SendMessageType.UserQuery) {
+      this.activeAutomaticTodoWorkChainPromptIds.clear();
+      this.config.startActiveTodoWorkChain(prompt_id);
+      this.activeTodoWorkChainPromptId = prompt_id;
+    } else if (messageType === SendMessageType.Retry) {
+      this.config.startActiveTodoWorkChain(
+        prompt_id,
+        this.activeTodoWorkChainPromptId,
+      );
+      this.activeTodoWorkChainPromptId = prompt_id;
+    } else if (
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
+    ) {
+      this.config.startAutomaticActiveTodoWorkChain(
+        prompt_id,
+        options?.todoWorkChainId ??
+          (messageType === SendMessageType.Teammate
+            ? this.activeTodoWorkChainPromptId
+            : undefined),
+      );
+      this.activeAutomaticTodoWorkChainPromptIds.add(prompt_id);
+    }
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
@@ -2436,6 +2514,7 @@ export class GeminiClient {
     // early-return) leaves this `false`, and the `finally` block aborts the
     // prefetch as a safety net.
     let normalCompletion = false;
+    let hasToolCalls = false;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
@@ -2851,6 +2930,39 @@ export class GeminiClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      if (
+        messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.Cron ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
+      ) {
+        const activeTodoReminder = this.config.takeActiveTodoReminder(
+          prompt_id,
+          true,
+        );
+        const alreadyHasActiveTodoReminder = requestToSend.some(
+          (part) =>
+            part === activeTodoReminder ||
+            (typeof part === 'object' &&
+              part !== null &&
+              'text' in part &&
+              part.text === activeTodoReminder),
+        );
+        if (activeTodoReminder && !alreadyHasActiveTodoReminder) {
+          const insertAt = requestToSend.findIndex(
+            (part) =>
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part),
+          );
+          requestToSend.splice(
+            insertAt < 0 ? requestToSend.length : insertAt,
+            0,
+            activeTodoReminder,
+          );
+        }
+      }
+
       if (messageType === SendMessageType.ToolResult) {
         const toolResultMemory =
           await this.tryConsumeMemoryPrefetch('tool_result');
@@ -2864,6 +2976,21 @@ export class GeminiClient {
           // intact under native Gemini; the OpenAI converter then emits the
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
+        }
+        const activeTodoReminder =
+          this.config.takeActiveTodoReminder(prompt_id);
+        if (activeTodoReminder) {
+          const insertAt = requestToSend.findIndex(
+            (part) =>
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part),
+          );
+          requestToSend.splice(
+            insertAt < 0 ? requestToSend.length : insertAt,
+            0,
+            activeTodoReminder,
+          );
         }
         await this.microcompactHistoryBeforeSend(null, {
           sizeOnly: true,
@@ -2927,7 +3054,6 @@ export class GeminiClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
-      let hasToolCalls = false;
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -3143,6 +3269,7 @@ export class GeminiClient {
           }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          hasToolCalls = steeredTurn.pendingToolCalls.length > 0;
           normalCompletion = true;
           return steeredTurn;
         }
@@ -3475,6 +3602,7 @@ export class GeminiClient {
           }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          hasToolCalls = hookTurn.pendingToolCalls.length > 0;
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
           // ToolResult turn still needs to consume the recall result.
@@ -3590,6 +3718,7 @@ export class GeminiClient {
           }
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          hasToolCalls = continueTurn.pendingToolCalls.length > 0;
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -3635,6 +3764,13 @@ export class GeminiClient {
       }
       throw error;
     } finally {
+      if (
+        this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&
+        (!normalCompletion || !hasToolCalls)
+      ) {
+        this.activeAutomaticTodoWorkChainPromptIds.delete(prompt_id);
+        this.config.endAutomaticActiveTodoWorkChain(prompt_id);
+      }
       if (!goalPermitReleased && (callerSignal.aborted || !normalCompletion)) {
         await releaseGoalPermitOnInterruptedExit();
       }
