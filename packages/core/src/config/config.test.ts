@@ -1578,7 +1578,7 @@ describe('Server Config (config.ts)', () => {
         goalRuntime: 'prohibited',
         sessionWriterState: 'prohibited',
         canonicalLifecycle: 'prohibited',
-        approvalModeMutation: 'prohibited',
+        approvalModeMutation: 'copied',
       });
     });
 

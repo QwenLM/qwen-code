@@ -547,12 +547,10 @@ function reportTokens(
  * would bypass that normalization and require us to duplicate it here.
  *
  * Why the worktree-rebound Config is passed as `runtimeContext` (not
- * `toolConfigOverride`): `SubagentManager.buildSubagentContextOverride`
- * (subagent-manager.ts:857) builds the subagent context via
- * `Object.create(runtimeContext)`. The own-property rebinds we set on the
- * worktree override propagate through the prototype chain, so all
- * `getTargetDir() / getCwd() / getFileService() / getWorkspaceContext()`
- * call sites inside the subagent see the worktree path. Subsequent
+ * `toolConfigOverride`): `SubagentManager` derives its subagent context from
+ * this worktree profile.
+ * The worktree profile's own getter and field rebinds propagate through that
+ * derivation, so workspace-bound call sites keep the selected path.
  * `rebuildToolRegistryOnOverride` re-resolves `this.config` through the
  * chain and anchors EditTool / WriteFileTool / ReadFileTool to the
  * worktree's FileReadCache, so the subagent cannot leak writes back into

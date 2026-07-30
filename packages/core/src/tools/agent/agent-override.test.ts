@@ -332,6 +332,22 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
+  it('restores AUTO rules when registry setup fails', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'createToolRegistry').mockRejectedValue(
+      new Error('registry boom'),
+    );
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.AUTO),
+    ).rejects.toThrow('registry boom');
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
   it('does not need cleanup restore after a child leaves AUTO mode itself', async () => {
     const parent = await createParentWithRegistry();
     const { stripDangerousRulesForAutoMode, restoreDangerousRules } =

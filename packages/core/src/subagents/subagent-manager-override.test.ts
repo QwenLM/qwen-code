@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Config, ApprovalMode } from '../config/config.js';
+import { Config, ApprovalMode, deriveConfig } from '../config/config.js';
 import { SubagentManager } from './subagent-manager.js';
 import type { SubagentConfig } from './types.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -14,16 +14,9 @@ import { ReadFileTool } from '../tools/read-file.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 
 /**
- * Companion to `tools/agent/agent-override.test.ts`. Same regression:
- * Object.create(parent) by itself is not enough to isolate a subagent's
- * core tools from the parent's bound `EditTool` / `WriteFileTool` /
- * `ReadFileTool`. The subagent path (which flows through
- * `SubagentManager.createAgentHeadless` →
- * `buildSubagentContextOverride`) must rebuild the tool registry on
- * the override Config so bound tools resolve `this.config` to the
- * subagent rather than the parent — otherwise mutations executed via
- * the bound tool reach the parent's FileReadCache and silently weaken
- * prior-read enforcement.
+ * Companion to `tools/agent/agent-override.test.ts`. A derived child must
+ * rebuild core tools so Edit/Write/Read resolve its child-local cache rather
+ * than the parent's recorded reads.
  */
 describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', () => {
   // Bare mode keeps the registry small (ReadFile / Edit / Shell only) and
@@ -131,23 +124,7 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     expect(child.getFileReadCache().size()).toBe(0);
   });
 
-  it('skips rebuild and inherits registry via prototype when an upstream wrapper has already rebuilt the registry (real-world chained-override case)', async () => {
-    // This mirrors the real-world flow: agent.ts wraps the parent in
-    // `createApprovalModeOverride` (which builds R1 on the wrapper),
-    // then passes that wrapper — sometimes wrapped one more level in
-    // `bgConfig = Object.create(agentConfig)` for the background path —
-    // through `createAgentHeadless` → `buildSubagentContextOverride`.
-    // We do NOT want the second layer to build a redundant R2 — that
-    // would (a) waste work, (b) leak listeners on every later
-    // AgentTool/SkillTool factory invocation, and (c) split the cache
-    // so client-level clears target an empty R2 cache while the bound
-    // tools (still in R1) keep using R1's.
-    //
-    // Detection is via the `TOOL_REGISTRY_REBUILT` symbol marker that
-    // `createApprovalModeOverride` sets on its return value; Symbol
-    // property lookup walks the prototype chain so even an Object.create
-    // wrapper above the rebuilt Config is correctly recognised as
-    // having an upstream rebuild.
+  it('skips rebuild and inherits registry when an upstream derived wrapper already rebuilt it', async () => {
     const parent = new Config(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
       skipDiscovery: true,
@@ -162,30 +139,19 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     );
     const upstreamRegistry = upstreamWrapper.getToolRegistry();
 
-    // Layer 2: simulate `bgConfig = Object.create(agentConfig)` from
-    // the background path — own properties added on this layer should
-    // not hide the marker on the prototype.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bgWrapper = Object.create(upstreamWrapper) as any;
-    bgWrapper.getShouldAvoidPermissionPrompts = () => true;
+    // Layer 2: add the background prompt policy through the factory.
+    const bgWrapper = deriveConfig(upstreamWrapper, {
+      getShouldAvoidPermissionPrompts: () => true,
+    });
 
     const manager = new SubagentManager(parent);
 
     const child = await callBuildOverride(manager, bgWrapper as Config);
 
-    // child is still a distinct instance (Object.create) so the
-    // FileReadCache lazy-init still works, but its registry must
-    // resolve via the prototype back to upstreamRegistry — we did not
-    // build a new one.
+    // The child is distinct, but the rebuilt registry remains inherited from
+    // the approval profile so no duplicate registry lifecycle is created.
     expect(child).not.toBe(bgWrapper);
     expect(child.getToolRegistry()).toBe(upstreamRegistry);
-
-    // Critically: tools the model later instantiates from the registry
-    // are bound to upstreamWrapper, NOT the second-layer child. That
-    // is what the optimization is for — the bound tool still resolves
-    // `this.config.getFileReadCache()` to upstreamWrapper's cache,
-    // which is the cache the rest of the subagent execution actually
-    // uses.
     const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
     expect(childEdit).toBeInstanceOf(EditTool);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

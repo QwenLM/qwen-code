@@ -37,7 +37,7 @@ import type {
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
-import { APPROVAL_MODES } from '../config/config.js';
+import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
@@ -959,25 +959,9 @@ export class SubagentManager {
   }
 
   /**
-   * Build the per-subagent Config override used as the AgentHeadless
-   * runtime context. The override is a thin prototype-delegation wrapper
-   * (`Object.create(runtimeContext)`): no method changes, but a distinct
-   * instance triggers the lazy own-property init in
-   * `Config.getFileReadCache()` so the subagent gets its own cache
-   * rather than inheriting the parent's recorded reads — which would
-   * silently weaken prior-read enforcement on its mutation paths.
-   *
-   * The tool registry is also rebuilt on the override so `EditTool` /
-   * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
-   * subagent — without that step, the parent's cached tool instances
-   * still reach the parent's FileReadCache. The rebuild is skipped when
-   * a wrapper above `runtimeContext` already rebuilt one (typically
-   * `agent.ts:createApprovalModeOverride`, which marks itself via a
-   * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
-   * this also catches wrapper-on-wrapper layering like
-   * `bgConfig = Object.create(agentConfig)` from the background path).
-   * Rebuilding twice would waste work, leak listeners on shared
-   * managers, and split caches across registry layers.
+   * Build the per-subagent Config context. A distinct derived Config keeps
+   * child-local caches isolated; registry rebuilding preserves bound-tool and
+   * per-agent MCP ownership.
    */
   private async buildSubagentContextOverride(
     runtimeContext: Config,
@@ -997,8 +981,7 @@ export class SubagentManager {
      */
     cleanup?: () => Promise<void>;
   }> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const subagentContext = Object.create(runtimeContext) as any as Config;
+    const subagentContext = deriveConfig(runtimeContext);
 
     // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
     // session-level servers on key collision (more-specific-wins, matching
