@@ -182,7 +182,7 @@ const {
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
-      submitPermission: vi.fn().mockResolvedValue(undefined),
+      submitPermission: vi.fn().mockResolvedValue(true),
       clearGoal: vi.fn().mockResolvedValue(undefined),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
@@ -263,6 +263,9 @@ const {
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestAskUserQuestionOnError: null as
+        | ((error: unknown, fallback: string) => void)
+        | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
       latestMonitorDetailsOnOpen: null as
@@ -1068,9 +1071,13 @@ vi.doMock('./components/messages/ToolApproval', async () => {
 vi.doMock('./components/messages/AskUserQuestion', async () => {
   const React = await import('react');
   return {
-    AskUserQuestion: (props: { keyboardActive?: boolean }) => {
+    AskUserQuestion: (props: {
+      keyboardActive?: boolean;
+      onError: (error: unknown, fallback: string) => void;
+    }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
+      testState.latestAskUserQuestionOnError = props.onError;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
     },
   };
@@ -1609,6 +1616,7 @@ beforeEach(() => {
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestAskUserQuestionOnError = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
@@ -8880,6 +8888,32 @@ describe('App session callbacks', () => {
       document.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();
     expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
+  });
+
+  it('routes AskUserQuestion submission errors to an error toast', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender({ onToast });
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.latestAskUserQuestionOnError?.(
+        new Error('Submit option is unavailable'),
+        'Failed to submit answer',
+      );
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'Submit option is unavailable',
+    );
   });
 
   it('closes the panel on Escape from outside the sidebar', async () => {
