@@ -9,7 +9,6 @@ import type { Part } from '@google/genai';
 const INVOKE_PATTERN = /<invoke\s+name="([^"]+)">([\s\S]*?)<\/invoke>/g;
 const PARAMETER_PATTERN =
   /<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>/g;
-const FENCE_PATTERN = /^ {0,3}(?:```|~~~)/gm;
 
 export interface ExtractedToolCall {
   name: string;
@@ -60,14 +59,20 @@ function stripDelimitingNewlines(value: string): string {
 }
 
 /**
- * Returns true when `index` falls inside an unclosed fenced code block
- * (``` or ~~~). An odd number of fence markers before the position means
- * a fence was opened but never closed.
+ * Returns true when `index` falls inside an unclosed fenced code block.
+ * Tracks delimiter type so a ~~~ fence is only closed by ~~~ (and vice
+ * versa), consistent with CommonMark.
  */
 function positionInsideFence(text: string, index: number): boolean {
-  const before = text.slice(0, index);
-  const fences = before.match(FENCE_PATTERN);
-  return fences !== null && fences.length % 2 === 1;
+  let openFence: string | null = null;
+  for (const line of text.slice(0, index).split('\n')) {
+    const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
+    if (!m) continue;
+    const delim = m[2] ? '`' : '~';
+    if (openFence === null) openFence = delim;
+    else if (openFence === delim) openFence = null;
+  }
+  return openFence !== null;
 }
 
 /**

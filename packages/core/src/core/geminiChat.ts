@@ -4301,7 +4301,7 @@ export class GeminiChat {
         );
       } else {
         debugLogger.warn(
-          'XML tool call fallback: detected XML tool calls but recovery was rejected (prose ratio too high or no parameterized blocks)',
+          `XML tool call fallback: detected XML tool calls but recovery was rejected (prose ratio too high or no parameterized blocks), contentLength=${contentText.length}`,
         );
       }
     }

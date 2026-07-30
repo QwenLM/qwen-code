@@ -188,6 +188,17 @@ describe('extractXmlToolCalls', () => {
       { name: 'read_file', args: { file_path: 'a.ts' } },
     ]);
   });
+
+  it('skips invokes inside a ~~~ fence that contains ``` lines', () => {
+    const text =
+      '~~~markdown\n' +
+      'Here is an example:\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hello')) +
+      '\n```\n' +
+      '~~~';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
 });
 
 describe('tryRecoverXmlToolCalls', () => {
@@ -324,5 +335,19 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(call?.args).toEqual({ file_path: 'a.ts' });
     expect(result.remainingText).toContain('```xml');
     expect(result.remainingText).toContain('echo hello');
+  });
+
+  it('does not recover an invoke inside a ~~~ fence containing ``` lines', () => {
+    const text =
+      '~~~markdown\n' +
+      'Example:\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hi')) +
+      '\n```\n' +
+      '~~~';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
   });
 });
