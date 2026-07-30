@@ -442,7 +442,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
     });
     try {
-      llmSpan.setAttribute('llm_request.stream', true);
+      llmSpan.setAttribute('gen_ai.request.stream', true);
     } catch {
       /* best-effort */
     }
@@ -465,13 +465,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     const startTime = Date.now();
     const session = this.startCaptureSession();
 
-    let stream: AsyncGenerator<GenerateContentResponse>;
+    let streamRequest: {
+      stream: AsyncGenerator<GenerateContentResponse>;
+      requestIssuedAtMs: number;
+    };
     try {
       runtimeDiagnostics.recordGenerateContentRequest(req, {
         stream: true,
         source: 'generateContentStream',
       });
-      stream = await context.with(spanContext, async () => {
+      streamRequest = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
             this.toContents(req.contents),
@@ -479,9 +482,14 @@ export class LoggingContentGenerator implements ContentGenerator {
             userPromptId,
           );
         }
-        return session.wrap(() =>
-          this.wrapped.generateContentStream(req, userPromptId),
-        );
+        return session.wrap(async () => {
+          const requestIssuedAtMs = performance.now();
+          const stream = await this.wrapped.generateContentStream(
+            req,
+            userPromptId,
+          );
+          return { stream, requestIssuedAtMs };
+        });
       });
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -515,6 +523,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     }
+    const { stream, requestIssuedAtMs } = streamRequest;
 
     let resolvedRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
     if (this.openaiLogger) {
@@ -529,6 +538,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       this.loggingStreamWrapper(
         stream,
         startTime,
+        requestIssuedAtMs,
         userPromptId,
         req.model,
         resolvedRequest,
@@ -566,6 +576,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   private async *loggingStreamWrapper(
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
+    requestIssuedAtMs: number,
     userPromptId: string,
     model: string,
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
@@ -604,13 +615,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
 
-    // TTFT (time to first token): wall-clock from generateContentStream
-    // dispatch to the first stream chunk containing user-visible content.
+    // Internal first-visible-output timing: wall-clock from the existing
+    // generateContentStream startTime to the first chunk containing
+    // user-visible content. This is distinct from the standard first-chunk
+    // timer above.
     // Method-local closure variable — NEVER an instance field — because
     // LoggingContentGenerator is shared across concurrent generateContentStream
     // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
     // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
     let ttftMs: number | undefined;
+    let firstChunkObserved = false;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
     // again (the helper would no-op, but more importantly we skip the
@@ -668,6 +682,17 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     try {
       for await (const response of stream) {
+        if (!firstChunkObserved && !spanEndedByTimeout) {
+          firstChunkObserved = true;
+          try {
+            span?.setAttribute(
+              'gen_ai.response.time_to_first_chunk',
+              Math.max(0, performance.now() - requestIssuedAtMs) / 1000,
+            );
+          } catch {
+            // OTel errors must not interrupt the consumer.
+          }
+        }
         lastResponse = response;
         if (!firstResponseId && response.responseId) {
           firstResponseId = response.responseId;

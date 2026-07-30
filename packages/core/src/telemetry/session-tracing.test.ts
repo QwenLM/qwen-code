@@ -616,7 +616,7 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
-    it('keeps private ttft_ms without emitting the incompatible GenAI alias', () => {
+    it('omits private ttft_ms while retaining user-visible timing derivatives', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -625,7 +625,8 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['ttft_ms']).toBe(234);
+      expect(attrs['ttft_ms']).toBeUndefined();
+      expect(attrs['sampling_ms']).toBe(766);
       expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
     });
 

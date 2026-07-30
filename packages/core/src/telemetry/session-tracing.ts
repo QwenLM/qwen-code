@@ -69,15 +69,16 @@ export interface LLMRequestMetadata {
   durationMs?: number;
   error?: string;
   /**
-   * Time from the successful attempt's request dispatch to the first stream
-   * chunk containing user-visible content (text / functionCall / inlineData /
-   * executableCode / thought). Undefined for non-streaming requests, requests
-   * aborted before the first user-visible chunk, and any path that does not
-   * pass through LoggingContentGenerator's stream wrapper.
+   * Internal time from the streaming wrapper's existing wall-clock start to
+   * the first chunk containing user-visible content (text / functionCall /
+   * inlineData / executableCode / thought). Undefined for non-streaming
+   * requests, requests aborted before the first user-visible chunk, and any
+   * path that does not pass through LoggingContentGenerator's stream wrapper.
    *
-   * Semantics: diverges from claude-code's ttftMs (which fires on
-   * Anthropic's message_start metadata event). Matches the "time to first
-   * actual token" intent of the industry-standard TTFT name.
+   * This is intentionally distinct from
+   * `gen_ai.response.time_to_first_chunk`, which uses a monotonic request
+   * issuance timer and records the first normalized chunk regardless of
+   * content.
    * See docs/design/telemetry-llm-request-timing-design.md (D1).
    */
   ttftMs?: number;
@@ -732,9 +733,6 @@ export function endLLMRequestSpan(
       ) {
         endAttributes['gen_ai.usage.cache_creation.input_tokens'] =
           metadata.cacheCreationInputTokens;
-      }
-      if (metadata.ttftMs !== undefined) {
-        endAttributes['ttft_ms'] = metadata.ttftMs;
       }
       if (metadata.requestSetupMs !== undefined) {
         endAttributes['request_setup_ms'] = metadata.requestSetupMs;
