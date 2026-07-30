@@ -11974,7 +11974,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       _args: unknown[];
     };
     expect(localConfig._args).toEqual(['node', ['server.js'], {}]);
-    expect(localConfig._args[3]).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;

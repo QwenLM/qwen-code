@@ -1884,6 +1884,7 @@ describe('Server Config (config.ts)', () => {
           explicit: { command: 'node', cwd: explicitCwd },
           remote: { httpUrl: 'https://example.test/mcp' },
           sdk: { type: 'sdk', command: 'placeholder' },
+          tcpWithCommand: { tcp: 'tcp://example.test:9000', command: 'node' },
         },
       });
 
@@ -1896,6 +1897,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.getSettingsMcpServers()?.['implicit']?.cwd).toBeUndefined();
       expect(config.getMcpServers()?.['remote']?.cwd).toBeUndefined();
       expect(config.getMcpServers()?.['sdk']?.cwd).toBeUndefined();
+      expect(config.getMcpServers()?.['tcpWithCommand']?.cwd).toBeUndefined();
     });
 
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
