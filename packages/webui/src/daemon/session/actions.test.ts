@@ -551,11 +551,58 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
-  it('suppresses notices for silent retryable HTTP getTasks failures', async () => {
+  it.each(['Request timed out', 'Network error', 'NetworkError'])(
+    'suppresses notices for silent %s getTasks failures',
+    async (message) => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn((notice) => notice);
+      session.tasks.mockRejectedValueOnce(new Error(message));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getTasks({ silent: true })).rejects.toThrow(message);
+
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([500, 408, 429])(
+    'suppresses notices for silent retryable HTTP %i getTasks failures',
+    async (status) => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn((notice) => notice);
+      session.tasks.mockRejectedValueOnce(
+        new DaemonHttpError(status, undefined, 'Retryable failure'),
+      );
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getTasks({ silent: true })).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('suppresses notices for silent abort getTasks failures', async () => {
     const session = createMockSession('session-a');
     const addNotice = vi.fn((notice) => notice);
     session.tasks.mockRejectedValueOnce(
-      new DaemonHttpError(500, undefined, 'Server error'),
+      new DOMException('Aborted', 'AbortError'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports silent hard HTTP getTasks failures once', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(
+      new DaemonHttpError(403, undefined, 'Forbidden'),
     );
     const { actions } = createActionsHarness({ addNotice, session });
 
@@ -563,7 +610,14 @@ describe('createDaemonSessionActions', () => {
       DaemonHttpError,
     );
 
-    expect(addNotice).not.toHaveBeenCalled();
+    expect(addNotice).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.load_tasks.failed',
+        message: 'Get tasks failed: Forbidden',
+        operation: 'load_tasks',
+      }),
+    );
   });
 
   it('reports silent hard getTasks failures once', async () => {
