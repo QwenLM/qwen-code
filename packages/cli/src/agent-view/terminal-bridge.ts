@@ -74,7 +74,7 @@ export async function bridgeAgentViewTerminal(
 
   const resizeDisposable = options.onResize?.((size) => {
     if (bridgeAbort.signal.aborted) return;
-    void options.pty.resize?.(size);
+    void Promise.resolve(options.pty.resize?.(size)).catch(() => {});
   });
   if (resizeDisposable) {
     disposables.push(resizeDisposable);

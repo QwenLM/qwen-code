@@ -134,7 +134,7 @@ class AgentViewSupervisorProcessHandler
   }
 
   shutdown(): { shuttingDown: true; workersStopped: 0 } {
-    void this.options.onShutdown?.();
+    void Promise.resolve(this.options.onShutdown?.()).catch(() => {});
     return { shuttingDown: true, workersStopped: 0 };
   }
 
@@ -145,7 +145,7 @@ class AgentViewSupervisorProcessHandler
   async tickIdleHibernation(): Promise<AgentViewSupervisorMaintenanceResult> {
     const states = await listAgentViewSessionStates(this.store);
     if (this.shouldAutoExit(states)) {
-      void this.options.onShutdown?.();
+      void Promise.resolve(this.options.onShutdown?.()).catch(() => {});
       return { hibernated: [], shutdownRequested: true };
     }
 

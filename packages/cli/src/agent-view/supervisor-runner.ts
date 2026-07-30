@@ -146,7 +146,7 @@ export async function runAgentViewSupervisor(
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
-        void server.close();
+        void Promise.resolve(server.close()).catch(() => {});
       });
     },
   });
@@ -175,12 +175,18 @@ export async function runAgentViewSupervisor(
     const onSigterm = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server.close().finally(resolve);
+      void server
+        .close()
+        .catch(() => {})
+        .finally(resolve);
     };
     const onSigint = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server.close().finally(resolve);
+      void server
+        .close()
+        .catch(() => {})
+        .finally(resolve);
     };
     const closeInterval = setInterval(() => {
       if (closeRequested) {

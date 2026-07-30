@@ -647,6 +647,30 @@ describe('Agent View supervisor server', () => {
       });
     }
   });
+
+  it('rejects with a timeout error when the server accepts but never responds', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const sockets: net.Socket[] = [];
+    const silentServer = net.createServer((socket) => {
+      sockets.push(socket);
+    });
+    await new Promise<void>((resolve) =>
+      silentServer.listen(socketPath, resolve),
+    );
+    try {
+      await expect(
+        requestAgentViewSupervisor(
+          socketPath,
+          { id: 'timeout-test', op: 'status' },
+          { timeoutMs: 50 },
+        ),
+      ).rejects.toMatchObject({ code: 'timeout' });
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => silentServer.close(() => resolve()));
+    }
+  });
 });
 
 async function makeSocketPath(): Promise<{ dir: string; socketPath: string }> {
