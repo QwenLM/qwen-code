@@ -255,6 +255,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
       const fileHandle = {} as import('node:fs/promises').FileHandle;
 
