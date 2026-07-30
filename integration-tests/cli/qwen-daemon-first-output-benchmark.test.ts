@@ -41,6 +41,7 @@ import {
   DEFAULT_ORDER_SENSITIVITY_THRESHOLD_MS,
   FIRST_OUTPUT_BENCHMARK_VERSION,
   FirstOutputTracker,
+  computeFirstOutputSessionTimings,
   evaluateSingleBundlePrototypeGate,
   findInvalidTimings,
   measuredPairCountForDwell,
@@ -880,6 +881,7 @@ async function runSession(
   let streamTask: Promise<void> | undefined;
   let failure: FirstOutputFailure | null = null;
   let cleanupFailure: FirstOutputFailure | null = null;
+  let daemonPromptQueueWaitMs: number | null = null;
   const tracker = new FirstOutputTracker();
   const timestamps: FirstOutputSessionRunResult['timestamps'] = {
     sessionCreateStart,
@@ -887,6 +889,7 @@ async function runSession(
     sseReady: null,
     promptStart: null,
     promptAccepted: null,
+    userEcho: null,
     providerRequestArrival: null,
     providerReady: null,
     firstModelOutput: null,
@@ -1077,6 +1080,12 @@ async function runSession(
         `Prompt ${promptId} completed without an eligible output and terminal.`,
       );
     }
+    if (!tracked.userEcho) {
+      throw new BenchmarkFailure(
+        'harness_error',
+        `Prompt ${promptId} completed without a matching relayed user echo.`,
+      );
+    }
     if (tracked.firstOutput.kind !== 'answer_text') {
       throw new BenchmarkFailure(
         'unexpected_output_kind',
@@ -1099,6 +1108,23 @@ async function runSession(
         `Expected exactly one target generation request, observed ${expectedRequest.count}.`,
       );
     }
+    const daemonStatus = await daemon.client.daemonStatus();
+    const queueWait = daemonStatus.runtime.perf?.promptQueueWait;
+    if (
+      queueWait?.count !== ordinal ||
+      queueWait.lastMs === null ||
+      !Number.isFinite(queueWait.lastMs) ||
+      queueWait.lastMs < 0
+    ) {
+      throw new BenchmarkFailure(
+        'harness_error',
+        `Expected isolated daemon prompt queue-wait sample ${ordinal}, ` +
+          `received count=${String(queueWait?.count)} lastMs=${String(
+            queueWait?.lastMs,
+          )}.`,
+      );
+    }
+    daemonPromptQueueWaitMs = queueWait.lastMs;
   } catch (error) {
     failure = firstOutputFailure(error);
   } finally {
@@ -1118,10 +1144,15 @@ async function runSession(
     timestamps.providerRequestArrival = expectedRequest.timing.requestAtMs;
     timestamps.providerReady = expectedRequest.timing.readyAtMs;
   }
+  timestamps.userEcho = tracked.userEcho?.receivedAtMs ?? null;
   timestamps.firstModelOutput = tracked.firstOutput?.receivedAtMs ?? null;
   timestamps.firstAnswerText = tracked.firstAnswer?.receivedAtMs ?? null;
   timestamps.terminal = tracked.terminal?.receivedAtMs ?? null;
-  const timings = computeSessionTimings(timestamps, daemon.processStartedAtMs);
+  const timings = computeFirstOutputSessionTimings(
+    timestamps,
+    daemon.processStartedAtMs,
+    daemonPromptQueueWaitMs,
+  );
   const invalidMetrics = findInvalidTimings(timings);
   if (invalidMetrics.length > 0) {
     failure ??= {
@@ -1163,40 +1194,6 @@ async function runSession(
         timestamps.providerRequestArrival,
       ),
     },
-  };
-}
-
-function computeSessionTimings(
-  timestamps: FirstOutputSessionRunResult['timestamps'],
-  processStartedAtMs: number,
-): FirstOutputSessionRunResult['timings'] {
-  return {
-    processToSessionReadyMs: duration(
-      timestamps.sessionReady,
-      processStartedAtMs,
-    ),
-    sseReadyToPromptMs: duration(timestamps.promptStart, timestamps.sseReady),
-    promptToProviderRequestArrivalMs: duration(
-      timestamps.providerRequestArrival,
-      timestamps.promptStart,
-    ),
-    promptToFirstModelOutputMs: duration(
-      timestamps.firstModelOutput,
-      timestamps.promptStart,
-    ),
-    promptToFirstAnswerTextMs: duration(
-      timestamps.firstAnswerText,
-      timestamps.promptStart,
-    ),
-    providerReadyToFirstModelOutputMs: duration(
-      timestamps.firstModelOutput,
-      timestamps.providerReady,
-    ),
-    processToFirstModelOutputMs: duration(
-      timestamps.firstModelOutput,
-      processStartedAtMs,
-    ),
-    promptToTerminalMs: duration(timestamps.terminal, timestamps.promptStart),
   };
 }
 
@@ -1674,6 +1671,12 @@ const METRICS: readonly FirstOutputMetricName[] = [
   'providerReadyToFirstModelOutputMs',
   'processToFirstModelOutputMs',
   'promptToTerminalMs',
+  // Appended so existing metrics keep their bootstrap seed offsets.
+  'promptToAcceptanceMs',
+  'acceptanceToProviderRequestArrivalMs',
+  'promptToUserEchoMs',
+  'userEchoToProviderRequestArrivalMs',
+  'daemonPromptQueueWaitMs',
 ];
 
 function toProcessRun(
@@ -1755,6 +1758,16 @@ function sessionMetric(
       return session.timings.processToSessionReadyMs;
     case 'sseReadyToPromptMs':
       return session.timings.sseReadyToPromptMs;
+    case 'promptToAcceptanceMs':
+      return session.timings.promptToAcceptanceMs;
+    case 'acceptanceToProviderRequestArrivalMs':
+      return session.timings.acceptanceToProviderRequestArrivalMs;
+    case 'promptToUserEchoMs':
+      return session.timings.promptToUserEchoMs;
+    case 'userEchoToProviderRequestArrivalMs':
+      return session.timings.userEchoToProviderRequestArrivalMs;
+    case 'daemonPromptQueueWaitMs':
+      return session.timings.daemonPromptQueueWaitMs;
     case 'promptToProviderRequestArrivalMs':
       return session.timings.promptToProviderRequestArrivalMs;
     case 'promptToFirstModelOutputMs':
