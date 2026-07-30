@@ -9714,7 +9714,7 @@ class QwenAgent implements Agent {
             ?.fireSessionDeleteEvent(sessionId)
             .catch((error) => {
               debugLogger.warn(
-                `SessionDelete hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                `SessionDelete hook failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
               );
             });
         }

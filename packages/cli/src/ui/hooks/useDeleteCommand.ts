@@ -22,6 +22,19 @@ export interface UseDeleteCommandResult {
   handleDeleteMany: (sessionIds: string[]) => void;
 }
 
+function fireSessionDeleteHook(config: Config, sessionId: string): void {
+  void config
+    .getHookSystem()
+    ?.fireSessionDeleteEvent(sessionId)
+    .catch((error) => {
+      config
+        .getDebugLogger()
+        .warn(
+          `SessionDelete hook failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    });
+}
+
 export function useDeleteCommand(
   options?: UseDeleteCommandOptions,
 ): UseDeleteCommandResult {
@@ -75,16 +88,7 @@ export function useDeleteCommand(
         const success = await sessionService.removeSession(sessionId);
 
         if (success) {
-          void config
-            .getHookSystem()
-            ?.fireSessionDeleteEvent(sessionId)
-            .catch((error) => {
-              config
-                .getDebugLogger()
-                .warn(
-                  `SessionDelete hook failed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-            });
+          fireSessionDeleteHook(config, sessionId);
           addItem?.(
             {
               type: 'info',
@@ -173,16 +177,7 @@ export function useDeleteCommand(
         const result = await sessionService.removeSessions(filtered);
 
         for (const sessionId of result.removed) {
-          void config
-            .getHookSystem()
-            ?.fireSessionDeleteEvent(sessionId)
-            .catch((error) => {
-              config
-                .getDebugLogger()
-                .warn(
-                  `SessionDelete hook failed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-            });
+          fireSessionDeleteHook(config, sessionId);
         }
 
         const removedCount = result.removed.length;

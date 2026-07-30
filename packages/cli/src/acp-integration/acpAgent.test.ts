@@ -12345,7 +12345,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
     await vi.waitFor(() =>
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        'SessionDelete hook failed: failed',
+        'SessionDelete hook failed for 6ba7b810-9dad-11d1-80b4-00c04fd430c8: failed',
       ),
     );
     expect(sessionDeleteHook).toHaveBeenCalledWith(deletedSessionId);

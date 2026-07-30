@@ -573,11 +573,11 @@ describe('useDeleteCommand', () => {
       expect(debugLogger.warn).toHaveBeenCalledTimes(2);
       expect(debugLogger.warn).toHaveBeenNthCalledWith(
         1,
-        'SessionDelete hook failed: failed',
+        'SessionDelete hook failed for a: failed',
       );
       expect(debugLogger.warn).toHaveBeenNthCalledWith(
         2,
-        'SessionDelete hook failed: failed',
+        'SessionDelete hook failed for b: failed',
       );
       const [item] = addItem.mock.calls.at(-1) as [
         { type: string; text: string },
@@ -643,7 +643,7 @@ describe('useDeleteCommand', () => {
         'deleted-id',
       );
       expect(debugLogger.warn).toHaveBeenCalledWith(
-        'SessionDelete hook failed: failed',
+        'SessionDelete hook failed for deleted-id: failed',
       );
       expect(addItem).toHaveBeenCalledWith(
         expect.objectContaining({
