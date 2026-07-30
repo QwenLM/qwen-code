@@ -1,9 +1,10 @@
 # Daemon first-output latency
 
 - **Tracking**: #7757
+- **Immediate-prompt follow-up**: #7982
 - **Background**: #7264
 - **Scope**: daemon/ACP client-observable latency
-- **Status**: Phase 1 measurement design
+- **Status**: Measurement and immediate-prompt attribution
 
 ## Decision and scope
 
@@ -46,7 +47,7 @@ Artifacts are written below `.qwen/investigations/daemon-first-output-benchmark/
 
 ### One clock
 
-All latency timestamps use `performance.now()` in the parent harness. No duration combines daemon, ACP-child, Provider, or wall clocks.
+All latency timestamps use `performance.now()` in the parent harness. No duration combines daemon, ACP-child, Provider, or wall clocks. The daemon FIFO queue-wait value is an existing standalone duration read after the isolated prompt completes; it is never subtracted from a parent timestamp.
 
 | Timestamp                  | Client-observable definition                                                       |
 | -------------------------- | ---------------------------------------------------------------------------------- |
@@ -55,6 +56,7 @@ All latency timestamps use `performance.now()` in the parent harness. No duratio
 | `sseReadyAt`               | First SSE epoch callback observed; the dwell anchor                                |
 | `promptStartedAt`          | Immediately before starting the non-blocking prompt request                        |
 | `promptAcceptedAt`         | HTTP `202` body validated, including top-level `promptId` and replay cursor        |
+| `userEchoAt`               | Matching relayed `user_message_chunk` parsed from SSE                              |
 | `providerRequestArrivalAt` | Fake Provider accepts the measured request, before its fixed delay                 |
 | `providerReadyAt`          | Fixed 50 ms delay has elapsed, immediately before the response stream is available |
 | `firstModelOutputAt`       | First qualifying SSE event for the accepted top-level `promptId` parsed            |
@@ -63,18 +65,25 @@ All latency timestamps use `performance.now()` in the parent harness. No duratio
 
 The raw timestamps produce these exact metrics:
 
-| Metric                              | Calculation                                     |
-| ----------------------------------- | ----------------------------------------------- |
-| `processToSessionReadyMs`           | `sessionReadyAt - processSpawnAt`               |
-| `sseReadyToPromptMs`                | `promptStartedAt - sseReadyAt`, diagnostic      |
-| `promptToProviderRequestArrivalMs`  | `providerRequestArrivalAt - promptStartedAt`    |
-| `promptToFirstModelOutputMs`        | `firstModelOutputAt - promptStartedAt`          |
-| `promptToFirstAnswerTextMs`         | `firstAnswerTextAt - promptStartedAt`, nullable |
-| `providerReadyToFirstModelOutputMs` | `firstModelOutputAt - providerReadyAt`          |
-| `promptToTerminalMs`                | `terminalAt - promptStartedAt`                  |
-| `processToFirstModelOutputMs`       | `firstModelOutputAt - processSpawnAt`           |
+| Metric                                 | Calculation                                           |
+| -------------------------------------- | ----------------------------------------------------- |
+| `processToSessionReadyMs`              | `sessionReadyAt - processSpawnAt`                     |
+| `sseReadyToPromptMs`                   | `promptStartedAt - sseReadyAt`, diagnostic            |
+| `promptToAcceptanceMs`                 | `promptAcceptedAt - promptStartedAt`                  |
+| `acceptanceToProviderRequestArrivalMs` | `providerRequestArrivalAt - promptAcceptedAt`, signed |
+| `promptToUserEchoMs`                   | `userEchoAt - promptStartedAt`                        |
+| `userEchoToProviderRequestArrivalMs`   | `providerRequestArrivalAt - userEchoAt`, signed       |
+| `daemonPromptQueueWaitMs`              | Existing daemon FIFO queue-wait duration              |
+| `promptToProviderRequestArrivalMs`     | `providerRequestArrivalAt - promptStartedAt`          |
+| `promptToFirstModelOutputMs`           | `firstModelOutputAt - promptStartedAt`                |
+| `promptToFirstAnswerTextMs`            | `firstAnswerTextAt - promptStartedAt`, nullable       |
+| `providerReadyToFirstModelOutputMs`    | `firstModelOutputAt - providerReadyAt`                |
+| `promptToTerminalMs`                   | `terminalAt - promptStartedAt`                        |
+| `processToFirstModelOutputMs`          | `firstModelOutputAt - processSpawnAt`                 |
 
-`promptAcceptedAt` is diagnostic, not a latency origin: a Provider request or event may precede receipt of the HTTP `202`. Missing required timestamps, non-finite values, or negative durations invalidate the sample. The harness owns the 30-second SSE-readiness deadline; the SDK connect timeout is recorded and set five seconds later so timer ordering cannot change `sse_connect_timeout` into another failure code.
+`promptAcceptedAt` is diagnostic, not a latency origin: a Provider request or event may precede receipt of the HTTP `202`. The daemon publishes the matching user echo before forwarding the ACP prompt, but SSE delivery can still lose the race with Provider request arrival. Therefore both `acceptanceToProviderRequestArrivalMs` and `userEchoToProviderRequestArrivalMs` are signed offsets and negative values are valid. Every other duration must be non-negative. The queue-wait counter must advance exactly once per isolated prompt and retain a finite non-negative `lastMs`; otherwise the sample is invalid because the value cannot be correlated safely. Missing required timestamps or non-finite values invalidate the sample. The harness owns the 30-second SSE-readiness deadline; the SDK connect timeout is recorded and set five seconds later so timer ordering cannot change `sse_connect_timeout` into another failure code.
+
+The immediate-prompt attribution metrics deliberately stop at existing boundaries. Together they distinguish client/route acceptance, the relayed pre-forward user echo, daemon FIFO queueing, and the remaining ACP-child/local-preparation interval without adding a cross-process timestamp, protocol field, or production telemetry. The echo boundary includes SSE relay time and is approximate rather than a daemon-internal timestamp. These metrics do not divide the remaining interval among ACP transport, prompt preparation, Provider loader settlement, and request construction; deeper instrumentation requires separate evidence and design.
 
 ### Prompt and event correlation
 
@@ -182,9 +191,9 @@ Every classified lifecycle or sample failure is retained and has one primary cod
 | `residual_process`                | Tracked daemon/ACP descendant survived cleanup                   |
 | `harness_error`                   | Unclassified harness invariant or I/O failure                    |
 
-The first causal lifecycle failure stays primary; SSE/session and process cleanup failures are recorded separately and still invalidate the pair. Non-finite or negative timings are retained as a harness failure but normalized to `null` before aggregation, and failed runs never contribute to percentile or gate calculations. Fixed timeouts, request limits, and buffer capacity are serialized. Diagnostic messages and bounded stdout/stderr tails do not affect decisions.
+The first causal lifecycle failure stays primary; SSE/session and process cleanup failures are recorded separately and still invalidate the pair. Non-finite timings and invalid negative timings other than the two signed offsets are retained as a harness failure but normalized to `null` before aggregation, and failed runs never contribute to percentile or gate calculations. Fixed timeouts, request limits, and buffer capacity are serialized. Diagnostic messages and bounded stdout/stderr tails do not affect decisions.
 
-Each invocation writes schema-version-1 `daemon-first-output` JSON plus Markdown derived only from that JSON. It contains run/platform/bundle identity, sanitized configuration, warmups, every raw relative timestamp and metric, latched first-output/answer/terminal event types and correlation counts, Provider request counts, invalid samples and pairs, failures, cleanup results, statistics/bootstrap/order summaries, and gate inputs with explicit decision reasons. Phase 2 resource runs extend their validation evidence with RSS measurements. Classified sample failures stay in their fixed sample slots; invalid configuration or an unclassified harness failure produces a fatal artifact. Artifacts exclude credentials, tokens, and prompt content beyond the non-secret benchmark sentinel.
+Each invocation writes schema-version-2 `daemon-first-output` JSON plus Markdown derived only from that JSON. It contains run/platform/bundle identity, sanitized configuration, warmups, every raw relative timestamp and metric, latched first-output/answer/terminal event types and correlation counts, Provider request counts, invalid samples and pairs, failures, cleanup results, statistics/bootstrap/order summaries, and gate inputs with explicit decision reasons. Phase 2 resource runs extend their validation evidence with RSS measurements. Classified sample failures stay in their fixed sample slots; invalid configuration or an unclassified harness failure produces a fatal artifact. Artifacts exclude credentials, tokens, and prompt content beyond the non-secret benchmark sentinel.
 
 Cleanup always aborts and awaits SSE, closes live sessions, captures ACP/MCP descendant PIDs, sends `SIGTERM` to the owned process group while its leader is still known live, and escalates the group only if that same leader survives the fixed grace period. Captured descendants and an enumeration-completeness latch stay attached to the active resource through emergency cleanup. Once the leader exits, cleanup never probes or signals its numeric process-group ID again because POSIX may reuse it; it only verifies the retained descendant set and fails safely if a descendant survives or enumeration was incomplete. Provider sockets close only after process teardown, and temporary state is removed only after both are verified. Cleanup never uses process-name-wide killing. Any invalid process or completed pair stops sampling immediately while retaining the failure. If an owned process or listener cannot be verified as stopped, the runner records the temp root deferred to emergency cleanup, marks a not-started counterpart when needed to preserve an invalid pair, and makes emergency teardown failure visible rather than silently dropping its tracked resource. Emergency teardown retries tracked processes and Providers before deleting deferred temp roots or compile caches.
 

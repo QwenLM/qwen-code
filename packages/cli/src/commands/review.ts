@@ -26,13 +26,15 @@ import { scriptLintCommand } from './review/script-lint.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { cleanupCommand } from './review/cleanup.js';
+import { runCommand } from './review/run.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
   describe:
-    'Internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
+    'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
   builder: (yargs: Argv) =>
     yargs
+      .command(runCommand)
       .command(parseArgsCommand)
       .command(fetchPrCommand)
       .command(captureLocalCommand)
@@ -52,7 +54,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

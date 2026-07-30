@@ -1204,6 +1204,7 @@ const EN: Messages = {
   'queue.insertCommandDisabled':
     "Commands can't be inserted into the running turn; they run after it finishes.",
   'queue.submitting': 'Submitting...',
+  'queue.serverQueued': 'Queued on server...',
   'queue.editing': 'Editing...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
@@ -2314,6 +2315,8 @@ const EN: Messages = {
   'splitView.closePane': 'Close pane',
   'splitView.maximizePane': 'Maximize pane',
   'splitView.restorePane': 'Restore pane',
+  'splitView.morePaneActions': 'More pane actions',
+  'splitView.defaultActionLabel': 'Action',
   'splitView.paneError': 'This session pane hit an error',
   'splitView.paneConnectionError': 'Connection lost',
   'splitView.outerApprovalPending':
@@ -3674,6 +3677,7 @@ const ZH: Messages = {
   'queue.inserted': '已插入，下次模型调用生效。',
   'queue.insertCommandDisabled': '命令无法插入当前回合。',
   'queue.submitting': '提交中...',
+  'queue.serverQueued': '服务器排队中...',
   'queue.editing': '编辑中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
@@ -4697,6 +4701,8 @@ const ZH: Messages = {
   'splitView.closePane': '关闭窗格',
   'splitView.maximizePane': '最大化窗格',
   'splitView.restorePane': '还原窗格',
+  'splitView.morePaneActions': '更多窗格操作',
+  'splitView.defaultActionLabel': '操作',
   'splitView.paneError': '此会话窗格出错',
   'splitView.paneConnectionError': '连接已断开',
   'splitView.outerApprovalPending': '主会话正在等待审批。',

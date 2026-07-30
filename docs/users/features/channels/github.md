@@ -4,7 +4,8 @@ This guide covers setting up a Qwen Code channel that monitors GitHub notificati
 
 ## Prerequisites
 
-- A GitHub account (or a dedicated bot account)
+- A GitHub account for the channel. Use a dedicated bot account when the PAT
+  owner also needs to operate the channel.
 - A GitHub Personal Access Token (PAT) with `notifications` and `public_repo` (or `repo`) scopes
 
 ## Creating a Token
@@ -26,10 +27,12 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "github",
       "token": "$GITHUB_TOKEN",
       "pollInterval": 60000,
+      "reasonFilter": ["mention", "review_requested", "assign"],
       "senderPolicy": "allowlist",
-      "allowedUsers": ["your-github-username"],
+      "allowedUsers": ["operator-github-username"],
       "sessionScope": "chat_thread",
       "cwd": "/path/to/your/project",
+      "blockStreaming": "off",
       "groupPolicy": "open",
       "groups": {
         "*": { "requireMention": true }
@@ -45,6 +48,13 @@ Set the token as an environment variable:
 export GITHUB_TOKEN="ghp_your_token_here"
 ```
 
+The PAT owner cannot trigger its own channel: GitHub self-activity does not
+provide a usable notification, and the adapter intentionally ignores its own
+comments to prevent reply loops. If the PAT owner needs to operate the channel,
+use a separate bot-owned PAT and put only operator accounts in `allowedUsers`.
+Startup rejects an allowlist containing only the PAT owner and warns when the
+PAT owner appears alongside other operators.
+
 ### GitHub Enterprise
 
 For GitHub Enterprise Server, set `baseUrl`:
@@ -57,14 +67,22 @@ For GitHub Enterprise Server, set `baseUrl`:
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                      |
-| ------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
-| `token`                   | (required)               | Classic PAT with `notifications` scope                                           |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                              |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                           |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                       |
-| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                          |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run |
+| Option                    | Default                  | Description                                                                                   |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
+| `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
+| `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
+| `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                  |
+
+Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
+
+Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author`, `comment`, `ci_activity`, `manual`, `state_change`, `subscribed`, `team_mention`, `security_alert`, `approval_requested`, `invitation`, `member_feature_requested`, and `security_advisory_credit`.
+
+Filtered notifications are still marked read before they are skipped. Removing the filter later will not replay notifications the channel already skipped.
 
 ## ⚠️ Security
 
@@ -91,6 +109,20 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 The comment window is `(previousCursor, currentMaxUpdatedAt]` — comments already eligible in a previous poll cycle are excluded by the cursor, preventing duplicate replies even when the async mark-read has not taken effect. If the process crashes mid-processing, the user can re-mention the bot to retry.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
+
+## Response Feedback
+
+For an accepted issue or pull-request comment, the channel adds GitHub's `👀` reaction while the agent is working, then removes it when the run completes, fails, or is cancelled. Both operations are best-effort: a reaction API or permission failure is logged and never prevents the final response.
+
+### Final-only output
+
+The GitHub channel always forces final-only delivery. The adapter sets `blockStreaming` to `"off"`, so intermediate model chunks are never published as separate comments and `blockStreaming: "on"` is not supported.
+
+```json
+{
+  "blockStreaming": "off"
+}
+```
 
 ## Known Limitations
 

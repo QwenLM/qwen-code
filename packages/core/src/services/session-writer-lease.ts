@@ -5,16 +5,18 @@
  */
 
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
-const LOCK_SCHEMA_VERSION = 1;
+const LEGACY_LOCK_SCHEMA_VERSION = 1;
+const LOCK_SCHEMA_VERSION = 2;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
+const CLAIMED_PRIMARY_WAIT_ATTEMPTS = 20;
 const RELEASE_PRECHECK_ATTEMPTS = 3;
 const RELEASE_PRECHECK_RETRY_DELAY_MS = 50;
 const ACQUIRE_ATTEMPTS = 8;
@@ -102,8 +104,7 @@ export class SessionWriterUnavailableError extends SessionWriterError {
   }
 }
 
-interface SessionWriterLockRecord {
-  schema_version: number;
+interface SessionWriterOwnerRecord {
   session_id: string;
   owner_id: string;
   pid: number;
@@ -114,6 +115,38 @@ interface SessionWriterLockRecord {
   qwen_version: string | null;
 }
 
+interface LegacySessionWriterLockRecord extends SessionWriterOwnerRecord {
+  schema_version: typeof LEGACY_LOCK_SCHEMA_VERSION;
+}
+
+interface ActiveSessionWriterLockRecord extends SessionWriterOwnerRecord {
+  schema_version: typeof LOCK_SCHEMA_VERSION;
+  state: 'active';
+}
+
+interface SealedTranscriptProof {
+  relative_path: string;
+  exists: boolean;
+  byte_length: number;
+  sha256: string;
+}
+
+interface SealedSessionWriterLockRecord extends SessionWriterOwnerRecord {
+  schema_version: typeof LOCK_SCHEMA_VERSION;
+  state: 'sealed';
+  sealed_at: string;
+  transcript: SealedTranscriptProof;
+}
+
+type SessionWriterLockRecord =
+  | LegacySessionWriterLockRecord
+  | ActiveSessionWriterLockRecord
+  | SealedSessionWriterLockRecord;
+
+type ActiveLockRecord =
+  | LegacySessionWriterLockRecord
+  | ActiveSessionWriterLockRecord;
+
 export interface AcquireSessionWriterLeaseOptions {
   runtimeBaseDir: string;
   sessionId: string;
@@ -121,13 +154,15 @@ export interface AcquireSessionWriterLeaseOptions {
   processKind?: SessionWriterProcessKind;
   qwenVersion?: string | null;
   reclaimPolicy?: 'local' | 'never';
+  takeoverPolicy?: 'never' | 'certified';
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
 }
 
 type ExistingLockState =
   | { kind: 'missing' }
-  | { kind: 'live' }
-  | { kind: 'stale'; record: SessionWriterLockRecord }
+  | { kind: 'live'; record: ActiveLockRecord; raw: string }
+  | { kind: 'stale'; record: ActiveLockRecord; raw: string }
+  | { kind: 'sealed'; record: SealedSessionWriterLockRecord; raw: string }
   | { kind: 'malformed' };
 
 interface TranscriptFingerprint {
@@ -145,6 +180,12 @@ type TranscriptState =
       byteLength: number;
       fingerprint: TranscriptFingerprint;
     };
+
+interface OpenTranscriptProof {
+  readonly state: TranscriptState;
+  readonly sha256: string;
+  readonly handle?: fs.FileHandle;
+}
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -226,12 +267,11 @@ async function readProcessStartIdentity(pid: number): Promise<string | null> {
   return null;
 }
 
-function isLockRecord(value: unknown): value is SessionWriterLockRecord {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
+function hasValidOwnerFields(
+  record: Record<string, unknown>,
+): record is Record<string, unknown> & SessionWriterOwnerRecord {
   const processKind = record['process_kind'];
   return (
-    record['schema_version'] === LOCK_SCHEMA_VERSION &&
     typeof record['session_id'] === 'string' &&
     record['session_id'].length > 0 &&
     typeof record['owner_id'] === 'string' &&
@@ -252,6 +292,40 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
   );
 }
 
+function isSealedTranscriptProof(
+  value: unknown,
+): value is SealedTranscriptProof {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proof = value as Record<string, unknown>;
+  return (
+    typeof proof['relative_path'] === 'string' &&
+    proof['relative_path'].length > 0 &&
+    typeof proof['exists'] === 'boolean' &&
+    Number.isSafeInteger(proof['byte_length']) &&
+    (proof['byte_length'] as number) >= 0 &&
+    typeof proof['sha256'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(proof['sha256']) &&
+    (proof['exists'] || proof['byte_length'] === 0)
+  );
+}
+
+function isLockRecord(value: unknown): value is SessionWriterLockRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (!hasValidOwnerFields(record)) return false;
+  if (record['schema_version'] === LEGACY_LOCK_SCHEMA_VERSION) {
+    return record['state'] === undefined;
+  }
+  if (record['schema_version'] !== LOCK_SCHEMA_VERSION) return false;
+  if (record['state'] === 'active') return true;
+  return (
+    record['state'] === 'sealed' &&
+    typeof record['sealed_at'] === 'string' &&
+    Number.isFinite(Date.parse(record['sealed_at'])) &&
+    isSealedTranscriptProof(record['transcript'])
+  );
+}
+
 function parseLockRecord(raw: string): SessionWriterLockRecord | null {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -261,17 +335,27 @@ function parseLockRecord(raw: string): SessionWriterLockRecord | null {
   }
 }
 
-async function lockStateForRecord(
+function isActiveLockRecord(
   record: SessionWriterLockRecord,
+): record is ActiveLockRecord {
+  return (
+    record.schema_version === LEGACY_LOCK_SCHEMA_VERSION ||
+    record.state === 'active'
+  );
+}
+
+async function lockStateForRecord(
+  record: ActiveLockRecord,
+  raw: string,
 ): Promise<ExistingLockState> {
-  if (record.hostname !== os.hostname()) return { kind: 'live' };
-  if (!isProcessAlive(record.pid)) return { kind: 'stale', record };
-  if (!record.process_start_identity) return { kind: 'live' };
+  if (record.hostname !== os.hostname()) return { kind: 'live', record, raw };
+  if (!isProcessAlive(record.pid)) return { kind: 'stale', record, raw };
+  if (!record.process_start_identity) return { kind: 'live', record, raw };
   const currentStartIdentity = await readProcessStartIdentity(record.pid);
   return currentStartIdentity !== null &&
     currentStartIdentity !== record.process_start_identity
-    ? { kind: 'stale', record }
-    : { kind: 'live' };
+    ? { kind: 'stale', record, raw }
+    : { kind: 'live', record, raw };
 }
 
 async function delay(ms: number): Promise<void> {
@@ -313,6 +397,18 @@ function sameTranscriptState(
   );
 }
 
+async function assertTranscriptPathMissing(filePath: string): Promise<void> {
+  try {
+    await fs.lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  throw new SessionWriterUnavailableError({
+    cause: new Error('Session transcript path is not a regular file'),
+  });
+}
+
 async function getTranscriptState(filePath: string): Promise<TranscriptState> {
   let handle: fs.FileHandle | undefined;
   try {
@@ -320,6 +416,7 @@ async function getTranscriptState(filePath: string): Promise<TranscriptState> {
       handle = await fs.open(filePath, 'r');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        await assertTranscriptPathMissing(filePath);
         return { exists: false, byteLength: 0 };
       }
       throw error;
@@ -367,6 +464,199 @@ async function getTranscriptState(filePath: string): Promise<TranscriptState> {
   }
 }
 
+function getTranscriptRelativePath(
+  runtimeBaseDir: string,
+  transcriptPath: string,
+): string {
+  const relativePath = path.relative(runtimeBaseDir, transcriptPath);
+  if (
+    relativePath.length === 0 ||
+    path.isAbsolute(relativePath) ||
+    relativePath === '..' ||
+    relativePath.startsWith(`..${path.sep}`)
+  ) {
+    throw new SessionWriterUnavailableError({
+      cause: new Error('Session transcript is outside the runtime base'),
+    });
+  }
+  return relativePath.split(path.sep).join('/');
+}
+
+async function openTranscriptProof(
+  filePath: string,
+): Promise<OpenTranscriptProof> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    try {
+      handle = await fs.open(filePath, 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        await assertTranscriptPathMissing(filePath);
+        return {
+          state: { exists: false, byteLength: 0 },
+          sha256: createHash('sha256').digest('hex'),
+        };
+      }
+      throw error;
+    }
+
+    const [beforeStat, pathStat] = await Promise.all([
+      handle.stat(),
+      fs.lstat(filePath),
+    ]);
+    if (
+      !beforeStat.isFile() ||
+      !pathStat.isFile() ||
+      pathStat.isSymbolicLink()
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    const beforeState: TranscriptState = {
+      exists: true,
+      byteLength: beforeStat.size,
+      fingerprint: transcriptFingerprint(beforeStat),
+    };
+    if (
+      !sameFileIdentity(
+        beforeState.fingerprint,
+        transcriptFingerprint(pathStat),
+      )
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+    if (beforeStat.size > 0) {
+      const lastByte = Buffer.allocUnsafe(1);
+      const { bytesRead } = await handle.read(
+        lastByte,
+        0,
+        1,
+        beforeStat.size - 1,
+      );
+      if (bytesRead !== 1 || lastByte[0] !== 0x0a) {
+        throw new SessionTranscriptChangedError();
+      }
+    }
+
+    const hash = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (position < beforeStat.size) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.byteLength, beforeStat.size - position),
+        position,
+      );
+      if (bytesRead === 0) throw new SessionTranscriptChangedError();
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+
+    const [afterStat, afterPathStat] = await Promise.all([
+      handle.stat(),
+      fs.lstat(filePath),
+    ]);
+    const afterState: TranscriptState = {
+      exists: true,
+      byteLength: afterStat.size,
+      fingerprint: transcriptFingerprint(afterStat),
+    };
+    if (
+      !sameTranscriptState(beforeState, afterState) ||
+      !afterPathStat.isFile() ||
+      afterPathStat.isSymbolicLink() ||
+      !sameFileIdentity(
+        afterState.fingerprint,
+        transcriptFingerprint(afterPathStat),
+      )
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+
+    const proof = {
+      state: beforeState,
+      sha256: hash.digest('hex'),
+      handle,
+    };
+    handle = undefined;
+    return proof;
+  } catch (error) {
+    if (error instanceof SessionWriterError) throw error;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function validateOpenTranscriptProof(
+  filePath: string,
+  proof: OpenTranscriptProof,
+): Promise<void> {
+  if (!proof.state.exists) {
+    const current = await getTranscriptState(filePath);
+    if (!sameTranscriptState(current, proof.state)) {
+      throw new SessionTranscriptChangedError();
+    }
+    return;
+  }
+  const handle = proof.handle;
+  if (!handle) throw new SessionWriterUnavailableError();
+  try {
+    const [handleStat, pathStat] = await Promise.all([
+      handle.stat(),
+      fs.lstat(filePath),
+    ]);
+    if (
+      !handleStat.isFile() ||
+      !pathStat.isFile() ||
+      pathStat.isSymbolicLink()
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    const current: TranscriptState = {
+      exists: true,
+      byteLength: handleStat.size,
+      fingerprint: transcriptFingerprint(handleStat),
+    };
+    if (
+      !sameTranscriptState(current, proof.state) ||
+      !sameFileIdentity(current.fingerprint, transcriptFingerprint(pathStat))
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+  } catch (error) {
+    if (error instanceof SessionWriterError) throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new SessionTranscriptChangedError();
+    }
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
+
+async function closeTranscriptProof(proof: OpenTranscriptProof): Promise<void> {
+  await proof.handle?.close().catch(() => {});
+}
+
+function assertSealedProofMatches(
+  sealed: SealedSessionWriterLockRecord,
+  relativePath: string,
+  proof: OpenTranscriptProof,
+): void {
+  const transcript = sealed.transcript;
+  if (
+    transcript.relative_path !== relativePath ||
+    transcript.exists !== proof.state.exists ||
+    transcript.byte_length !== proof.state.byteLength ||
+    transcript.sha256 !== proof.sha256
+  ) {
+    throw new SessionTranscriptChangedError();
+  }
+}
+
 async function restoreMovedLock(
   movedPath: string,
   lockPath: string,
@@ -392,8 +682,9 @@ async function installLockRecord(
   const temporaryPath = `${lockPath}.${record.owner_id}.tmp`;
   let handle: fs.FileHandle | undefined;
   try {
+    const recordRaw = JSON.stringify(record);
     handle = await fs.open(temporaryPath, 'wx', 0o600);
-    await handle.writeFile(JSON.stringify(record), 'utf8');
+    await handle.writeFile(recordRaw, 'utf8');
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -401,7 +692,14 @@ async function installLockRecord(
       await fs.link(temporaryPath, lockPath);
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      const { state } = await inspectExactRecord(lockPath, recordRaw);
+      if (state === 'exact') return true;
+      if (
+        state === 'other' ||
+        (error as NodeJS.ErrnoException).code === 'EEXIST'
+      ) {
+        return false;
+      }
       throw error;
     }
   } catch (error) {
@@ -418,7 +716,7 @@ async function installLockRecord(
 async function acquireReclaimGuard(
   lockPath: string,
   staleOwnerId: string,
-  record: SessionWriterLockRecord,
+  record: ActiveLockRecord,
   inspect: (
     lockPath: string,
     expectedSessionId: string,
@@ -430,8 +728,11 @@ async function acquireReclaimGuard(
     if (await installLockRecord(guardPath, record)) return guardPath;
     const state = await inspect(guardPath, record.session_id);
     if (state.kind === 'missing') continue;
-    if (state.kind === 'live') throw new SessionWriterUnavailableError();
-    if (state.kind === 'malformed') {
+    if (
+      state.kind === 'live' ||
+      state.kind === 'sealed' ||
+      state.kind === 'malformed'
+    ) {
       throw new SessionWriterUnavailableError();
     }
     guardPath = `${basePath}.${encodeURIComponent(state.record.owner_id)}`;
@@ -444,10 +745,364 @@ async function removeOwnedLock(
   ownerId: string,
 ): Promise<void> {
   const record = parseLockRecord(await fs.readFile(lockPath, 'utf8'));
-  if (!record || record.owner_id !== ownerId) {
+  if (!record || !isActiveLockRecord(record) || record.owner_id !== ownerId) {
     throw new SessionWriterLostError();
   }
   await fs.unlink(lockPath);
+}
+
+async function assertPathMissing(candidatePath: string): Promise<void> {
+  try {
+    await fs.lstat(candidatePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+  throw new SessionWriterUnavailableError({
+    cause: new Error('Session writer transition claim already exists'),
+  });
+}
+
+async function removeExactRecord(
+  candidatePath: string,
+  expectedRaw: string,
+): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(candidatePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+  if (raw !== expectedRaw) throw new SessionWriterLostError();
+  try {
+    await fs.unlink(candidatePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
+
+type ExactRecordState = 'exact' | 'missing' | 'other' | 'unknown';
+
+interface RecordInspection<State extends string> {
+  state: State;
+  cause?: Error;
+}
+
+async function inspectExactRecord(
+  candidatePath: string,
+  expectedRaw: string,
+): Promise<RecordInspection<ExactRecordState>> {
+  try {
+    const stat = await fs.lstat(candidatePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return { state: 'other' };
+    const raw = await fs.readFile(candidatePath, 'utf8');
+    return { state: raw === expectedRaw ? 'exact' : 'other' };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { state: 'missing' };
+    }
+    return {
+      state: 'unknown',
+      cause: error instanceof Error ? error : undefined,
+    };
+  }
+}
+
+async function removeTransitionClaimAfterFailure(
+  lockPath: string,
+  expectedPrimaryRaw: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  const { state: primaryState } = await inspectExactRecord(
+    lockPath,
+    expectedPrimaryRaw,
+  );
+  if (primaryState !== 'exact') {
+    throw new SessionWriterUnavailableError({
+      cause: new Error(
+        'Session writer primary was not restored; transition claim retained',
+      ),
+    });
+  }
+  await removeExactRecord(claimPath, claimRaw);
+}
+
+async function releaseTransitionClaim(
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(claimPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+  if (raw !== claimRaw) return;
+  try {
+    await fs.unlink(claimPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    const { state } = await inspectExactRecord(claimPath, claimRaw);
+    if (state === 'missing' || state === 'other') return;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
+
+type ClaimedPrimaryState =
+  | 'source'
+  | 'candidate'
+  | 'missing'
+  | 'other'
+  | 'unknown';
+
+async function inspectClaimedPrimary(
+  lockPath: string,
+  sourceRaw: string,
+  sessionId: string,
+): Promise<RecordInspection<ClaimedPrimaryState>> {
+  try {
+    const stat = await fs.lstat(lockPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return { state: 'other' };
+    const raw = await fs.readFile(lockPath, 'utf8');
+    if (raw === sourceRaw) return { state: 'source' };
+    const record = parseLockRecord(raw);
+    return {
+      state:
+        record?.schema_version === LOCK_SCHEMA_VERSION &&
+        record.state === 'active' &&
+        record.session_id === sessionId
+          ? 'candidate'
+          : 'other',
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { state: 'missing' };
+    }
+    return {
+      state: 'unknown',
+      cause: error instanceof Error ? error : undefined,
+    };
+  }
+}
+
+async function assertExactTransitionClaim(
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  const { state: claimState } = await inspectExactRecord(claimPath, claimRaw);
+  if (claimState !== 'exact') {
+    throw new SessionWriterUnavailableError({
+      cause: new Error('Session writer transition claim ownership was lost'),
+    });
+  }
+}
+
+async function waitForClaimedPrimaryCandidate(attempt: number): Promise<void> {
+  if (attempt >= CLAIMED_PRIMARY_WAIT_ATTEMPTS) {
+    throw new SessionWriterUnavailableError({
+      cause: new Error(
+        'Session writer primary candidate did not release the claimed path',
+      ),
+    });
+  }
+  await delay(MALFORMED_RETRY_DELAY_MS);
+}
+
+async function linkClaimedPrimary(
+  lockPath: string,
+  sourcePath: string,
+  sourceRaw: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  let candidateWaitAttempts = 0;
+  for (;;) {
+    await assertExactTransitionClaim(claimPath, claimRaw);
+    try {
+      await fs.link(sourcePath, lockPath);
+      return;
+    } catch (error) {
+      const { state } = await inspectClaimedPrimary(
+        lockPath,
+        sourceRaw,
+        sessionId,
+      );
+      if (state === 'source') return;
+      if (state === 'candidate') {
+        // A schema-v2 acquirer can pass its first claim check immediately
+        // before this transition creates the claim. It must remove its primary
+        // candidate after the second check, so keep the predecessor and wait.
+        await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
+        continue;
+      }
+      if (state === 'other') throw new SessionWriterLostError();
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+  }
+}
+
+async function removeClaimedPrimary(
+  lockPath: string,
+  sourceRaw: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  let candidateWaitAttempts = 0;
+  for (;;) {
+    await assertExactTransitionClaim(claimPath, claimRaw);
+    const { state, cause } = await inspectClaimedPrimary(
+      lockPath,
+      sourceRaw,
+      sessionId,
+    );
+    if (state === 'missing') return;
+    if (state === 'candidate') {
+      await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
+      continue;
+    }
+    if (state === 'other') throw new SessionWriterLostError();
+    if (state === 'unknown') {
+      throw new SessionWriterUnavailableError({ cause });
+    }
+    try {
+      await fs.unlink(lockPath);
+      return;
+    } catch (error) {
+      const { state: afterState } = await inspectClaimedPrimary(
+        lockPath,
+        sourceRaw,
+        sessionId,
+      );
+      if (afterState === 'missing') return;
+      if (afterState === 'candidate') {
+        await waitForClaimedPrimaryCandidate(++candidateWaitAttempts);
+        continue;
+      }
+      if (afterState === 'other') throw new SessionWriterLostError();
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+  }
+}
+
+async function transitionExactPrimary(
+  lockPath: string,
+  expectedRaw: string,
+  replacementPath: string,
+  replacementRaw: string,
+  retiredPath: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  try {
+    await fs.rename(lockPath, retiredPath);
+  } catch (error) {
+    const [primaryExpected, retired] = await Promise.all([
+      inspectExactRecord(lockPath, expectedRaw),
+      inspectExactRecord(retiredPath, expectedRaw),
+    ]);
+    if (primaryExpected.state === 'exact' && retired.state === 'missing') {
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+    if (retired.state !== 'exact') {
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
+  }
+  try {
+    await linkClaimedPrimary(
+      lockPath,
+      replacementPath,
+      replacementRaw,
+      sessionId,
+      claimPath,
+      claimRaw,
+    );
+  } catch (error) {
+    try {
+      await linkClaimedPrimary(
+        lockPath,
+        retiredPath,
+        expectedRaw,
+        sessionId,
+        claimPath,
+        claimRaw,
+      );
+      await removeExactRecord(retiredPath, expectedRaw);
+    } catch (restoreError) {
+      throw new SessionWriterUnavailableError({
+        cause: new AggregateError(
+          [error, restoreError],
+          'Session writer primary transition could not be restored',
+        ),
+      });
+    }
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
+
+async function rollbackExactTransition(
+  lockPath: string,
+  replacementRaw: string,
+  retiredPath: string,
+  expectedRaw: string,
+  sessionId: string,
+  claimPath: string,
+  claimRaw: string,
+): Promise<void> {
+  await removeClaimedPrimary(
+    lockPath,
+    replacementRaw,
+    sessionId,
+    claimPath,
+    claimRaw,
+  );
+  const retired = await inspectExactRecord(retiredPath, expectedRaw);
+  if (retired.state !== 'exact') {
+    throw retired.state === 'other'
+      ? new SessionWriterLostError()
+      : new SessionWriterUnavailableError({ cause: retired.cause });
+  }
+  try {
+    await linkClaimedPrimary(
+      lockPath,
+      retiredPath,
+      expectedRaw,
+      sessionId,
+      claimPath,
+      claimRaw,
+    );
+    await removeExactRecord(retiredPath, expectedRaw);
+  } catch (error) {
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
 }
 
 export function getSessionWriterLockPath(
@@ -469,13 +1124,15 @@ export class SessionWriterLease {
   readonly transcriptPath: string;
   private expectedTranscriptState: TranscriptState | undefined;
   private released = false;
-  private releasePromise: Promise<void> | undefined;
+  private terminalPromise: Promise<void> | undefined;
+  private operationTail: Promise<void> = Promise.resolve();
   private readonly lockRecordRaw: string;
   private readonly retiredPath: string;
+  private readonly claimPath: string;
 
   private constructor(
     private readonly lockPath: string,
-    lockRecord: SessionWriterLockRecord,
+    lockRecord: ActiveLockRecord,
     options: AcquireSessionWriterLeaseOptions,
   ) {
     this.ownerId = lockRecord.owner_id;
@@ -484,6 +1141,7 @@ export class SessionWriterLease {
     this.transcriptPath = options.transcriptPath;
     this.lockRecordRaw = JSON.stringify(lockRecord);
     this.retiredPath = `${lockPath}.released.${encodeURIComponent(this.ownerId)}`;
+    this.claimPath = `${lockPath}.claim`;
   }
 
   get transcriptExistedAtAcquire(): boolean {
@@ -546,8 +1204,9 @@ export class SessionWriterLease {
     }
 
     const processStartIdentity = await readProcessStartIdentity(process.pid);
-    const lockRecord: SessionWriterLockRecord = {
+    const lockRecord: ActiveSessionWriterLockRecord = {
       schema_version: LOCK_SCHEMA_VERSION,
+      state: 'active',
       session_id: normalizedOptions.sessionId,
       owner_id: randomUUID(),
       pid: process.pid,
@@ -559,9 +1218,17 @@ export class SessionWriterLease {
       acquired_at: new Date().toISOString(),
       qwen_version: normalizedOptions.qwenVersion ?? null,
     };
+    const claimPath = `${lockPath}.claim`;
 
     for (let attempt = 0; attempt < ACQUIRE_ATTEMPTS; attempt++) {
+      await assertPathMissing(claimPath);
       if (await installLockRecord(lockPath, lockRecord)) {
+        try {
+          await assertPathMissing(claimPath);
+        } catch (error) {
+          await removeOwnedLock(lockPath, lockRecord.owner_id).catch(() => {});
+          throw error;
+        }
         return SessionWriterLease.finishAcquisition(
           lockPath,
           lockRecord,
@@ -580,6 +1247,17 @@ export class SessionWriterLease {
           cause: new Error('Existing session writer lock is malformed'),
         });
       }
+      if (state.kind === 'sealed') {
+        if (normalizedOptions.takeoverPolicy !== 'certified') {
+          throw new SessionWriterConflictError();
+        }
+        return SessionWriterLease.takeOverSealed(
+          lockPath,
+          state,
+          lockRecord,
+          normalizedOptions,
+        );
+      }
       if (normalizedOptions.reclaimPolicy === 'never') {
         throw new SessionWriterConflictError();
       }
@@ -596,6 +1274,7 @@ export class SessionWriterLease {
       let staleMoved = false;
       const stalePath = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
       try {
+        await assertPathMissing(claimPath);
         const currentState = await SessionWriterLease.inspectExistingLock(
           lockPath,
           normalizedOptions.sessionId,
@@ -630,6 +1309,7 @@ export class SessionWriterLease {
           throw new SessionWriterUnavailableError();
         }
         primaryInstalled = true;
+        await assertPathMissing(claimPath);
         const lease = await SessionWriterLease.finishAcquisition(
           lockPath,
           lockRecord,
@@ -655,10 +1335,145 @@ export class SessionWriterLease {
     throw new SessionWriterUnavailableError();
   }
 
+  private static async takeOverSealed(
+    lockPath: string,
+    observed: Extract<ExistingLockState, { kind: 'sealed' }>,
+    lockRecord: ActiveSessionWriterLockRecord,
+    options: AcquireSessionWriterLeaseOptions,
+  ): Promise<SessionWriterLease> {
+    const relativePath = getTranscriptRelativePath(
+      options.runtimeBaseDir,
+      options.transcriptPath,
+    );
+    const proof = await openTranscriptProof(options.transcriptPath);
+    const claimPath = `${lockPath}.claim`;
+    const claimRaw = JSON.stringify(lockRecord);
+    const retiredPath = `${lockPath}.sealed.${encodeURIComponent(
+      observed.record.owner_id,
+    )}.${encodeURIComponent(lockRecord.owner_id)}`;
+    let claimAcquired = false;
+    let transitionStarted = false;
+    let transitionCommitted = false;
+    try {
+      assertSealedProofMatches(observed.record, relativePath, proof);
+      await assertPathMissing(retiredPath);
+      if (!(await installLockRecord(claimPath, lockRecord))) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error('Session writer transition claim already exists'),
+        });
+      }
+      claimAcquired = true;
+      const current = await SessionWriterLease.inspectExistingLock(
+        lockPath,
+        options.sessionId,
+      );
+      if (current.kind !== 'sealed' || current.raw !== observed.raw) {
+        throw current.kind === 'live'
+          ? new SessionWriterConflictError()
+          : new SessionWriterUnavailableError();
+      }
+      await validateOpenTranscriptProof(options.transcriptPath, proof);
+      assertSealedProofMatches(current.record, relativePath, proof);
+      transitionStarted = true;
+      await transitionExactPrimary(
+        lockPath,
+        observed.raw,
+        claimPath,
+        claimRaw,
+        retiredPath,
+        options.sessionId,
+        claimPath,
+        claimRaw,
+      );
+      transitionCommitted = true;
+      await validateOpenTranscriptProof(options.transcriptPath, proof);
+      const lease = await SessionWriterLease.finishAcquisition(
+        lockPath,
+        lockRecord,
+        options,
+        proof.state,
+      );
+      await releaseTransitionClaim(claimPath, claimRaw);
+      claimAcquired = false;
+      await removeExactRecord(retiredPath, observed.raw).catch((error) => {
+        debugLogger.debug(
+          `Session writer sealed lock cleanup failed path=${JSON.stringify(retiredPath)} ` +
+            `error=${describeDiagnosticError(error)}`,
+        );
+      });
+      debugLogger.info(
+        `Certified session writer handoff accepted sessionId=${JSON.stringify(options.sessionId)} ` +
+          `previousHostname=${JSON.stringify(observed.record.hostname)} ` +
+          `previousPid=${observed.record.pid} sealedAt=${observed.record.sealed_at}`,
+      );
+      return lease;
+    } catch (error) {
+      const cleanupFailures: unknown[] = [];
+      const claimState = claimAcquired
+        ? (await inspectExactRecord(claimPath, claimRaw)).state
+        : 'missing';
+      if (claimState === 'unknown') {
+        cleanupFailures.push(
+          new SessionWriterUnavailableError({
+            cause: new Error(
+              'Session writer transition claim ownership is unreadable',
+            ),
+          }),
+        );
+      }
+      if (transitionCommitted && claimState === 'exact') {
+        try {
+          await rollbackExactTransition(
+            lockPath,
+            claimRaw,
+            retiredPath,
+            observed.raw,
+            options.sessionId,
+            claimPath,
+            claimRaw,
+          );
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      }
+      if (claimState === 'exact') {
+        try {
+          if (transitionStarted) {
+            await removeTransitionClaimAfterFailure(
+              lockPath,
+              observed.raw,
+              claimPath,
+              claimRaw,
+            );
+          } else {
+            await releaseTransitionClaim(claimPath, claimRaw);
+          }
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, ...cleanupFailures],
+            'Certified session writer takeover cleanup failed',
+          ),
+        });
+      }
+      if (error instanceof SessionWriterError) throw error;
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    } finally {
+      await closeTranscriptProof(proof);
+    }
+  }
+
   private static async finishAcquisition(
     lockPath: string,
-    lockRecord: SessionWriterLockRecord,
+    lockRecord: ActiveLockRecord,
     options: AcquireSessionWriterLeaseOptions,
+    requiredTranscriptState?: TranscriptState,
   ): Promise<SessionWriterLease> {
     const lease = new SessionWriterLease(lockPath, lockRecord, options);
     try {
@@ -666,6 +1481,15 @@ export class SessionWriterLease {
       lease.expectedTranscriptState = await getTranscriptState(
         options.transcriptPath,
       );
+      if (
+        requiredTranscriptState &&
+        !sameTranscriptState(
+          lease.expectedTranscriptState,
+          requiredTranscriptState,
+        )
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
       return lease;
     } catch (error) {
       try {
@@ -717,7 +1541,10 @@ export class SessionWriterLease {
             cause: new Error('Session writer lock belongs to another session'),
           });
         }
-        return lockStateForRecord(record);
+        if (!isActiveLockRecord(record)) {
+          return { kind: 'sealed', record, raw };
+        }
+        return lockStateForRecord(record, raw);
       }
       if (attempt + 1 < MALFORMED_RETRY_COUNT) {
         await delay(MALFORMED_RETRY_DELAY_MS);
@@ -726,7 +1553,7 @@ export class SessionWriterLease {
     return { kind: 'malformed' };
   }
 
-  private async readOwnedLock(): Promise<SessionWriterLockRecord> {
+  private async readOwnedLock(): Promise<ActiveLockRecord> {
     if (this.released) throw new SessionWriterLostError();
     let stat: Awaited<ReturnType<typeof fs.lstat>>;
     try {
@@ -752,6 +1579,7 @@ export class SessionWriterLease {
     const record = parseLockRecord(raw);
     if (
       !record ||
+      !isActiveLockRecord(record) ||
       record.owner_id !== this.ownerId ||
       raw !== this.lockRecordRaw
     ) {
@@ -760,7 +1588,11 @@ export class SessionWriterLease {
     return record;
   }
 
-  async assertOwnedAndUnchanged(): Promise<void> {
+  assertOwnedAndUnchanged(): Promise<void> {
+    return this.runExclusive(() => this.assertOwnedAndUnchangedOnce());
+  }
+
+  private async assertOwnedAndUnchangedOnce(): Promise<void> {
     await this.readOwnedLock();
     if (!this.expectedTranscriptState) {
       throw new SessionWriterUnavailableError();
@@ -771,7 +1603,11 @@ export class SessionWriterLease {
     }
   }
 
-  async appendJsonLine(value: unknown): Promise<void> {
+  appendJsonLine(value: unknown): Promise<void> {
+    return this.runExclusive(() => this.appendJsonLineOnce(value));
+  }
+
+  private async appendJsonLineOnce(value: unknown): Promise<void> {
     let serialized: string | undefined;
     try {
       serialized = JSON.stringify(value);
@@ -782,7 +1618,7 @@ export class SessionWriterLease {
     }
     if (serialized === undefined) throw new SessionWriterUnavailableError();
     const bytes = Buffer.from(`${serialized}\n`, 'utf8');
-    await this.assertOwnedAndUnchanged();
+    await this.assertOwnedAndUnchangedOnce();
     const expectedBefore = this.expectedTranscriptState;
     if (!expectedBefore) throw new SessionWriterUnavailableError();
     const nextByteLength = expectedBefore.byteLength + bytes.byteLength;
@@ -845,12 +1681,26 @@ export class SessionWriterLease {
   }
 
   release(): Promise<void> {
-    this.releasePromise ??= this.releaseOnce();
-    return this.releasePromise;
+    this.terminalPromise ??= this.runExclusive(() => this.releaseOnce());
+    return this.terminalPromise;
+  }
+
+  sealForHandoff(): Promise<void> {
+    this.terminalPromise ??= this.runExclusive(() => this.sealForHandoffOnce());
+    return this.terminalPromise;
   }
 
   get isReleased(): boolean {
     return this.released;
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.operationTail.then(operation, operation);
+    this.operationTail = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
   }
 
   private async releaseOnce(): Promise<void> {
@@ -887,11 +1737,169 @@ export class SessionWriterLease {
     }
   }
 
-  private async readOwnedLockForRelease(): Promise<void> {
+  private async sealForHandoffOnce(): Promise<void> {
+    if (this.released) return;
+    const ownedRecord = await this.readOwnedLockForRelease();
+    if (!this.expectedTranscriptState) {
+      throw new SessionWriterUnavailableError();
+    }
+    const relativePath = getTranscriptRelativePath(
+      this.runtimeBaseDir,
+      this.transcriptPath,
+    );
+    const proof = await openTranscriptProof(this.transcriptPath);
+    const sealedRecord: SealedSessionWriterLockRecord = {
+      ...ownedRecord,
+      schema_version: LOCK_SCHEMA_VERSION,
+      state: 'sealed',
+      sealed_at: new Date().toISOString(),
+      transcript: {
+        relative_path: relativePath,
+        exists: proof.state.exists,
+        byte_length: proof.state.byteLength,
+        sha256: proof.sha256,
+      },
+    };
+    const sealedRaw = JSON.stringify(sealedRecord);
+    const sealedCandidatePath = `${this.lockPath}.sealed-candidate.${encodeURIComponent(
+      this.ownerId,
+    )}`;
+    const handoffRetiredPath = `${this.lockPath}.handoff.${encodeURIComponent(
+      this.ownerId,
+    )}`;
+    let claimAcquired = false;
+    let transitionStarted = false;
+    let transitionCommitted = false;
+    try {
+      if (!sameTranscriptState(proof.state, this.expectedTranscriptState)) {
+        throw new SessionTranscriptChangedError();
+      }
+      if (!(await installLockRecord(sealedCandidatePath, sealedRecord))) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error('Session writer sealed candidate already exists'),
+        });
+      }
+      await assertPathMissing(handoffRetiredPath);
+      if (!(await installLockRecord(this.claimPath, ownedRecord))) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error('Session writer transition claim already exists'),
+        });
+      }
+      claimAcquired = true;
+      await this.readOwnedLock();
+      await validateOpenTranscriptProof(this.transcriptPath, proof);
+      transitionStarted = true;
+      await transitionExactPrimary(
+        this.lockPath,
+        this.lockRecordRaw,
+        sealedCandidatePath,
+        sealedRaw,
+        handoffRetiredPath,
+        this.sessionId,
+        this.claimPath,
+        this.lockRecordRaw,
+      );
+      transitionCommitted = true;
+      await validateOpenTranscriptProof(this.transcriptPath, proof);
+      await releaseTransitionClaim(this.claimPath, this.lockRecordRaw);
+      claimAcquired = false;
+      this.released = true;
+      await removeExactRecord(handoffRetiredPath, this.lockRecordRaw).catch(
+        (error) => {
+          debugLogger.debug(
+            `Session writer handoff retired cleanup failed path=${JSON.stringify(handoffRetiredPath)} ` +
+              `error=${describeDiagnosticError(error)}`,
+          );
+        },
+      );
+      await removeExactRecord(sealedCandidatePath, sealedRaw).catch((error) => {
+        debugLogger.debug(
+          `Session writer handoff candidate cleanup failed path=${JSON.stringify(sealedCandidatePath)} ` +
+            `error=${describeDiagnosticError(error)}`,
+        );
+      });
+      debugLogger.info(
+        `Session writer handoff sealed sessionId=${JSON.stringify(this.sessionId)} ` +
+          `hostname=${JSON.stringify(ownedRecord.hostname)} pid=${ownedRecord.pid} ` +
+          `sealedAt=${sealedRecord.sealed_at}`,
+      );
+    } catch (error) {
+      const cleanupFailures: unknown[] = [];
+      const claimState = claimAcquired
+        ? (await inspectExactRecord(this.claimPath, this.lockRecordRaw)).state
+        : 'missing';
+      if (claimState === 'unknown') {
+        cleanupFailures.push(
+          new SessionWriterUnavailableError({
+            cause: new Error(
+              'Session writer transition claim ownership is unreadable',
+            ),
+          }),
+        );
+      }
+      if (transitionCommitted && claimState === 'exact') {
+        try {
+          await rollbackExactTransition(
+            this.lockPath,
+            sealedRaw,
+            handoffRetiredPath,
+            this.lockRecordRaw,
+            this.sessionId,
+            this.claimPath,
+            this.lockRecordRaw,
+          );
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      }
+      if (claimState === 'exact') {
+        try {
+          if (transitionStarted) {
+            await removeTransitionClaimAfterFailure(
+              this.lockPath,
+              this.lockRecordRaw,
+              this.claimPath,
+              this.lockRecordRaw,
+            );
+          } else {
+            await releaseTransitionClaim(this.claimPath, this.lockRecordRaw);
+          }
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      }
+      try {
+        await removeExactRecord(sealedCandidatePath, sealedRaw);
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupError);
+      }
+      if (
+        (await inspectExactRecord(this.lockPath, this.lockRecordRaw)).state !==
+        'exact'
+      ) {
+        this.released = true;
+      }
+      if (cleanupFailures.length > 0) {
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, ...cleanupFailures],
+            'Session writer handoff cleanup failed',
+          ),
+        });
+      }
+      if (error instanceof SessionWriterError) throw error;
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    } finally {
+      await closeTranscriptProof(proof);
+    }
+  }
+
+  private async readOwnedLockForRelease(): Promise<ActiveLockRecord> {
     for (let attempt = 0; attempt < RELEASE_PRECHECK_ATTEMPTS; attempt++) {
       try {
-        await this.readOwnedLock();
-        return;
+        return await this.readOwnedLock();
       } catch (error) {
         if (
           !(error instanceof SessionWriterUnavailableError) ||
@@ -902,6 +1910,7 @@ export class SessionWriterLease {
       }
       await delay(RELEASE_PRECHECK_RETRY_DELAY_MS);
     }
+    throw new SessionWriterUnavailableError();
   }
 
   private async inspectReleasePath(

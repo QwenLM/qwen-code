@@ -438,35 +438,87 @@ jobs:
           ${{ github.repository == 'QwenLM/qwen-code' }}
         working-directory: 'packages/audio-capture'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/channel-base'
         working-directory: 'packages/channels/base'
         run: |-
-          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish "${PUBLISH_ARGS[@]}"
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish remaining channel packages'
         working-directory: 'packages/channels'
         run: |-
           # Explicit allowlist: new channel workspaces require release approval.
+          PUBLISH_MARKER="$(mktemp)"
           for channel in dingtalk feishu github qqbot telegram wecom weixin; do
             echo "::group::Publishing @qwen-code/channel-${channel}"
-            (cd "${channel}" && npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }})
+            (
+              cd "${channel}"
+              PACKAGE_NAME="$(node -p "require('./package.json').name")"
+              PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+              if [[ "${IS_DRY_RUN}" == "true" ]]; then
+                PUBLISH_ARGS+=(--dry-run)
+              elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+                echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+                exit 0
+              fi
+              npm publish "${PUBLISH_ARGS[@]}"
+              echo "${channel}" >> "${PUBLISH_MARKER}"
+            )
             echo "::endgroup::"
           done
+          if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${PUBLISH_MARKER}" ]]; then
+            echo "::warning::Every channel package was already published; nothing shipped"
+          fi
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Verify Standalone Archives'
         run: |-
