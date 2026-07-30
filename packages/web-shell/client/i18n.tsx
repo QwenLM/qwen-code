@@ -282,6 +282,8 @@ const EN: Messages = {
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
   'approval.option.allowOnce': 'Yes, allow once',
+  'approval.option.allowOnceAndSwitchToDefault':
+    'Allow once and switch to Default mode',
   'approval.option.rejectOnce': 'Reject',
   'approval.option.allowAllEdits': 'Allow All Edits',
   'approval.option.allowAlwaysProject': 'Always allow in this project',
@@ -2504,6 +2506,7 @@ const ZH: Messages = {
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
   'approval.option.allowOnce': '是，允许一次',
+  'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
   'approval.option.rejectOnce': '拒绝',
   'approval.option.allowAllEdits': '允许所有编辑',
   'approval.option.allowAlwaysProject': '项目内始终允许',
