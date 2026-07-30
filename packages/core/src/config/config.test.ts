@@ -5596,6 +5596,40 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should report both memory and MCP refresh failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
     const config = new Config(baseParams);
 
