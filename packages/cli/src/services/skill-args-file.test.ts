@@ -103,7 +103,7 @@ describe('writeSkillArgs', () => {
     const target = join(dir, 'victim.txt');
     writeFileSync(target, 'precious');
     const linkPath = skillArgsPath('review');
-    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    mkdirSync(dirname(linkPath), { recursive: true });
     symlinkSync(target, linkPath);
 
     expect(writeSkillArgs('review', 'attacker')).toBeNull();
