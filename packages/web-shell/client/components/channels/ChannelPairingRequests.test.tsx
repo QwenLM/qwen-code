@@ -196,6 +196,31 @@ describe('ChannelPairingRequests', () => {
     );
   });
 
+  it('cancels the revoke confirmation without revoking the approval', async () => {
+    const revokeApproval = vi.fn();
+    await renderRequests({ revokeApproval });
+
+    const revoke = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke paired-user"]',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+
+    const cancel = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Cancel',
+    );
+    await act(async () => {
+      cancel?.click();
+    });
+
+    expect(revokeApproval).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps an approval visible when revoking it fails', async () => {
     const revokeError = Object.assign(new Error('Revocation failed.'), {
       status: 500,
