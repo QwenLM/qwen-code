@@ -285,6 +285,53 @@ describe('readManyFiles', () => {
       expect(contentToString(result.contentParts)).toContain('unsaved buffer');
     });
 
+    it('does not cache a validated custom-fs read dropped after identity drift', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('approved.txt');
+      const backupPath = `${absolutePath}.approved`;
+      const stats = await fs.stat(absolutePath);
+      const cache = new FileReadCache();
+      const readTextFile = vi.fn(async () => {
+        await fs.rename(absolutePath, backupPath);
+        await fs.writeFile(absolutePath, 'replacement secret');
+        return {
+          content: 'unsaved buffer',
+          _meta: {
+            originalLineCount: 1,
+            originalLineCountExact: true,
+          },
+        };
+      });
+      const mockConfig = {
+        ...createMockConfigWithCache(tempRootDir, cache),
+        getFileSystemService: () => ({
+          readTextFile,
+          writeTextFile: vi.fn(),
+          findFiles: vi.fn(),
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: stats.dev, ino: stats.ino }],
+          ]),
+        });
+
+        const content = contentToString(result.contentParts);
+        expect(content).not.toContain('unsaved buffer');
+        expect(content).not.toContain('replacement secret');
+        expect(result.files).toHaveLength(0);
+        expect(cache.size()).toBe(0);
+        const decision = await checkPriorRead(cache, absolutePath, 'editing');
+        expect(decision.ok).toBe(false);
+      } finally {
+        await fs.unlink(absolutePath).catch(() => {});
+        await fs.rename(backupPath, absolutePath).catch(() => {});
+      }
+    });
+
     it('should include truncated large text files instead of reporting a size error', async () => {
       const relativePath = 'large.log';
       const absolutePath = path.join(tempRootDir, relativePath);

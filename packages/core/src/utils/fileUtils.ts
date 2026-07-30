@@ -1877,13 +1877,10 @@ export async function processSingleFileContent(
       throw error;
     }
     const errorMessage = getErrorMessage(error);
-    const relativeDisplayPath = path
-      .relative(rootDirectory, displayPath)
-      .replace(/\\/g, '/');
     return {
-      llmContent: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
-      returnDisplay: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
-      error: `Error reading file ${relativeDisplayPath}: ${errorMessage}`,
+      llmContent: `Error reading file ${relativePathForDisplay}: ${errorMessage}`,
+      returnDisplay: `Error reading file ${relativePathForDisplay}: ${errorMessage}`,
+      error: `Error reading file ${relativePathForDisplay}: ${errorMessage}`,
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }

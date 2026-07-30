@@ -186,6 +186,10 @@ export async function readManyFiles(
         if (shouldSnapshot && !snapshot) continue;
         let readResult;
         try {
+          const validateAfterRead =
+            validatedIdentity && !snapshot
+              ? () => matchesValidatedPathIdentity(fullPath, validatedIdentity)
+              : undefined;
           readResult = await readFileContent(
             config,
             snapshot?.filePath ?? fullPath,
@@ -193,16 +197,10 @@ export async function readManyFiles(
             signal,
             displayPath,
             snapshot?.stats,
+            validateAfterRead,
           );
         } finally {
           await snapshot?.cleanup();
-        }
-        if (
-          validatedIdentity &&
-          !snapshot &&
-          !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
-        ) {
-          continue;
         }
         if (readResult) {
           contentParts.push(...readResult.contentParts);
@@ -341,6 +339,10 @@ async function snapshotValidatedFile(
     }
   } catch (error) {
     if (signal?.aborted || isAbortError(error)) throw error;
+    if (result) {
+      await result.cleanup();
+      result = undefined;
+    }
     return undefined;
   } finally {
     if (snapshotDir && !result) {
@@ -384,6 +386,7 @@ async function readFileContent(
   signal?: AbortSignal,
   displayPath = filePath,
   validatedStats?: fs.Stats,
+  validateAfterRead?: () => Promise<boolean>,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
@@ -394,6 +397,9 @@ async function readFileContent(
     });
     if (validatedStats && fileReadResult.stats) {
       fileReadResult.stats = validatedStats;
+    }
+    if (validateAfterRead && !(await validateAfterRead())) {
+      return null;
     }
 
     const prefixText: Part = { text: `\nContent from ${displayPath}:\n` };

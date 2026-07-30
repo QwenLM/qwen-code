@@ -1583,6 +1583,50 @@ describe('handleAtCommand', () => {
       },
     );
 
+    it.skipIf(process.platform === 'win32')(
+      'prunes all labels for a skipped canonical file',
+      async () => {
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'target.txt'),
+          'safe content',
+        );
+        const aliasPath = path.join(testRootDir, 'alias.txt');
+        await fsPromises.symlink(filePath, aliasPath);
+        const outsideDir = await fsPromises.realpath(
+          await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-swap-outside-')),
+        );
+        const outsidePath = path.join(outsideDir, 'secret.txt');
+        await fsPromises.writeFile(outsidePath, 'outside secret');
+        const readMcpResource = vi.fn(async () => {
+          await fsPromises.unlink(filePath);
+          await fsPromises.symlink(outsidePath, filePath);
+          return {
+            contents: [{ uri: 'res://doc', text: 'resource body' }],
+          };
+        });
+
+        try {
+          const result = await handleAtCommand({
+            query: `inspect @${aliasPath} @${filePath} @myserver:res://doc`,
+            config: makeResourceConfig(readMcpResource),
+            onDebugMessage: mockOnDebugMessage,
+            messageId: 6002,
+            signal: abortController.signal,
+          });
+
+          expect(JSON.stringify(result.processedQuery)).not.toContain(
+            'outside secret',
+          );
+          expect(result.filesRead).not.toContain(aliasPath);
+          expect(result.filesRead).not.toContain(filePath);
+          expect(result.filesRead).toContain('myserver:res://doc');
+        } finally {
+          await fsPromises.unlink(filePath).catch(() => {});
+          await fsPromises.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('preserves @mcp:<uri> as a resource ref when a server is named mcp', async () => {
       const readMcpResource = vi.fn().mockResolvedValue({
         contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],

@@ -221,6 +221,7 @@ export async function resolveAtCommandQuery({
   const atPathToResolvedSpecMap = new Map<string, string>();
   const contentLabelsForDisplay: string[] = [];
   const displayPaths = new Map<string, string>();
+  const displayPathsByCanonicalPath = new Map<string, Set<string>>();
   const ignoredByReason: Record<string, string[]> = {
     git: [],
     qwen: [],
@@ -445,6 +446,10 @@ export async function resolveAtCommandQuery({
         atPathToResolvedSpecMap.set(originalAtPath, pathName);
         contentLabelsForDisplay.push(pathName);
         displayPaths.set(canonicalPath, pathName);
+        const canonicalDisplays =
+          displayPathsByCanonicalPath.get(canonicalPath) ?? new Set<string>();
+        canonicalDisplays.add(pathName);
+        displayPathsByCanonicalPath.set(canonicalPath, canonicalDisplays);
         resolvedSuccessfully = true;
       } catch (error) {
         if (isNodeError(error) && error.code === 'ENOENT') {
@@ -845,14 +850,21 @@ export async function resolveAtCommandQuery({
     { dev: number; ino: number }
   >();
   const pruneSkippedPath = (approvedPath: string) => {
-    const displayPath = displayPaths.get(approvedPath) ?? approvedPath;
+    const displayPath = displayPaths.get(approvedPath);
+    const displayLabels =
+      displayPathsByCanonicalPath.get(approvedPath) ??
+      new Set(displayPath ? [displayPath] : []);
     for (const [originalAtPath, resolvedSpec] of atPathToResolvedSpecMap) {
-      if (resolvedSpec === displayPath) {
+      if (resolvedSpec === approvedPath || displayLabels.has(resolvedSpec)) {
         atPathToResolvedSpecMap.delete(originalAtPath);
       }
     }
-    const index = contentLabelsForDisplay.indexOf(displayPath);
-    if (index >= 0) contentLabelsForDisplay.splice(index, 1);
+    for (let index = contentLabelsForDisplay.length - 1; index >= 0; index--) {
+      const label = contentLabelsForDisplay[index];
+      if (label === approvedPath || displayLabels.has(label)) {
+        contentLabelsForDisplay.splice(index, 1);
+      }
+    }
   };
   for (const approvedPath of pathSpecsToRead) {
     try {
