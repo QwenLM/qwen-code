@@ -1734,6 +1734,34 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('does not duplicate a pending final retry across reconnects', async () => {
+      writePending([pendingRecord()]);
+      let resolveRetry!: (value: {
+        data: { id: number; html_url: string };
+      }) => void;
+      mockOctokit.rest.issues.createComment.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRetry = resolve;
+        }),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      channel.disconnect();
+      await channel.connect();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      resolveRetry({
+        data: {
+          id: 2002,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      channel.disconnect();
+    });
+
     it('distinguishes pre-delivery validation from ambiguous failures', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockRejectedValue(

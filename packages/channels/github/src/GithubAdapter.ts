@@ -259,6 +259,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private webOrigin = 'https://github.com';
   private readonly activeReactions = new Map<string, WorkingReaction>();
   private readonly reactionsPendingRemoval = new Set<string>();
+  private pendingFinalDeliveryRetry: Promise<void> | undefined;
   private reasonFilter: Set<string> | null = null;
 
   constructor(
@@ -350,14 +351,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
-    void this.retryPendingFinalDeliveries().catch((err) => {
-      process.stderr.write(
-        `[Channel:${this.name}] pending GitHub delivery retry failed: ${sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        )}\n`,
-      );
-    });
+    if (!this.pendingFinalDeliveryRetry) {
+      this.pendingFinalDeliveryRetry = this.retryPendingFinalDeliveries()
+        .catch((err) => {
+          process.stderr.write(
+            `[Channel:${this.name}] pending GitHub delivery retry failed: ${sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              200,
+            )}\n`,
+          );
+        })
+        .finally(() => {
+          this.pendingFinalDeliveryRetry = undefined;
+        });
+    }
   }
 
   disconnect(): void {
