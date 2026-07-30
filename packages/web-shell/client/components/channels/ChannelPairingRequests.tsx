@@ -524,7 +524,7 @@ export function ChannelPairingRequests({
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t('channels.editor.pairing.approvals.confirm.title', {
-                senderId: revokeTarget || undefined,
+                senderId: revokeTarget ?? '',
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>

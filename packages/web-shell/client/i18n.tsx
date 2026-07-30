@@ -2435,7 +2435,7 @@ const EN: Messages = {
   'channels.editor.pairing.approvals.empty.description':
     'Approved sender IDs will appear here.',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
-    `Revoke pairing approval for ${v?.senderId ?? 'this sender'}?`,
+    `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
   'channels.editor.pairing.approvals.confirm.description':
     'Only the approval created through pairing will be removed. Access configured in the Channel allowlist is not changed.',
   'channels.editor.pairing.approvals.confirm.action': 'Revoke approval',
@@ -4836,7 +4836,7 @@ const ZH: Messages = {
   'channels.editor.pairing.approvals.empty.description':
     '批准配对请求后，用户 ID 会显示在这里。',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
-    `撤销 ${v?.senderId ?? '该用户'} 的配对授权？`,
+    `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
   'channels.editor.pairing.approvals.confirm.description':
     '只会移除通过配对获得的授权，不会更改频道配置中的白名单访问权限。',
   'channels.editor.pairing.approvals.confirm.action': '撤销授权',
