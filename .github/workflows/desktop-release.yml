@@ -313,7 +313,7 @@ jobs:
         shell: 'bash'
         run: |
           set -euo pipefail
-          xvfb-run -a npm run smoke:packaged -- src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop
+          NO_AT_BRIDGE=1 xvfb-run -a npm run smoke:packaged -- src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop
 
       - name: 'Collect artifacts'
         shell: 'bash'
