@@ -3386,6 +3386,36 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(soft).toBeGreaterThanOrEqual(Math.floor(agentMinutes * 0.8));
   });
 
+  // Third instance of one structural bug: an instruction placed outside the
+  // flow the agent actually follows. #7917 buried the /verify recommendation
+  // in a "local invocation ONLY" section; #8016 marked captures "Optionally";
+  // and captures still came out ZERO on two live runs (#7975, #8066) where
+  // the browser installed fine — because the plan the agent executes is the
+  // Scope-selection budget list, and that list had no capture line at all.
+  it('budgets evidence capture in scope selection, not only in the contract', () => {
+    const scope = verifySkill.slice(
+      verifySkill.indexOf('## Scope selection'),
+      verifySkill.indexOf('## Method'),
+    );
+    // A numbered budget item alongside the A/B, harnesses and gates.
+    expect(scope).toMatch(/^4\. \*\*Capture/m);
+    expect(scope).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // Time reserved, and the failure that motivated it named — a rule
+    // stated without its failure reads as advice and gets skipped.
+    expect(scope).toContain('~5 minutes');
+    expect(scope).toContain('produced **zero**');
+    // Bounded: the cap exists so "budget it" does not become eight images.
+    expect(scope).toMatch(/normally two, at most a handful/);
+
+    // And the report has somewhere to put it, or a produced capture has no
+    // referent and the naming rule means nothing.
+    const structure = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(structure).toContain('Reference the capture of those cells here');
+  });
+
   // Cleanups must never descend through a PR-writable parent, and an
   // outward-resolving hooks entry must be removed rather than reported.
   it('survives symlink escapes in the workspace cleanup', () => {
