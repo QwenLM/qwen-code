@@ -15,7 +15,9 @@ import type {
   DaemonCapabilities,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -201,6 +203,11 @@ export interface DaemonChannelPairingActions {
     name: string,
     code: string,
   ): Promise<DaemonChannelPairingApprovalResult>;
+  approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revoke(
+    name: string,
+    senderId: string,
+  ): Promise<DaemonChannelPairingRevocationResult>;
 }
 
 // ── Scheduled Tasks (durable cron, server-only) ─────────────────────
