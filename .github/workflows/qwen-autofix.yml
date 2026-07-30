@@ -2949,6 +2949,11 @@ jobs:
           # distinct consumed spans to land here. Fresh, not-yet-evaluated
           # feedback never counts against its own author, and everything is
           # window-scoped so a /retry resets the budget with the window.
+          # Only feedback the deferred renderer below would actually defer is
+          # counted: Critical-tagged items, Request changes / APPROVED reviews,
+          # and inline comments rooted at a Critical comment or attached to a
+          # Request changes review are never deferrable, so they must not burn
+          # an author's budget — the item filter mirrors those predicates.
           OVER_BUDGET_AUTHORS='[]'
           if [[ "${CRITICAL_ONLY}" == "true" ]]; then
             OVER_BUDGET_AUTHORS="$(jq -n \
@@ -2966,10 +2971,28 @@ jobs:
                    | ($ms[$i]
                       | select((.acted == "true" and .round > $r5) or (.acted == "false" and .round >= $r5))
                       | {lo: (if $i == 0 then "" else ($ms[$i - 1].ts) end), hi: .ts}) ]) as $spans
-              | ([ ($rv | add)[] | {at: (.submitted_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
-                 + [ ($rc | add)[] | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
-                 + [ ($ic | add)[] | select((.body // "") | test("^\\s*@qwen-code /") | not)
-                     | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
+              | ($rv | add) as $reviews
+              | ($rc | add) as $comments
+              | ([ $reviews[]
+                   | select((.state // "") == "COMMENTED")
+                   | select(((.body // "") | contains("**[Critical]**")) | not)
+                   | {at: (.submitted_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
+                 + [ $comments[]
+                   | select((
+                       ((.body // "") | contains("**[Critical]**"))
+                       or ((.in_reply_to_id // null) as $root
+                         | $root != null
+                         and any($comments[]; .id == $root and ((.body // "") | contains("**[Critical]**"))))
+                       or ((.pull_request_review_id // null) as $review
+                         | $review != null
+                         and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")))
+                     ) | not)
+                   | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
+                 + [ ($ic | add)[]
+                   | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                   | select((.body // "") | test("^\\s*@qwen-code /") | not)
+                   | select(((.body // "") | contains("**[Critical]**")) | not)
+                   | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
               | map(select(.login != "" and .login != $ab and .login != $rb) | select(.assoc | IN($trust[])))
               | [ .[] | . as $c
                   | ([ $spans[] | select($c.at > .lo and $c.at <= .hi) ] | .[0] // empty)

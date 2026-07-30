@@ -254,7 +254,12 @@ describe('qwen-autofix workflow', () => {
       encoding: 'utf8',
       input: runBlock.replace(/^ {10}/gm, ''),
     });
-    expect(res.status).toBe(0);
+    // Surface bash's syntax error on failure, not just `expected 2 to be 0`:
+    // this test exists precisely to diagnose quoting breakage.
+    expect({ status: res.status, stderr: res.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
   });
 
   it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
@@ -4038,6 +4043,12 @@ describe('qwen-autofix workflow', () => {
     // looped reviewer with two CONSUMED batches in the Critical-only tail
     // is listed; one batch, pre-Critical batches, unconsumed (fresh)
     // feedback, untrusted authors, and command comments never count.
+    // Never-deferrable feedback must not burn budget either, mirroring the
+    // deferred renderer: Critical-tagged comments, Request changes / APPROVED
+    // reviews, inline replies rooted at a Critical comment, and inline comments
+    // under a Request changes review all stay absent (crit/cr/appr/replyguy/
+    // crinline). The review bot stays absent even as a trusted MEMBER, and a
+    // sentinel-ts marker opens no span (sentinelvictim stays at one batch).
     expect(workflow).toContain("CRITICAL_ONLY_HUMAN_BATCHES: '2'");
     const censusBlock = prepareBranchAndFeedbackStep.match(
       /OVER_BUDGET_AUTHORS="\$\(jq -n[\s\S]*?' \|\| echo '\[\]'\)"/,
@@ -4071,6 +4082,10 @@ describe('qwen-autofix workflow', () => {
             '2026-06-15T01:00:00Z',
             '2026-06-01T00:00:00Z',
           ),
+          // Sentinel-ts marker: filtered out, so it opens no span. Dropping
+          // the guard would open a (2026-07-04, 9999] span that absorbs
+          // sentinelvictim's second batch below and surface them.
+          markerC('9999-12-31T23:59:59Z', 'true', 6, '2026-07-04T02:00:00Z'),
           humanC('looper', '2026-07-02T12:00:00Z'),
           humanC('looper', '2026-07-03T12:00:00Z'),
           humanC('onetime', '2026-07-03T13:00:00Z'),
@@ -4101,6 +4116,40 @@ describe('qwen-autofix workflow', () => {
             'MEMBER',
             '@qwen-code /retry',
           ),
+          // Critical-only author: both batches are **[Critical]**-tagged, so
+          // they are never deferrable and must not count (absent). Dropping the
+          // Critical exclusion would surface them.
+          humanC(
+            'crit',
+            '2026-07-02T15:00:00Z',
+            'MEMBER',
+            '**[Critical]** fix X',
+          ),
+          humanC(
+            'crit',
+            '2026-07-03T15:00:00Z',
+            'MEMBER',
+            '**[Critical]** still broken',
+          ),
+          // Review bot, even carrying a trusted association, is excluded by
+          // login (its budget is zero). Dropping `.login != $rb` surfaces it.
+          humanC(
+            'qwen-code-ci-bot',
+            '2026-07-02T18:00:00Z',
+            'MEMBER',
+            'bot suggestion',
+          ),
+          humanC(
+            'qwen-code-ci-bot',
+            '2026-07-03T18:00:00Z',
+            'MEMBER',
+            'bot suggestion 2',
+          ),
+          // Sentinel-span probe: the first batch lands in span B; the second
+          // falls after span B and only counts if the sentinel marker above
+          // wrongly opens a span. With the guard, stays at one batch (absent).
+          humanC('sentinelvictim', '2026-07-03T12:30:00Z'),
+          humanC('sentinelvictim', '2026-07-04T12:00:00Z'),
         ]),
       );
       // A second author whose two consumed batches arrive through the review
@@ -4116,6 +4165,47 @@ describe('qwen-autofix workflow', () => {
             submitted_at: '2026-07-02T12:30:00Z',
             body: 'feedback delivered through a review',
           },
+          // Request changes / APPROVED reviews are never deferrable, so two
+          // consumed-span batches of each must not count (both authors absent):
+          // the census mirrors the deferred renderer's `state == "COMMENTED"`.
+          {
+            user: { login: 'cr' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-07-02T16:00:00Z',
+            body: 'changes requested',
+          },
+          {
+            user: { login: 'cr' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-07-03T16:00:00Z',
+            body: 'changes requested again',
+          },
+          {
+            user: { login: 'appr' },
+            author_association: 'MEMBER',
+            state: 'APPROVED',
+            submitted_at: '2026-07-02T17:00:00Z',
+            body: 'lgtm',
+          },
+          {
+            user: { login: 'appr' },
+            author_association: 'MEMBER',
+            state: 'APPROVED',
+            submitted_at: '2026-07-03T17:00:00Z',
+            body: 'lgtm again',
+          },
+          // Request changes review container (id 801) that the crinline
+          // comments below attach to; itself never deferrable.
+          {
+            id: 801,
+            user: { login: 'crreviewer' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-07-02T10:00:00Z',
+            body: 'requesting changes',
+          },
         ]),
       );
       writeFileSync(
@@ -4126,6 +4216,47 @@ describe('qwen-autofix workflow', () => {
             author_association: 'MEMBER',
             created_at: '2026-07-03T13:30:00Z',
             body: 'feedback delivered through an inline comment',
+          },
+          // Critical root comment (id 901) that replyguy's replies attach to.
+          {
+            id: 901,
+            user: { login: 'somecrit' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T11:00:00Z',
+            body: '**[Critical]** root finding',
+          },
+          // Inline replies rooted at a Critical comment are never deferrable,
+          // so two consumed-span replies must not count (replyguy absent).
+          {
+            user: { login: 'replyguy' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 901,
+            created_at: '2026-07-02T12:45:00Z',
+            body: 'me too',
+          },
+          {
+            user: { login: 'replyguy' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 901,
+            created_at: '2026-07-03T12:45:00Z',
+            body: 'me too again',
+          },
+          // Inline comments under a Request changes review are never
+          // deferrable, so two consumed-span comments must not count
+          // (crinline absent).
+          {
+            user: { login: 'crinline' },
+            author_association: 'MEMBER',
+            pull_request_review_id: 801,
+            created_at: '2026-07-02T13:45:00Z',
+            body: 'inline under CR review',
+          },
+          {
+            user: { login: 'crinline' },
+            author_association: 'MEMBER',
+            pull_request_review_id: 801,
+            created_at: '2026-07-03T13:45:00Z',
+            body: 'inline under CR review 2',
           },
         ]),
       );
@@ -4148,6 +4279,10 @@ describe('qwen-autofix workflow', () => {
         ],
         { encoding: 'utf8' },
       );
+      // Only the two looped authors land here; every protected author above
+      // (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/sentinelvictim) has
+      // two consumed-span batches yet stays absent — dropping any one of the
+      // census's deferral-mirroring exclusions surfaces one of them and fails.
       expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
     } finally {
       rmSync(budgetDir, { recursive: true, force: true });
