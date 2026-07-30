@@ -172,23 +172,27 @@ export async function runAgentViewSupervisor(
     const maintenanceInterval = setInterval(() => {
       void handler.tickIdleHibernation().catch(() => {});
     }, options.maintenanceIntervalMs ?? SUPERVISOR_MAINTENANCE_INTERVAL_MS);
+    const onSigterm = () => {
+      clearInterval(maintenanceInterval);
+      clearInterval(closeInterval);
+      void server.close().finally(resolve);
+    };
+    const onSigint = () => {
+      clearInterval(maintenanceInterval);
+      clearInterval(closeInterval);
+      void server.close().finally(resolve);
+    };
     const closeInterval = setInterval(() => {
       if (closeRequested) {
         clearInterval(maintenanceInterval);
         clearInterval(closeInterval);
+        process.off('SIGTERM', onSigterm);
+        process.off('SIGINT', onSigint);
         resolve();
       }
     }, 25);
-    process.once('SIGTERM', () => {
-      clearInterval(maintenanceInterval);
-      clearInterval(closeInterval);
-      void server.close().finally(resolve);
-    });
-    process.once('SIGINT', () => {
-      clearInterval(maintenanceInterval);
-      clearInterval(closeInterval);
-      void server.close().finally(resolve);
-    });
+    process.once('SIGTERM', onSigterm);
+    process.once('SIGINT', onSigint);
   });
   await fs
     .unlink(

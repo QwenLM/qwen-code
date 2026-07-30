@@ -574,6 +574,32 @@ describe('Agent View supervisor server', () => {
 
   it('creates local sockets with owner-only permissions', async () => {
     if (process.platform === 'win32') return;
+    const { dir } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const nestedSocketPath = path.join(dir, 'nested', 'supervisor.sock');
+    const server = createAgentViewSupervisorServer(
+      {
+        status: () => ({}),
+        list: () => [],
+        shutdown: () => ({}),
+      },
+      { socketPath: nestedSocketPath },
+    );
+
+    await server.listen();
+    try {
+      const [dirStat, socketStat] = await Promise.all([
+        fs.stat(path.dirname(nestedSocketPath)),
+        fs.stat(nestedSocketPath),
+      ]);
+      expect(dirStat.mode & 0o777).toBe(0o700);
+      expect(socketStat.mode & 0o777).toBe(0o600);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('destroys sockets that exceed the request line size limit', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);
     const server = createAgentViewSupervisorServer(
@@ -587,12 +613,14 @@ describe('Agent View supervisor server', () => {
 
     await server.listen();
     try {
-      const [dirStat, socketStat] = await Promise.all([
-        fs.stat(path.dirname(socketPath)),
-        fs.stat(socketPath),
-      ]);
-      expect(dirStat.mode & 0o777).toBe(0o700);
-      expect(socketStat.mode & 0o777).toBe(0o600);
+      const socket = net.createConnection(socketPath);
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      const closed = new Promise<void>((resolve) =>
+        socket.once('close', resolve),
+      );
+      const oversized = Buffer.alloc(1024 * 1024 + 1, 0x41);
+      socket.write(oversized);
+      await closed;
     } finally {
       await server.close();
     }

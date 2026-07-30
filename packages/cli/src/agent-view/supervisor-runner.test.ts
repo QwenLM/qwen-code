@@ -341,9 +341,10 @@ describe('Agent View supervisor runner', () => {
         protocolVersion: 1,
       },
     );
+    const authToken = await readAuthToken(globalDir);
     await expect(
       callAgentViewSupervisor(socketPath, 'shutdown', undefined, {
-        authToken: await readAuthToken(globalDir),
+        authToken,
       }),
     ).resolves.toEqual({
       shuttingDown: true,
@@ -351,7 +352,7 @@ describe('Agent View supervisor runner', () => {
     });
     await supervisorPromise;
 
-    await expectSupervisorUnreachable(socketPath);
+    await expectSupervisorUnreachable(socketPath, authToken);
   });
 
   it('auto-exits when maintenance sees only hibernated managed sessions', async () => {
@@ -363,10 +364,11 @@ describe('Agent View supervisor runner', () => {
     });
 
     await waitForSupervisor(socketPath, globalDir);
+    const authToken = await readAuthToken(globalDir);
     await writeHibernatedSessionForTest(globalDir, 'session-1');
     await supervisorPromise;
 
-    await expectSupervisorUnreachable(socketPath);
+    await expectSupervisorUnreachable(socketPath, authToken);
   });
 });
 
@@ -453,10 +455,14 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('Timed out waiting for supervisor runner test condition.');
 }
 
-async function expectSupervisorUnreachable(socketPath: string): Promise<void> {
+async function expectSupervisorUnreachable(
+  socketPath: string,
+  authToken: string | undefined,
+): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       await callAgentViewSupervisor(socketPath, 'status', undefined, {
+        authToken,
         timeoutMs: 100,
       });
     } catch {
