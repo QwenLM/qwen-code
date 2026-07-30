@@ -223,6 +223,23 @@ describe('SkillCommandLoader', () => {
     });
   });
 
+  it('keeps usage recording best-effort when persistence fails', async () => {
+    recordAutoSkillUsageMock.mockRejectedValueOnce(new Error('lock busy'));
+
+    await expect(
+      recordAutoSkillCommandUsage(mockConfig, {
+        name: 'my-skill',
+        description: 'My skill',
+        kind: CommandKind.SKILL,
+        skillDetail: {
+          name: 'my-skill',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-test/SKILL.md',
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it('should submit skill body as prompt', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockImplementation(

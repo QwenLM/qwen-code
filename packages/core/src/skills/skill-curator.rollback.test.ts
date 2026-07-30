@@ -39,6 +39,7 @@ describe('auto-skill curator rollback', () => {
   });
 
   afterEach(async () => {
+    vi.resetAllMocks();
     await fs.rm(projectRoot, { recursive: true, force: true });
   });
 
@@ -151,5 +152,87 @@ describe('auto-skill curator rollback', () => {
     await expect(fs.access(liveManifest)).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('escalates when an archive move cannot be rolled back', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-old', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'old', level: 'project', filePath: manifest },
+      old,
+    );
+    const liveDirectory = path.dirname(manifest);
+    const archivedDirectory = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-old',
+    );
+    const persistenceError = new Error('simulated persistence failure');
+    vi.mocked(atomicFileWrite.atomicWriteJSON).mockImplementationOnce(
+      async () => {
+        // The archive rename has completed by the time persistence starts.
+        // Recreate its source as a non-empty directory so rename-back fails.
+        await fs.mkdir(liveDirectory, { recursive: true });
+        await fs.writeFile(path.join(liveDirectory, 'rollback-blocker'), 'x');
+        throw persistenceError;
+      },
+    );
+
+    await expect(
+      runAutoSkillCurator(projectRoot, { now }),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/^Rollback failed:/),
+      cause: persistenceError,
+    });
+    await expect(fs.access(archivedDirectory)).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(liveDirectory, 'rollback-blocker')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('escalates when a restore move cannot be rolled back', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const manifest = await writeSkill('auto-skill-old', old);
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'old', level: 'project', filePath: manifest },
+      old,
+    );
+    await runAutoSkillCurator(projectRoot, { now });
+    const liveDirectory = path.dirname(manifest);
+    const archivedDirectory = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-old',
+    );
+    const persistenceError = new Error('simulated persistence failure');
+    vi.mocked(atomicFileWrite.atomicWriteJSON).mockImplementationOnce(
+      async () => {
+        // The restore rename has completed by the time persistence starts.
+        // Recreate its source as a non-empty directory so rename-back fails.
+        await fs.mkdir(archivedDirectory, { recursive: true });
+        await fs.writeFile(
+          path.join(archivedDirectory, 'rollback-blocker'),
+          'x',
+        );
+        throw persistenceError;
+      },
+    );
+
+    await expect(
+      restoreArchivedAutoSkill(projectRoot, 'auto-skill-old', now),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/^Rollback failed:/),
+      cause: persistenceError,
+    });
+    await expect(fs.access(liveDirectory)).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(archivedDirectory, 'rollback-blocker')),
+    ).resolves.toBeUndefined();
   });
 });

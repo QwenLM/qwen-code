@@ -2362,6 +2362,9 @@ describe('useSlashCommandProcessor', () => {
     });
 
     it('records confirmed skill slash commands only once', async () => {
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValueOnce(
+        '/test/project',
+      );
       const action = vi
         .fn()
         .mockResolvedValueOnce({
@@ -2376,6 +2379,11 @@ describe('useSlashCommandProcessor', () => {
       const skillCmd = createTestCommand(
         {
           name: 'review-skill',
+          skillDetail: {
+            name: 'review-skill',
+            level: 'project',
+            filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+          },
           action,
         },
         CommandKind.SKILL,
@@ -2400,6 +2408,7 @@ describe('useSlashCommandProcessor', () => {
         expect(action).toHaveBeenCalledTimes(2);
       });
       expect(recordSkillInvocation).toHaveBeenCalledTimes(1);
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledTimes(1);
       expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
         skillName: 'review-skill',
         success: true,

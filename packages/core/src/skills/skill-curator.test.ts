@@ -84,7 +84,7 @@ describe('auto-skill curator', () => {
   it('does not leave a placeholder file beside the proper lock', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
 
-    await getAutoSkillCuratorStatus(projectRoot, now);
+    await runAutoSkillCurator(projectRoot, { now });
 
     await expect(
       fs.lstat(path.join(projectRoot, '.qwen', 'skill-curator.lock')),
@@ -583,6 +583,37 @@ describe('auto-skill curator', () => {
     ).resolves.toBe('preserve');
   });
 
+  it('reports archive collisions during a dry run', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const old = new Date(now.getTime() - 100 * DAY_MS);
+    const liveManifest = await writeSkill(
+      'auto-skill-collision',
+      'auto-skill',
+      old,
+    );
+    await recordAutoSkillUsage(
+      projectRoot,
+      { name: 'collision', level: 'project', filePath: liveManifest },
+      old,
+    );
+    const archivedDirectory = path.join(
+      projectRoot,
+      '.qwen',
+      'archived-skills',
+      'auto-skill-collision',
+    );
+    await fs.mkdir(archivedDirectory, { recursive: true });
+
+    const result = await runAutoSkillCurator(projectRoot, {
+      dryRun: true,
+      now,
+    });
+
+    expect(result.skippedCollisions).toEqual(['auto-skill-collision']);
+    expect(result.archived).toEqual([]);
+    await expect(fs.access(liveManifest)).resolves.toBeUndefined();
+  });
+
   it('seeds an unseen skill on an explicit run before aging it', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
     const manifest = await writeSkill(
@@ -655,6 +686,37 @@ describe('auto-skill curator', () => {
       recordAutoSkillUsage(
         projectRoot,
         { name: 'user', level: 'user', filePath: manifest },
+        now,
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it('ignores project usage records outside the skills root', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const outsideDirectory = path.join(
+      projectRoot,
+      '.qwen',
+      'outside',
+      'auto-skill-evil',
+    );
+    const manifest = path.join(outsideDirectory, 'SKILL.md');
+    await fs.mkdir(outsideDirectory, { recursive: true });
+    await fs.writeFile(
+      manifest,
+      [
+        '---',
+        'name: evil',
+        'description: outside the managed skills root',
+        'source: auto-skill',
+        '---',
+        '',
+      ].join('\n'),
+    );
+
+    await expect(
+      recordAutoSkillUsage(
+        projectRoot,
+        { name: 'evil', level: 'project', filePath: manifest },
         now,
       ),
     ).resolves.toBe(false);
