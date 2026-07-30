@@ -1253,6 +1253,20 @@ function cleanOrphanedToolCalls(
  * turn that already carries real text alongside the untrustworthy thinking
  * is left as-is -- narrower in scope than a blanket "no tool_use = always
  * rewrite", matching the tested downstream fix this port is based on.
+ *
+ * IMPORTANT -- this is a conservative, false-positive-prone heuristic, not
+ * a precise detector. By the time this pass runs, "this turn's tool_use
+ * was removed by an earlier trim" and "this turn was always thinking-only"
+ * are structurally indistinguishable (no surviving tool_use, no other
+ * text, in both cases). This function treats both the same way, so it
+ * will also downgrade a turn whose thinking signature was never actually
+ * invalidated -- the rewrite is non-destructive (the reasoning text
+ * survives, just re-typed and unsigned) but it IS a real change to valid
+ * historical content, not only a fix for invalid content. Live
+ * verification of the specific 400 this guards against (a stale
+ * cross-turn signature being rejected) did not reproduce against a
+ * Vertex-routed proxy as of this writing -- see the PR that introduced
+ * this function for the full calibration note.
  */
 function pruneUntrustworthyThinking(
   messages: AnthropicMessageParam[],
