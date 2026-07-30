@@ -20,6 +20,7 @@ import {
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
+  Storage,
   addDaemonRequestAttribute,
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
@@ -34,6 +35,7 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { loadSettingsCached } from '../../config/settings-cache.js';
 import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../channel-delivery.js';
 import {
@@ -1289,9 +1291,16 @@ export function registerSessionRoutes(
       // Reject an id that already exists (active or archived) at the route
       // boundary: loadCliConfig calls process.exit(1) on a duplicate, which
       // would terminate the shared ACP child and every session on its channel.
+      const runtimeOutputDir =
+        loadSettingsCached(workspaceCwd).merged.advanced?.runtimeOutputDir;
       if (
-        await new SessionService(workspaceCwd).sessionExistsInAnyState(
-          requestedSessionId,
+        await Storage.runWithRuntimeBaseDir(
+          runtimeOutputDir,
+          workspaceCwd,
+          () =>
+            new SessionService(workspaceCwd).sessionExistsInAnyState(
+              requestedSessionId,
+            ),
         )
       ) {
         res.status(409).json({

@@ -8652,6 +8652,33 @@ describe('createServeApp', () => {
       }
     });
 
+    it('runs the sessionId existence check inside runWithRuntimeBaseDir', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('active');
+      const runWithSpy = vi.spyOn(Storage, 'runWithRuntimeBaseDir');
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: '550e8400-e29b-41d4-a716-446655440000' });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('session_id_conflict');
+        expect(runWithSpy).toHaveBeenCalled();
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        locationSpy.mockRestore();
+        runWithSpy.mockRestore();
+      }
+    });
+
     it('409 when concurrent request has same sessionId in flight', async () => {
       let resolveFirstSpawn!: (v: BridgeSession) => void;
       const firstSpawnBarrier = new Promise<BridgeSession>((r) => {
