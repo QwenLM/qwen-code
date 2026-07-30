@@ -2819,7 +2819,7 @@ describe('runNonInteractive', () => {
       2,
       [{ text: 'task result' }],
       expect.any(AbortSignal),
-      'prompt-drain-isolation',
+      'prompt-drain-isolation/automatic/2',
       expect.objectContaining({
         type: SendMessageType.Notification,
         modelOverride: undefined,
@@ -2829,7 +2829,7 @@ describe('runNonInteractive', () => {
       3,
       [{ text: 'drain tool response' }],
       expect.any(AbortSignal),
-      'prompt-drain-isolation',
+      'prompt-drain-isolation/automatic/2',
       { type: SendMessageType.ToolResult, modelOverride: undefined },
     );
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
