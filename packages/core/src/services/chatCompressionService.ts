@@ -16,6 +16,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
+import { resolveModelId } from '../utils/modelId.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
@@ -515,12 +516,43 @@ export class ChatCompressionService {
         );
     }
 
+    // Guard: if the compaction model's context window is too small for the
+    // slimmed payload, fall back to the main model for this compression only.
+    let effectiveCompactionModel = config.getCompactionModel?.();
+    let compactionWarning: string | undefined;
+    if (effectiveCompactionModel) {
+      const resolved = resolveModelId(effectiveCompactionModel);
+      if (resolved) {
+        const models = resolved.authType
+          ? config.getAllConfiguredModels([resolved.authType])
+          : config.getAllConfiguredModels();
+        const entry = models.find((m) => m.id === resolved.modelId);
+        const window = entry?.contextWindowSize;
+        const slimmedTokenEstimate = estimateContentTokens(
+          slim.slimmedHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
+        if (window && window > 0 && slimmedTokenEstimate > window) {
+          compactionWarning =
+            `Compaction model "${resolved.modelId}" context window ` +
+            `(${window.toLocaleString()} tokens) is too small for the current ` +
+            `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
+            `using the main model for this compression.`;
+          config
+            .getDebugLogger()
+            .warn(`[chat-compression] ${compactionWarning}`);
+          effectiveCompactionModel = config.getModel();
+        }
+      }
+    }
+
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
       skipOutputLanguagePreference: true,
-      model: config.getCompactionModel?.(),
+      model: effectiveCompactionModel,
       // Compression uses the compaction model (config.getCompactionModel?.()) to reduce cost.
-      // Falls back to fastModel, then the main model if not set.
+      // Falls back to the main model if not set or if the payload exceeds the
+      // compaction model's context window.
       // See https://github.com/QwenLM/qwen-code/issues/5956
       // Stream so a slow compression inference keeps the HTTP connection alive.
       // Non-streaming returns no bytes until the whole summary is generated, so
@@ -879,6 +911,7 @@ export class ChatCompressionService {
           newTokenCount,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
+          ...(compactionWarning && { warning: compactionWarning }),
         },
       };
     }

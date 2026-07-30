@@ -4423,7 +4423,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.getCompactionModel()).toBe('openai:compaction-model');
       });
 
-      it('falls back to fastModel when compactionModel is not set', async () => {
+      it('falls back to the main model when compactionModel is not set', async () => {
         const config = new Config({
           ...baseParams,
           authType: AuthType.USE_OPENAI,
@@ -4449,7 +4449,8 @@ describe('Server Config (config.ts)', () => {
 
         await config.refreshAuth(AuthType.USE_OPENAI);
 
-        expect(config.getCompactionModel()).toBe('fast-model');
+        // fastModel is intentionally ignored — compaction falls back to main
+        expect(config.getCompactionModel()).toBe('gpt-4');
       });
 
       it('falls back to main model when neither compactionModel nor fastModel is set', () => {

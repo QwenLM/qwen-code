@@ -3901,7 +3901,7 @@ export class Config {
 
   /**
    * Resolve the compaction model for chat compression (auto-compaction).
-   * Priority: compactionModel (if set) → fastModel (if set) → main model.
+   * Priority: compactionModel (if set) → main model.
    */
   getCompactionModel(): string | undefined {
     const selector = this.resolveCompactionModelSelector();
@@ -3926,8 +3926,7 @@ export class Config {
         ? `${rawSelector.authType}:${selector.modelId}`
         : selector.modelId;
     }
-    // Fallback: fastModel → main model
-    return this.getFastModel() ?? this.getModel();
+    return this.getModel();
   }
 
   private resolveCompactionModelSelector() {
@@ -3958,7 +3957,7 @@ export class Config {
   /**
    * Update the compaction model at runtime (e.g. `/model --compaction <model>`).
    * Pass undefined or an empty string to clear the override and fall back to
-   * fastModel, then the main model.
+   * the main model.
    */
   setCompactionModel(model: string | undefined): void {
     this.compactionModel = model || undefined;

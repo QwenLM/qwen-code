@@ -54,6 +54,7 @@ describe('ChatCompressionService', () => {
       getModel: () => 'test-model',
       getCompactionModel: vi.fn(),
       getFastModel: vi.fn(),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -821,7 +822,7 @@ describe('ChatCompressionService', () => {
 
   it('passes getCompactionModel to runSideQuery for compression', async () => {
     // Compression passes config.getCompactionModel?.() to runSideQuery so it uses
-    // the compaction model (falls back to fastModel, then main model) instead of
+    // the compaction model (falls back to the main model) instead of
     // the expensive main model, reducing cost. See https://github.com/QwenLM/qwen-code/issues/5956
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
@@ -873,7 +874,7 @@ describe('ChatCompressionService', () => {
     );
   });
 
-  it('falls back to fastModel when getCompactionModel returns undefined', async () => {
+  it('falls back to the main model when compactionModel is not set', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -883,8 +884,8 @@ describe('ChatCompressionService', () => {
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
     vi.mocked(tokenLimit).mockReturnValue(1000);
-    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(undefined);
-    vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model-v1');
+    // getCompactionModel() returns getModel() when compactionModel is unset
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('test-model');
 
     const mockGenerateText = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -908,9 +909,53 @@ describe('ChatCompressionService', () => {
 
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'fast-model-v1',
+        model: 'test-model',
       }),
     );
+  });
+
+  it('falls back to the main model when the compaction model context window is too small', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('small-model');
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'small-model', contextWindowSize: 1 },
+    ] as never[]);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'test-model',
+      }),
+    );
+    expect(result.info.warning).toBeDefined();
+    expect(result.info.warning).toContain('too small');
   });
 
   it('should return FAILED if new token count is inflated', async () => {
