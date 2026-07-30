@@ -979,17 +979,6 @@ export function probeCleanupFailureDetail(
   return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
 }
 
-/**
- * One vitest run over the probe files, classified per file. Shared by the
- * baseline run, every mutant run, and the revert probe — the same suite, the
- * same runner, the same classifier. Throws when the run never produced output
- * to classify (spawn failure, or killed by the deadline).
- *
- * `deadlineAt` clamps the per-run timeout so the baseline + mutants + revert
- * cannot together exceed {@link TOTAL_BUDGET_MS}: the baseline and mutant
- * runs share a window that reserves the revert probe's full slot, and the
- * revert probe gets the remainder of the whole budget.
- */
 function exposeDependencies(probeTree: string, dependencyRoot: string): void {
   if (probeTree === dependencyRoot) return;
   const source = join(dependencyRoot, 'node_modules');
@@ -1013,6 +1002,17 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
   }
 }
 
+/**
+ * One vitest run over the probe files, classified per file. Shared by the
+ * baseline run, every mutant run, and the revert probe — the same suite, the
+ * same runner, the same classifier. Throws when the run never produced output
+ * to classify (spawn failure, or killed by the deadline).
+ *
+ * `deadlineAt` clamps the per-run timeout so the baseline + mutants + revert
+ * cannot together exceed {@link TOTAL_BUDGET_MS}: the baseline and mutant
+ * runs share a window that reserves the revert probe's full slot, and the
+ * revert probe gets the remainder of the whole budget.
+ */
 function runProbeSuite(
   probeTree: string,
   probes: string[],

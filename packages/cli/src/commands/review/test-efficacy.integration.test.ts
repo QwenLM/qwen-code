@@ -22,6 +22,7 @@ import {
   existsSync,
   symlinkSync,
   statSync,
+  lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1119,7 +1120,7 @@ process.stdout.write(JSON.stringify({
 
     const probeModules = join(probeTree, 'node_modules');
     expect(statSync(probeModules).isDirectory()).toBe(true);
-    expect(statSync(probeModules).isSymbolicLink()).toBe(false);
+    expect(lstatSync(probeModules).isSymbolicLink()).toBe(false);
     writeFileSync(join(probeModules, '.vite-probe'), 'local cache');
     expect(
       existsSync(join(dependencyRoot, 'node_modules', '.vite-probe')),
