@@ -553,6 +553,19 @@ describe('selectMutants', () => {
     expect(got.map((c) => c.line)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 
+  it('matches Set, WeakMap, and WeakSet reassignments', () => {
+    const content = src([
+      'this.set = new Set();',
+      'this.wm = new WeakMap();',
+      'this.ws = new WeakSet();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(3), hasNewTests: false },
+    ]);
+    expect(got.map((c) => c.line)).toEqual([1, 2, 3]);
+  });
+
   it('skips a modifier-less class field that only looks like an assignment', () => {
     // `cache = new Map();` in a class body matches the safety-verb set and
     // balances its delimiters, but it is a field DECLARATION: deleting it breaks
@@ -580,6 +593,30 @@ describe('selectMutants', () => {
     const content = src([
       'class Store',
       '  extends Base',
+      '{',
+      '  cache = new Map();',
+      '  reset() {',
+      '    this.cache.clear();',
+      '  }',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(8), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 6, statement: 'this.cache.clear();' },
+    ]);
+  });
+
+  it('skips a class field when the extends clause has an inline object type', () => {
+    // `extends Base<{ foo: string }>` has balanced braces on its own line.
+    // The backward walk must not break there — only a net-unbalanced brace
+    // (a real block boundary) stops it — or the `class` keyword on the line
+    // above is never reached and the field is admitted.
+    const content = src([
+      'class Store',
+      '  extends Base<{ foo: string }>',
       '{',
       '  cache = new Map();',
       '  reset() {',
@@ -642,6 +679,24 @@ describe('selectMutants', () => {
       { file: 'src/s.ts', content, addedLines: all(13), hasNewTests: false },
     ]);
     expect(got).toEqual([]);
+  });
+
+  it('rejects a multi-statement line even when a safety verb matches', () => {
+    // Two statements on one line: deleting the whole line removes BOTH, and
+    // the extra deletion can MASK a missing test on the safety verb.
+    const content = src([
+      'export function reset() {',
+      "  this.cache.clear(); this.emit('reset');",
+      '  live.clear();',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: [2, 3], hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 3, statement: 'live.clear();' },
+    ]);
   });
 
   it('skips safety-verb text inside template literals and comment blocks', () => {
@@ -719,6 +774,45 @@ describe('selectMutants', () => {
       'const x = `foo ${`bar;',
       'baz.clear();',
       '`} qux`;',
+      'after.clear();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(4), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 4, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('does not let a quoted } inside an interpolation close the template', () => {
+    // A `}` inside a quoted string in the interpolation must not decrement
+    // interpDepth: the premature drop lets a later nested backtick be mistaken
+    // for the outer close, admitting template text as a candidate.
+    const content = src([
+      'const x = `a${fmt("}") + `nested`}',
+      'items.clear();',
+      '`;',
+      'after.clear();',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(4), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 4, statement: 'after.clear();' },
+    ]);
+  });
+
+  it('does not let a } in nested-template text close the outer interpolation', () => {
+    // A `}` in a nested template's TEXT (not its own interpolation) must not
+    // decrement the outer interpDepth. Without the nested-template sub-scan,
+    // the depth drops to 0 and the nested close backtick reads as the outer
+    // close, admitting the outer literal's remaining text as code.
+    const content = src([
+      'const x = `a${x + `b } c`}d',
+      'items.clear();',
+      '`;',
       'after.clear();',
       '',
     ]);

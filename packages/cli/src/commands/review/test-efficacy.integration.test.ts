@@ -497,6 +497,7 @@ process.stdout.write(JSON.stringify({
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
     expect(out.mutants.probed).toEqual([]);
+    expect(out.mutants.skippedForBaseline).toBe(1);
     expect(out.mutants.note).toContain('no probe file was green');
     expect(
       (out.findings as Array<{ kind: string }>).some(
@@ -645,12 +646,76 @@ process.stdout.write(JSON.stringify({
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
     expect(out.mutants.probed.length).toBe(1);
     expect(out.mutants.skippedForBudget).toBe(2);
+    expect(out.mutants.skippedForBaseline).toBe(0);
     expect(out.mutants.probed.length + out.mutants.skippedForBudget).toBe(3);
     for (const m of out.mutants.probed) {
       expect(m.verdict).toBe('survived');
     }
     expect(stdoutChunks.join('')).toContain(
       '2 mutant(s) skipped: the remaining budget cannot fit another suite run',
+    );
+  });
+
+  it('reports mutants skipped for cap when candidates exceed MAX_MUTANTS', async () => {
+    // Nine safety-verb candidates but MAX_MUTANTS is 8: the counter, the
+    // `skippedForCap` report field, and the stdout line are exercised
+    // end-to-end, mirroring the budget-skip test above.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n',
+    );
+    const base = commitAll('base');
+    const stmts = Array.from({ length: 9 }, (_, i) => `  state${i}.clear();`);
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function reset() {\n' +
+        stmts.join('\n') +
+        '\n}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { it, expect } from "vitest"; it("t", () => expect(1).toBe(1));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
+    try {
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed.length).toBe(8);
+    expect(out.mutants.skippedForCap).toBe(1);
+    expect(out.mutants.skippedForBaseline).toBe(0);
+    expect(out.mutants.probed.length + out.mutants.skippedForCap).toBe(9);
+    expect(stdoutChunks.join('')).toContain(
+      '1 mutant(s) skipped: more candidates than the cap of 8',
     );
   });
 

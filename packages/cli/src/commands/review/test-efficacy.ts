@@ -298,8 +298,11 @@ interface FileScan {
  * Interpolations (`${…}`) are treated as still-template, tracked by brace
  * depth so the backtick of a NESTED template inside `${…}` is not mistaken for
  * the outer close (which would flag the outer literal's remaining lines as
- * code and admit its text as candidates): still-template can only skip a
- * candidate, never admit one.
+ * code and admit its text as candidates). Quoted strings inside the
+ * interpolation are skipped so their `}` does not decrement depth, and a
+ * nested backtick opens a sub-scan that keeps the nested template's text `}`
+ * from reaching the outer counter: still-template can only skip a candidate,
+ * never admit one.
  *
  * `codeLines`: the selection checks are end-anchored — `endsWith(';')`, the
  * `$` alternatives in {@link SAFETY_VERB_RE}, the predecessor `/[;{}]$/` — so
@@ -320,6 +323,7 @@ function scanFileLines(content: string): FileScan {
   const codeLines: string[] = [];
   let state: 'code' | 'template' | 'comment' = 'code';
   let interpDepth = 0;
+  let nestedDepth = 0;
   let buf = '';
   let lineStart = 0;
   let rawLine = false;
@@ -348,6 +352,39 @@ function scanFileLines(content: string): FileScan {
           interpDepth = 1;
           i++;
         }
+      } else if (nestedDepth > 0) {
+        if (nestedDepth === 1) {
+          if (ch === '`') {
+            nestedDepth = 0;
+          } else if (ch === '$' && content[i + 1] === '{') {
+            nestedDepth = 2;
+            i++;
+          }
+        } else if (ch === '"' || ch === "'") {
+          const q = ch;
+          i++;
+          while (
+            i < content.length &&
+            content[i] !== q &&
+            content[i] !== '\n'
+          ) {
+            if (content[i] === '\\' && content[i + 1] !== '\n') i++;
+            i++;
+          }
+        } else if (ch === '{') {
+          nestedDepth++;
+        } else if (ch === '}') {
+          nestedDepth--;
+        }
+      } else if (ch === '"' || ch === "'") {
+        const q = ch;
+        i++;
+        while (i < content.length && content[i] !== q && content[i] !== '\n') {
+          if (content[i] === '\\' && content[i + 1] !== '\n') i++;
+          i++;
+        }
+      } else if (ch === '`') {
+        nestedDepth = 1;
       } else if (ch === '{') {
         interpDepth++;
       } else if (ch === '}') {
@@ -366,6 +403,7 @@ function scanFileLines(content: string): FileScan {
       buf += '`';
       state = 'template';
       interpDepth = 0;
+      nestedDepth = 0;
     } else if (ch === '/' && content[i + 1] === '*') {
       state = 'comment';
       i++;
@@ -417,7 +455,9 @@ function insideClassBody(codeLines: string[], idx: number): boolean {
           if (/\bclass\b/.test(code.slice(0, i))) return true;
           for (let k = j - 1; k >= 0; k--) {
             const prev = codeLines[k];
-            if (/[;{}]/.test(prev)) break;
+            if (prev.includes(';')) break;
+            const d = scanLineDelimiters(prev);
+            if (!d || d.brace !== 0) break;
             if (/\bclass\b/.test(prev)) return true;
           }
           return false;
@@ -448,6 +488,7 @@ function isRemovableStatement(
   // End-anchored checks run on the code portion only, so a trailing comment
   // (`reminders.clear(); // why`) does not hide the statement's real end.
   if (!(codeLines[idx] ?? '').endsWith(';')) return false;
+  if ((codeLines[idx] ?? '').slice(0, -1).includes(';')) return false;
   if (!/^(?:await\s+)?[A-Za-z_$]/.test(t)) return false;
   if (NON_STATEMENT_START_RE.test(t)) return false;
   if (insideClassBody(codeLines, idx)) return false;
@@ -1044,6 +1085,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   const mutantResults: MutantResult[] = [];
   let mutantsSkippedForBudget = 0;
   let mutantsSkippedForCap = 0;
+  let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
 
   if (probes.length > 0 && revert.length > 0) {
@@ -1158,6 +1200,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           .filter((r) => r.verdict === 'inert')
           .map((r) => r.file);
         if (greenProbes.length === 0) {
+          mutantsSkippedForBaseline = candidates.length;
           mutantsNote =
             'mutants not run: no probe file was green in the unmutated baseline (every file was red or collected nothing), so a red mutant run would prove nothing';
         } else {
@@ -1287,6 +1330,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       inconclusive: count('inconclusive'),
       skippedForBudget: mutantsSkippedForBudget,
       skippedForCap: mutantsSkippedForCap,
+      skippedForBaseline: mutantsSkippedForBaseline,
       ...(mutantsNote ? { note: mutantsNote } : {}),
     },
     findings,
@@ -1303,6 +1347,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   if (mutantsSkippedForCap > 0) {
     writeStdoutLine(
       `  ${mutantsSkippedForCap} mutant(s) skipped: more candidates than the cap of ${MAX_MUTANTS}`,
+    );
+  }
+  if (mutantsSkippedForBaseline > 0) {
+    writeStdoutLine(
+      `  ${mutantsSkippedForBaseline} mutant(s) skipped: no probe file was green in the unmutated baseline`,
     );
   }
   if (mutantsSkippedForBudget > 0) {
