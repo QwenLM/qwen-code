@@ -2450,6 +2450,30 @@ const EN: Messages = {
   'channels.editor.pairing.saveFirst.title': 'Save pairing mode first',
   'channels.editor.pairing.saveFirst.description':
     'Pending requests will appear here after this Channel is saved in pairing mode.',
+  'channels.editor.pairing.approvals.title': 'Pairing approvals',
+  'channels.editor.pairing.approvals.description':
+    'Sender IDs approved through pairing for this Channel.',
+  'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
+  'channels.editor.pairing.approvals.revoke': 'Revoke',
+  'channels.editor.pairing.approvals.revokeFor': (v) =>
+    `Revoke ${v?.senderId ?? 'pairing approval'}`,
+  'channels.editor.pairing.approvals.revoked': (v) =>
+    `Pairing approval for ${v?.senderId ?? 'this sender'} was revoked.`,
+  'channels.editor.pairing.approvals.error':
+    'Pairing approvals were not updated',
+  'channels.editor.pairing.approvals.unavailable':
+    'Pairing approvals are temporarily unavailable. Try again.',
+  'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
+  'channels.editor.pairing.approvals.empty.description':
+    'Approved sender IDs will appear here.',
+  'channels.editor.pairing.approvals.confirm.title': (v) =>
+    `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
+  'channels.editor.pairing.approvals.confirm.description':
+    'Only the approval created through pairing will be removed. Access configured in the Channel allowlist is not changed.',
+  'channels.editor.pairing.approvals.confirm.action': 'Revoke approval',
+  'channels.editor.pairing.allowlist.title': 'Configured allowlist',
+  'channels.editor.pairing.allowlist.description':
+    'Configured allowlist users remain allowed after a pairing approval is revoked.',
   'channels.editor.policy.open.title': 'Open',
   'channels.editor.policy.open.description':
     'Anyone who can reach the bot can start a conversation.',
@@ -4858,6 +4882,29 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
+  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.description':
+    '通过配对获得此频道访问权限的用户 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+  'channels.editor.pairing.approvals.revoke': '撤销',
+  'channels.editor.pairing.approvals.revokeFor': (v) =>
+    `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
+  'channels.editor.pairing.approvals.revoked': (v) =>
+    `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
+  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.unavailable':
+    '暂时无法获取已配对用户，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+  'channels.editor.pairing.approvals.empty.description':
+    '批准配对请求后，用户 ID 会显示在这里。',
+  'channels.editor.pairing.approvals.confirm.title': (v) =>
+    `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
+  'channels.editor.pairing.approvals.confirm.description':
+    '只会移除通过配对获得的授权，不会更改频道配置中的白名单访问权限。',
+  'channels.editor.pairing.approvals.confirm.action': '撤销授权',
+  'channels.editor.pairing.allowlist.title': '配置白名单',
+  'channels.editor.pairing.allowlist.description':
+    '撤销配对授权后，配置白名单中的用户仍然可以访问此频道。',
   'channels.editor.policy.open.title': '开放模式',
   'channels.editor.policy.open.description':
     '所有能够访问机器人的用户均可直接开始对话。',
