@@ -60,6 +60,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import {
@@ -3334,8 +3335,31 @@ export class AcpDispatcher {
               );
             return;
           }
+          const rawCursor = params['cursor'];
+          if (
+            rawCursor !== undefined &&
+            (typeof rawCursor !== 'string' ||
+              rawCursor.length === 0 ||
+              rawCursor.length > MAX_TEXT_CURSOR_CHARS)
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`cursor\` must be a non-empty string of at most ${MAX_TEXT_CURSOR_CHARS} characters`,
+                ),
+              );
+            return;
+          }
+          const cursor = rawCursor as string | undefined;
           const resolved = await fs.resolve(p, 'read');
-          const out = await fs.readText(resolved, { maxBytes, line, limit });
+          const out = await fs.readText(resolved, {
+            maxBytes,
+            line,
+            limit,
+            cursor,
+          });
           this.replyConn(conn, id, {
             path: p,
             content: out.content,

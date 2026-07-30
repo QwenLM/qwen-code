@@ -2772,6 +2772,29 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('accepts managed handoff only after certified takeover is configured', async () => {
+      const standalone = new Config(baseParams);
+      await standalone.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          standalone as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(false);
+
+      const managed = new Config(baseParams);
+      managed.setSessionWriterTakeoverPolicy('certified');
+      await managed.closeSessionWriter({ handoff: true });
+      expect(
+        (
+          managed as unknown as {
+            sessionWriterHandoffRequested: boolean;
+          }
+        ).sessionWriterHandoffRequested,
+      ).toBe(true);
+    });
+
     it.each([
       [
         'an ACP session without an opt-in',
@@ -3074,6 +3097,38 @@ describe('Server Config (config.ts)', () => {
       ]);
 
       expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('aborts active workflows during shutdown', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+      const abortController = new AbortController();
+      const registry = config.getWorkflowRunRegistry();
+      registry.register({
+        runId: 'wf_1234',
+        meta: null,
+        status: 'running',
+        startTime: Date.now(),
+        outputFile: '/tmp/wf_1234.jsonl',
+        abortController,
+      });
+
+      await config.shutdown({
+        shutdownTelemetry: false,
+        skipSessionWriter: true,
+        strictResourceCleanup: true,
+      });
+
+      expect(abortController.signal.aborted).toBe(true);
+      expect(registry.get('wf_1234')?.status).toBe('cancelled');
     });
 
     it('allows a later shutdown to retry incomplete resource cleanup', async () => {
@@ -8935,5 +8990,134 @@ describe('Model Switching and Config Updates', () => {
       );
       expect(response.success).toBe(true);
     });
+  });
+
+  it('moves only the continued work chain Todo reminder', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.setActiveTodoReminder('prompt-cron', 'unfinished cron work');
+
+    config.startActiveTodoWorkChain('prompt-retry', 'prompt-user');
+
+    expect(config.getActiveTodoReminder('prompt-retry')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+  });
+
+  it('clears stale Todo reminders when a new ordinary work chain starts', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-old');
+    config.setActiveTodoReminder('prompt-old', 'old work');
+
+    config.startActiveTodoWorkChain('prompt-new');
+
+    expect(config.getActiveTodoReminder('prompt-new')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-old')).toBeUndefined();
+  });
+
+  it('re-issues the active Todo reminder only every third tool turn', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished work');
+
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+
+    expect(config.takeActiveTodoReminder('prompt-user', true)).toBe(
+      'unfinished work',
+    );
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+    expect(config.takeActiveTodoReminder('prompt-user')).toBe(
+      'unfinished work',
+    );
+
+    config.setActiveTodoReminder('prompt-user', 'updated work');
+    expect(config.takeActiveTodoReminder('prompt-user')).toBeUndefined();
+  });
+
+  it('moves related automatic work without clearing unrelated reminders', () => {
+    const config = Object.create(Config.prototype) as Config;
+    config.startActiveTodoWorkChain('prompt-user');
+    config.setActiveTodoReminder('prompt-user', 'unfinished user work');
+    config.startAutomaticActiveTodoWorkChain('prompt-unrelated');
+    config.setActiveTodoReminder('prompt-unrelated', 'other work');
+
+    config.startAutomaticActiveTodoWorkChain('prompt-cron');
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-related-notification',
+      'prompt-user',
+    );
+
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-related-notification')).toBe(
+      'unfinished user work',
+    );
+    expect(
+      config.getActiveTodoWorkChainOwner(
+        'prompt-related-notification',
+        'stale-owner',
+      ),
+    ).toBe('prompt-user');
+    expect(
+      config.getActiveTodoWorkChainOwner('prompt-unmapped', 'inherited-owner'),
+    ).toBe('inherited-owner');
+    expect(config.getActiveTodoReminder('prompt-unrelated')).toBe('other work');
+
+    config.endAutomaticActiveTodoWorkChain('prompt-cron');
+    config.endAutomaticActiveTodoWorkChain('prompt-related-notification');
+
+    expect(config.getActiveTodoReminder('prompt-cron')).toBeUndefined();
+    expect(config.getActiveTodoReminder('prompt-user')).toBe(
+      'unfinished user work',
+    );
+
+    config.startAutomaticActiveTodoWorkChain(
+      'prompt-stale-notification',
+      'prompt-stale-owner',
+    );
+    config.setActiveTodoReminder(
+      'prompt-stale-notification',
+      'stale automatic work',
+    );
+    config.endAutomaticActiveTodoWorkChain('prompt-stale-notification');
+
+    expect(config.getActiveTodoReminder('prompt-stale-owner')).toBeUndefined();
+  });
+
+  it('isolates active Todo reminders inherited through child Configs', () => {
+    const parent = Object.create(Config.prototype) as Config;
+    const child = Object.create(parent) as Config;
+    parent.setActiveTodoReminder('parent-prompt', 'parent work');
+
+    child.setActiveTodoReminder('child-prompt', 'child work');
+    child.startActiveTodoWorkChain('child-retry', 'child-prompt');
+
+    expect(parent.getActiveTodoReminder('parent-prompt')).toBe('parent work');
+    expect(parent.getActiveTodoReminder('child-retry')).toBeUndefined();
+    expect(child.getActiveTodoReminder('parent-prompt')).toBeUndefined();
+    expect(child.getActiveTodoReminder('child-retry')).toBe('child work');
+  });
+
+  it('clears active Todo reminders for a new session', () => {
+    const config = new Config(baseParams);
+    config.setActiveTodoReminder('old-prompt', 'unfinished old work');
+    config.startActiveTodoWorkChain('old-retry', 'old-prompt');
+
+    config.startNewSession('new-session-id');
+
+    expect(config.getActiveTodoReminder('old-prompt')).toBeUndefined();
+    expect(config.getActiveTodoWorkChainOwner('old-retry')).toBe('old-retry');
   });
 });

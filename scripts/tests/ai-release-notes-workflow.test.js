@@ -12,6 +12,10 @@ const finalizeWorkflow = readFileSync(
   '.github/workflows/finalize-release.yml',
   'utf8',
 );
+const releaseNotesScript = readFileSync(
+  'scripts/generate-release-notes.js',
+  'utf8',
+);
 
 function getStep(workflow, name) {
   const match = new RegExp(
@@ -66,8 +70,21 @@ describe('stable release notes workflow', () => {
     );
     expect(validate).toContain('is not a stable release tag');
     expect(validate).toContain('exit 1');
-    expect(generate).toContain('timeout-minutes: 15');
+    expect(generate).toContain('timeout-minutes: 35');
     expect(generate).toContain('continue-on-error: true');
+
+    // The step timeout must exceed the script's internal budget; otherwise
+    // the runner SIGKILLs the step and even the fallback notes are lost.
+    const stepTimeoutMin = Number(
+      generate.match(/timeout-minutes:\s*(\d+)/)[1],
+    );
+    const budgetMs = releaseNotesScript
+      .match(/totalTimeoutMs\s*=\s*([\d_]+)\s*\*\s*([\d_]+)/)
+      .slice(1)
+      .map((part) => Number(part.replace(/_/g, '')))
+      .reduce((a, b) => a * b, 1);
+    expect(stepTimeoutMin * 60_000).toBeGreaterThan(budgetMs);
+
     expect(generate).toContain('GitHub-generated notes');
     expect(generate).toContain('node scripts/generate-release-notes.js');
     expect(update).toContain('continue-on-error: true');
