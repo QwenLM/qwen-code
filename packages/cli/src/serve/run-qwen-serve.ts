@@ -3712,6 +3712,8 @@ async function runQwenServeImpl(
       isWorkspaceTrusted: () => trustedWorkspace,
       assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
+      // TODO(#8138): replace with a worktree-aware resolver once the HTTP
+      // layer can identify the worktree context for a request.
       resolveContextFile: (filename, ws) => ({
         target: path.resolve(ws, filename),
         effectiveWorkspace: ws,

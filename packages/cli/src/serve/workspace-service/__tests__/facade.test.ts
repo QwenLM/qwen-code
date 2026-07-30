@@ -2938,5 +2938,25 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.action).toBe('created');
       expect(result.path).toBe(path.join(tmpDir, 'QWEN.md'));
     });
+
+    it('throws when resolveContextFile returns a target outside its effectiveWorkspace', async () => {
+      const outsideDir = path.join(tmpDir, 'outside');
+      await fs.mkdir(outsideDir, { recursive: true });
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          resolveContextFile: (_filename, _ws) => ({
+            target: path.resolve(outsideDir, '..', 'escape.md'),
+            effectiveWorkspace: outsideDir,
+          }),
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /resolves outside/,
+      );
+    });
   });
 });

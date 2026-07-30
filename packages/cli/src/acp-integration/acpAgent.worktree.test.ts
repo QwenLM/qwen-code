@@ -342,6 +342,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getMcpServers: vi.fn().mockReturnValue({}),
       setMcpBudgetEventCallback: vi.fn(),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
     };
   }
 
