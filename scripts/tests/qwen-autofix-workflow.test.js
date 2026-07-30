@@ -5266,8 +5266,8 @@ describe('qwen-autofix workflow', () => {
     // push failure on an unmoved branch no-ops the merge ("Already up to
     // date") and must NOT tell the reviewer to re-check commits that
     // never existed.
-    expect(pushAndReportStep).toContain(
-      'PRE_MERGE_HEAD="$(git rev-parse HEAD)"',
+    expect(pushAndReportStep).toMatch(
+      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n\s+if ! git -c user\.name=/,
     );
     expect(pushAndReportStep).toMatch(
       /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
@@ -5298,7 +5298,9 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep).toMatch(
       /if \[\[ "\$\{PUSH_RACE_MERGED\}" == .true. \]\]; then\n\s+echo\n\s+echo "⚠️ The branch received new commits/,
     );
-    expect(pushAndReportStep).toContain('PUSH_RACE_MERGED');
+    expect(pushAndReportStep).toMatch(
+      /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
+    );
     expect(pushAndReportStep).toContain('verification predates that merge');
     // Bounded: the loop gives up after the last attempt instead of spinning.
     // The structural pin connects the guard value to the error exit — a
