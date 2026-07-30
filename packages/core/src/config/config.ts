@@ -1730,6 +1730,103 @@ function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
   );
 }
 
+const DERIVED_CONFIG = Symbol('derivedConfig');
+
+function isDerivedConfig(config: Config): boolean {
+  return (
+    (config as Config & { [DERIVED_CONFIG]?: boolean })[DERIVED_CONFIG] === true
+  );
+}
+
+/**
+ * State ownership for a Config derived through {@link deriveConfig}.
+ *
+ * - `shared`: reads and mutations intentionally resolve to the parent.
+ * - `copied`: the factory installs an own snapshot on the child.
+ * - `child-local`: Config lazily installs independent mutable state.
+ * - `prohibited`: the child must not resolve the parent's runtime object.
+ */
+export type DerivedConfigStateOwnership =
+  | 'shared'
+  | 'copied'
+  | 'child-local'
+  | 'prohibited';
+
+export const DERIVED_CONFIG_STATE_OWNERSHIP = {
+  workspacePathAndContext: 'shared',
+  fileService: 'shared',
+  toolRegistry: 'shared',
+  permissionManager: 'shared',
+  approvalModeState: 'shared',
+  fileReadCache: 'child-local',
+  memoryPressureMonitor: 'child-local',
+  activeTodoState: 'child-local',
+  chatRecordingService: 'shared',
+  goalRuntime: 'prohibited',
+  sessionWriterState: 'prohibited',
+  canonicalLifecycle: 'prohibited',
+  approvalModeMutation: 'prohibited',
+} as const satisfies Record<string, DerivedConfigStateOwnership>;
+
+export type DerivedConfigOverrides = Partial<
+  Pick<
+    Config,
+    | 'getTargetDir'
+    | 'getCwd'
+    | 'getWorkingDir'
+    | 'getProjectRoot'
+    | 'getPlanFilePath'
+    | 'getWorkspaceContext'
+    | 'getFileService'
+    | 'getToolRegistry'
+    | 'getPermissionManager'
+    | 'getApprovalMode'
+    | 'getShouldAvoidPermissionPrompts'
+    | 'getMcpServers'
+    | 'getBareMode'
+    | 'isSafeMode'
+    | 'getSandbox'
+    | 'getScreenReader'
+    | 'getModel'
+    | 'getMaxSessionTurns'
+    | 'getMaxToolCalls'
+    | 'getMaxSubagentDepth'
+    | 'getChatRecordingService'
+    | 'getTranscriptPath'
+    | 'getDisableAllHooks'
+    | 'getHookSystem'
+    | 'getMessageBus'
+    | 'getAutoMemoryPrompt'
+    | 'getUserMemory'
+  >
+>;
+
+/**
+ * Creates a Config overlay while keeping prototype delegation inside one
+ * reviewable boundary. Callers supply only public getter overrides; Config's
+ * child-local and prohibited runtime state remains enforced by its accessors.
+ */
+export function deriveConfig(
+  base: Config,
+  overrides: DerivedConfigOverrides = {},
+): Config {
+  const derived = Object.create(base) as Config;
+  for (const key in overrides) {
+    if (!Object.hasOwn(overrides, key)) continue;
+    const override = overrides[key as keyof DerivedConfigOverrides];
+    if (override !== undefined) {
+      Object.defineProperty(derived, key, {
+        value: override,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
+    }
+  }
+  Object.defineProperty(derived, DERIVED_CONFIG, { value: true });
+  return derived;
+}
+
 export class Config {
   private sessionId: string;
   private sessionSourceType?: string;
@@ -1906,6 +2003,7 @@ export class Config {
    * single-block layout when it doesn't match the request's system text.
    */
   private staticSystemPrefix: string | undefined;
+
   /**
    * Volatile system-prompt layer: the managed auto-memory section
    * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
@@ -2574,6 +2672,9 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot be initialized');
+    }
     if (this.initialized) {
       throw Error('Config was already initialized');
     }
@@ -3798,6 +3899,9 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot start new sessions');
+    }
     if (this.chatRecordingService?.hasWriteOwnership()) {
       throw new SessionWriterUnavailableError();
     }
@@ -4845,6 +4949,9 @@ export class Config {
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
   }> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot relocate working directories');
+    }
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -4979,6 +5086,7 @@ export class Config {
     skipSessionWriter?: boolean;
     strictResourceCleanup?: boolean;
   }): Promise<void> {
+    if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
     this.settingsWatcher?.stopWatching();
     const closeWriter = () =>
@@ -5973,6 +6081,9 @@ export class Config {
    * Clean up Team runtime — stops all teammates and clears state.
    */
   async cleanupTeamRuntime(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot clean up Team runtime');
+    }
     const manager = this.teamManager;
     if (!manager) {
       return;
@@ -5999,6 +6110,9 @@ export class Config {
    * always removes worktrees regardless of preserveArtifacts.
    */
   async cleanupArenaRuntime(force?: boolean): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot clean up Arena runtime');
+    }
     const manager = this.arenaManager;
     if (!manager) {
       return;
@@ -6095,6 +6209,9 @@ export class Config {
       fromApprovedPlanExit?: boolean;
     },
   ): void {
+    if (isDerivedConfig(this)) {
+      throw new Error('Derived Configs cannot change approval mode');
+    }
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -7563,12 +7680,14 @@ export class Config {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    if (isDerivedConfig(this)) return;
     if (this.chatRecordingService?.hasWriteOwnership()) {
       await this.chatRecordingService.assertCanStartTurn();
     }
   }
 
   hasSessionWriteOwnership(): boolean {
+    if (isDerivedConfig(this)) return false;
     return (
       this.pendingSessionWriterLease !== undefined ||
       this.chatRecordingService?.hasWriteOwnership() === true
@@ -7576,6 +7695,9 @@ export class Config {
   }
 
   setSessionWriterReclaimPolicy(policy: 'local' | 'never'): void {
+    if (isDerivedConfig(this)) {
+      throw new SessionWriterUnavailableError();
+    }
     if (this.initialized) {
       throw new SessionWriterUnavailableError();
     }
@@ -7583,6 +7705,9 @@ export class Config {
   }
 
   setSessionWriterTakeoverPolicy(policy: 'never' | 'certified'): void {
+    if (isDerivedConfig(this)) {
+      throw new SessionWriterUnavailableError();
+    }
     if (this.initialized) {
       throw new SessionWriterUnavailableError();
     }
@@ -7590,6 +7715,9 @@ export class Config {
   }
 
   closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+    if (isDerivedConfig(this)) {
+      throw new SessionWriterUnavailableError();
+    }
     if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
       this.sessionWriterHandoffRequested = true;
     }
