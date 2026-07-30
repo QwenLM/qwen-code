@@ -6,7 +6,11 @@
 
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
-import { deriveWorktreeConfig, type Config } from '../../config/config.js';
+import {
+  deriveConfig,
+  deriveWorktreeConfig,
+  type Config,
+} from '../../config/config.js';
 import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
@@ -1255,12 +1259,11 @@ async function createSchemaConfigOverride(
   base: Config,
   schema: Record<string, unknown>,
 ): Promise<Config> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override: any = Object.create(base);
-  await rebuildToolRegistryOnOverride(override as Config, base);
+  const override = deriveConfig(base);
+  await rebuildToolRegistryOnOverride(override, base);
   const registry = override.getToolRegistry();
   registry.registerTool(new SyntheticOutputTool(schema));
-  return override as Config;
+  return override;
 }
 
 export class WorkflowOrchestrator {

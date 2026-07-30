@@ -16,6 +16,7 @@ import globals from 'globals';
 import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import noConfigObjectCreate from './eslint-rules/no-config-object-create.js';
 
 export default tseslint.config(
   {
@@ -248,6 +249,27 @@ export default tseslint.config(
     },
     rules: {
       'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/core/src/**/*.ts'],
+    ignores: [
+      'packages/core/src/config/config.ts',
+      '**/*.test.ts',
+      '**/*.spec.ts',
+      '**/__tests__/**',
+      '**/generated/**',
+      '**/*.generated.ts',
+    ],
+    plugins: {
+      'qwen-code': {
+        rules: {
+          'no-config-object-create': noConfigObjectCreate,
+        },
+      },
+    },
+    rules: {
+      'qwen-code/no-config-object-create': 'error',
     },
   },
   {
