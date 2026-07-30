@@ -9,11 +9,11 @@ import {
 } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1501,7 +1501,7 @@ describe('GithubChannel', () => {
       },
     );
 
-    it('persists and recovers final delivery when GitHub definitely did not write', async () => {
+    it('preserves concurrent delivery while recovering a pending final', async () => {
       await connectForPublication();
       const sleep = vi.fn().mockResolvedValue(undefined);
       (
@@ -1541,18 +1541,42 @@ describe('GithubChannel', () => {
       ]);
 
       mockOctokit.rest.issues.createComment.mockReset();
-      mockOctokit.rest.issues.createComment.mockResolvedValue({
-        data: {
-          id: 2002,
-          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
-        },
-      });
+      let resolveRetry!: (value: {
+        data: { id: number; html_url: string };
+      }) => void;
+      mockOctokit.rest.issues.createComment.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRetry = resolve;
+        }),
+      );
       channel = new TestableGithubChannel(
         'test-github',
         makeConfig(),
         makeBridge(),
       );
       await connectForPublication();
+
+      const current = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+      writeFileSync(
+        pendingPath,
+        JSON.stringify([
+          ...current,
+          {
+            id: 'concurrent',
+            createdAt: new Date().toISOString(),
+            chatId: 'owner/repo',
+            threadId: 'issue:43',
+            fullText: 'Concurrent reply',
+            sessionId: 'session-concurrent',
+          },
+        ]),
+      );
+      resolveRetry({
+        data: {
+          id: 2002,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
+        },
+      });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
@@ -1561,7 +1585,39 @@ describe('GithubChannel', () => {
         issue_number: 42,
         body: 'Final reply',
       });
-      expect(existsSync(pendingPath)).toBe(false);
+      expect(JSON.parse(readFileSync(pendingPath, 'utf-8'))).toMatchObject([
+        {
+          id: 'concurrent',
+          threadId: 'issue:43',
+          fullText: 'Concurrent reply',
+        },
+      ]);
+
+      mockOctokit.rest.issues.createComment.mockReset();
+      let resolveUnreadableRetry!: (value: {
+        data: { id: number; html_url: string };
+      }) => void;
+      mockOctokit.rest.issues.createComment.mockReturnValue(
+        new Promise((resolve) => {
+          resolveUnreadableRetry = resolve;
+        }),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await connectForPublication();
+      writeFileSync(pendingPath, '{');
+      resolveUnreadableRetry({
+        data: {
+          id: 2003,
+          html_url: 'https://github.com/owner/repo/issues/43#issuecomment-2003',
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(readFileSync(pendingPath, 'utf-8')).toBe('{');
     });
 
     it('distinguishes pre-delivery validation from ambiguous failures', async () => {

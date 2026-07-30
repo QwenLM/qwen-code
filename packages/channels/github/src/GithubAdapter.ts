@@ -540,7 +540,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async retryPendingFinalDeliveries(): Promise<void> {
-    let pending = this.readPendingFinalDeliveries();
+    const pending = this.readPendingFinalDeliveries();
     for (const record of pending) {
       const auditBase = this.buildPublicationAuditBase({
         chatId: record.chatId,
@@ -561,11 +561,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           3,
           isDefiniteNoWriteGithubError,
         );
-        pending = pending.filter((item) => item.id !== record.id);
         // ponytail: GitHub has no createComment idempotency key without adding
         // a public marker to the verbatim final body; marker-upsert if that
         // contract changes.
-        this.writePendingFinalDeliveries(pending);
+        const current = this.readPendingFinalDeliveries(true);
+        this.writePendingFinalDeliveries(
+          current.filter((item) => item.id !== record.id),
+        );
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -576,12 +578,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         });
       } catch (err) {
         if (isDefiniteNoWriteGithubError(err)) {
-          record.attempts = (record.attempts ?? 0) + 1;
-          this.writePendingFinalDeliveries(pending);
+          const current = this.readPendingFinalDeliveries(true);
+          this.writePendingFinalDeliveries(
+            current.map((item) =>
+              item.id === record.id
+                ? { ...item, attempts: (item.attempts ?? 0) + 1 }
+                : item,
+            ),
+          );
           continue;
         }
-        pending = pending.filter((item) => item.id !== record.id);
-        this.writePendingFinalDeliveries(pending);
+        const current = this.readPendingFinalDeliveries(true);
+        this.writePendingFinalDeliveries(
+          current.filter((item) => item.id !== record.id),
+        );
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -601,7 +611,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return this.channelFilePath('github-pending-deliveries.json');
   }
 
-  private readPendingFinalDeliveries(): PendingFinalDelivery[] {
+  private readPendingFinalDeliveries(strict = false): PendingFinalDelivery[] {
     try {
       const parsed = JSON.parse(
         readFileSync(this.pendingFinalDeliveriesPath(), 'utf-8'),
@@ -615,6 +625,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             200,
           )}\n`,
         );
+        if (strict) throw err;
       }
       return [];
     }
