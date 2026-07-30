@@ -110,6 +110,11 @@ export interface FirstOutputObservation {
   serverTimestampMs: number | null;
 }
 
+export interface FirstOutputUserEchoObservation {
+  receivedAtMs: number;
+  eventId: number | null;
+}
+
 export interface FirstOutputTerminal {
   kind: 'complete' | 'error';
   receivedAtMs: number;
@@ -130,6 +135,7 @@ export interface FirstOutputTrackerSnapshot {
   bufferedBeforeAcceptanceCount: number;
   matchingEventCount: number;
   matchingTerminalCount: number;
+  userEcho: FirstOutputUserEchoObservation | null;
   firstOutput: FirstOutputObservation | null;
   firstAnswer: FirstOutputObservation | null;
   finalAnswerText: string | null;
@@ -300,6 +306,26 @@ export function classifyFirstOutputEvent(
   return { type: 'ignore', reason: 'non_output_update' };
 }
 
+function isMatchingUserEcho(
+  event: BenchmarkDaemonEvent,
+  promptId: string,
+): boolean {
+  if (
+    event.type !== 'session_update' ||
+    event.promptId !== promptId ||
+    isReplayMeta(event._meta) ||
+    !isRecord(event.data) ||
+    !isRecord(event.data['update'])
+  ) {
+    return false;
+  }
+  const update = event.data['update'];
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  return (
+    update['sessionUpdate'] === 'user_message_chunk' && !isReplayMeta(meta)
+  );
+}
+
 export class FirstOutputTracker {
   readonly #maxBufferedEvents: number;
   readonly #buffer: TimedDaemonEvent[] = [];
@@ -307,6 +333,7 @@ export class FirstOutputTracker {
   #bufferedBeforeAcceptanceCount = 0;
   #matchingEventCount = 0;
   #matchingTerminalCount = 0;
+  #userEcho: FirstOutputUserEchoObservation | null = null;
   #firstOutput: FirstOutputObservation | null = null;
   #firstAnswer: FirstOutputObservation | null = null;
   #answerChunks: string[] = [];
@@ -370,6 +397,7 @@ export class FirstOutputTracker {
       bufferedBeforeAcceptanceCount: this.#bufferedBeforeAcceptanceCount,
       matchingEventCount: this.#matchingEventCount,
       matchingTerminalCount: this.#matchingTerminalCount,
+      userEcho: this.#userEcho ? { ...this.#userEcho } : null,
       firstOutput: this.#firstOutput ? { ...this.#firstOutput } : null,
       firstAnswer: this.#firstAnswer ? { ...this.#firstAnswer } : null,
       finalAnswerText:
@@ -384,6 +412,13 @@ export class FirstOutputTracker {
 
   #process(event: BenchmarkDaemonEvent, receivedAtMs: number): void {
     if (this.#terminal !== null) return;
+    if (isMatchingUserEcho(event, this.#promptId!)) {
+      this.#userEcho ??= {
+        receivedAtMs,
+        eventId: numberOrNull(event.id),
+      };
+      return;
+    }
     const classified = classifyFirstOutputEvent(event, this.#promptId!);
     if (classified.type === 'ignore') return;
     this.#matchingEventCount += 1;
@@ -895,6 +930,7 @@ export interface FirstOutputSessionTimestamps {
   sseReady: number | null;
   promptStart: number | null;
   promptAccepted: number | null;
+  userEcho: number | null;
   providerRequestArrival: number | null;
   providerReady: number | null;
   firstModelOutput: number | null;
@@ -906,12 +942,78 @@ export interface FirstOutputSessionTimings {
   processToSessionReadyMs: number | null;
   /** Idle window actually granted by the configured post-session dwell. */
   sseReadyToPromptMs: number | null;
+  promptToAcceptanceMs: number | null;
+  /**
+   * Signed offset from HTTP acceptance to Provider request arrival. A negative
+   * value is valid when dispatch reaches the Provider before the client reads
+   * the `202` response.
+   */
+  acceptanceToProviderRequestArrivalMs: number | null;
+  promptToUserEchoMs: number | null;
+  /**
+   * Signed offset from the relayed user echo to Provider request arrival. SSE
+   * delivery can lag the already-dispatched Provider request.
+   */
+  userEchoToProviderRequestArrivalMs: number | null;
+  /** Existing daemon FIFO queue-wait duration for this isolated prompt. */
+  daemonPromptQueueWaitMs: number | null;
   promptToProviderRequestArrivalMs: number | null;
   promptToFirstModelOutputMs: number | null;
   promptToFirstAnswerTextMs: number | null;
   providerReadyToFirstModelOutputMs: number | null;
   processToFirstModelOutputMs: number | null;
   promptToTerminalMs: number | null;
+}
+
+export function computeFirstOutputSessionTimings(
+  timestamps: FirstOutputSessionTimestamps,
+  processStartedAtMs: number,
+  daemonPromptQueueWaitMs: number | null,
+): FirstOutputSessionTimings {
+  const duration = (end: number | null, start: number | null) =>
+    end === null || start === null ? null : end - start;
+  return {
+    processToSessionReadyMs: duration(
+      timestamps.sessionReady,
+      processStartedAtMs,
+    ),
+    sseReadyToPromptMs: duration(timestamps.promptStart, timestamps.sseReady),
+    promptToAcceptanceMs: duration(
+      timestamps.promptAccepted,
+      timestamps.promptStart,
+    ),
+    acceptanceToProviderRequestArrivalMs: duration(
+      timestamps.providerRequestArrival,
+      timestamps.promptAccepted,
+    ),
+    promptToUserEchoMs: duration(timestamps.userEcho, timestamps.promptStart),
+    userEchoToProviderRequestArrivalMs: duration(
+      timestamps.providerRequestArrival,
+      timestamps.userEcho,
+    ),
+    daemonPromptQueueWaitMs,
+    promptToProviderRequestArrivalMs: duration(
+      timestamps.providerRequestArrival,
+      timestamps.promptStart,
+    ),
+    promptToFirstModelOutputMs: duration(
+      timestamps.firstModelOutput,
+      timestamps.promptStart,
+    ),
+    promptToFirstAnswerTextMs: duration(
+      timestamps.firstAnswerText,
+      timestamps.promptStart,
+    ),
+    providerReadyToFirstModelOutputMs: duration(
+      timestamps.firstModelOutput,
+      timestamps.providerReady,
+    ),
+    processToFirstModelOutputMs: duration(
+      timestamps.firstModelOutput,
+      processStartedAtMs,
+    ),
+    promptToTerminalMs: duration(timestamps.terminal, timestamps.promptStart),
+  };
 }
 
 export function findInvalidTimings(
@@ -922,7 +1024,12 @@ export function findInvalidTimings(
     keyof FirstOutputSessionTimings
   >) {
     const value = timings[key];
-    if (value !== null && (!Number.isFinite(value) || value < 0)) {
+    const negativeInvalid =
+      value !== null &&
+      value < 0 &&
+      key !== 'acceptanceToProviderRequestArrivalMs' &&
+      key !== 'userEchoToProviderRequestArrivalMs';
+    if (value !== null && (!Number.isFinite(value) || negativeInvalid)) {
       invalid.push([key, value]);
     }
   }
@@ -997,6 +1104,11 @@ export type FirstOutputMetricName =
   | 'processToListenMs'
   | 'processToSessionReadyMs'
   | 'sseReadyToPromptMs'
+  | 'promptToAcceptanceMs'
+  | 'acceptanceToProviderRequestArrivalMs'
+  | 'promptToUserEchoMs'
+  | 'userEchoToProviderRequestArrivalMs'
+  | 'daemonPromptQueueWaitMs'
   | 'promptToProviderRequestArrivalMs'
   | 'promptToFirstModelOutputMs'
   | 'promptToFirstAnswerTextMs'

@@ -4997,11 +4997,13 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].force).toBe(false);
 
       // The outgoing request is clamped to the room left in the window:
-      // estimate = 170,000 + 1 ("hi"), room = 200,000 − 170,001 − 10,000.
+      // char/4("hi") = 1 token, inflated by the conservative safety factor
+      // (1.5x, ceil'd) to 2, estimate = 170,000 + 2,
+      // room = 200,000 − 170,002 − 10,000.
       const requestConfig = vi.mocked(
         mockContentGenerator.generateContentStream,
       ).mock.calls[0][0].config as { maxOutputTokens?: number };
-      expect(requestConfig.maxOutputTokens).toBe(19_999);
+      expect(requestConfig.maxOutputTokens).toBe(19_998);
       expect(170_000 + requestConfig.maxOutputTokens!).toBeLessThanOrEqual(
         200_000,
       );
@@ -7272,7 +7274,7 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('does not retry retryable transport stream errors after yielding a chunk', async () => {
+    it('does not retry retryable transport stream errors after yielding a content chunk', async () => {
       const transportError = Object.assign(new TypeError('terminated'), {
         cause: Object.assign(new Error('other side closed'), {
           code: 'UND_ERR_SOCKET',
@@ -7320,6 +7322,132 @@ describe('GeminiChat', async () => {
               'Partial response before socket close',
         ),
       ).toBe(true);
+    });
+
+    it('retries a transport stream error after yielding only thinking chunks', async () => {
+      // Thinking models stream thought parts within seconds, then can
+      // spend minutes reasoning — exactly when gateways close long-lived
+      // SSE connections (#7832). Thought parts are ephemeral (never
+      // recorded as the assistant's response in history), so the replay
+      // cannot duplicate user-visible output and must be allowed.
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        { text: 'Let me think about this…', thought: true },
+                      ],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered after thinking-phase retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retry-after-thinking',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered after thinking-phase retry',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry when visible content followed the thinking chunks', async () => {
+      // The content flag must accumulate across the whole attempt: once a
+      // non-thought part has flowed — even after any amount of thinking —
+      // a replay would duplicate visible output and stays blocked.
+      const transportError = Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Reasoning first…', thought: true }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Visible answer begins' }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw transportError;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-transport-no-retry-after-thinking-then-content',
+      );
+      const events: StreamEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          events.push(event);
+        }
+      }).rejects.toThrow('terminated');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(0);
     });
 
     it('retries a transport stream error after yielding only tool preparation metadata', async () => {
@@ -10357,10 +10485,12 @@ describe('GeminiChat', async () => {
       const recoveryConfig = calls[1]![0].config as {
         maxOutputTokens?: number;
       };
-      // Initial: room = 131072 − 71350 − 10000 = 49722 (below the 64K ceiling).
-      expect(initialConfig.maxOutputTokens).toBe(49_722);
+      // Initial: char/4("hi")=1 token, inflated by the conservative safety
+      // factor (1.5x, ceil'd) to 2, room = 131072 − 71351 − 10000 = 49721
+      // (below the 64K ceiling).
+      expect(initialConfig.maxOutputTokens).toBe(49_721);
       // Recovery: prompt grew to ~121K → re-clamped to the 4,000 floor, NOT
-      // the stale 49,722 (which would overflow the window by ~40K).
+      // the stale 49,721 (which would overflow the window by ~40K).
       expect(recoveryConfig.maxOutputTokens).toBe(4_000);
     });
 

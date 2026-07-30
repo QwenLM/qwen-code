@@ -349,6 +349,7 @@ export interface ChatRecord {
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
     | NotificationRecordPayload
+    | UserPromptRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | FileHistorySnapshotRecordPayload
@@ -391,6 +392,19 @@ export interface ChatRecord {
   };
 }
 
+/**
+ * Stored payload for user-prompt records whose model-bound parts were
+ * augmented by a UserPromptSubmit hook. `message` keeps the exact
+ * model-bound Content (resume must replay what the model actually saw);
+ * this payload preserves the user-authored projection for UI/resume
+ * display. Hook-injected text stays recoverable from the tagged part in
+ * `message.parts` via `isUserPromptSubmitContextPartText`.
+ */
+export interface UserPromptRecordPayload {
+  /** Pre-injection projection of the user's own prompt text. */
+  displayText?: string;
+}
+
 export interface NotificationRecordPayload {
   displayText: string;
   backgroundTask?: {
@@ -411,13 +425,13 @@ export interface AgentBootstrapRecordPayload {
    */
   history: Content[];
   /**
-   * Immutable launch-time system instruction for the fork runtime. Resume must
-   * reuse this exact value rather than reading the current parent config.
+   * Legacy launch-time system instruction. Current writers omit this field and
+   * resume reconstructs the instruction from the current parent runtime.
    */
   systemInstruction?: string | Content;
   /**
-   * Immutable launch-time tool declarations / allowlist for the fork runtime.
-   * Resume must reuse this exact capability set or stay blocked.
+   * Legacy launch-time tool declarations / allowlist. Current writers omit
+   * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
 }
@@ -611,6 +625,7 @@ export class ChatRecordingService {
   private operationTail: Promise<void> = Promise.resolve();
   private acceptingWrites = false;
   private closePromise: Promise<void> | undefined;
+  private handoffRequested = false;
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -1152,15 +1167,21 @@ export class ChatRecordingService {
     }
   }
 
-  close(): Promise<void> {
+  close(options?: { handoff?: boolean }): Promise<void> {
+    if (options?.handoff) {
+      this.handoffRequested = true;
+    }
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
-    this.beginClose();
+    this.beginClose(options);
     this.closePromise = this.closeOnce();
     return this.closePromise;
   }
 
-  beginClose(): void {
+  beginClose(options?: { handoff?: boolean }): void {
+    if (options?.handoff) {
+      this.handoffRequested = true;
+    }
     this.autoTitleController?.abort();
     this.acceptingWrites = false;
     if (this.state === 'active') {
@@ -1175,9 +1196,23 @@ export class ChatRecordingService {
     } catch (error) {
       flushFailure = error;
     }
+    if (this.handoffRequested && flushFailure !== undefined) {
+      // Fail closed: a handoff whose final flush did not durably land must
+      // neither seal (the proof would be incomplete) nor release (a successor
+      // could take over records that were never persisted). Unlike the
+      // release-then-throw normal-close path below, it retains the active lock
+      // so write ownership stays unambiguous until an external writer fence
+      // recovers it.
+      this.state = 'integrity_failed';
+      throw flushFailure;
+    }
     const lease = this.binding?.lease;
     try {
-      await lease?.release();
+      if (this.handoffRequested) {
+        await lease?.sealForHandoff();
+      } else {
+        await lease?.release();
+      }
       this.binding = undefined;
       this.state = 'closed';
     } catch (error) {
@@ -1255,6 +1290,7 @@ export class ChatRecordingService {
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
+    payload?: UserPromptRecordPayload,
   ): void {
     try {
       this.turnParentUuids.push(this.lastRecordUuid);
@@ -1262,6 +1298,7 @@ export class ChatRecordingService {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
+        ...(payload ? { systemPayload: payload } : {}),
       };
       this.appendRecord(record);
     } catch (error) {
