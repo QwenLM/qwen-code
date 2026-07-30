@@ -20,6 +20,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
+import fs from 'node:fs';
 import os from 'node:os';
 import path, { basename } from 'node:path';
 import v8 from 'node:v8';
@@ -105,6 +106,10 @@ import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
 import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
+import {
+  ErrorBoundary,
+  consumeLastRenderError,
+} from './ui/components/shared/ErrorBoundary.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -164,6 +169,34 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 import { loadSandboxConfig } from './config/sandboxConfig.js';
 import { runAcpAgent } from './acp-integration/acpAgent.js';
 
+export function setupUncaughtExceptionHandler(sessionId: string) {
+  process.on('uncaughtException', (error) => {
+    const timestamp = new Date().toISOString();
+    const line = `${timestamp} [ERROR] [STARTUP] [UNCAUGHT_EXCEPTION] ${error.message}\n${error.stack ?? ''}\n`;
+    // debugLogger.error() uses async fs.appendFile — the write would be
+    // abandoned by the process.exit() below. Write synchronously instead.
+    try {
+      fs.appendFileSync(Storage.getDebugLogPath(sessionId), line, 'utf8');
+    } catch {
+      // Best-effort: if the debug dir doesn't exist yet or the disk is
+      // full, the stderr output below is the fallback record.
+    }
+    // In VP / alternate-screen mode, stderr is written to the alternate
+    // buffer which is discarded on teardown. Leave the alternate screen
+    // *before* writing the error so the user actually sees it.
+    try {
+      process.stdout.write('\x1b[?1049l'); // leave alternate screen
+      process.stdout.write('\x1b[?25h'); // show cursor
+    } catch {
+      // stdout may be broken; the debug log above is the primary record.
+    }
+    writeStderrLine(
+      `\nFatal: uncaught exception (logged to debug file)\n${error.stack ?? error.message}`,
+    );
+    process.exit(1);
+  });
+}
+
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
   process.on('unhandledRejection', (reason, _promise) => {
@@ -178,6 +211,9 @@ Stack trace:
 ${reason.stack}`
         : ''
     }`;
+    // Always persist to the debug log — the app event sink may have no
+    // active UI listener (e.g. after Ink unmounts on a rendering crash).
+    debugLogger.error(errorMessage);
     appEvents.emit(AppEvent.LogError, errorMessage);
     if (!unhandledRejectionOccurred) {
       unhandledRejectionOccurred = true;
@@ -187,7 +223,9 @@ ${reason.stack}`
 }
 
 function getSignalExitCode(signal: NodeJS.Signals): number {
-  return signal === 'SIGINT' ? 130 : 143;
+  if (signal === 'SIGINT') return 130;
+  if (signal === 'SIGHUP') return 129;
+  return 143;
 }
 
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
@@ -218,13 +256,18 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   const handleSigint = () => {
     handleSignal('SIGINT');
   };
+  const handleSighup = () => {
+    handleSignal('SIGHUP');
+  };
 
   process.once('SIGTERM', handleSigterm);
   process.once('SIGINT', handleSigint);
+  process.once('SIGHUP', handleSighup);
 
   return () => {
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
+    process.removeListener('SIGHUP', handleSighup);
   };
 }
 
@@ -320,39 +363,54 @@ export async function startInteractiveUI(
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
-          <SettingsContext.Provider value={settings}>
-            <KeypressProvider
-              kittyProtocolEnabled={kittyProtocolStatus.enabled}
-              config={config}
-              debugKeystrokeLogging={
-                settings.merged.general?.debugKeystrokeLogging
-              }
-              pasteWorkaround={
-                process.platform === 'win32' || nodeMajorVersion < 20
-              }
-              initialCapturedInput={initialCapturedInput}
-            >
-              <SessionStatsProvider sessionId={config.getSessionId()}>
-                <VimModeProvider settings={settings}>
-                  <AgentViewProvider config={config}>
-                    <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                      />
-                    </BackgroundTaskViewProvider>
-                  </AgentViewProvider>
-                </VimModeProvider>
-              </SessionStatsProvider>
-            </KeypressProvider>
-          </SettingsContext.Provider>
-        </DualOutputContext.Provider>
-      </RemoteInputContext.Provider>
+      <ErrorBoundary
+        onError={(error, info) => {
+          debugLogger.error(
+            `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+          );
+          // The fallback replaces AppWrapper, unmounting KeypressProvider and
+          // Ctrl+C handling. Schedule a graceful exit so the session does not
+          // hang (e.g. under the Kitty keyboard protocol where Ctrl+C is a
+          // keypress, not SIGINT).
+          setTimeout(() => {
+            void runExitCleanup().then(() => process.exit(1));
+          }, 5000);
+        }}
+      >
+        <RemoteInputContext.Provider value={remoteInputWatcher}>
+          <DualOutputContext.Provider value={dualOutputBridge}>
+            <SettingsContext.Provider value={settings}>
+              <KeypressProvider
+                kittyProtocolEnabled={kittyProtocolStatus.enabled}
+                config={config}
+                debugKeystrokeLogging={
+                  settings.merged.general?.debugKeystrokeLogging
+                }
+                pasteWorkaround={
+                  process.platform === 'win32' || nodeMajorVersion < 20
+                }
+                initialCapturedInput={initialCapturedInput}
+              >
+                <SessionStatsProvider sessionId={config.getSessionId()}>
+                  <VimModeProvider settings={settings}>
+                    <AgentViewProvider config={config}>
+                      <BackgroundTaskViewProvider config={config}>
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                        />
+                      </BackgroundTaskViewProvider>
+                    </AgentViewProvider>
+                  </VimModeProvider>
+                </SessionStatsProvider>
+              </KeypressProvider>
+            </SettingsContext.Provider>
+          </DualOutputContext.Provider>
+        </RemoteInputContext.Provider>
+      </ErrorBoundary>
     );
   };
 
@@ -395,13 +453,24 @@ export async function startInteractiveUI(
   registerCleanup(async () => {
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
-    // Explicitly disable the Kitty keyboard protocol before unmounting Ink so
-    // that the disable escape sequence is written while stdout is still fully
-    // operational, preventing garbled terminal output after the app exits.
-    disableKittyProtocol();
     instance.unmount();
+    // Pop the Kitty keyboard protocol flags on the *main* screen buffer.
+    // Ink's own unmount already pops the alternate-screen push (if any)
+    // before writing `?1049l`. Running our disable after unmount ensures
+    // the main-screen push from `detectAndEnableKittyProtocol()` is
+    // balanced on the correct buffer (see #7779).
+    disableKittyProtocol();
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
+    // If the ErrorBoundary caught a rendering error, echo it to stderr
+    // now that we are back on the main screen buffer. In VP mode the
+    // fallback UI was drawn on the alternate screen and is gone.
+    const renderError = consumeLastRenderError();
+    if (renderError) {
+      writeStderrLine(
+        `\nRendering error (logged to debug file): ${renderError.message}`,
+      );
+    }
   });
 }
 
@@ -831,6 +900,11 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+
+    // Install the uncaughtException handler once the session ID is known.
+    // Before this point VP mode is not active, so Node's default stderr
+    // output is visible and sufficient.
+    setupUncaughtExceptionHandler(config.getSessionId());
 
     // Startup optimization: preconnect API to warm TCP+TLS connection
     // Fires early; cost is one HEAD request even for local-only commands

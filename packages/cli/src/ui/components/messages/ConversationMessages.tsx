@@ -16,6 +16,7 @@ import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
+import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 
 interface UserMessageProps {
   text: string;
@@ -247,21 +248,35 @@ export const AssistantMessageContent: React.FC<
   />
 );
 
+// Partial markdown arriving during thought streaming can contain unclosed
+// code fences or half-formed tables. If MarkdownDisplay's parser throws on
+// such input, the ErrorBoundary degrades to plain text instead of taking
+// down the entire VP tree (which previously caused a silent process exit
+// because Ink's internal boundary writes the error to the alternate screen
+// and discards it on teardown).
+const thoughtMarkdownFallback = (error: Error) => (
+  <Text color={theme.text.secondary} dimColor>
+    {error.message}
+  </Text>
+);
+
 export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   text,
   isPending,
   availableTerminalHeight,
   contentWidth,
 }) => (
-  <PrefixedMarkdownMessage
-    text={text}
-    prefix="✦"
-    prefixColor={theme.text.secondary}
-    isPending={isPending}
-    availableTerminalHeight={availableTerminalHeight}
-    contentWidth={contentWidth}
-    textColor={theme.text.secondary}
-  />
+  <ErrorBoundary fallback={thoughtMarkdownFallback}>
+    <PrefixedMarkdownMessage
+      text={text}
+      prefix="✦"
+      prefixColor={theme.text.secondary}
+      isPending={isPending}
+      availableTerminalHeight={availableTerminalHeight}
+      contentWidth={contentWidth}
+      textColor={theme.text.secondary}
+    />
+  </ErrorBoundary>
 );
 
 export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
@@ -270,12 +285,14 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
   availableTerminalHeight,
   contentWidth,
 }) => (
-  <ContinuationMarkdownMessage
-    text={text}
-    isPending={isPending}
-    availableTerminalHeight={availableTerminalHeight}
-    contentWidth={contentWidth}
-    basePrefix="✦"
-    textColor={theme.text.secondary}
-  />
+  <ErrorBoundary fallback={thoughtMarkdownFallback}>
+    <ContinuationMarkdownMessage
+      text={text}
+      isPending={isPending}
+      availableTerminalHeight={availableTerminalHeight}
+      contentWidth={contentWidth}
+      basePrefix="✦"
+      textColor={theme.text.secondary}
+    />
+  </ErrorBoundary>
 );

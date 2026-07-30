@@ -1,0 +1,98 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { Box, Text } from 'ink';
+import { theme } from '../../semantic-colors.js';
+
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+  return new Error(String(error));
+}
+
+/**
+ * Module-level store for the last rendering error. The cleanup chain in
+ * gemini.tsx reads this after `instance.unmount()` leaves the alternate
+ * screen, so the message can be echoed to the *main* screen buffer where
+ * it survives after the process exits. Without this, VP / alternate-screen
+ * mode discards the fallback UI on teardown and the user sees nothing.
+ */
+let lastRenderError: Error | undefined;
+
+export function consumeLastRenderError(): Error | undefined {
+  const err = lastRenderError;
+  lastRenderError = undefined;
+  return err;
+}
+
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  /**
+   * Custom fallback renderer. Receives the caught error and a `reset` callback
+   * that clears the boundary's error state (e.g. to retry after the offending
+   * data has changed). When omitted, a minimal default message is shown.
+   */
+  fallback?: (error: Error, reset: () => void) => ReactNode;
+  /** Optional side-effecting hook for logging the error. */
+  onError?: (error: Error, info: ErrorInfo) => void;
+}
+
+interface ErrorBoundaryState {
+  error: Error | null;
+}
+
+/**
+ * React error boundary for the Ink tree. Catches render-time errors in its
+ * subtree and shows a fallback instead of letting the exception propagate to
+ * Ink's internal boundary, which calls `handleExit(error)` → `unmount(error)`.
+ * In VP / alternate-screen mode the ErrorOverview Ink renders is written to
+ * the alternate screen buffer and immediately lost when teardown switches back
+ * to the primary buffer — the user sees a silent exit with no error message
+ * and nothing in the debug log.
+ *
+ * This boundary sits inside Ink's own and intercepts errors first, ensuring
+ * they are logged (via `onError`) and visible (via `fallback`).
+ */
+export class ErrorBoundary extends Component<
+  ErrorBoundaryProps,
+  ErrorBoundaryState
+> {
+  override state: ErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
+    return { error: normalizeError(error) };
+  }
+
+  override componentDidCatch(error: unknown, info: ErrorInfo): void {
+    const normalized = normalizeError(error);
+    lastRenderError = normalized;
+    this.props.onError?.(normalized, info);
+  }
+
+  private readonly reset = () => {
+    this.setState({ error: null });
+  };
+
+  override render(): ReactNode {
+    const { error } = this.state;
+    if (error) {
+      if (this.props.fallback) {
+        return this.props.fallback(error, this.reset);
+      }
+      return (
+        <Box flexDirection="column">
+          <Text color={theme.status.error} bold>
+            Something went wrong while rendering.
+          </Text>
+          <Text color={theme.text.secondary}>{error.message}</Text>
+        </Box>
+      );
+    }
+    return this.props.children;
+  }
+}
