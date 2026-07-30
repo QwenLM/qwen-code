@@ -1874,6 +1874,30 @@ describe('Server Config (config.ts)', () => {
       expect(Object.keys(result!)).not.toContain('playwright');
     });
 
+    it('binds command MCP servers without an explicit cwd to the session target directory', () => {
+      const explicitCwd = path.resolve('/explicit/mcp');
+      const config = new Config({
+        ...baseParams,
+        targetDir: path.resolve('/session/worktree'),
+        mcpServers: {
+          implicit: { command: 'node', args: ['server.js'] },
+          explicit: { command: 'node', cwd: explicitCwd },
+          remote: { httpUrl: 'https://example.test/mcp' },
+          sdk: { type: 'sdk', command: 'placeholder' },
+        },
+      });
+
+      expect(config.getMcpServers()).toMatchObject({
+        implicit: { cwd: path.resolve('/session/worktree') },
+        explicit: { cwd: explicitCwd },
+        remote: { httpUrl: 'https://example.test/mcp' },
+        sdk: { type: 'sdk', command: 'placeholder' },
+      });
+      expect(config.getSettingsMcpServers()?.['implicit']?.cwd).toBeUndefined();
+      expect(config.getMcpServers()?.['remote']?.cwd).toBeUndefined();
+      expect(config.getMcpServers()?.['sdk']?.cwd).toBeUndefined();
+    });
+
     it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
       const config = new Config({
         ...baseParams,
@@ -5177,6 +5201,65 @@ describe('Server Config (config.ts)', () => {
     await config.relocateWorkingDirectory(newDir);
 
     expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reconcile MCP servers with the new session cwd', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node', args: ['server.js'] } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockClear();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(config.getMcpServers()?.['local']?.cwd).toBe(newDir);
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledOnce();
+    expect(manager.discoverAllMcpToolsIncremental).toHaveBeenCalledWith(config);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should report MCP reconcile failures after moving', async () => {
+    const config = new Config({
+      ...baseParams,
+      mcpServers: { local: { command: 'node' } },
+    });
+    await config.initialize();
+    const manager = (
+      config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+      }
+    ).__mcpManagerMock;
+    await config.waitForMcpReady();
+    manager.discoverAllMcpToolsIncremental.mockRejectedValueOnce(
+      new Error('MCP failed'),
+    );
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.mcpRefreshError).toEqual(new Error('MCP failed'));
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();

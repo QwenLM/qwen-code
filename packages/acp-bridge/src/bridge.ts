@@ -109,6 +109,7 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  WORKTREE_MCP_DEFER_META_KEY,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -470,6 +471,7 @@ interface ChannelInfo {
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
+  effectiveCwd: string;
   createdAt: string;
   displayName?: string;
   /** Id of the session that spawned this one (via `create_sub_session`).
@@ -493,6 +495,8 @@ interface SessionEntry {
   recordingDegraded: boolean;
   /** Set synchronously while agent-owned state and its writer lease close. */
   closing: boolean;
+  /** Tail of cwd changes that direct shell commands must not overtake. */
+  cwdChangeQueue: Promise<void>;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -2645,17 +2649,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           async () => {
             // This legacy-named helper sanitizes and injects trace metadata
             // for any ACP request, not only prompts.
+            const request = telemetry.injectPromptContext({
+              cwd: boundWorkspace,
+              mcpServers: [],
+              ...(sourceType
+                ? { _meta: sessionSourceRequestMeta(sourceType, sourceId) }
+                : {}),
+            });
             const response = await withTimeout(
               ci.connection.newSession(
-                telemetry.injectPromptContext({
-                  cwd: boundWorkspace,
-                  mcpServers: [],
-                  ...(sourceType
-                    ? {
-                        _meta: sessionSourceRequestMeta(sourceType, sourceId),
-                      }
-                    : {}),
-                }),
+                worktree
+                  ? {
+                      ...request,
+                      _meta: {
+                        ...(isRecord(request._meta) ? request._meta : {}),
+                        [WORKTREE_MCP_DEFER_META_KEY]: true,
+                      },
+                    }
+                  : request,
               ),
               initTimeoutMs,
               'newSession',
@@ -3879,6 +3890,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
+      effectiveCwd: workspaceCwd,
       createdAt: new Date().toISOString(),
       ...(options.parentSessionId
         ? { parentSessionId: options.parentSessionId }
@@ -3897,6 +3909,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }),
       recordingDegraded: false,
       closing: false,
+      cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -6394,6 +6407,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         // State update inside the queue lambda — always executes when
         // the extMethod settles, regardless of caller timeout.
+        entry.effectiveCwd = extResult.newCwd;
         if (extResult.previousCwd !== extResult.newCwd) {
           entry.events.publish({
             type: 'session_cwd_changed',
@@ -6412,6 +6426,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Queue tail tied to the raw extMethod settlement — subsequent
       // operations wait for the actual cd to finish, not the timeout.
       entry.promptQueue = cdPromise.then(
+        () => undefined,
+        () => undefined,
+      );
+      entry.cwdChangeQueue = cdPromise.then(
         () => undefined,
         () => undefined,
       );
@@ -7773,7 +7791,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { exitCode: null, output: '', aborted: true };
       }
 
-      const cwd = entry.workspaceCwd;
+      await entry.cwdChangeQueue;
+      if (signal?.aborted) {
+        return { exitCode: null, output: '', aborted: true };
+      }
+      const cwd = entry.effectiveCwd;
 
       entry.events.publish({
         type: 'user_shell_command',

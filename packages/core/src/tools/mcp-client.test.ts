@@ -2340,11 +2340,13 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
     it('should discover tools via mcpServerCommand', () => {
       const commandString = 'command --arg1 value1';
-      const out = populateMcpServerCommand({}, commandString);
+      const cwd = '/session/worktree';
+      const out = populateMcpServerCommand({}, commandString, cwd);
       expect(out).toEqual({
         mcp: {
           command: 'command',
           args: ['--arg1', 'value1'],
+          cwd,
         },
       });
     });

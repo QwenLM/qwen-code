@@ -1159,7 +1159,11 @@ export async function discoverMcpTools(
 ): Promise<void> {
   mcpDiscoveryState = MCPDiscoveryState.IN_PROGRESS;
   try {
-    mcpServers = populateMcpServerCommand(mcpServers, mcpServerCommand);
+    mcpServers = populateMcpServerCommand(
+      mcpServers,
+      mcpServerCommand,
+      cliConfig.getTargetDir(),
+    );
 
     const discoveryPromises = Object.entries(mcpServers).map(
       ([mcpServerName, mcpServerConfig]) =>
@@ -1183,6 +1187,7 @@ export async function discoverMcpTools(
 export function populateMcpServerCommand(
   mcpServers: Record<string, MCPServerConfig>,
   mcpServerCommand: string | undefined,
+  cwd?: string,
 ): Record<string, MCPServerConfig> {
   if (mcpServerCommand) {
     const cmd = mcpServerCommand;
@@ -1194,6 +1199,7 @@ export function populateMcpServerCommand(
     mcpServers['mcp'] = {
       command: args[0],
       args: args.slice(1),
+      cwd,
     };
   }
   return mcpServers;

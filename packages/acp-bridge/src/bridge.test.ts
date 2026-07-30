@@ -62,6 +62,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  WORKTREE_MCP_DEFER_META_KEY,
 } from './bridgeTypes.js';
 import {
   ApprovalMode,
@@ -1044,6 +1045,24 @@ describe('createAcpSessionBridge', () => {
       'session.id': session.sessionId,
       'qwen-code.daemon.acp_channel.id': channelId,
     });
+  });
+
+  it('marks worktree session creation to defer MCP discovery', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: async () => handle.channel,
+    });
+
+    await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      worktree: { slug: 'task-a', path: WS_B, branch: 'worktree-task-a' },
+    });
+
+    expect(handle.agent.newSessionCalls[0]?._meta).toMatchObject({
+      [WORKTREE_MCP_DEFER_META_KEY]: true,
+    });
+    await bridge.shutdown();
   });
 
   it('does not fail initialization when span enrichment throws', async () => {
@@ -11519,12 +11538,130 @@ describe('createAcpSessionBridge', () => {
         aborted: false,
       });
       expect(shellSpy).toHaveBeenCalledTimes(1);
+      expect(shellSpy).toHaveBeenCalledWith(
+        'echo hello',
+        WS_A,
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        { terminalWidth: 120, terminalHeight: 40 },
+        { streamStdout: true },
+      );
       const it = events[Symbol.asyncIterator]();
       const first = await it.next();
       expect(first.value?.type).toBe('user_shell_command');
       expect(first.value?.originatorClientId).toBe(session.clientId);
 
       abort.abort();
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('executes direct shell in each session effective cwd', async () => {
+      const shellSpy = mockShellExecute();
+      const handle = makeChannel({
+        extMethodImpl: async (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+            return {
+              previousCwd: WS_A,
+              newCwd: (params as { path: string }).path,
+              warnings: [],
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const firstSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const secondSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await Promise.all([
+        bridge.changeSessionCwd(firstSession.sessionId, { path: WS_A }),
+        bridge.changeSessionCwd(secondSession.sessionId, { path: WS_B }),
+      ]);
+      await Promise.all([
+        bridge.executeShellCommand(
+          firstSession.sessionId,
+          'echo first',
+          undefined,
+          { clientId: firstSession.clientId },
+        ),
+        bridge.executeShellCommand(
+          secondSession.sessionId,
+          'echo second',
+          undefined,
+          { clientId: secondSession.clientId },
+        ),
+      ]);
+
+      expect(shellSpy).toHaveBeenCalledTimes(2);
+      expect(
+        shellSpy.mock.calls.map(([command, cwd]) => [command, cwd]),
+      ).toEqual(
+        expect.arrayContaining([
+          ['echo first', WS_A],
+          ['echo second', WS_B],
+        ]),
+      );
+
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('waits for a pending cwd change before executing direct shell', async () => {
+      const shellSpy = mockShellExecute();
+      const cdResult = deferred<{
+        previousCwd: string;
+        newCwd: string;
+        warnings: string[];
+      }>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+            return cdResult.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const cd = bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+          params: {
+            sessionId: session.sessionId,
+            path: WS_B,
+          },
+        }),
+      );
+      const shell = bridge.executeShellCommand(
+        session.sessionId,
+        'echo after-cd',
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      await Promise.resolve();
+      expect(shellSpy).not.toHaveBeenCalled();
+      cdResult.resolve({ previousCwd: WS_A, newCwd: WS_B, warnings: [] });
+      await Promise.all([cd, shell]);
+
+      expect(shellSpy.mock.calls[0]?.[1]).toBe(WS_B);
+
       await bridge.shutdown();
       shellSpy.mockRestore();
     });

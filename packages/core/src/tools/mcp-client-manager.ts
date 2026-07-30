@@ -1059,6 +1059,7 @@ export class McpClientManager {
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},
       this.cliConfig.getMcpServerCommand(),
+      this.cliConfig.getTargetDir(),
     );
 
     // mark the bulk pass active
@@ -1226,6 +1227,7 @@ export class McpClientManager {
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},
       this.cliConfig.getMcpServerCommand(),
+      this.cliConfig.getTargetDir(),
     );
     const serverConfig = servers[serverName];
     if (!serverConfig) {
@@ -1264,6 +1266,7 @@ export class McpClientManager {
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},
       this.cliConfig.getMcpServerCommand(),
+      this.cliConfig.getTargetDir(),
     );
     const serverConfig = servers[serverName];
     if (!serverConfig) {
@@ -1564,6 +1567,7 @@ export class McpClientManager {
       const servers = populateMcpServerCommand(
         this.cliConfig.getMcpServers() || {},
         this.cliConfig.getMcpServerCommand(),
+        this.cliConfig.getTargetDir(),
       );
       // diff against the
       // current `pooledConnections` instead of releasing all then
@@ -2121,6 +2125,7 @@ export class McpClientManager {
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},
       this.cliConfig.getMcpServerCommand(),
+      this.cliConfig.getTargetDir(),
     );
 
     // suppress per-server
@@ -2624,6 +2629,7 @@ export class McpClientManager {
     const servers = populateMcpServerCommand(
       this.cliConfig.getMcpServers() || {},
       this.cliConfig.getMcpServerCommand(),
+      this.cliConfig.getTargetDir(),
     );
     const serverConfig = servers[serverName];
     if (this.cliConfig.isMcpServerDisabled(serverName)) {

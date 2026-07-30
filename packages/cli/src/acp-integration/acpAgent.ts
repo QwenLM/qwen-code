@@ -306,6 +306,7 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -630,6 +631,11 @@ function isChannelSessionRequest(params: { _meta?: unknown }): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   const value = meta?.[SESSION_SOURCE_META_KEY];
   return isObjectRecord(value) && value['sourceType'] === 'channel';
+}
+
+function shouldDeferMcpDiscovery(params: { _meta?: unknown }): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  return meta?.[WORKTREE_MCP_DEFER_META_KEY] === true;
 }
 
 function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
@@ -4354,7 +4360,17 @@ class QwenAgent implements Agent {
         );
         this.settings = settings;
         const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(cwd, mcpServers, settings, isChannelSession),
+          this.newSessionConfig(
+            cwd,
+            mcpServers,
+            settings,
+            isChannelSession,
+            undefined,
+            undefined,
+            shouldDeferMcpDiscovery(params)
+              ? { skipMcpDiscovery: true }
+              : undefined,
+          ),
         );
         let session: Session;
         try {
@@ -8940,6 +8956,15 @@ class QwenAgent implements Agent {
               }`,
             );
           }
+          if (relocation.mcpRefreshError) {
+            warnings.push(
+              `MCP refresh failed: ${
+                relocation.mcpRefreshError instanceof Error
+                  ? relocation.mcpRefreshError.message
+                  : String(relocation.mcpRefreshError)
+              }`,
+            );
+          }
 
           try {
             await config
@@ -10699,7 +10724,6 @@ class QwenAgent implements Agent {
           stdioServer.command,
           stdioServer.args,
           env,
-          cwd,
         );
         continue;
       }
