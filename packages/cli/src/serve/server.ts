@@ -5,7 +5,7 @@
  */
 
 import express from 'express';
-import type { Application } from 'express';
+import type { Application, NextFunction, Request, Response } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
@@ -64,6 +64,7 @@ import {
   type ServeOptions,
 } from './types.js';
 import {
+  isDocumentNavigation,
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
@@ -1170,6 +1171,24 @@ export function createServeApp(
             o.startsWith('moz-extension://'),
         )
       : [];
+  if (webShellDir && opts.token && process.env['QWEN_CODE_DESKTOP'] === '1') {
+    const token = opts.token;
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (!isDocumentNavigation(req) || req.query['token'] !== token) {
+        next();
+        return;
+      }
+      const url = new URL(`${req.protocol}://${req.get('host')}${req.originalUrl}`);
+      url.searchParams.delete('token');
+      res.cookie('qwen-daemon-token', token, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: req.secure,
+      });
+      res.redirect(303, `${url.pathname}${url.search}${url.hash}`);
+    });
+  }
+
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
   }
@@ -1220,6 +1239,17 @@ export function createServeApp(
     });
   }
 
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const cookieToken = req.headers.cookie
+      ?.split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('qwen-daemon-token='))
+      ?.slice('qwen-daemon-token='.length);
+    if (!req.headers.authorization && cookieToken) {
+      req.headers.authorization = `Bearer ${cookieToken}`;
+    }
+    next();
+  });
   app.use(bearerAuth(opts.token));
 
   // Rate limiter: after auth (only count authenticated requests), except

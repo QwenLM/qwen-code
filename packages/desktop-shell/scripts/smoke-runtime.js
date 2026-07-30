@@ -2,10 +2,14 @@
 
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 const runtimeRoot = path.join(packageDir, 'runtime', 'qwen-code');
 const nodePath =
   process.platform === 'win32'
@@ -14,9 +18,22 @@ const nodePath =
 const entryPath = path.join(runtimeRoot, 'lib', 'cli-entry.js');
 const token = crypto.randomBytes(32).toString('hex');
 
+verifyRuntimeIntegrity();
+
 const child = spawn(
   nodePath,
-  [entryPath, 'serve', '--port', '0', '--hostname', '127.0.0.1', '--require-auth', '--workspace', packageDir, '--no-open'],
+  [
+    entryPath,
+    'serve',
+    '--port',
+    '0',
+    '--hostname',
+    '127.0.0.1',
+    '--require-auth',
+    '--workspace',
+    packageDir,
+    '--no-open',
+  ],
   {
     cwd: packageDir,
     env: { ...process.env, QWEN_SERVER_TOKEN: token },
@@ -26,7 +43,10 @@ const child = spawn(
 
 let output = '';
 let done = false;
-const timeout = setTimeout(() => finish(new Error('Timed out waiting for bundled daemon startup')), 45_000);
+const timeout = setTimeout(
+  () => finish(new Error('Timed out waiting for bundled daemon startup')),
+  45_000,
+);
 child.stdout.setEncoding('utf8');
 child.stderr.setEncoding('utf8');
 child.stdout.on('data', (chunk) => {
@@ -38,7 +58,12 @@ child.stderr.on('data', (chunk) => {
   output += chunk;
 });
 child.on('exit', (code) => {
-  if (!done) finish(new Error(`Bundled daemon exited before readiness (code ${code})\n${output}`));
+  if (!done)
+    finish(
+      new Error(
+        `Bundled daemon exited before readiness (code ${code})\n${output}`,
+      ),
+    );
 });
 
 async function verify(baseUrl) {
@@ -70,5 +95,53 @@ function finish(error) {
   if (error) {
     console.error(error.message);
     process.exitCode = 1;
+  }
+}
+
+function verifyRuntimeIntegrity() {
+  const required = [
+    'manifest.json',
+    'checksums.json',
+    'LICENSE',
+    'NOTICE',
+    'node/LICENSE',
+    'lib/cli-entry.js',
+    'lib/web-shell/index.html',
+  ];
+  for (const relative of required) {
+    const file = path.join(runtimeRoot, relative);
+    if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
+      throw new Error(`Bundled runtime file is missing: ${relative}`);
+    }
+  }
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(runtimeRoot, 'manifest.json'), 'utf8'),
+  );
+  for (const field of [
+    'desktopVersion',
+    'qwenCodeVersion',
+    'qwenCodeCommit',
+    'target',
+    'node',
+    'builtAt',
+  ]) {
+    if (!manifest[field])
+      throw new Error(`Runtime manifest is missing ${field}`);
+  }
+  const checksums = JSON.parse(
+    fs.readFileSync(path.join(runtimeRoot, 'checksums.json'), 'utf8'),
+  );
+  for (const [relative, expected] of Object.entries(checksums)) {
+    const file = path.join(runtimeRoot, relative);
+    if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
+      throw new Error(`Checksummed runtime file is missing: ${relative}`);
+    }
+    const actual = crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(file))
+      .digest('hex');
+    if (actual !== expected) {
+      throw new Error(`Bundled runtime checksum mismatch: ${relative}`);
+    }
   }
 }

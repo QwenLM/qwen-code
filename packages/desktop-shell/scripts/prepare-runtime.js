@@ -8,40 +8,60 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
-const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 const repoRoot = path.resolve(packageDir, '../..');
+const sourceRoot = process.env.QWEN_CODE_ROOT
+  ? path.resolve(process.env.QWEN_CODE_ROOT)
+  : repoRoot;
 const runtimeDir = path.join(packageDir, 'runtime');
 const packageRoot = path.join(runtimeDir, 'qwen-code');
 const libDir = path.join(packageRoot, 'lib');
 const nodeDir = path.join(packageRoot, 'node');
+const qwenCodeVersion = JSON.parse(
+  fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'),
+).version;
+const desktopVersion = JSON.parse(
+  fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'),
+).version;
 const binDir = path.join(packageRoot, 'bin');
 
 const target = desktopTarget();
+const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';
 
-execFileSync('npm', ['run', 'build', '--', '--cli-only'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
-execFileSync('npm', ['run', 'build', '--workspace=packages/webui'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
-execFileSync('npm', ['run', 'build', '--workspace=packages/web-shell'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
-execFileSync('npm', ['run', 'bundle'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-  env: { ...process.env, DEV: 'true' },
-});
-execFileSync('npm', ['run', 'prepare:package'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
+if (!skipBuild) {
+  execFileSync('npm', ['run', 'build', '--', '--cli-only'], {
+    cwd: sourceRoot,
+    stdio: 'inherit',
+  });
+  execFileSync('npm', ['run', 'build', '--workspace=packages/webui'], {
+    cwd: sourceRoot,
+    stdio: 'inherit',
+  });
+  execFileSync('npm', ['run', 'build', '--workspace=packages/web-shell'], {
+    cwd: sourceRoot,
+    stdio: 'inherit',
+  });
+  execFileSync('npm', ['run', 'bundle'], {
+    cwd: sourceRoot,
+    stdio: 'inherit',
+    env: { ...process.env, DEV: 'true' },
+  });
+  execFileSync('npm', ['run', 'prepare:package'], {
+    cwd: sourceRoot,
+    stdio: 'inherit',
+  });
+}
 
-const distDir = path.join(repoRoot, 'dist');
-for (const required of ['cli.js', 'cli-entry.js', 'web-shell/index.html', 'web-shell/assets']) {
+const distDir = path.join(sourceRoot, 'dist');
+for (const required of [
+  'cli.js',
+  'cli-entry.js',
+  'web-shell/index.html',
+  'web-shell/assets',
+]) {
   const candidate = path.join(distDir, required);
   if (!fs.existsSync(candidate)) {
     throw new Error(`Missing bundled runtime asset: ${candidate}`);
@@ -54,22 +74,46 @@ fs.mkdirSync(binDir, { recursive: true });
 copyDirectory(distDir, libDir);
 await installNodeRuntime(nodeDir, target);
 writeLaunchers();
+copyRequiredFile(
+  path.join(sourceRoot, 'LICENSE'),
+  path.join(packageRoot, 'LICENSE'),
+);
+copyRequiredFile(
+  path.join(packageDir, 'NOTICE'),
+  path.join(packageRoot, 'NOTICE'),
+);
+const nodeLicense = path.join(nodeDir, 'LICENSE');
+if (!fs.existsSync(nodeLicense)) {
+  throw new Error(`Bundled Node.js license is missing: ${nodeLicense}`);
+}
 fs.writeFileSync(
   path.join(packageRoot, 'manifest.json'),
-  `${JSON.stringify({
-    name: '@qwen-code/qwen-code',
-    version: JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version,
-    target,
-    node: process.version,
-  }, null, 2)}\n`,
+  `${JSON.stringify(
+    {
+      name: '@qwen-code/qwen-code',
+      desktopVersion,
+      qwenCodeVersion,
+      qwenCodeCommit: process.env.QWEN_CODE_COMMIT || gitCommit(sourceRoot),
+      target,
+      node: `v${process.versions.node}`,
+      builtAt: new Date().toISOString(),
+    },
+    null,
+    2,
+  )}\n`,
 );
-console.log(`Prepared desktop runtime at ${path.relative(repoRoot, packageRoot)}`);
+writeChecksums();
+console.log(
+  `Prepared desktop runtime at ${path.relative(repoRoot, packageRoot)}`,
+);
 
 async function installNodeRuntime(destination, desktopTarget) {
   const nodeVersion = process.versions.node;
   const archiveName = nodeArchiveName(nodeVersion, desktopTarget);
   const downloadRoot = `https://nodejs.org/dist/v${nodeVersion}`;
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-desktop-node-'));
+  const temporaryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'qwen-desktop-node-'),
+  );
   try {
     const checksumsPath = path.join(temporaryRoot, 'SHASUMS256.txt');
     const archivePath = path.join(temporaryRoot, archiveName);
@@ -95,7 +139,16 @@ async function installNodeRuntime(destination, desktopTarget) {
 }
 
 function desktopTarget() {
-  const target = `${process.platform}-${process.arch}`;
+  const target =
+    process.env.QWEN_DESKTOP_TARGET || `${process.platform}-${process.arch}`;
+  const aliases = {
+    'aarch64-apple-darwin': 'darwin-arm64',
+    'x86_64-apple-darwin': 'darwin-x64',
+    'aarch64-unknown-linux-gnu': 'linux-arm64',
+    'x86_64-unknown-linux-gnu': 'linux-x64',
+    'x86_64-pc-windows-msvc': 'win32-x64',
+  };
+  const resolved = aliases[target] || target;
   if (
     ![
       'darwin-arm64',
@@ -103,11 +156,11 @@ function desktopTarget() {
       'linux-arm64',
       'linux-x64',
       'win32-x64',
-    ].includes(target)
+    ].includes(resolved)
   ) {
-    throw new Error(`Unsupported desktop PoC target: ${target}`);
+    throw new Error(`Unsupported desktop target: ${target}`);
   }
-  return target;
+  return resolved;
 }
 
 function nodeArchiveName(version, desktopTarget) {
@@ -161,10 +214,51 @@ function writeLaunchers() {
     );
     return;
   }
-  const launcher = '#!/usr/bin/env sh\nset -e\nROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"\nexec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"\n';
+  const launcher =
+    '#!/usr/bin/env sh\nset -e\nROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"\nexec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"\n';
   const launcherPath = path.join(binDir, 'qwen');
   fs.writeFileSync(launcherPath, launcher);
   fs.chmodSync(launcherPath, 0o755);
+}
+
+function copyRequiredFile(source, destination) {
+  if (!fs.statSync(source, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(`Required desktop runtime file is missing: ${source}`);
+  }
+  fs.copyFileSync(source, destination);
+}
+
+function gitCommit(directory) {
+  return execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: directory,
+    encoding: 'utf8',
+  }).trim();
+}
+
+function writeChecksums() {
+  const checksums = {};
+  for (const file of runtimeFiles(packageRoot)) {
+    const relative = path.relative(packageRoot, file).split(path.sep).join('/');
+    if (relative === 'checksums.json') continue;
+    checksums[relative] = crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(file))
+      .digest('hex');
+  }
+  fs.writeFileSync(
+    path.join(packageRoot, 'checksums.json'),
+    `${JSON.stringify(checksums, null, 2)}\n`,
+  );
+}
+
+function runtimeFiles(directory) {
+  return fs
+    .readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) => {
+      const absolute = path.join(directory, entry.name);
+      return entry.isDirectory() ? runtimeFiles(absolute) : [absolute];
+    })
+    .sort();
 }
 
 function copyDirectory(source, destination) {

@@ -1,63 +1,421 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop_state;
 mod runtime;
 
+use desktop_state::{default_window_size, restore_window, SettingsStore};
 use runtime::DesktopRuntime;
-use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
-use tauri::{Manager, RunEvent, WebviewUrl};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 
+#[cfg(target_os = "windows")]
+const BOOTSTRAP_URL: &str = "http://tauri.localhost";
+#[cfg(not(target_os = "windows"))]
+const BOOTSTRAP_URL: &str = "tauri://localhost";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapState {
+    desktop_version: String,
+    log_path: String,
+    status: &'static str,
+    workspace: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeStopped {
+    runtime_id: u64,
+    status: String,
+}
+
+struct ApplicationState {
+    runtime: Mutex<Option<DesktopRuntime>>,
+    settings: SettingsStore,
+    log_path: PathBuf,
+    origin: Arc<Mutex<Option<Url>>>,
+    start_generation: AtomicU64,
+    starting: AtomicU64,
+}
+
 fn main() {
-    let app = match tauri::Builder::default().build(tauri::generate_context!()) {
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            focus_main_window(app);
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            bootstrap_state,
+            choose_workspace,
+            open_logs,
+            restart_runtime,
+            check_for_update,
+            install_update,
+        ])
+        .setup(setup_app);
+
+    let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
         Err(error) => {
             eprintln!("Failed to initialize Qwen Code desktop: {error}");
             return;
         }
     };
+
+    app.run(|app_handle, event| match event {
+        RunEvent::WindowEvent { label, event, .. } if label == "main" => {
+            if matches!(
+                event,
+                WindowEvent::Moved(_)
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::CloseRequested { .. }
+            ) {
+                save_window_state(app_handle);
+            }
+        }
+        RunEvent::Exit | RunEvent::ExitRequested { .. } => stop_runtime(app_handle),
+        _ => {}
+    });
+}
+
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
-    let runtime = match DesktopRuntime::start(&handle) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("Failed to start Qwen Code desktop runtime:\n{error}");
+    let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
+    let window_state = settings.window();
+    let log_path = desktop_log_path(&handle).map_err(std::io::Error::other)?;
+    let origin = Arc::new(Mutex::new(None));
+    let navigation_origin = Arc::clone(&origin);
+    let runtime_exit_handle = handle.clone();
+    handle.listen("runtime-process-stopped", move |event| {
+        let Ok(stopped) = serde_json::from_str::<RuntimeStopped>(event.payload()) else {
+            return;
+        };
+        let state = runtime_exit_handle.state::<ApplicationState>();
+        if lock(&state.runtime).as_ref().map(DesktopRuntime::id) != Some(stopped.runtime_id) {
             return;
         }
-    };
-    let origin = match origin_of(&runtime.base_url) {
-        Ok(origin) => origin,
-        Err(error) => {
-            eprintln!("Failed to validate Qwen Code desktop URL: {error}");
-            return;
-        }
-    };
-    let web_url = runtime.web_url();
-    let navigation_origin = origin.clone();
-    let main_window = WebviewWindowBuilder::new(&handle, "main", WebviewUrl::External(web_url))
+        stop_runtime(&runtime_exit_handle);
+        *lock(&state.origin) = None;
+        let _ = navigate_to_bootstrap(&runtime_exit_handle);
+        let _ = runtime_exit_handle.emit(
+            "runtime-failed",
+            format!("Qwen Code stopped: {}", stopped.status),
+        );
+    });
+    let (width, height) = default_window_size();
+
+    let window = WebviewWindowBuilder::new(&handle, "main", WebviewUrl::App("index.html".into()))
         .title("Qwen Code")
-        .inner_size(1280.0, 820.0)
+        .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
-        .center()
-        .on_navigation(move |url| is_same_origin(url, &navigation_origin))
+        .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
                 let _ = open::that_detached(url.as_str());
             }
             NewWindowResponse::Deny
         })
-        .build();
-    if let Err(error) = main_window {
-        eprintln!("Failed to create Qwen Code desktop window: {error}");
+        .on_download(|webview, event| match event {
+            DownloadEvent::Requested { url, .. } => webview
+                .url()
+                .ok()
+                .and_then(|current| origin_of(&current).ok())
+                .is_some_and(|current_origin| {
+                    url.scheme() == "blob"
+                        && lock(&webview.app_handle().state::<ApplicationState>().origin)
+                            .as_ref()
+                            .is_some_and(|runtime_origin| current_origin == *runtime_origin)
+                }),
+            DownloadEvent::Finished { .. } => true,
+            _ => false,
+        })
+        .build()?;
+    restore_window(&window, window_state.as_ref());
+
+    handle.manage(ApplicationState {
+        runtime: Mutex::new(None),
+        settings,
+        log_path,
+        origin,
+        start_generation: AtomicU64::new(0),
+        starting: AtomicU64::new(0),
+    });
+
+    if let Some(workspace) = initial_workspace(&handle) {
+        start_runtime_async(handle.clone(), workspace);
+    } else {
+        let _ = handle.emit("workspace-required", ());
+    }
+    check_updates_silently(handle);
+    Ok(())
+}
+
+#[tauri::command]
+fn bootstrap_state(state: State<'_, ApplicationState>) -> BootstrapState {
+    let starting = state.starting.load(Ordering::SeqCst) != 0;
+    let running = lock(&state.runtime).is_some();
+    BootstrapState {
+        desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+        log_path: state.log_path.to_string_lossy().into_owned(),
+        status: if running {
+            "ready"
+        } else if starting {
+            "starting"
+        } else {
+            "idle"
+        },
+        workspace: state
+            .settings
+            .workspace()
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+}
+
+#[tauri::command]
+fn choose_workspace(app: AppHandle) -> Result<Option<String>, String> {
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("Choose a Qwen Code workspace")
+        .blocking_pick_folder();
+    let Some(folder) = folder else {
+        return Ok(None);
+    };
+    let workspace = folder
+        .into_path()
+        .map_err(|error| format!("Failed to read selected workspace: {error}"))?;
+    start_runtime_async(app, workspace.clone());
+    Ok(Some(workspace.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn restart_runtime(app: AppHandle) -> Result<(), String> {
+    let workspace = app
+        .state::<ApplicationState>()
+        .settings
+        .workspace()
+        .ok_or_else(|| "Choose a workspace before starting Qwen Code.".to_string())?;
+    start_runtime_async(app, workspace);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_logs(state: State<'_, ApplicationState>) -> Result<(), String> {
+    if let Some(parent) = state.log_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create desktop log directory: {error}"))?;
+    }
+    if !state.log_path.exists() {
+        fs::write(&state.log_path, b"")
+            .map_err(|error| format!("Failed to create desktop log: {error}"))?;
+    }
+    open::that_detached(&state.log_path)
+        .map_err(|error| format!("Failed to open desktop logs: {error}"))
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
+    let update = app
+        .updater()
+        .map_err(|error| format!("Failed to initialize updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {error}"))?;
+    Ok(update.map(|update| update.version))
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let update = app
+        .updater()
+        .map_err(|error| format!("Failed to initialize updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {error}"))?
+        .ok_or_else(|| "No desktop update is available.".to_string())?;
+    let version = update.version.clone();
+    let confirmed = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || {
+            app.dialog()
+                .message(format!(
+                    "Install Qwen Code Desktop {version} and restart now?"
+                ))
+                .title("Qwen Code update")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Install and restart".to_string(),
+                    "Cancel".to_string(),
+                ))
+                .blocking_show()
+        }
+    })
+    .await
+    .map_err(|error| format!("Failed to show update confirmation: {error}"))?;
+    if !confirmed {
+        return Ok(());
+    }
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| format!("Failed to install update: {error}"))?;
+    app.request_restart();
+    Ok(())
+}
+
+fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
+    let generation = {
+        let state = app.state::<ApplicationState>();
+        let generation = state.start_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.starting.store(generation, Ordering::SeqCst);
+        generation
+    };
+    stop_runtime(&app);
+    let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ApplicationState>();
+        let canonical = match fs::canonicalize(&workspace) {
+            Ok(path) if path.is_dir() => path,
+            Ok(path) => {
+                emit_runtime_failure(
+                    &app,
+                    generation,
+                    format!("Workspace is not a directory: {}", path.display()),
+                );
+                return;
+            }
+            Err(error) => {
+                emit_runtime_failure(
+                    &app,
+                    generation,
+                    format!("Failed to open workspace {}: {error}", workspace.display()),
+                );
+                return;
+            }
+        };
+        match DesktopRuntime::start(&app, &canonical, &state.log_path) {
+            Ok(runtime) => {
+                if state.start_generation.load(Ordering::SeqCst) != generation {
+                    runtime.stop();
+                    return;
+                }
+                let web_url = runtime.web_url();
+                let origin = match origin_of(&runtime.base_url) {
+                    Ok(origin) => origin,
+                    Err(error) => {
+                        runtime.stop();
+                        emit_runtime_failure(&app, generation, error);
+                        return;
+                    }
+                };
+                if let Err(error) = state.settings.set_workspace(canonical.clone()) {
+                    runtime.stop();
+                    emit_runtime_failure(&app, generation, error);
+                    return;
+                }
+                *lock(&state.origin) = Some(origin);
+                *lock(&state.runtime) = Some(runtime);
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(error) = window.navigate(web_url) {
+                        stop_runtime(&app);
+                        emit_runtime_failure(
+                            &app,
+                            generation,
+                            format!("Failed to load Web Shell: {error}"),
+                        );
+                        return;
+                    }
+                }
+                state
+                    .starting
+                    .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .ok();
+                let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+            }
+            Err(error) => emit_runtime_failure(&app, generation, error),
+        }
+    });
+}
+
+fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
+    let state = app.state::<ApplicationState>();
+    if state.start_generation.load(Ordering::SeqCst) != generation {
         return;
     }
-    handle.manage(runtime);
-    app.run(move |app_handle, event| match event {
-        RunEvent::Exit | RunEvent::ExitRequested { .. } => {
-            if let Some(runtime) = app_handle.try_state::<DesktopRuntime>() {
-                runtime.stop();
-            }
-        }
-        _ => {}
-    });
+    state
+        .starting
+        .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .ok();
+    *lock(&state.origin) = None;
+    let _ = navigate_to_bootstrap(app);
+    let _ = app.emit("runtime-failed", error);
+}
+
+fn stop_runtime(app: &AppHandle) {
+    if let Some(runtime) = lock(&app.state::<ApplicationState>().runtime).take() {
+        runtime.stop();
+    }
+}
+
+fn initial_workspace(app: &AppHandle) -> Option<PathBuf> {
+    std::env::var_os("QWEN_DESKTOP_WORKSPACE")
+        .map(PathBuf::from)
+        .or_else(|| app.state::<ApplicationState>().settings.workspace())
+}
+
+fn desktop_log_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_log_dir()
+        .map(|path| path.join("desktop-runtime.log"))
+        .map_err(|error| format!("Failed to resolve desktop log directory: {error}"))
+}
+
+fn save_window_state(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = app
+            .state::<ApplicationState>()
+            .settings
+            .save_window(&window);
+    }
+}
+
+fn focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn navigate_to_bootstrap(app: &AppHandle) -> Result<(), String> {
+    let url = Url::parse(BOOTSTRAP_URL)
+        .map_err(|error| format!("Failed to construct bootstrap URL: {error}"))?;
+    app.get_webview_window("main")
+        .ok_or_else(|| "Desktop window is unavailable.".to_string())?
+        .navigate(url)
+        .map_err(|error| format!("Failed to show desktop recovery page: {error}"))
+}
+
+fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
+    is_bootstrap_url(url)
+        || lock(origin)
+            .as_ref()
+            .is_some_and(|allowed| is_same_origin(url, allowed))
+}
+
+fn is_bootstrap_url(url: &Url) -> bool {
+    (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
 }
 
 fn origin_of(url: &Url) -> Result<Url, String> {
@@ -77,13 +435,35 @@ fn is_same_origin(url: &Url, origin: &Url) -> bool {
         && url.port_or_known_default() == origin.port_or_known_default()
 }
 
+fn check_updates_silently(app: AppHandle) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let updater = match app.updater() {
+            Ok(updater) => updater,
+            Err(_) => return,
+        };
+        if let Ok(Some(update)) = updater.check().await {
+            let _ = app.emit("update-available", update.version);
+        }
+    });
+}
+
 fn is_safe_external_url(url: &Url) -> bool {
     matches!(url.scheme(), "https" | "http" | "mailto")
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_external_url, is_same_origin, origin_of};
+    use super::{is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of, BOOTSTRAP_URL};
     use url::Url;
 
     #[test]
@@ -104,6 +484,26 @@ mod tests {
     }
 
     #[test]
+    fn allows_platform_bootstrap_origins() {
+        assert!(is_bootstrap_url(
+            &Url::parse("tauri://localhost/").expect("tauri bootstrap")
+        ));
+        assert!(is_bootstrap_url(
+            &Url::parse("http://tauri.localhost/").expect("windows bootstrap")
+        ));
+    }
+
+    #[test]
+    fn recovery_uses_the_platform_bootstrap_origin() {
+        let expected = if cfg!(windows) {
+            "http://tauri.localhost"
+        } else {
+            "tauri://localhost"
+        };
+        assert_eq!(BOOTSTRAP_URL, expected);
+    }
+
+    #[test]
     fn rejects_non_loopback_runtime_origins() {
         let error = origin_of(&Url::parse("http://0.0.0.0:4170/").expect("url"))
             .expect_err("non-loopback origin");
@@ -120,6 +520,9 @@ mod tests {
         ));
         assert!(!is_safe_external_url(
             &Url::parse("file:///etc/passwd").expect("file")
+        ));
+        assert!(!is_safe_external_url(
+            &Url::parse("javascript:alert(1)").expect("javascript")
         ));
     }
 }

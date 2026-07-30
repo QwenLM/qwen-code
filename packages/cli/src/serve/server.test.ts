@@ -2892,8 +2892,10 @@ describe('createServeApp', () => {
       '<script type="module" src="/assets/app.js"></script></head>' +
       '<body><div id="root"></div></body></html>';
     const host = `127.0.0.1:${baseOpts.port}`;
+    let previousDesktopEnv: string | undefined;
 
     beforeEach(async () => {
+      previousDesktopEnv = process.env['QWEN_CODE_DESKTOP'];
       webShellDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-webshell-'));
       await fsp.writeFile(path.join(webShellDir, 'index.html'), INDEX_HTML);
       await fsp.mkdir(path.join(webShellDir, 'assets'));
@@ -2904,9 +2906,13 @@ describe('createServeApp', () => {
     });
 
     afterEach(async () => {
+      if (previousDesktopEnv === undefined) {
+        delete process.env['QWEN_CODE_DESKTOP'];
+      } else {
+        process.env['QWEN_CODE_DESKTOP'] = previousDesktopEnv;
+      }
       await fsp.rm(webShellDir, { recursive: true, force: true });
     });
-
     it('serves the shell at the root with security headers', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app).get('/').set('Host', host);
@@ -2921,6 +2927,62 @@ describe('createServeApp', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
       expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('bootstraps authenticated browser navigation with an HttpOnly cookie', async () => {
+      process.env['QWEN_CODE_DESKTOP'] = '1';
+      const app = createServeApp(
+        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
+        undefined,
+        { webShellDir },
+      );
+      const bootstrap = await request(app)
+        .get('/?token=desktop-secret')
+        .set('Host', host)
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(bootstrap.status).toBe(303);
+      expect(bootstrap.headers.location).toBe('/');
+      const cookie = bootstrap.headers['set-cookie']?.[0];
+      expect(cookie).toContain('qwen-daemon-token=desktop-secret');
+      expect(cookie).toContain('HttpOnly');
+      expect(cookie).toContain('SameSite=Strict');
+
+      const health = await request(app)
+        .get('/health')
+        .set('Host', host)
+        .set('Cookie', cookie ?? '');
+      expect(health.status).toBe(200);
+      expect(health.body).toEqual({ status: 'ok' });
+    });
+
+    it('does not mint browser auth cookies outside the desktop shell', async () => {
+      delete process.env['QWEN_CODE_DESKTOP'];
+      const app = createServeApp(
+        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
+        undefined,
+        { webShellDir },
+      );
+      const response = await request(app)
+        .get('/?token=desktop-secret')
+        .set('Host', host)
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(response.status).toBe(200);
+      expect(response.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('does not accept an invalid browser bootstrap token', async () => {
+      process.env['QWEN_CODE_DESKTOP'] = '1';
+      const app = createServeApp(
+        { ...baseOpts, token: 'desktop-secret', requireAuth: true },
+        undefined,
+        { webShellDir },
+      );
+      const response = await request(app)
+        .get('/?token=wrong-secret')
+        .set('Host', host)
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(response.status).toBe(200);
+      expect(response.headers['set-cookie']).toBeUndefined();
     });
 
     it('allows configured extension origins to frame the shell without self-framing', async () => {

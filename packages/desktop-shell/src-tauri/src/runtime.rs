@@ -1,31 +1,49 @@
 use command_group::{CommandGroup, GroupChild};
 use rand::RngCore;
 use std::ffi::OsString;
-use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use url::Url;
 
 const LISTEN_PREFIX: &str = "qwen serve listening on ";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
 const HEALTH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const FAILURE_OUTPUT_LIMIT: usize = 16 * 1024;
+static NEXT_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+const TEST_RUNTIME_INFO_ENV: &str = "QWEN_DESKTOP_TEST_RUNTIME_INFO";
+
+#[derive(Clone, serde::Serialize)]
+struct RuntimeStopped {
+    runtime_id: u64,
+    status: String,
+}
 
 pub struct DesktopRuntime {
+    id: u64,
     pub base_url: Url,
     token: String,
     child: Arc<Mutex<Option<GroupChild>>>,
+    stopping: Arc<AtomicBool>,
 }
 
 impl DesktopRuntime {
-    pub fn start(app: &AppHandle) -> Result<Self, String> {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn start(app: &AppHandle, workspace: &Path, log_path: &Path) -> Result<Self, String> {
+        let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         let layout = RuntimeLayout::resolve(app)?;
-        let workspace = resolve_workspace()?;
+        let workspace = resolve_workspace(workspace)?;
         let token = random_token();
         let mut command = Command::new(&layout.node);
         command
@@ -52,9 +70,15 @@ impl DesktopRuntime {
             .take()
             .ok_or_else(|| "Bundled runtime stderr was not captured.".to_string())?;
         let failure_output = Arc::new(Mutex::new(String::new()));
+        let log = Arc::new(Mutex::new(open_log(log_path)?));
         let (listen_sender, listen_receiver) = std::sync::mpsc::channel();
-        capture_stdout(stdout, Arc::clone(&failure_output), listen_sender);
-        capture_stderr(stderr, Arc::clone(&failure_output));
+        capture_stdout(
+            stdout,
+            Arc::clone(&failure_output),
+            Arc::clone(&log),
+            listen_sender,
+        );
+        capture_stderr(stderr, Arc::clone(&failure_output), log);
 
         let base_url =
             match wait_for_listening(&mut child, listen_receiver, &token, &failure_output) {
@@ -65,15 +89,23 @@ impl DesktopRuntime {
                     return Err(error);
                 }
             };
+        write_test_runtime_info(&base_url, &token)?;
+
+        let child = Arc::new(Mutex::new(Some(child)));
+        let stopping = Arc::new(AtomicBool::new(false));
+        monitor_runtime(app.clone(), id, Arc::clone(&child), Arc::clone(&stopping));
 
         Ok(Self {
+            id,
             base_url,
             token,
-            child: Arc::new(Mutex::new(Some(child))),
+            child,
+            stopping,
         })
     }
 
     pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         let child = match self.child.lock() {
             Ok(mut guard) => guard.take(),
             Err(poisoned) => poisoned.into_inner().take(),
@@ -135,11 +167,8 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
     Err(format!("{description} is missing at {}", path.display()))
 }
 
-fn resolve_workspace() -> Result<PathBuf, String> {
-    let configured = std::env::var_os("QWEN_DESKTOP_WORKSPACE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let workspace = fs::canonicalize(&configured).map_err(|error| {
+fn resolve_workspace(configured: &Path) -> Result<PathBuf, String> {
+    let workspace = fs::canonicalize(configured).map_err(|error| {
         format!(
             "Failed to resolve desktop workspace {}: {error}",
             configured.display()
@@ -164,11 +193,13 @@ fn random_token() -> String {
 fn capture_stdout(
     stdout: impl Read + Send + 'static,
     failure_output: Arc<Mutex<String>>,
+    log: Arc<Mutex<File>>,
     listen_sender: std::sync::mpsc::Sender<Url>,
 ) {
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             append_failure_output(&failure_output, &line);
+            append_log(&log, "stdout", &line);
             if let Some(url) = parse_listening_url(&line) {
                 let _ = listen_sender.send(url);
             }
@@ -176,10 +207,15 @@ fn capture_stdout(
     });
 }
 
-fn capture_stderr(stderr: impl Read + Send + 'static, failure_output: Arc<Mutex<String>>) {
+fn capture_stderr(
+    stderr: impl Read + Send + 'static,
+    failure_output: Arc<Mutex<String>>,
+    log: Arc<Mutex<File>>,
+) {
     thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             append_failure_output(&failure_output, &line);
+            append_log(&log, "stderr", &line);
         }
     });
 }
@@ -199,6 +235,73 @@ fn append_failure_output(output: &Mutex<String>, line: &str) {
     }
 }
 
+fn open_log(path: &Path) -> Result<File, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create desktop log directory: {error}"))?;
+    }
+    File::options()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("Failed to open desktop runtime log: {error}"))
+}
+
+fn append_log(log: &Mutex<File>, stream: &str, line: &str) {
+    let mut log = match log.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = writeln!(log, "[{stream}] {line}");
+    let _ = log.flush();
+}
+
+fn monitor_runtime(
+    app: AppHandle,
+    id: u64,
+    child: Arc<Mutex<Option<GroupChild>>>,
+    stopping: Arc<AtomicBool>,
+) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(250));
+        if stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        let exit = {
+            let mut guard = match child.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let Some(process) = guard.as_mut() else {
+                return;
+            };
+            match process.try_wait() {
+                Ok(Some(status)) => {
+                    guard.take();
+                    Some(status.to_string())
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    guard.take();
+                    Some(format!("failed to inspect daemon: {error}"))
+                }
+            }
+        };
+        if let Some(status) = exit {
+            if !stopping.load(Ordering::SeqCst) {
+                let _ = app.emit(
+                    "runtime-process-stopped",
+                    RuntimeStopped {
+                        runtime_id: id,
+                        status,
+                    },
+                );
+            }
+            return;
+        }
+    });
+}
+
 fn parse_listening_url(line: &str) -> Option<Url> {
     let rest = line.strip_prefix(LISTEN_PREFIX)?;
     let raw_url = rest.split_whitespace().next()?;
@@ -212,8 +315,17 @@ fn parse_listening_url(line: &str) -> Option<Url> {
 
 fn authenticated_web_url(base_url: &Url, token: &str) -> Url {
     let mut url = base_url.clone();
-    url.set_fragment(Some(&format!("token={token}")));
+    url.set_query(Some(&format!("token={token}")));
     url
+}
+
+fn write_test_runtime_info(base_url: &Url, token: &str) -> Result<(), String> {
+    let Some(path) = std::env::var_os(TEST_RUNTIME_INFO_ENV) else {
+        return Ok(());
+    };
+    let contents = serde_json::json!({ "url": base_url, "token": token });
+    fs::write(PathBuf::from(path), contents.to_string())
+        .map_err(|error| format!("Failed to write desktop test runtime info: {error}"))
 }
 
 fn wait_for_listening(
@@ -343,12 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn carries_the_daemon_token_in_the_web_url_fragment() {
+    fn carries_the_daemon_token_only_in_the_bootstrap_query() {
         let base_url = Url::parse("http://127.0.0.1:49152/").expect("base URL");
         let web_url = authenticated_web_url(&base_url, "secret-token");
         assert_eq!(
             web_url.as_str(),
-            "http://127.0.0.1:49152/#token=secret-token"
+            "http://127.0.0.1:49152/?token=secret-token"
         );
         assert_eq!(base_url.as_str(), "http://127.0.0.1:49152/");
     }
