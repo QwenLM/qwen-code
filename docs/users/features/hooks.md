@@ -631,7 +631,7 @@ Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `s
 }
 ```
 
-The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`). `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it.
+The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it.
 
 #### MessageDisplay
 
