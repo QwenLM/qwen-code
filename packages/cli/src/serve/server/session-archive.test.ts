@@ -33,6 +33,7 @@ import {
   deleteDaemonSessions,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
+  DaemonDrainingError,
 } from './session-archive.js';
 
 describe('assertSessionLoadable', () => {
@@ -649,6 +650,25 @@ describe('archiveDaemonSessions', () => {
     ).toBe(false);
     await primaryLease.release();
   });
+
+  it('rejects with DaemonDrainingError after the coordinator is sealed', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440080';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const coordinator = new SessionArchiveCoordinator();
+    await coordinator.sealMaintenanceAndWait();
+
+    await expect(
+      archiveDaemonSessions({
+        sessionIds: [sessionId],
+        service: new SessionService(workspaceDir),
+        bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+        coordinator,
+      }),
+    ).rejects.toThrow(DaemonDrainingError);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+  });
 });
 
 describe('unarchiveDaemonSessions', () => {
@@ -874,6 +894,24 @@ describe('unarchiveDaemonSessions', () => {
     expect(stranded!.enabled).toBe(true); // recovered
     expect(stranded!.disabledByArchive).toBeUndefined();
   });
+
+  it('rejects with DaemonDrainingError after the coordinator is sealed', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440081';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const coordinator = new SessionArchiveCoordinator();
+    await coordinator.sealMaintenanceAndWait();
+
+    await expect(
+      unarchiveDaemonSessions({
+        sessionIds: [sessionId],
+        service: new SessionService(workspaceDir),
+        coordinator,
+      }),
+    ).rejects.toThrow(DaemonDrainingError);
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+  });
 });
 
 describe('deleteDaemonSessions', () => {
@@ -1023,6 +1061,89 @@ describe('deleteDaemonSessions', () => {
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       true,
     );
+  });
+
+  it('rejects with DaemonDrainingError after the coordinator is sealed', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440082';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const coordinator = new SessionArchiveCoordinator();
+    await coordinator.sealMaintenanceAndWait();
+
+    await expect(
+      deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service: new SessionService(workspaceDir),
+        bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+        coordinator,
+      }),
+    ).rejects.toThrow(DaemonDrainingError);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+  });
+
+  it('deletes the transcript when killSession resolves true', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440083';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+
+    await expect(
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service,
+        bridge: { killSession: vi.fn().mockResolvedValue(true) },
+        coordinator: new SessionArchiveCoordinator(),
+      }),
+    ).resolves.toBe(true);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+  });
+
+  it('deletes the transcript when killSession throws SessionNotFoundError', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440084';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+
+    await expect(
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service,
+        bridge: {
+          killSession: vi
+            .fn()
+            .mockRejectedValue(new SessionNotFoundError(sessionId)),
+        },
+        coordinator: new SessionArchiveCoordinator(),
+      }),
+    ).resolves.toBe(true);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+  });
+
+  it('throws when the lease is held by another writer', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440085';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const lease = await service.acquireSessionWriterLease(sessionId, {
+      processKind: 'daemon',
+      reclaimPolicy: 'never',
+    });
+
+    await expect(
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service,
+        bridge: { killSession: vi.fn().mockResolvedValue(true) },
+        coordinator: new SessionArchiveCoordinator(),
+      }),
+    ).rejects.toThrow(SessionWriterConflictError);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+
+    await lease.release();
   });
 });
 

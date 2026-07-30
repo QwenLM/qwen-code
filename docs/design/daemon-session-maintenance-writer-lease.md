@@ -96,10 +96,14 @@ only after admitted maintenance leases have been released.
 
 ## Compatibility and rollout
 
-Batch response shapes, local `session_archiving` conflicts, and existing
-archive/delete/unarchive idempotency remain unchanged. Mixed-version writers
-are unsafe, so deployment and rollback must drain the old daemon and managed
-ACP processes before starting the new version.
+Batch response shapes and existing archive/delete/unarchive idempotency
+remain unchanged. Pre-check local `session_archiving` conflicts (raised by
+`assertNotTransitioning` before admission) still surface as a request-level
+`409`. Conflicts raised inside the admission gate are reported per session in
+the `200` response body (`errors[]`) for archive, unarchive, and delete
+alike. Mixed-version writers are unsafe, so deployment and rollback must
+drain the old daemon and managed ACP processes before starting the new
+version.
 
 ## Verification
 
