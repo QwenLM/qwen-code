@@ -863,6 +863,106 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('pass@');
   });
 
+  it('strips a spaced password from a URL whose host is a single character', async () => {
+    // The two-character floor on a bare host excluded a one-character one. The
+    // floor is only needed where a label has no delimiter after it; here the `/`
+    // says the label is an authority rather than a word, so no length is needed.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage = 'Failed https://user:my pass@h/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://h/v1');
+    expect(JSON.stringify(result)).not.toContain('my pass');
+  });
+
+  it('strips a spaced password when the username is empty', async () => {
+    // `https://:token@host` is a legal URL and the shape a token-only config
+    // produces, but requiring a character before the colon meant no userinfo was
+    // recognised and the fallback cut inside the password.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://:my pass@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://host.example/v1');
+    expect(JSON.stringify(result)).not.toContain('my pass');
+  });
+
+  it('strips credentials from a bracketed IPv6 base URL', async () => {
+    // Pins the IPv6 branch, which every other case here leaves untouched: it is
+    // the one host shape whose own characters include a colon, so a change to
+    // the port or delimiter rules could break it while the rest stay green.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:pass@[::1]:8443/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://[::1]:8443/v1',
+    );
+    expect(JSON.stringify(result)).not.toContain('pass');
+  });
+
+  it('leaves a password whose tail reads as a host, and says so', async () => {
+    // Not a fix: a record of where the boundary is. `word@realhost.example` is
+    // indistinguishable from a userinfo followed by a host, so `word` survives
+    // -- as it did before this PR. Pinned so that a later widening of the host
+    // rules has to decide this case deliberately rather than by accident.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:p@ss word@realhost.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed https://ss word@realhost.example/v1',
+    );
+  });
+
+  it('leaves a two-space password beginning with digits, and says so', async () => {
+    // The flip side of the port heuristic, and the other half of the tradeoff
+    // documented on CREDENTIAL_PREFIX_PATTERN: a second space before the `@` is
+    // what tells `:8443 — contact admin@…` from a password, so a password that
+    // has one reads as prose. Pinned for the same reason as the case above.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:123 secret word@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed https://user:123 secret word@host.example/v1',
+    );
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),

@@ -250,7 +250,8 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 /**
- * A host a provider base URL can address, with an optional port.
+ * A host with nothing after it to mark where it ends, so its own shape is the
+ * only evidence that it is one.
  *
  * Three shapes, because a single pattern for all of them would be wrong at the
  * edges. A bracketed IPv6 literal. A dotted name, whose first label may be a
@@ -266,7 +267,24 @@ const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
  * the list being incomplete was not a cosmetic problem. A trailing dot is
  * allowed to belong to the sentence rather than the name.
  */
-const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d](?:[A-Za-z\d-]*\.)+[A-Za-z\d-]+|[A-Za-z\d][A-Za-z\d-]+)(?::\d+)?(?![A-Za-z\d-])`;
+const UNDELIMITED_HOST = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d](?:[A-Za-z\d-]*\.)+[A-Za-z\d-]+|[A-Za-z\d][A-Za-z\d-]+)(?::\d+)?(?![A-Za-z\d-])`;
+
+/**
+ * A host followed by a path, query or fragment, which may be a single label.
+ *
+ * The two-character floor above exists only because a bare label at the end of
+ * a span has nothing to distinguish it from a word — but a label followed by
+ * `/`, `?` or `#` is not a word, it is an authority with a path. That evidence
+ * is structural rather than a length, so it can admit `@h/v1` without also
+ * admitting the `s` in `p@s s@host.example`, whose only delimiter is a space.
+ *
+ * Raising the floor instead would have traded one leak for another: at three
+ * characters, a two-character host leaks, and so on up.
+ */
+const DELIMITED_HOST = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d][A-Za-z\d-]*(?:\.[A-Za-z\d-]+)*)(?::\d+)?[/?#]`;
+
+/** A host addressable after a userinfo, delimited or not. */
+const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})`;
 
 /**
  * A `user:password@` prefix, where the password may contain spaces.
@@ -286,9 +304,19 @@ const HOST_AFTER_USERINFO = String.raw`(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z\d](?:[A-Za-
  * greedy tail runs past the host into an `@` in trailing prose while a lazy one
  * stops at an `@` inside the password. So the `@` is chosen structurally — it
  * must be followed by something addressable as a host.
+ *
+ * The username may be empty. `https://:password@host` is a legal URL, and one
+ * that appears in configs where only a token is needed, so requiring a character
+ * before the colon left its password unstripped.
+ *
+ * Two shapes are knowingly left unstripped, because nothing in them says which
+ * reading is right: `p@ss word@host.example`, where the password's tail is a
+ * valid host, and `123 secret word@host`, where a second space before the `@` is
+ * the same evidence that tells a port from a password. Both are pinned by test
+ * so that widening either rule has to choose deliberately.
  */
 const CREDENTIAL_PREFIX_PATTERN = new RegExp(
-  String.raw`^[^\s/?#'"\`<>]+:(?!\d+(?:$|[^\s\d]|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  String.raw`^[^\s/?#'"\`<>]*:(?!\d+(?:$|[^\s\d]|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
 );
 
 /**
