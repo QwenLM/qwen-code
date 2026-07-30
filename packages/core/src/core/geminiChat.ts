@@ -517,28 +517,35 @@ const FIRST_SEND_CLAMP_OVERHEAD_PAD = 20_000;
 const MAX_OUTPUT_RECOVERY_ATTEMPTS = 3;
 
 /**
+ * The resume instruction shared by every recovery user-turn, whatever cut the
+ * response short. Only the lead-in sentence naming the cause differs between
+ * the paths below, so the instruction itself lives here: tuning it (say, to
+ * curb recap behaviour) has to apply to both, and duplicating it invites one
+ * path to be updated while the other silently keeps the old wording.
+ */
+const RECOVERY_RESUME_INSTRUCTION =
+  'Resume directly — no apology, no recap of what you were doing. Pick up ' +
+  'mid-thought if that is where the cut happened. Break remaining work into ' +
+  'smaller pieces.';
+
+/**
  * Recovery message injected as a user turn when the model's output is
  * truncated even after token escalation. Instructs the model to resume
  * without repeating itself and to break remaining work into smaller steps.
  */
-const OUTPUT_RECOVERY_MESSAGE =
-  'Output token limit hit. Resume directly — no apology, no recap of what ' +
-  'you were doing. Pick up mid-thought if that is where the cut happened. ' +
-  'Break remaining work into smaller pieces.';
+const OUTPUT_RECOVERY_MESSAGE = `Output token limit hit. ${RECOVERY_RESUME_INSTRUCTION}`;
 
 /**
  * Lead-in for the same recovery user-turn when the cause was a socket-level
  * cut mid-stream rather than the output token limit (issue #7832). Gateways
  * that cap SSE connection lifetime close long generations after a few
  * minutes; the response so far is already on the caller's screen, so the only
- * safe recovery is to resume from it. Worded like
- * {@link OUTPUT_RECOVERY_MESSAGE} — the model does not need to know which
- * limit it hit, only that it was cut off and must not restart.
+ * safe recovery is to resume from it. Deliberately shares
+ * {@link RECOVERY_RESUME_INSTRUCTION} with {@link OUTPUT_RECOVERY_MESSAGE} —
+ * the model does not need to know which limit it hit, only that it was cut
+ * off and must not restart.
  */
-const TRANSPORT_CONTINUATION_MESSAGE =
-  'The connection dropped mid-response. Resume directly — no apology, no ' +
-  'recap of what you were doing. Pick up mid-thought if that is where the ' +
-  'cut happened. Break remaining work into smaller pieces.';
+const TRANSPORT_CONTINUATION_MESSAGE = `The connection dropped mid-response. ${RECOVERY_RESUME_INSTRUCTION}`;
 
 /**
  * Maximum length of the previous-response tail embedded inside the
@@ -2787,6 +2794,15 @@ export class GeminiChat {
             if (
               isRetryableStreamTransportError &&
               !streamYieldedContentChunk &&
+              // `streamYieldedContentChunk` is per-attempt, so on its own it
+              // cannot tell "nothing has been delivered" from "this attempt
+              // was cut while thinking, after earlier attempts already put
+              // text on screen". Only the first is replayable; replaying the
+              // second discards output the caller is watching. The
+              // accumulated buffer is what distinguishes them, and it must be
+              // consulted here because this branch is checked before the
+              // continuation one below.
+              transportContinuationText.trim().length === 0 &&
               transportStreamRetryCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
             ) {
@@ -2807,10 +2823,11 @@ export class GeminiChat {
               });
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
-              // continuation had staged must go. Reaching here with state to
-              // clear is possible: a continuation attempt can itself die from
-              // a transport error before yielding visible output, which lands
-              // in this branch rather than the continuation one.
+              // continuation had staged must go. The gate above now admits
+              // only an empty accumulated buffer, which leaves nothing for
+              // this to clear — it stays as an assertion of that invariant,
+              // so a future gate change cannot leak staged text into a
+              // restarted attempt.
               resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;

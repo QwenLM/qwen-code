@@ -7812,6 +7812,73 @@ describe('GeminiChat', async () => {
         }
       });
 
+      it('keeps continuing when a later attempt is cut during thinking', async () => {
+        // `streamYieldedContentChunk` is per-attempt, so an attempt cut while
+        // still in its thinking phase looks identical to a cut that delivered
+        // nothing at all — even though earlier attempts already put text on
+        // the caller's screen. The replay gate is checked first, so without a
+        // guard on the accumulated text it fires here, resets the
+        // continuation state, and emits a plain RETRY that tells the UI to
+        // discard output the user was watching.
+        vi.useFakeTimers();
+        try {
+          const thoughtOnly = {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: 'Now let me check the next part.', thought: true },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(cutAfter([thoughtOnly]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('part two', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-thought-only-cut',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 10_000);
+
+          // Every RETRY must be a continuation. A plain RETRY here is the UI
+          // being told to throw away "part one ".
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries).toHaveLength(2);
+          expect(
+            retries.every(
+              (event) =>
+                (event as { isContinuation?: boolean }).isContinuation === true,
+            ),
+          ).toBe(true);
+
+          // The delivered text must still anchor the third request...
+          expect(requestContentsOfCall(2).at(-2)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one ' }],
+          });
+          // ...and survive into history rather than being regenerated.
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('pins the delivered text after a thought part in the merged turn', async () => {
         // Covers `textIndex > 0`: the continuation turn leads with a thought
         // part, so the delivered text must merge into the *text* part rather
@@ -8131,20 +8198,18 @@ describe('GeminiChat', async () => {
         }
       });
 
-      it('drops a pending continuation when a replay takes over', async () => {
-        // Same requirement as the test above, but through the branch that sets
-        // `suppressNextRetryEvent`: a socket cut delivers text and schedules a
-        // continuation, then the continuation attempt is cut again *before*
-        // yielding anything visible — which lands in the replay branch, not the
-        // continuation branch, because replay is still legal with no visible
-        // output. Replay re-sends the original request and emits a plain RETRY,
-        // so the staged continuation must be discarded. Otherwise the replay
-        // would carry a resume instruction for text the UI has thrown away, and
-        // the merge on success would put that text back into history.
+      it('keeps continuing when a later attempt is cut with nothing yielded', async () => {
+        // A socket cut delivers text and schedules a continuation; the
+        // continuation attempt is then cut again having yielded nothing at
+        // all. The replay branch is checked first and its per-attempt
+        // "nothing delivered" test is satisfied here, so it must also consult
+        // the accumulated buffer — replaying would re-send the original
+        // request under a plain RETRY, telling the UI to discard text the
+        // caller already has and making the model regenerate it.
         vi.useFakeTimers();
         try {
           vi.mocked(mockContentGenerator.generateContentStream)
-            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockResolvedValueOnce(cutAfter([textChunk('kept half ')]))
             .mockResolvedValueOnce(cutAfter([]))
             .mockResolvedValueOnce(
               (async function* () {
@@ -8155,33 +8220,34 @@ describe('GeminiChat', async () => {
           const stream = await chat.sendMessageStream(
             'test-model',
             { message: 'test' },
-            'prompt-transport-continuation-replaced-by-replay',
+            'prompt-transport-continuation-empty-later-attempt',
           );
-          await collectStreamWithFakeTimers(stream, 10_000);
+          const events = await collectStreamWithFakeTimers(stream, 10_000);
 
           expect(
             mockContentGenerator.generateContentStream,
           ).toHaveBeenCalledTimes(3);
-          const thirdRequest = requestContentsOfCall(2);
+          // Both RETRYs keep the UI's buffer; a plain one would drop the text.
           expect(
-            thirdRequest.some((entry) =>
-              entry.parts?.some((part) =>
-                part.text?.includes('discarded half'),
+            events
+              .filter((event) => event.type === StreamEventType.RETRY)
+              .every(
+                (event) =>
+                  (event as { isContinuation?: boolean }).isContinuation ===
+                  true,
               ),
-            ),
-          ).toBe(false);
+          ).toBe(true);
+          const thirdRequest = requestContentsOfCall(2);
           expect(
             thirdRequest.some((entry) =>
               entry.parts?.some((part) =>
                 part.text?.includes('The connection dropped mid-response'),
               ),
             ),
-          ).toBe(false);
-          // The delivered text was discarded by the UI on the plain RETRY, so
-          // it must not be merged back in here.
+          ).toBe(true);
           expect(chat.getHistory().at(-1)).toEqual({
             role: 'model',
-            parts: [{ text: 'a clean answer' }],
+            parts: [{ text: 'kept half a clean answer' }],
           });
         } finally {
           vi.useRealTimers();
