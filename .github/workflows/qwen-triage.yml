@@ -1574,6 +1574,13 @@ jobs:
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
           fi
+          # Sweep any .stale.* dirs left by a previous non-root job's
+          # rename-aside fallback — this step runs as root and is the
+          # only actor that can actually delete them.
+          for d in "$GITHUB_WORKSPACE"/.qwen.stale.* "$GITHUB_WORKSPACE"/.git.stale.*; do
+            [ -d "$d" ] || continue
+            rm -rf "$d"
+          done
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
   # with the write PAT and never checks out PR code, so the write credential is
@@ -3190,13 +3197,20 @@ jobs:
         run: |-
           set -uo pipefail
           if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::could not restore .qwen write permissions"
           fi
           RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
           fi
+          # Sweep any .stale.* dirs left by a previous non-root job's
+          # rename-aside fallback — this step runs as root and is the
+          # only actor that can actually delete them.
+          for d in "$GITHUB_WORKSPACE"/.qwen.stale.* "$GITHUB_WORKSPACE"/.git.stale.*; do
+            [ -d "$d" ] || continue
+            rm -rf "$d"
+          done
 
       - name: 'Wipe workspace after external code'
         # The pre-run wipe answers what an external run INHERITS; this one

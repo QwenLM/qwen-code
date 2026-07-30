@@ -71,6 +71,14 @@ const prReviewJob = prReviewDoc.jobs['review-pr'];
 const prReviewOwnershipStep = prReviewJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
+const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
+const ciWebShellOwnershipStep = ciWebShellJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciIntegrationJob = ciDoc.jobs.integration_cli;
+const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
 
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
@@ -370,13 +378,13 @@ describe('ci.yml: rename-aside ownership recovery', () => {
     );
     assert.match(
       ciOwnershipStep.run,
-      /touch "\$target\/\.probe"/,
-      'must probe writability with a touch before deciding to rename',
+      /mkdir "\$target\/\.probe\.\$\{GITHUB_RUN_ID\}\.\$\{GITHUB_RUN_ATTEMPT\}"/,
+      'must probe writability with mkdir (symlink-safe, never follows a planted symlink)',
     );
     assert.match(
       ciOwnershipStep.run,
-      /mv "\$target" "\$\{target\}\.stale\.\$\$"/,
-      'must rename unwriteable dirs aside with a .stale.$$ suffix',
+      /mv "\$target" "\$\{target\}\.stale\.\$\{GITHUB_RUN_ID\}\.\$\{GITHUB_RUN_ATTEMPT\}"/,
+      'must rename unwriteable dirs aside with a unique .stale.RUN_ID.ATTEMPT suffix',
     );
   });
 
@@ -387,6 +395,16 @@ describe('ci.yml: rename-aside ownership recovery', () => {
     );
     assert.match(
       ciCleanStep.run,
+      /set -uo pipefail/,
+      'cleanup step must use strict shell mode',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\$GITHUB_WORKSPACE/,
+      'cleanup must use absolute $GITHUB_WORKSPACE paths, not relative globs',
+    );
+    assert.match(
+      ciCleanStep.run,
       /\.qwen\.stale\.\*/,
       'cleanup glob must cover .qwen.stale.* dirs',
     );
@@ -394,6 +412,16 @@ describe('ci.yml: rename-aside ownership recovery', () => {
       ciCleanStep.run,
       /\.git\.stale\.\*/,
       'cleanup glob must cover .git.stale.* dirs',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /sudo -n rm -rf/,
+      'cleanup must fall back to sudo for root-owned dirs',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /::warning::leaked/,
+      'cleanup must make leaked dirs visible, not swallow the failure',
     );
   });
 });
@@ -411,13 +439,13 @@ describe('qwen-code-pr-review.yml: rename-aside ownership recovery', () => {
     );
     assert.match(
       prReviewOwnershipStep.run,
-      /touch "\$target\/\.probe"/,
-      'must probe writability with a touch before deciding to rename',
+      /mkdir "\$target\/\.probe\.\$\{GITHUB_RUN_ID\}\.\$\{GITHUB_RUN_ATTEMPT\}"/,
+      'must probe writability with mkdir (symlink-safe, never follows a planted symlink)',
     );
     assert.match(
       prReviewOwnershipStep.run,
-      /mv "\$target" "\$\{target\}\.stale\.\$\$"/,
-      'must rename unwriteable dirs aside with a .stale.$$ suffix',
+      /mv "\$target" "\$\{target\}\.stale\.\$\{GITHUB_RUN_ID\}\.\$\{GITHUB_RUN_ATTEMPT\}"/,
+      'must rename unwriteable dirs aside with a unique .stale.RUN_ID.ATTEMPT suffix',
     );
   });
 
@@ -431,6 +459,92 @@ describe('qwen-code-pr-review.yml: rename-aside ownership recovery', () => {
       prReviewOwnershipStep.run,
       /\.git\.stale\.\*/,
       'inline cleanup must cover .git.stale.* dirs',
+    );
+    assert.match(
+      prReviewOwnershipStep.run,
+      /::warning::leaked/,
+      'inline cleanup must make leaked dirs visible, not swallow the failure',
+    );
+  });
+});
+
+describe('ci.yml: all self-hosted checkout jobs carry ownership recovery', () => {
+  it('web_shell_e2e_smoke has a Restore workspace ownership step', () => {
+    assert.ok(
+      ciWebShellOwnershipStep,
+      'web_shell_e2e_smoke must have a "Restore workspace ownership" step — it shares the ecs-qwen pool',
+    );
+    assert.match(
+      ciWebShellOwnershipStep.run,
+      /for stale in \.qwen \.git/,
+      'rename-aside loop must cover both .qwen and .git',
+    );
+  });
+
+  it('integration_cli has a Restore workspace ownership step', () => {
+    assert.ok(
+      ciIntegrationOwnershipStep,
+      'integration_cli must have a "Restore workspace ownership" step — it runs in the merge queue on the ecs-qwen pool',
+    );
+    assert.match(
+      ciIntegrationOwnershipStep.run,
+      /for stale in \.qwen \.git/,
+      'rename-aside loop must cover both .qwen and .git',
+    );
+  });
+
+  it('rename-aside blocks are byte-identical across ci.yml and pr-review', () => {
+    const extractBlock = (run, label) => {
+      const marker = '# NOTE: This rename-aside block';
+      const start = run.indexOf(marker);
+      assert.ok(start !== -1, label + ': rename-aside NOTE comment must exist');
+      const endMarker = 'checkout may fail"\ndone';
+      const end = run.indexOf(endMarker, start);
+      assert.ok(end !== -1, label + ': rename-aside block must end with done');
+      return run.slice(start, end + endMarker.length);
+    };
+    const ciBlock = extractBlock(ciOwnershipStep.run, 'ci.yml test');
+    const prBlock = extractBlock(prReviewOwnershipStep.run, 'pr-review');
+    assert.equal(
+      ciBlock,
+      prBlock,
+      'rename-aside blocks must be byte-identical — they are duplicated because extraction into .github/scripts/ is impossible before checkout',
+    );
+  });
+});
+
+describe('qwen-triage: containerised jobs sweep .stale.* dirs', () => {
+  it('verify ownership-restore sweeps .stale.* dirs as root', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /\.qwen\.stale\.\*/,
+      'verify must sweep .qwen.stale.* dirs',
+    );
+    assert.match(
+      verifyOwnershipStep.run,
+      /\.git\.stale\.\*/,
+      'verify must sweep .git.stale.* dirs',
+    );
+  });
+
+  it('tmux-testing ownership-restore sweeps .stale.* dirs as root', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /\.qwen\.stale\.\*/,
+      'tmux-testing must sweep .qwen.stale.* dirs',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /\.git\.stale\.\*/,
+      'tmux-testing must sweep .git.stale.* dirs',
+    );
+  });
+
+  it('verify chmod failure is visible, not silent', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not restore \.qwen write permissions/,
+      'chmod failure must emit a ::warning::, not be swallowed by || true',
     );
   });
 });
