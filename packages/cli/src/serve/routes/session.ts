@@ -1672,6 +1672,23 @@ export function registerSessionRoutes(
             }),
           ).catch(() => false);
         }
+        // This early return runs inside the outer try, but a return skips
+        // that try's catch — so replicate the catch's resource cleanup here.
+        // Otherwise the branch/worktree created for this request is orphaned
+        // and inFlightBranchWorkspaces permanently blocks the workspace.
+        if (worktreeMeta) {
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .catch(() => {});
+        }
+        if (branchMeta) {
+          await rollbackBranchCreation(
+            workspaceCwd,
+            branchMeta,
+            branchBaseCommit,
+            daemonLog,
+          );
+        }
         res.status(500).json({
           error: 'Agent did not honor the requested session id',
           code: 'session_id_not_honored',

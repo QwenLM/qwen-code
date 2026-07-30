@@ -8654,6 +8654,14 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(500);
       expect(res.body.code).toBe('session_id_not_honored');
+      // The orphaned spawn (the id the agent returned instead of the
+      // requested one) must be reaped via killSession with requireZeroAttaches.
+      expect(bridge.killCalls).toEqual([
+        {
+          sessionId: 'a-different-id-than-requested',
+          opts: { requireZeroAttaches: true },
+        },
+      ]);
     });
 
     it('409 when sessionId already exists (active or archived)', async () => {
