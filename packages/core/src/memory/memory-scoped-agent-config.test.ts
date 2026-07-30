@@ -16,6 +16,7 @@ import {
   isAllowedMemoryPath,
 } from './memory-scoped-agent-config.js';
 import {
+  AUTO_MEMORY_PINNED_DIRNAME,
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
@@ -113,11 +114,15 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
-  it('protects pinned memory and aliases while leaving ordinary memory writable', async () => {
+  it('protects project pinned memory and aliases while leaving ordinary memory writable', async () => {
     const memoryRoot = getAutoMemoryRoot(projectRoot);
-    const pinnedDir = path.join(memoryRoot, 'pinned');
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
     const pinnedFile = path.join(pinnedDir, 'architecture.md');
-    const pinnedAlias = path.join(memoryRoot, 'project', 'pinned-alias');
+    const pinnedAlias = path.join(
+      memoryRoot,
+      'project',
+      `${AUTO_MEMORY_PINNED_DIRNAME}-alias`,
+    );
     await fs.mkdir(pinnedDir, { recursive: true });
     await fs.writeFile(pinnedFile, 'canonical architecture');
     await fs.symlink(pinnedDir, pinnedAlias);
@@ -150,7 +155,11 @@ describe('createMemoryScopedAgentConfig', () => {
     await expect(
       protectedPm.evaluate({
         toolName: ToolNames.WRITE_FILE,
-        filePath: path.join(memoryRoot, 'PINNED', 'architecture.md'),
+        filePath: path.join(
+          memoryRoot,
+          AUTO_MEMORY_PINNED_DIRNAME.toUpperCase(),
+          'architecture.md',
+        ),
       }),
     ).resolves.toBe('deny');
     await expect(
@@ -168,13 +177,22 @@ describe('createMemoryScopedAgentConfig', () => {
     await expect(
       protectedPm.evaluate({
         toolName: ToolNames.WRITE_FILE,
-        filePath: path.join(memoryRoot, 'pinned-notes', 'ordinary.md'),
+        filePath: path.join(
+          memoryRoot,
+          `${AUTO_MEMORY_PINNED_DIRNAME}-notes`,
+          'ordinary.md',
+        ),
       }),
     ).resolves.toBe('allow');
     await expect(
       protectedPm.evaluate({
         toolName: ToolNames.WRITE_FILE,
-        filePath: path.join(memoryRoot, 'project', 'pinned', 'notes.md'),
+        filePath: path.join(
+          memoryRoot,
+          'project',
+          AUTO_MEMORY_PINNED_DIRNAME,
+          'notes.md',
+        ),
       }),
     ).resolves.toBe('allow');
     expect(
@@ -185,14 +203,22 @@ describe('createMemoryScopedAgentConfig', () => {
     ).toBe('ManagedAutoMemory(edit: pinned memory is read-only)');
     expect(
       protectedPm.findMatchingDenyRule({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(pinnedAlias, 'architecture.md'),
+      }),
+    ).toBe('ManagedAutoMemory(edit: pinned memory is read-only)');
+    expect(
+      protectedPm.findMatchingDenyRule({
         toolName: ToolNames.WRITE_FILE,
         filePath: path.join(pinnedDir, 'new.md'),
       }),
     ).toBe('ManagedAutoMemory(write_file: pinned memory is read-only)');
+  });
 
+  it('protects user pinned memory when user memory is included', async () => {
     const userPinnedFile = path.join(
       getUserAutoMemoryRoot(),
-      'pinned',
+      AUTO_MEMORY_PINNED_DIRNAME,
       'preferences.md',
     );
     await fs.mkdir(path.dirname(userPinnedFile), { recursive: true });
@@ -214,7 +240,16 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'ordinary.md'),
       }),
     ).resolves.toBe('allow');
+  });
 
+  it('leaves pinned memory writable when protection is disabled', async () => {
+    const pinnedFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      AUTO_MEMORY_PINNED_DIRNAME,
+      'architecture.md',
+    );
+    await fs.mkdir(path.dirname(pinnedFile), { recursive: true });
+    await fs.writeFile(pinnedFile, 'canonical architecture');
     const unprotectedPm = permissionManager(
       createMemoryScopedAgentConfig({} as Config, projectRoot, {
         includeUserMemory: false,
@@ -232,7 +267,7 @@ describe('createMemoryScopedAgentConfig', () => {
     const memoryRoot = getAutoMemoryRoot(projectRoot);
     const targetDir = path.join(memoryRoot, 'project', 'shared');
     const targetFile = path.join(targetDir, 'architecture.md');
-    const pinnedDir = path.join(memoryRoot, 'pinned');
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
     await fs.mkdir(targetDir, { recursive: true });
     await fs.writeFile(targetFile, 'canonical architecture');
     await fs.symlink(targetDir, pinnedDir);
@@ -258,8 +293,37 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
+  it('reports the outside-root reason for a pinned symlink target outside memory', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const outsideDir = path.join(tempDir, 'outside-pinned-target');
+    const outsideFile = path.join(outsideDir, 'architecture.md');
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
+    await fs.mkdir(outsideDir, { recursive: true });
+    await fs.writeFile(outsideFile, 'external architecture');
+    await fs.symlink(outsideDir, pinnedDir);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+    const context = {
+      toolName: ToolNames.EDIT,
+      filePath: path.join(pinnedDir, 'architecture.md'),
+    };
+
+    await expect(pm.evaluate(context)).resolves.toBe('deny');
+    expect(pm.findMatchingDenyRule(context)).toBe(
+      `ManagedAutoMemory(edit: only within ${memoryRoot})`,
+    );
+  });
+
   it('protects paths below a dangling top-level pinned symlink', async () => {
-    const pinnedDir = path.join(getAutoMemoryRoot(projectRoot), 'pinned');
+    const pinnedDir = path.join(
+      getAutoMemoryRoot(projectRoot),
+      AUTO_MEMORY_PINNED_DIRNAME,
+    );
     await fs.symlink(
       path.join(tempDir, 'missing-pinned-target'),
       pinnedDir,

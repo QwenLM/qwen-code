@@ -97,8 +97,8 @@ Everything saved is plain markdown — you can open, edit, or delete any file at
 
 #### Pinned memory
 
-Put hand-curated documents that Dream should preserve under `pinned/` in a
-managed-memory directory, for example
+Put hand-curated documents that automatic memory maintenance should preserve
+under `pinned/` in a managed-memory directory, for example
 `~/.qwen/projects/<project>/memory/pinned/architecture.md` or
 `~/.qwen/memories/pinned/preferences.md`. Use the same frontmatter as other
 memory documents. Valid pinned files are readable by Qwen and are included the
@@ -107,15 +107,16 @@ other memory documents.
 
 Only the top-level `pinned/` directory directly inside a managed-memory root is
 protected; nested directories such as `memory/project/pinned/` are ordinary
-writable memory. Dream workers match the reserved directory name
-case-insensitively.
+writable memory. Automatic extraction and Dream workers match the reserved
+directory name case-insensitively.
 
-Dream is instructed to skip `pinned/` during consolidation. Forked Dream
-workers, including background cleanup, additionally enforce that boundary on
-their write and edit tools, including paths that resolve through a symlink into
-`pinned/`; their existing read-only shell policy blocks command-line deletion.
-You still control these files directly and can remove them with an explicit
-`/forget` request.
+Automatic extraction is instructed to leave pinned records and their valid
+index entries unchanged, while Dream is instructed to skip `pinned/` during
+consolidation. Both automatic extraction and forked Dream workers, including
+background cleanup, enforce the pinned-file boundary on their write and edit
+tools, including paths that resolve through a symlink into `pinned/`; their
+existing read-only shell policy blocks command-line deletion. You still control
+these files directly and can remove them with an explicit `/forget` request.
 
 > **Note:** The visible `/dream` slash command runs on the main Agent. It
 > receives the same skip instruction, but does not yet receive the forked

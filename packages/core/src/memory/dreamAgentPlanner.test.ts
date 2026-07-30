@@ -16,6 +16,7 @@ import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import {
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
   clearAutoMemoryRootCache,
@@ -199,7 +200,7 @@ describe('dreamAgentPlanner', () => {
         toolName: ToolNames.EDIT,
         filePath: path.join(
           getAutoMemoryRoot(projectRoot),
-          'pinned',
+          AUTO_MEMORY_PINNED_DIRNAME,
           'architecture.md',
         ),
       }),
@@ -210,12 +211,14 @@ describe('dreamAgentPlanner', () => {
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
       }),
     ).resolves.toBe('deny');
+    // Pinned protection applies to write/edit; shell deletion is blocked by
+    // the pre-existing read-only shell policy.
     await expect(
       pm.evaluate({
         toolName: ToolNames.SHELL,
         command: `rm ${path.join(
           getAutoMemoryRoot(projectRoot),
-          'pinned',
+          AUTO_MEMORY_PINNED_DIRNAME,
           'architecture.md',
         )}`,
       }),
