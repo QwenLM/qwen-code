@@ -56,6 +56,7 @@ export interface WebShellDaemonScenario {
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
+  pairingApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -105,6 +106,7 @@ type ScenarioOverrides = Partial<
     | 'channelTypes'
     | 'channels'
     | 'pairingRequests'
+    | 'pairingApprovals'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -121,6 +123,7 @@ type ScenarioOverrides = Partial<
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
+  pairingApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -335,6 +338,7 @@ export function createWebShellDaemonScenario(
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
+    pairingApprovals: overrides.pairingApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -545,6 +549,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-requests(?:\/approve)?\/?$/.test(
       path,
     ) ||
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
@@ -574,6 +579,12 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (
     (method === 'GET' || method === 'POST') &&
     path === '/workspace/settings'
+  ) {
+    return true;
+  }
+  if (
+    (method === 'GET' || method === 'DELETE') &&
+    /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path)
   ) {
     return true;
   }
@@ -860,7 +871,48 @@ async function handleDaemonRoute(
         ...scenario.pairingRequests,
         [name]: remaining,
       };
+      scenario.pairingApprovals = {
+        ...scenario.pairingApprovals,
+        [name]: Array.from(
+          new Set([
+            ...(scenario.pairingApprovals[name] ?? []),
+            approved.senderId,
+          ]),
+        ),
+      };
       await json(route, { approved, requests: remaining });
+      return;
+    }
+  }
+  const pairingApprovalsMatch = path.match(
+    /^\/workspaces\/[^/]+\/channels\/([^/]+)\/pairing-approvals\/?$/,
+  );
+  if (pairingApprovalsMatch) {
+    const name = decodeURIComponent(pairingApprovalsMatch[1]);
+    const senderIds = scenario.pairingApprovals[name] ?? [];
+    if (method === 'GET') {
+      await json(route, { senderIds });
+      return;
+    }
+    if (method === 'DELETE') {
+      const senderId = String(getRecordValue(body, 'senderId') ?? '');
+      if (!senderIds.includes(senderId)) {
+        await json(
+          route,
+          {
+            error: 'Pairing approval was not found.',
+            code: 'channel_pairing_approval_not_found',
+          },
+          404,
+        );
+        return;
+      }
+      const remaining = senderIds.filter((item) => item !== senderId);
+      scenario.pairingApprovals = {
+        ...scenario.pairingApprovals,
+        [name]: remaining,
+      };
+      await json(route, { revoked: senderId, senderIds: remaining });
       return;
     }
   }

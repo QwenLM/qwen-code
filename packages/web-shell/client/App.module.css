@@ -59,6 +59,49 @@
   overflow: hidden;
 }
 
+.contextShell {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatHeaderRow {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+
+.customChatHeader {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.contextBody {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.contextBodyWithEnvironmentPanel .chatPane,
+.contextBodyWithEnvironmentPanel .content {
+  overflow: visible;
+}
+
+.contextBodyWithEnvironmentPanel [data-web-shell-message-list] {
+  box-sizing: border-box;
+  width: calc(100% + 332px);
+  padding-right: 356px;
+}
+
 .chatPane {
   flex: 1 1 auto;
   min-width: 0;
@@ -758,10 +801,6 @@
 
 .composerHeader {
   margin-bottom: 8px;
-}
-
-.chatHeader {
-  flex-shrink: 0;
 }
 
 .customFooter {

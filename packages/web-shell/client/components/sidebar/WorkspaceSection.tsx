@@ -17,7 +17,10 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
-import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
+} from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
@@ -68,6 +71,7 @@ interface WorkspaceSectionProps {
   noSessionsLabel: string;
   loadErrorLabel: string;
   organizationEnabled: boolean;
+  sourceMetadataEnabled?: boolean;
   ungroupedLabel: string;
   formatTime: (iso: string) => string;
   searchQuery?: string;
@@ -109,6 +113,7 @@ export function WorkspaceSection({
   noSessionsLabel,
   loadErrorLabel,
   organizationEnabled,
+  sourceMetadataEnabled = false,
   ungroupedLabel,
   formatTime,
   searchQuery = '',
@@ -167,6 +172,9 @@ export function WorkspaceSection({
         .listWorkspaceSessions({
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'active',
+          ...(sourceMetadataEnabled
+            ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+            : {}),
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),
@@ -179,7 +187,13 @@ export function WorkspaceSection({
       console.warn('[WorkspaceSection] session poll failed:', err);
       setLoadError(true);
     }
-  }, [client, disabled, organizationEnabled, workspace.cwd]);
+  }, [
+    client,
+    disabled,
+    organizationEnabled,
+    sourceMetadataEnabled,
+    workspace.cwd,
+  ]);
 
   useEffect(() => {
     if (!renderSessions || disabled || !organizationEnabled) {
