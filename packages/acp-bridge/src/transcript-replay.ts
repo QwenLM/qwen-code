@@ -24,7 +24,7 @@ import {
 // Narrow path — the helper is Node-free. Importing the core package barrel
 // here would pull the whole Node-bound core graph into the browser
 // transcript bundle (sdk-typescript daemon/transcript).
-import { isUserPromptSubmitContextPartText } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
+import { stripTrailingUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -552,22 +552,18 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     record: TranscriptRecordInput,
   ): TranscriptRecordInput {
     const parts = record.message?.parts;
-    if (!Array.isArray(parts) || parts.length <= 1) {
+    if (!Array.isArray(parts)) {
       return record;
     }
-    const last = parts[parts.length - 1];
-    if (
-      !isObjectRecord(last) ||
-      typeof last['text'] !== 'string' ||
-      !isUserPromptSubmitContextPartText(last['text'])
-    ) {
+    const nextParts = stripTrailingUserPromptSubmitContextPart(parts);
+    if (nextParts === parts) {
       return record;
     }
     return {
       ...record,
       message: {
         ...record.message,
-        parts: parts.slice(0, -1),
+        parts: [...nextParts],
       },
     };
   }

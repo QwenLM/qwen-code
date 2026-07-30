@@ -19,7 +19,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
-  isUserPromptSubmitContextPartText,
+  stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -52,17 +52,9 @@ function extractUserRecordDisplayText(
     return payload.displayText;
   }
   const parts = (record.message?.parts as Part[] | undefined) ?? [];
-  const lastText = parts.at(-1)?.text;
-  // Injection always appends the tagged block after the user's own part(s),
-  // so a genuine hook-context part is never the sole part. A single-part
-  // record matching the tag shape is user-authored and must be kept.
-  const displayParts =
-    parts.length > 1 &&
-    typeof lastText === 'string' &&
-    isUserPromptSubmitContextPartText(lastText)
-      ? parts.slice(0, -1)
-      : parts;
-  return extractTextFromParts(displayParts);
+  return extractTextFromParts([
+    ...stripTrailingUserPromptSubmitContextPart(parts),
+  ]);
 }
 
 /**

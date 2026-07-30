@@ -633,6 +633,7 @@ export {
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
   wrapUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
+  stripTrailingUserPromptSubmitContextPart,
 } from './hooks/user-prompt-submit-context.js';
 
 // ============================================================================

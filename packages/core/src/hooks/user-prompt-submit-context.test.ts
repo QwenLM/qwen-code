@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   wrapUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
+  stripTrailingUserPromptSubmitContextPart,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
 } from './user-prompt-submit-context.js';
@@ -25,6 +26,32 @@ describe('wrapUserPromptSubmitContext', () => {
         wrapUserPromptSubmitContext('multi\nline\ncontext'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('stripTrailingUserPromptSubmitContextPart', () => {
+  it('drops a trailing whole-part tagged block when other parts exist', () => {
+    const tagged = wrapUserPromptSubmitContext('ctx');
+    expect(
+      stripTrailingUserPromptSubmitContextPart([
+        { text: 'my prompt' },
+        { text: tagged },
+      ]),
+    ).toEqual([{ text: 'my prompt' }]);
+  });
+
+  it('keeps a sole part that matches the tag shape', () => {
+    const tagged = wrapUserPromptSubmitContext('ctx');
+    const parts = [{ text: tagged }];
+    expect(stripTrailingUserPromptSubmitContextPart(parts)).toBe(parts);
+  });
+
+  it('keeps parts when the trailing part is not a whole tagged block', () => {
+    const parts = [
+      { text: 'my prompt' },
+      { text: `quote: ${wrapUserPromptSubmitContext('ctx')}` },
+    ];
+    expect(stripTrailingUserPromptSubmitContextPart(parts)).toBe(parts);
   });
 });
 

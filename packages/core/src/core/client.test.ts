@@ -348,6 +348,8 @@ vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetectionDisabled: vi.fn(),
 }));
 
+import * as telemetryIndex from '../telemetry/index.js';
+
 const { mockClientDebugLogger } = vi.hoisted(() => ({
   mockClientDebugLogger: {
     isEnabled: vi.fn().mockReturnValue(false),
@@ -9600,6 +9602,69 @@ Other open files:
           'my prompt',
           expect.any(Object),
         );
+      });
+
+      it('uses the pre-injection prompt for telemetry user-prompt attributes', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'extra hook context',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        Object.assign(mockConfig, {
+          getTelemetryIncludeSensitiveSpanAttributes: vi
+            .fn()
+            .mockReturnValue(true),
+        });
+        const startSpy = vi
+          .spyOn(telemetryIndex, 'startInteractionSpan')
+          .mockImplementation(() => {});
+        const spanSpy = vi
+          .spyOn(telemetryIndex, 'getActiveInteractionSpan')
+          .mockReturnValue({} as never);
+        const addSpy = vi
+          .spyOn(telemetryIndex, 'addUserPromptAttributes')
+          .mockImplementation(() => {});
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        try {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'my prompt' }],
+              new AbortController().signal,
+              'prompt-hook-context-telemetry',
+            ),
+          );
+
+          expect(addSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.anything(),
+            'my prompt',
+          );
+          const promptArg = addSpy.mock.calls[0]?.[2] as string;
+          expect(promptArg).not.toContain('extra hook context');
+          expect(promptArg).not.toContain('qwen:user-prompt-submit-context');
+        } finally {
+          startSpy.mockRestore();
+          spanSpy.mockRestore();
+          addSpy.mockRestore();
+        }
       });
 
       it.each([

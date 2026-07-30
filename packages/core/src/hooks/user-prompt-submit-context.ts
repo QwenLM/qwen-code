@@ -46,3 +46,26 @@ export function isUserPromptSubmitContextPartText(text: string): boolean {
         USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG.length
   );
 }
+
+/**
+ * Drops a trailing part that is entirely a tagged UserPromptSubmit context
+ * block. Injection always appends after the user's own part(s), so a sole
+ * matching part is treated as user-authored and kept. Returns the same
+ * array reference when nothing is stripped.
+ */
+export function stripTrailingUserPromptSubmitContextPart<T>(
+  parts: readonly T[],
+): readonly T[] {
+  if (parts.length <= 1) {
+    return parts;
+  }
+  const last = parts[parts.length - 1] as { text?: unknown } | undefined;
+  if (
+    !last ||
+    typeof last.text !== 'string' ||
+    !isUserPromptSubmitContextPartText(last.text)
+  ) {
+    return parts;
+  }
+  return parts.slice(0, -1);
+}
