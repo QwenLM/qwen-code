@@ -247,9 +247,17 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
   return ApprovalMode.AUTO;
 }
 
-const URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s'"`<>]+/g;
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
+/**
+ * Strips credentials from every URL in a free-text warning or error message.
+ *
+ * Each URL-looking span is handed to `sanitizeProviderBaseUrl`, which scopes
+ * credential detection to the authority. Splitting the message into spans first
+ * rather than matching URLs with one global regex is what lets a password
+ * containing a space or a quote — legal in userinfo, but excluded by any
+ * `[^\s'"]`-style URL pattern — still be found.
+ */
 function sanitizeProviderWarning(warning: string): string {
   let result = '';
   let index = 0;
@@ -259,8 +267,7 @@ function sanitizeProviderWarning(warning: string): string {
     result += warning.slice(index, next.index);
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
-    const segment = warning.slice(next.index, segmentEnd);
-    result += sanitizeProviderWarningSegment(segment, next.marker.length);
+    result += sanitizeProviderBaseUrl(warning.slice(next.index, segmentEnd));
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
@@ -293,36 +300,6 @@ function findUrlSegmentEnd(
   const nextUrl = findNextUrlStart(value, afterMarker);
 
   return Math.min(lineEnd, nextUrl?.index ?? value.length);
-}
-
-function sanitizeProviderWarningSegment(
-  segment: string,
-  markerLength: number,
-): string {
-  const at = segment.indexOf('@', markerLength);
-  if (
-    at !== -1 &&
-    hasCredentialPrefix(segment, markerLength, at) &&
-    segment[at + 1] !== undefined &&
-    /[A-Za-z0-9.[\]-]/.test(segment[at + 1])
-  ) {
-    return `${segment.slice(0, markerLength)}${segment.slice(at + 1)}`;
-  }
-
-  return segment.replace(URL_LIKE_PATTERN, (url) =>
-    sanitizeProviderBaseUrl(url),
-  );
-}
-
-function hasCredentialPrefix(
-  segment: string,
-  markerLength: number,
-  at: number,
-): boolean {
-  const colon = segment.indexOf(':', markerLength);
-  if (colon === -1 || colon > at) return false;
-  const username = segment.slice(markerLength, colon);
-  return !/[/?#\s'"`<>]/.test(username);
 }
 
 function buildCurrent(

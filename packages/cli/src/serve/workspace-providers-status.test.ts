@@ -562,6 +562,63 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(result.initialized).toBe(false);
   });
 
+  it('keeps a port and the text after it when the message has no credentials', async () => {
+    // A `:` in the authority used to be read as the start of a password, so any
+    // later `@` — an email address, an npm scope — was taken as the end of the
+    // userinfo and everything between them was deleted.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443/v1 — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example:8443/v1 — contact admin@example.com',
+    );
+  });
+
+  it('strips a password containing an @ instead of splitting on the first one', async () => {
+    // `indexOf('@')` found the one inside the password, so the cut landed too
+    // early and the rest of the password was emitted.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed loading provider https://user:p@ssw0rd-tail@broken.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Failed loading provider https://broken.example/v1',
+    );
+    expect(JSON.stringify(result)).not.toContain('ssw0rd-tail');
+  });
+
+  it('strips credentials from every URL in a message and leaves the rest intact', async () => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Moving from https://user:sec ret@a.example/v1 to https://user:other@b.example:8443/v2; see admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Moving from https://a.example/v1 to https://b.example:8443/v2; see admin@example.com',
+    );
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
