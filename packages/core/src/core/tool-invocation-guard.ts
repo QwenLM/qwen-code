@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
+
 export interface ToolInvocationGuardContext {
   callId: string;
   toolName: string;
@@ -26,6 +28,8 @@ export type ToolInvocationGuard = (
 export type EvaluatedToolInvocationGuardDecision =
   | { allowed: true }
   | { allowed: false; reason: string };
+
+const debugLogger = createDebugLogger('TOOL_INVOCATION_GUARD');
 
 const DENIED_MESSAGE = 'Tool invocation denied by host policy';
 const FAILED_MESSAGE = 'Tool invocation guard failed';
@@ -58,9 +62,10 @@ export async function evaluateToolInvocationGuard(
             : DENIED_MESSAGE,
       };
     }
-  } catch {
+  } catch (error) {
     // A configured guard is an enforcement boundary. Provider and cloning
     // failures must deny the call instead of falling back to execution.
+    debugLogger.debug('Tool invocation guard evaluation failed', error);
   }
 
   return { allowed: false, reason: FAILED_MESSAGE };

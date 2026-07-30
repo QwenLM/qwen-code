@@ -330,6 +330,21 @@ vi.mock('../ide/ide-client.js', () => ({
   },
 }));
 
+const evaluateGuardSpy = vi.hoisted(() => vi.fn());
+vi.mock('./tool-invocation-guard.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./tool-invocation-guard.js')>();
+  return {
+    ...actual,
+    evaluateToolInvocationGuard: (
+      ...args: Parameters<typeof actual.evaluateToolInvocationGuard>
+    ) => {
+      evaluateGuardSpy(...args);
+      return actual.evaluateToolInvocationGuard(...args);
+    },
+  };
+});
+
 const mockIdeClient = {
   openDiff: vi.fn(),
   isDiffingEnabled: vi.fn(),
@@ -8857,6 +8872,28 @@ describe('CoreToolScheduler Plan shell routing', () => {
     expect(execute).not.toHaveBeenCalled();
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
     expect(completed[0].status).toBe('cancelled');
+  });
+
+  it('skips guard evaluation entirely when no guard is configured', async () => {
+    evaluateGuardSpy.mockClear();
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ execute })],
+    });
+
+    await scheduler.schedule(
+      [request('no-guard', 'git status')],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(evaluateGuardSpy).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
   });
 
   it('limits PM-confirmed read-only shell calls to exact one-off approval', async () => {

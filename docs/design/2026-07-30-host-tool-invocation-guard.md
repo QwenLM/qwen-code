@@ -14,7 +14,7 @@ The missing primitive is a final execution-boundary decision over the effective 
 
 - Let an in-process host provide one allow/deny function through `ConfigParameters`.
 - Evaluate the canonical tool name and cloned final invocation parameters immediately before execution.
-- Cover all currently reachable Config-owned runtime paths: the core scheduler, ACP session runtime, and speculative execution.
+- Cover the core scheduler, ACP session runtime, and speculative execution paths.
 - Fail closed when a configured guard denies, throws, returns a malformed decision, or cannot receive cloned arguments.
 - Preserve the existing execution path when no guard is configured.
 - Prevent execution if cancellation occurs before or while awaiting the guard.
@@ -57,6 +57,12 @@ The experimental speculation engine also executes invocations directly instead o
 All three paths use the built invocation parameters rather than the model-provided draft arguments. In the core and ACP paths, a denial produces zero executor calls and a structured `execution_denied` tool result.
 
 Any future Config-owned runtime that executes a `ToolInvocation` directly must evaluate the same guard or route through an already guarded scheduler. This is a code-review invariant, not a claim that arbitrary external callers can be intercepted.
+
+Two agent-dispatch call sites — the `/fork` slash command and the ACP agent
+fork handler — build and execute an agent tool invocation directly without
+consulting the guard. The spawned subagent shares the caller's `Config`, so
+every tool the subagent itself calls is guarded; only the dispatch call itself
+is unguarded. A future change may extend the guard to these sites.
 
 ## Default-off compatibility
 
