@@ -91,6 +91,7 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     dirname(rig.testDir!),
     `${basename(rig.testDir!)}-home`,
   );
+  rmSync(qwenHome, { recursive: true, force: true });
   mkdirSync(qwenHome, { recursive: true });
 
   const agent = spawn(
