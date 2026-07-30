@@ -1797,6 +1797,31 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
+    it('skips a pending final already recorded as posted', async () => {
+      writePending([pendingRecord()]);
+      mkdirSync(join(process.env.QWEN_HOME!, 'channels'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        `${JSON.stringify({
+          at: '2026-07-30T00:01:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: 'session-publication',
+          threadId: 'issue:42',
+          bodySha256: createHash('sha256').update('Final reply').digest('hex'),
+          bodyChars: 'Final reply'.length,
+        })}\n`,
+      );
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
     it('distinguishes pre-delivery validation from ambiguous failures', async () => {
       await connectForPublication();
       mockOctokit.rest.issues.createComment.mockRejectedValue(

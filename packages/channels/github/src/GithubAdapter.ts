@@ -560,6 +560,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? `Trigger: ${record.triggerKind}.`
           : undefined,
       });
+      if (this.hasPostedPublicationAudit(auditBase)) {
+        this.updatePendingFinalDeliveries((current) =>
+          current.filter((item) => item.id !== record.id),
+        );
+        continue;
+      }
       try {
         const comment = await this.createIssueComment(
           record.chatId,
@@ -616,6 +622,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ),
         });
       }
+    }
+  }
+
+  private hasPostedPublicationAudit(auditBase: PublicationAuditBase): boolean {
+    try {
+      return readFileSync(this.channelFilePath('github-audit.jsonl'), 'utf-8')
+        .split('\n')
+        .some((line) => {
+          if (!line) return false;
+          const record = JSON.parse(line) as Partial<PublicationAuditRecord>;
+          return (
+            record.outcome === 'posted' &&
+            record.channel === auditBase.channel &&
+            record.repository === auditBase.repository &&
+            record.number === auditBase.number &&
+            record.sessionId === auditBase.sessionId &&
+            record.sourceMessageId === auditBase.sourceMessageId &&
+            record.threadId === auditBase.threadId &&
+            record.bodySha256 === auditBase.bodySha256
+          );
+        });
+    } catch {
+      return false;
     }
   }
 
