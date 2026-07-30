@@ -541,7 +541,10 @@ export interface ToolResult {
    */
   modelOverride?: string;
 
-  /** End the current agent turn after recording this successful result. */
+  /**
+   * End the current Goal turn after recording this successful result. Only
+   * honored when the tool batch carries a Goal context; ignored otherwise.
+   */
   terminateTurn?: boolean;
 }
 

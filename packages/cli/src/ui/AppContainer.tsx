@@ -396,6 +396,8 @@ export function useQueuedSubmissionDrain({
   const admissionFailureRef = useRef<{
     pendingSubmissionCount: number;
     goalQueueRevision: number;
+    streamingState: StreamingState;
+    isProcessing: boolean;
   } | null>(null);
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
@@ -406,7 +408,9 @@ export function useQueuedSubmissionDrain({
         admissionFailureRef.current = null;
       } else if (
         pendingSubmissionCount <= admissionFailure.pendingSubmissionCount &&
-        goalQueueRevision === admissionFailure.goalQueueRevision
+        goalQueueRevision === admissionFailure.goalQueueRevision &&
+        streamingState === admissionFailure.streamingState &&
+        isProcessing === admissionFailure.isProcessing
       ) {
         return;
       } else {
@@ -451,6 +455,8 @@ export function useQueuedSubmissionDrain({
       admissionFailureRef.current = {
         pendingSubmissionCount: getPendingSubmissionCount(),
         goalQueueRevision,
+        streamingState,
+        isProcessing,
       };
     };
     const request =

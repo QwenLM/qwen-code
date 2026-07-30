@@ -96,15 +96,19 @@ describe('GoalPill', () => {
 
   it.each([
     ['no goal', noGoalSnapshot, ''],
-    ['active and idle', snapshot('active', 'idle'), '◎ /goal active'],
-    ['active and running', snapshot('active', 'running'), '◎ /goal active'],
+    ['active and idle', snapshot('active', 'idle'), '◎\uFE0E /goal active'],
+    [
+      'active and running',
+      snapshot('active', 'running'),
+      '◎\uFE0E /goal active',
+    ],
     [
       'active and verifying',
       snapshot('active', 'verifying'),
-      '○ /goal checking',
+      '○\uFE0E /goal checking',
     ],
     ['paused', snapshot('paused'), '! /goal paused'],
-    ['blocked', snapshot('blocked'), '✖ /goal blocked'],
+    ['blocked', snapshot('blocked'), '✖\uFE0E /goal blocked'],
     ['usage limited', snapshot('usage_limited'), '! /goal usage limited'],
     ['complete', snapshot('complete'), ''],
   ])('renders accessible lifecycle text for %s', (_name, value, expected) => {

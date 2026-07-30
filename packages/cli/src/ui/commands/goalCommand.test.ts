@@ -116,6 +116,21 @@ describe('goalCommand', () => {
     ]);
   });
 
+  it.each(['pause', 'resume', 'edit revised'] as const)(
+    'rejects /goal %s in non-interactive mode',
+    async (args) => {
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      const result = await goalCommand.action!(context, args);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringMatching(/only available in interactive mode/i),
+      });
+    },
+  );
+
   it('rejects invalid set and edit commands before runtime admission', async () => {
     const { runtime } = makeRuntime(noGoalSnapshot());
     const { context, getGoalRuntimeReady } = makeContext(runtime);

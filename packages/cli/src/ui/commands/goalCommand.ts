@@ -258,6 +258,17 @@ export const goalCommand: SlashCommand = {
     args: string,
   ): Promise<SlashCommandActionReturn> => {
     if (context.executionMode !== 'interactive') {
+      const operation = parseGoalCommand(args);
+      if (operation.kind === 'error') return errorMessage(operation.message);
+      if (
+        operation.kind !== 'status' &&
+        operation.kind !== 'clear' &&
+        operation.kind !== 'set'
+      ) {
+        return errorMessage(
+          `'/goal ${operation.kind}' is only available in interactive mode.`,
+        );
+      }
       return (
         (await runLegacyGoalCommand(context, args)) ?? {
           type: 'message',

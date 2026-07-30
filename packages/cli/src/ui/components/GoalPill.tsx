@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
 
 const ELAPSED_REFRESH_MS = 1000;
 
@@ -83,14 +84,18 @@ function presentation(snapshot: GoalSnapshotV2): {
 
   if (goal.status === 'active') {
     return snapshot.activity === 'verifying'
-      ? { icon: '○', label: 'checking', color: theme.text.secondary }
-      : { icon: '◎', label: 'active', color: theme.text.accent };
+      ? {
+          icon: ICON.CIRCLE_EMPTY,
+          label: 'checking',
+          color: theme.text.secondary,
+        }
+      : { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
   }
   switch (goal.status) {
     case 'paused':
       return { icon: '!', label: 'paused', color: theme.status.warning };
     case 'blocked':
-      return { icon: '✖', label: 'blocked', color: theme.status.error };
+      return { icon: ICON.CROSS, label: 'blocked', color: theme.status.error };
     case 'usage_limited':
       return {
         icon: '!',
