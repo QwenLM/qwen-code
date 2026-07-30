@@ -41,10 +41,11 @@ describe('Interactive file system', () => {
       const fileName = 'version.txt';
 
       // Drive the conversation with a deterministic fake model instead of a
-      // live LLM. A real model made this multi-turn test flaky: it could pick
-      // different tools, phrase the read result without the literal version,
-      // or settle the first turn on its own schedule. The fake model scripts
-      // the exact read-then-write turn sequence so the interactive mechanics
+      // live LLM. A real model made this multi-turn test flaky: the cited CI
+      // failure was the second turn stalling mid-stream until the poll timed
+      // out, and a live model can also pick a different tool or phrase the
+      // read result without the literal version. The fake model scripts the
+      // exact read-then-write turn sequence so the interactive mechanics
       // (typed input, tool execution, file mutation) are what get tested.
       let filePath = '';
       fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
@@ -118,10 +119,11 @@ describe('Interactive file system', () => {
         expect(readCall, 'Expected to find a read_file tool call').toBe(true);
 
         // The interactive UI renders a successful read_file as a one-line
-        // summary, not its content, so '1.0.0' here matches the fake model's
-        // scripted echo (requestIndex 1), not the read result. The write-side
-        // poll below still grounds the test in the real filesystem, and
-        // read_file correctness is covered by its own unit tests.
+        // summary, not its content, so the rendered '1.0.0' matches the fake
+        // model's scripted echo (requestIndex 1), not the read result. Assert
+        // the read result directly via the tool result the CLI sent back in
+        // the next request, so this still observes the real file content; the
+        // write-side poll below grounds the test in the real filesystem.
         const containsExpectedVersion = await rig.waitForText('1.0.0');
         if (!containsExpectedVersion) {
           printDebugInfo(rig, rig._interactiveOutput, {
@@ -132,6 +134,7 @@ describe('Interactive file system', () => {
           containsExpectedVersion,
           'Expected to see version "1.0.0" in output',
         ).toBe(true);
+        expect(JSON.stringify(fakeServer.requests[1]!.body)).toContain('1.0.0');
 
         // Step 2: Write the file
         const writePrompt = `now change the version to 1.0.1 in the file`;
