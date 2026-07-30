@@ -8934,6 +8934,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings handlers fall back to process.cwd() after worktree session closes', async () => {
+    const WORKTREE_DIR = '/fake/worktree';
+    const innerConfig = await setupSessionMocks('wt-close-session');
+    innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
+
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/fake/project', mcpServers: [] });
+
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(WORKTREE_DIR);
+
+    await agent.extMethod('qwen/control/session/close', {
+      sessionId: 'wt-close-session',
+    });
+
+    vi.mocked(loadSettings).mockClear();
+    await agent.extMethod('qwen/settings/getCore', {});
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(process.cwd());
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/permissions/setRules validates scope and ruleType', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
