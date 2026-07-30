@@ -694,6 +694,15 @@ describe('BundledSkillLoader', () => {
           expiresAt: 2,
           jitterMs: 0,
         },
+        {
+          id: 'similar-prefix-job',
+          cronExpr: '*/10 * * * *',
+          prompt: 'autofix tickets weekly',
+          recurring: true,
+          createdAt: 1,
+          expiresAt: 2,
+          jitterMs: 0,
+        },
       );
 
       const result = await invokeAutofix('off');
@@ -702,6 +711,7 @@ describe('BundledSkillLoader', () => {
       expect(scheduler.delete).toHaveBeenCalledTimes(2);
       expect(scheduler.list).toHaveBeenCalledTimes(2);
       expect(scheduler.delete).not.toHaveBeenCalledWith('ordinary-job');
+      expect(scheduler.delete).not.toHaveBeenCalledWith('similar-prefix-job');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',

@@ -53,9 +53,10 @@ export type CurrentAutofixPullRequestResult =
 const AUTOFIX_PROMPT_PATTERN =
   /^autofix tick repo=([^\s]+) pr=([1-9]\d*) mode=(propose-only|auto-commit|auto-push) rounds=(\d+) infra-reruns=(\d+)$/;
 const OWNER_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const AUTOFIX_NAMESPACE_PATTERN = /^autofix tick(?:\s|$)/;
 
 export function isAutofixCronJob(job: Pick<CronJob, 'prompt'>): boolean {
-  return job.prompt.startsWith('autofix tick');
+  return AUTOFIX_NAMESPACE_PATTERN.test(job.prompt);
 }
 
 export function parseAutofixWatcher(job: CronJob): AutofixWatcher | null {
