@@ -22,9 +22,11 @@ import {
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
+  MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
   shouldLaunchBrowser,
+  type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
@@ -109,7 +111,7 @@ interface ServeArgs {
   'max-journal-events': number;
   'max-journal-bytes': number;
   workspace?: string | string[];
-  'memory-project-scope'?: 'git-root' | 'workspace';
+  'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
   'tls-cert'?: string;
@@ -201,7 +203,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('memory-project-scope', {
         type: 'string',
-        choices: ['git-root', 'workspace'] as const,
+        choices: MEMORY_PROJECT_SCOPES,
         description:
           'Choose how project memory is partitioned. ' +
           '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +

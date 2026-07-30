@@ -30,6 +30,13 @@ export const USER_AUTO_MEMORY_DIRNAME = 'memories';
  */
 export const TEAM_AUTO_MEMORY_DIRNAME = 'team-memory';
 
+/**
+ * Valid project-memory partitioning modes. Exported so CLI yargs choices,
+ * type declarations, and runtime guards share one source of truth.
+ */
+export const MEMORY_PROJECT_SCOPES = ['git-root', 'workspace'] as const;
+export type MemoryProjectScope = (typeof MEMORY_PROJECT_SCOPES)[number];
+
 function findGitRoot(startPath: string): string | null {
   let current = path.resolve(startPath);
 

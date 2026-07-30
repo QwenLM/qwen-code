@@ -407,6 +407,25 @@ Notes:
 | `--web` / `--no-web`                    | `true`          | Serve the built Web Shell SPA at the daemon root (`GET /`, `/assets/*`, and SPA deep-link fallback). The static shell is registered **before** the bearer-auth gate — a browser can't attach a token to a `<script>` subresource or an address-bar navigation, the shell carries no secrets, and every API route stays token-gated regardless. On non-loopback binds a one-line stderr warning notes the UI is reachable without auth. Use `--no-web` for an API-only daemon. No effect when the build omits the Web Shell assets (the daemon logs a breadcrumb and runs API-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
+> **Memory project scope caveats.**
+>
+> - **Daemon vs. standalone CLI.** `--memory-project-scope` (and
+>   `QWEN_CODE_MEMORY_PROJECT_SCOPE`) only affects daemon-managed runtimes.
+>   A standalone `qwen` TUI started in the same directory still uses the
+>   git-root scope unless the environment variable is exported globally. To keep
+>   both entry points consistent, pin the scope in the workspace `.env` or
+>   `settings.env` so every process that reads the workspace agrees.
+> - **Directory-name collisions.** The storage key is derived by
+>   `sanitizeCwd`, which replaces every non-alphanumeric character with
+>   `-`. Sibling directories that differ only in punctuation (e.g.
+>   `feature_1` and `feature-1`) map to the same memory directory even
+>   under `workspace` scope. Avoid such naming when relying on workspace
+>   isolation.
+> - **Normalization differs between flag and env var.** The environment variable
+>   is trimmed and lowercased (`"  Workspace  "` works); the CLI flag is
+>   matched case-sensitively by yargs `choices` (`--memory-project-scope
+Workspace` is rejected). Use lowercase values when copying between the two.
+
 > **Sizing the load knobs.** `--max-sessions` is the per-workspace fresh-session cap. `--max-total-sessions`, when set, is the daemon-wide fresh-session cap.
 > Three other layers also limit load — when sizing for a high-concurrency
 > deployment, tune them together:

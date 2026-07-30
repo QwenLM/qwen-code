@@ -45,11 +45,12 @@ import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
-import type {
-  AuthType,
-  ProviderSetupInputs,
-  TelemetryRuntimeConfig,
-  TelemetrySettings,
+import {
+  MEMORY_PROJECT_SCOPES,
+  type AuthType,
+  type ProviderSetupInputs,
+  type TelemetryRuntimeConfig,
+  type TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
@@ -1961,8 +1962,9 @@ async function runQwenServeImpl(
   // bad scope can never be baked into a runtime, even transiently.
   if (
     optsIn.memoryProjectScope !== undefined &&
-    optsIn.memoryProjectScope !== 'git-root' &&
-    optsIn.memoryProjectScope !== 'workspace'
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(
+      optsIn.memoryProjectScope,
+    )
   ) {
     throw new TypeError(
       `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
