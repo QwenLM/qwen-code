@@ -12833,7 +12833,9 @@ describe('GeminiChat', async () => {
       const prose =
         'Here is how you use the tool. First you open the file, then you read it. ' +
         'The invoke block below shows the format. Remember to always check the path. ' +
-        'This is a documentation example for the read_file tool call format.';
+        'This is a documentation example for the read_file tool call format. ' +
+        'You should never execute these examples directly. They are for illustration ' +
+        'purposes only. The actual tool calls are made through the structured API.';
       const text =
         prose +
         '\n<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';

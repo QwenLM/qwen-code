@@ -60,7 +60,20 @@ function stripDelimitingNewlines(value: string): string {
 }
 
 /**
+ * Returns true when `index` falls inside an unclosed fenced code block
+ * (``` or ~~~). An odd number of fence markers before the position means
+ * a fence was opened but never closed.
+ */
+function positionInsideFence(text: string, index: number): boolean {
+  const before = text.slice(0, index);
+  const fences = before.match(FENCE_PATTERN);
+  return fences !== null && fences.length % 2 === 1;
+}
+
+/**
  * Extracts XML-style tool calls from plain text content.
+ * Invoke blocks inside fenced code blocks (``` or ~~~) are skipped:
+ * they document the format rather than emitting a tool call. See #8003.
  * Returns an array of extracted tool calls, or an empty array if none found.
  */
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
@@ -71,6 +84,10 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
 
   let match: RegExpExecArray | null;
   while ((match = INVOKE_PATTERN.exec(text)) !== null) {
+    if (positionInsideFence(text, match.index)) {
+      continue;
+    }
+
     const toolName = match[1];
     const paramsBlock = match[2];
 
@@ -96,23 +113,6 @@ export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
 }
 
 /**
- * Detects whether the first invoke block sits inside an unclosed fenced code
- * block (``` or ~~~). A fenced invoke example means the model is documenting
- * the format rather than emitting a tool call, so recovery must be vetoed to
- * keep documentation from being executed. See #8003.
- */
-function firstInvokeInsideFence(text: string): boolean {
-  INVOKE_PATTERN.lastIndex = 0;
-  const first = INVOKE_PATTERN.exec(text);
-  if (!first) {
-    return false;
-  }
-  const before = text.slice(0, first.index);
-  const fences = before.match(FENCE_PATTERN);
-  return fences !== null && fences.length % 2 === 1;
-}
-
-/**
  * Attempts to recover tool calls from XML-formatted text content.
  * If XML tool calls are found and dominate the content, returns
  * functionCall parts and the remaining text (with recovered XML
@@ -130,13 +130,6 @@ export function tryRecoverXmlToolCalls(text: string): {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 
-  // Intent guard: a fenced code block around the invoke example signals the
-  // model is documenting the format, not calling a tool. Veto so documented
-  // examples are never executed.
-  if (firstInvokeInsideFence(text)) {
-    return { recovered: false, functionCallParts: [], remainingText: text };
-  }
-
   // Intent guard: only recover when XML blocks dominate the content.
   // Substantial surrounding prose suggests the model is documenting or
   // echoing the format, not emitting a tool call. Measure against all
@@ -146,18 +139,25 @@ export function tryRecoverXmlToolCalls(text: string): {
     .replace(INVOKE_PATTERN, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  if (text.length > 0 && proseOnly.length / text.length > 0.2) {
+  if (text.length > 0 && proseOnly.length / text.length > 0.8) {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 
-  // Strip only invoke blocks that contain parameters (the ones we actually
-  // recovered). Parameterless blocks are preserved as plain text.
+  // Strip only invoke blocks that contain parameters and are outside
+  // fenced code blocks (the ones we actually recovered). Parameterless
+  // and fenced blocks are preserved as plain text.
   INVOKE_PATTERN.lastIndex = 0;
   const remainingText = text
-    .replace(INVOKE_PATTERN, (block) => {
-      PARAMETER_PATTERN.lastIndex = 0;
-      return PARAMETER_PATTERN.test(block) ? '' : block;
-    })
+    .replace(
+      INVOKE_PATTERN,
+      (block, _name: string, _body: string, offset: number) => {
+        if (positionInsideFence(text, offset)) {
+          return block;
+        }
+        PARAMETER_PATTERN.lastIndex = 0;
+        return PARAMETER_PATTERN.test(block) ? '' : block;
+      },
+    )
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 

@@ -168,6 +168,26 @@ describe('extractXmlToolCalls', () => {
     expect(Object.getPrototypeOf(args)).toBeNull();
     expect((args as Record<string, unknown>)['polluted']).toBeUndefined();
   });
+
+  it('skips invoke blocks inside fenced code blocks', () => {
+    const text =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
+  it('extracts non-fenced invokes while skipping fenced ones', () => {
+    const realCall = invoke('read_file', param('file_path', 'a.ts'));
+    const fencedExample =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hello')) +
+      '\n```';
+    const text = realCall + '\n' + fencedExample;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+  });
 });
 
 describe('tryRecoverXmlToolCalls', () => {
@@ -209,11 +229,63 @@ describe('tryRecoverXmlToolCalls', () => {
     const prose =
       'Here is how you use the tool. First you open the file, then you read it. ' +
       'The invoke block below shows the format. Remember to always check the path. ' +
-      'This is a documentation example for the read_file tool call format.';
+      'This is a documentation example for the read_file tool call format. ' +
+      'You should never execute these examples directly. They are for illustration ' +
+      'purposes only. The actual tool calls are made through the structured API.';
     const text = prose + '\n' + invoke('read_file', param('file_path', 'a.ts'));
     const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);
+  });
+
+  it('recovers when reasoning prose precedes the XML (issue #8003 shape)', () => {
+    // Reconstructs the shape from #8003: ~1400 chars of model reasoning
+    // prose followed by a ~600-byte edit invoke with multi-line params.
+    // Prose ratio ≈ 0.70, which must pass the 0.8 guard.
+    const reasoning =
+      'I need to fix the authentication token validation in the middleware. ' +
+      'The current implementation does not check the expiry date, which means ' +
+      'expired tokens are still accepted. This is a security vulnerability that ' +
+      'could allow unauthorized access. I will update the validateToken function ' +
+      'to check the exp claim and reject tokens that have expired. The fix involves ' +
+      'adding a date comparison after the signature verification step. I also need ' +
+      'to make sure the error message is clear about why the token was rejected. ' +
+      'Let me look at the current implementation and make the necessary changes. ' +
+      'The file is located in the src/middleware directory. I will use the edit tool ' +
+      'to replace the old validation logic with the new one that includes expiry ' +
+      'checking. This should be a straightforward change that does not affect other ' +
+      'parts of the codebase. The test suite should still pass after this change. ' +
+      'I have verified that no other middleware depends on the old behavior. ' +
+      'The change is backward compatible because valid tokens will still be accepted.';
+    const editBlock = invoke(
+      'edit',
+      param('file_path', '/project/src/middleware/auth.ts') +
+        param(
+          'old_string',
+          'function validateToken(token: string): boolean {\n' +
+            '  const decoded = jwt.verify(token, SECRET);\n' +
+            '  return decoded !== null;\n' +
+            '}',
+        ) +
+        param(
+          'new_string',
+          'function validateToken(token: string): boolean {\n' +
+            '  const decoded = jwt.verify(token, SECRET);\n' +
+            '  if (!decoded || !decoded.exp) return false;\n' +
+            '  return Date.now() < decoded.exp * 1000;\n' +
+            '}',
+        ),
+    );
+    const text = reasoning + '\n' + editBlock;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts).toHaveLength(1);
+    const call = result.functionCallParts[0]?.functionCall;
+    expect(call?.name).toBe('edit');
+    expect(call?.args).toHaveProperty('file_path');
+    expect(call?.args).toHaveProperty('old_string');
+    expect(call?.args).toHaveProperty('new_string');
+    expect(result.remainingText).toBe(reasoning);
   });
 
   it('preserves parameterless invoke blocks as plain text', () => {
@@ -235,5 +307,22 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);
     expect(result.remainingText).toBe(text);
+  });
+
+  it('recovers a real invoke while excluding a fenced example after it', () => {
+    const realCall = invoke('read_file', param('file_path', 'a.ts'));
+    const fencedExample =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hello')) +
+      '\n```';
+    const text = realCall + '\n' + fencedExample;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts).toHaveLength(1);
+    const call = result.functionCallParts[0]?.functionCall;
+    expect(call?.name).toBe('read_file');
+    expect(call?.args).toEqual({ file_path: 'a.ts' });
+    expect(result.remainingText).toContain('```xml');
+    expect(result.remainingText).toContain('echo hello');
   });
 });
