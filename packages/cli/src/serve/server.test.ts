@@ -334,6 +334,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_list',
   'session_info',
   'session_source_metadata',
+  'session_side_task',
   'session_prompt',
   'session_cancel',
   'session_events',

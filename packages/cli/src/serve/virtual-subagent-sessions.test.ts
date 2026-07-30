@@ -88,6 +88,46 @@ describe('VirtualSubagentSessions', () => {
     ).toThrow('valid id parts');
   });
 
+  it('resolves an out-of-band fork by agent task id', async () => {
+    const runtime = {
+      workspaceId: 'workspace-1',
+      workspaceCwd: '/workspace',
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: {
+        getSessionTasksStatus: async () => ({
+          v: 1 as const,
+          sessionId: 'parent-session',
+          now: Date.now(),
+          tasks: [
+            {
+              kind: 'agent' as const,
+              id: 'fork-agent-1',
+              label: 'Review current changes',
+              description: 'Review current changes',
+              status: 'running' as const,
+              startTime: Date.now(),
+              runtimeMs: 1,
+              outputFile: '/tmp/fork-agent-1.jsonl',
+              isBackgrounded: true,
+            },
+          ],
+        }),
+      },
+    } as unknown as WorkspaceRuntime;
+
+    const resolved = await new VirtualSubagentSessions().resolve(
+      runtime,
+      'parent-session',
+      'fork-agent-1',
+    );
+
+    expect(resolved).toMatchObject({
+      taskId: 'fork-agent-1',
+      title: 'Review current changes',
+      status: 'running',
+    });
+  });
+
   it('resolves, fully loads, and independently streams an agent transcript', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
     tempDirs.push(dir);
