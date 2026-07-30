@@ -38,6 +38,7 @@ Examples:
 - `check the deploy` → prompt-only self-paced path, prompt `check the deploy`
 - (empty) → self-paced autonomous loop (sentinel `<<autonomous-loop-dynamic>>`)
 - `5m` → fixed-interval autonomous loop (interval `5m`, sentinel `<<autonomous-loop>>`)
+- `/autofix status` → prompt-only self-paced observer. If a per-PR watcher is desired, use `/autofix on` instead of wrapping it in a recurring `/loop`.
 
 ## Prompt-only self-paced path
 

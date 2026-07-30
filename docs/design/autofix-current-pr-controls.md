@@ -1,37 +1,39 @@
-# Current-PR Autofix controls
+# Current-PR Autofix watcher
 
 ## Problem
 
-Qwen Autofix already manages opted-in pull requests in GitHub Actions, but the CLI has no focused entry point for the pull request associated with the current branch. Users must remember the workflow's exact comment commands and inspect labels, CI, and review state separately.
+Qwen Code can detect the current branch's pull request, schedule recurring prompts, inspect GitHub CI and review state, and edit the current checkout. Those pieces are not exposed as one explicit, per-PR maintenance mode. Users still have to copy CI logs and review feedback into separate turns.
 
 ## Scope
 
-Add a bundled `/autofix` skill with three exact user-invoked operations:
+Add a bundled, user-only `/autofix` skill with explicit per-PR confirmation modes:
 
-- `status`: read the current branch's open pull request and summarize Autofix labels, CI, review state, and eligibility facts.
-- `on`: post the workflow's existing `@qwen-code /takeover` command.
-- `off`: post the workflow's existing `@qwen-code /takeover stop` command.
+- `status`: resolve the current branch's open pull request and summarize watcher, CI, review, mode, round count, and eligibility state.
+- `on [propose-only|auto-commit|auto-push]`: create one session-scoped 10-minute watcher for that pull request and run the first maintenance check immediately. Bare `on` defaults to `propose-only`.
+- `off`: cancel and re-check every watcher matching that pull request.
 
-This change does not add a watcher, daemon, workflow, confirmation mode, status-line indicator, direct label mutation, or arbitrary-PR targeting. The existing GitHub Actions workflow remains the only owner of authorization, eligibility, label mutation, review triage, fixes, pushes, audit comments, and round limits.
+The watcher runs only while Qwen Code is open. Its exact scheduled prompt pins the PR number, confirmation mode, and cumulative change-producing round count. Every tick re-resolves the current branch; a branch/PR mismatch stops the watcher instead of retargeting it.
 
-## Design
+## Maintenance contract
 
-Use a Markdown-only bundled skill. The operation is thin orchestration over stable `gh` and workflow contracts, so a TypeScript command would duplicate skill loading and command plumbing without adding a deterministic runtime requirement.
+Each tick inspects the live PR, failed checks, and unresolved trusted feedback. CI is diagnosed from the failed step or job logs; unambiguous infrastructure failures may be re-run once, while ordinary timeouts and test/build failures remain code failures until proven otherwise.
 
-Resolve the pull request with one current-branch query:
+Review comments are triaged before edits:
 
-```bash
-gh pr view --json number,url,state,baseRefName,isCrossRepository,maintainerCanModify,author,labels,statusCheckRollup,reviewDecision,latestReviews
-```
+- `act`: verified, valuable, in-scope feedback gets the smallest fix.
+- `reply-and-dismiss`: bikeshedding, speculative defense, or codebase-inconsistent requests get a brief reason and stay unresolved.
+- `defer-to-human`: product, scope, or contradictory-reviewer decisions are surfaced without the agent choosing for the user.
 
-Writes use only the validated numeric `number` field and one of two constant, single-quoted comment bodies. GitHub-provided strings are display-only and never reach executable shell text.
+The watcher uses the current checkout rather than manufacturing an unrelated branch. It refuses change-producing work when the user already has staged changes, preserves independent unstaged work, verifies focused behavior plus required build/typecheck gates, and stages only intended files.
 
-A posted comment is a request, not proof of state change. The skill must not report takeover as active until a later status read observes workflow-owned labels. `autofix/skip` takes precedence over `autofix/takeover`.
+The confirmation mode controls the result: `propose-only` leaves a verified patch for review, `auto-commit` creates a local Conventional Commit with an `Auto-fix:` trailer, and `auto-push` additionally revalidates the live head, pushes without force, and posts only verified replies. Non-push modes draft replies in the conversation rather than writing to GitHub.
 
-## Status mapping
+## Safety and visibility
 
-CI matches the repository's existing GitHub pull-request aggregation semantics: failure-like CheckRun conclusions or StatusContext states win, then pending, then passing, with an empty rollup reported as no checks. Review status uses `reviewDecision`, with `latestReviews` summarized by reviewer and state without quoting review bodies.
+Only a direct user slash-command invocation can enable Autofix; the skill is hidden from model invocation. There is no global enablement or arbitrary-PR argument. Status reports mode, round count, and cron job ID. `/autofix off` verifies deletion by listing again and cannot report success while a matching job remains. Every tick reports evidence, triage decisions, changes, selected mode, commit/push result, verification, and watcher re-arm state.
 
-## Failure behavior
+The round count is carried in the scheduled prompt and incremented after each successful remote action or push. At five rounds, only blocking work may grow the diff; at ten, the watcher stops and asks the user to take over.
 
-Invalid arguments, missing or unauthenticated `gh`, API failure, no current-branch pull request, a non-open pull request, or an invalid pull-request number stop before any write. Workflow-side rejection remains visible through the workflow's acknowledgement comments and subsequent status reads.
+## Existing integrations
+
+The implementation reuses the existing `/loop` scheduler and current-branch PR resolution. `/review` remains independent evidence: Autofix may consume its findings, but must re-check them against the live head and may not use a clean static review to dismiss red CI.
