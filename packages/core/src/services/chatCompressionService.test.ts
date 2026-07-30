@@ -884,8 +884,9 @@ describe('ChatCompressionService', () => {
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
     vi.mocked(tokenLimit).mockReturnValue(1000);
-    // getCompactionModel() returns getModel() when compactionModel is unset
-    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('test-model');
+    // getCompactionModel() returns undefined when compactionModel is unset;
+    // the service coalesces to config.getModel() via ?? fallback
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(undefined);
 
     const mockGenerateText = vi.fn().mockResolvedValue({
       text: 'Summary',

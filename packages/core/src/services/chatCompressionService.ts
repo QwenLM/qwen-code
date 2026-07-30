@@ -523,7 +523,10 @@ export class ChatCompressionService {
     let effectiveCompactionModel =
       config.getCompactionModel?.() ?? config.getModel();
     let compactionWarning: string | undefined;
-    if (effectiveCompactionModel) {
+    // Only check the window when the effective model differs from the main
+    // model — warning about the main model being "too small" is confusing
+    // when no compaction model was explicitly configured.
+    if (effectiveCompactionModel !== config.getModel()) {
       const resolved = resolveModelId(effectiveCompactionModel);
       if (resolved) {
         const models = resolved.authType
