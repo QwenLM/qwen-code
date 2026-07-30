@@ -785,22 +785,23 @@ describe('selectMutants', () => {
     ]);
   });
 
-  it('does not let a quoted } inside an interpolation close the template', () => {
-    // A `}` inside a quoted string in the interpolation must not decrement
-    // interpDepth: the premature drop lets a later nested backtick be mistaken
-    // for the outer close, admitting template text as a candidate.
+  it('does not let a regex literal in an interpolation swallow later code', () => {
+    // A regex literal is not a string: skipping from the `'` in `/'/g` to a
+    // matching quote runs past the interpolation's `}` (no closing quote on the
+    // line), so the scanner never leaves the template, its end state is not
+    // `code`, and a real safety statement on the next line is silently dropped.
+    // Not skipping quotes inside an interpolation keeps the brace depth honest;
+    // the statement must be selected.
     const content = src([
-      'const x = `a${fmt("}") + `nested`}',
+      'const q = `${x.replace(/\'/g, "")}`;',
       'items.clear();',
-      '`;',
-      'after.clear();',
       '',
     ]);
     const { selected: got } = selectMutants([
-      { file: 'src/s.ts', content, addedLines: all(4), hasNewTests: false },
+      { file: 'src/s.ts', content, addedLines: all(2), hasNewTests: false },
     ]);
     expect(got).toEqual([
-      { file: 'src/s.ts', line: 4, statement: 'after.clear();' },
+      { file: 'src/s.ts', line: 2, statement: 'items.clear();' },
     ]);
   });
 

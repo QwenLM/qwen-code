@@ -302,11 +302,14 @@ interface FileScan {
  * Interpolations (`${…}`) are treated as still-template, tracked by brace
  * depth so the backtick of a NESTED template inside `${…}` is not mistaken for
  * the outer close (which would flag the outer literal's remaining lines as
- * code and admit its text as candidates). Quoted strings inside the
- * interpolation are skipped so their `}` does not decrement depth, and a
- * nested backtick opens a sub-scan that keeps the nested template's text `}`
- * from reaching the outer counter: still-template can only skip a candidate,
- * never admit one.
+ * code and admit its text as candidates). A nested backtick opens a sub-scan
+ * that keeps the nested template's text `}` from reaching the outer counter.
+ * Quotes inside the interpolation are deliberately not skipped: a regex literal
+ * (`/'/g`) is not a string, and skipping to its matching quote runs past the
+ * interpolation's own `}`, derailing the scan and dropping every later candidate
+ * in the file. A `}` in a plain string can still decrement depth — handling
+ * that needs regex-literal awareness — but not skipping is what the corpus
+ * shows is safe today.
  *
  * `codeLines`: the selection checks are end-anchored — `endsWith(';')`, the
  * `$` alternatives in {@link SAFETY_VERB_RE}, the predecessor `/[;{}]$/` — so
@@ -364,28 +367,10 @@ function scanFileLines(content: string): FileScan {
             nestedDepth = 2;
             i++;
           }
-        } else if (ch === '"' || ch === "'") {
-          const q = ch;
-          i++;
-          while (
-            i < content.length &&
-            content[i] !== q &&
-            content[i] !== '\n'
-          ) {
-            if (content[i] === '\\' && content[i + 1] !== '\n') i++;
-            i++;
-          }
         } else if (ch === '{') {
           nestedDepth++;
         } else if (ch === '}') {
           nestedDepth--;
-        }
-      } else if (ch === '"' || ch === "'") {
-        const q = ch;
-        i++;
-        while (i < content.length && content[i] !== q && content[i] !== '\n') {
-          if (content[i] === '\\' && content[i + 1] !== '\n') i++;
-          i++;
         }
       } else if (ch === '`') {
         nestedDepth = 1;
