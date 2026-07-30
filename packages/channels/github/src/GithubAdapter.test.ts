@@ -1489,6 +1489,7 @@ describe('GithubChannel', () => {
         cause: error,
       });
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
       const audit = readFileSync(
         join(
           process.env.QWEN_HOME!,
@@ -1545,6 +1546,36 @@ describe('GithubChannel', () => {
         expect(sleep).toHaveBeenCalled();
       },
     );
+
+    it('deduplicates repeated pending final deliveries', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('rate limited'), { status: 429 });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+
+      expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
+    });
 
     it('preserves concurrent delivery while recovering a pending final', async () => {
       await connectForPublication();
@@ -1731,6 +1762,10 @@ describe('GithubChannel', () => {
         repo: 'repo',
         issue_number: 43,
         body: 'Second reply',
+      });
+      expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
+        outcome: 'posted',
+        commentId: 2004,
       });
     });
 

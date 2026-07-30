@@ -571,13 +571,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // ponytail: GitHub has no createComment idempotency key without adding
         // a public marker to the verbatim final body; marker-upsert if that
         // contract changes.
-        if (
-          !this.updatePendingFinalDeliveries((current) =>
-            current.filter((item) => item.id !== record.id),
-          )
-        ) {
-          continue;
-        }
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -586,6 +579,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           commentId: comment.id,
           commentUrl: comment.html_url,
         });
+        if (
+          !this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          continue;
+        }
       } catch (err) {
         if (isDefiniteNoWriteGithubError(err)) {
           this.updatePendingFinalDeliveries((current) =>
