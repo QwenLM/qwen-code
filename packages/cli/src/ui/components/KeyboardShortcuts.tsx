@@ -20,10 +20,9 @@ const getNewlineKey = () =>
   process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
 const getPasteKey = () => {
   if (process.platform === 'win32') return 'alt+v';
-  // macOS: Cmd+V works in VSCode integrated terminal but not in standalone
-  // terminals like iTerm2 (which intercept it for text paste). Ctrl+V works
-  // everywhere. Show both so users can try whichever their terminal supports.
-  return process.platform === 'darwin' ? 'cmd+v / ctrl+v' : 'ctrl+v';
+  // macOS terminals (iTerm2, Terminal.app) intercept Cmd+V for text paste, so
+  // advertise Ctrl+V and Option+V, which reach the CLI as image-paste keys.
+  return process.platform === 'darwin' ? 'ctrl+v / option+v' : 'ctrl+v';
 };
 const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
