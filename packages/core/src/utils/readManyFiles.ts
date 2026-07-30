@@ -9,7 +9,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from '../core/inlineMediaLimit.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { getErrorMessage, isAbortError } from './errors.js';
 import type { ProcessedFileReadResult } from './fileUtils.js';
@@ -176,11 +175,11 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
+        const standardFileSystem =
+          config.getFileSystemService() instanceof StandardFileSystemService;
         const shouldSnapshot =
           validatedIdentity &&
-          stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES &&
-          (config.getFileSystemService() instanceof StandardFileSystemService ||
-            (await detectFileType(fullPath)) !== 'text');
+          (standardFileSystem || (await detectFileType(fullPath)) !== 'text');
         const snapshot = shouldSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
           : undefined;
@@ -267,6 +266,9 @@ async function snapshotValidatedFile(
   | undefined
 > {
   let snapshotDir: string | undefined;
+  let result:
+    | { filePath: string; stats: fs.Stats; cleanup: () => Promise<void> }
+    | undefined;
   try {
     signal?.throwIfAborted();
     const source = await fs.promises.open(
@@ -295,44 +297,55 @@ async function snapshotValidatedFile(
       try {
         const buffer = Buffer.allocUnsafe(64 * 1024);
         let sourcePosition = 0;
-        while (true) {
+        while (sourcePosition < stats.size) {
           signal?.throwIfAborted();
+          const remaining = stats.size - sourcePosition;
           const { bytesRead } = await source.read(
             buffer,
             0,
-            buffer.length,
+            Math.min(buffer.length, remaining),
             sourcePosition,
           );
-          if (bytesRead === 0) break;
+          if (bytesRead === 0) return undefined;
           let written = 0;
           while (written < bytesRead) {
-            const result = await target.write(
+            const writeResult = await target.write(
               buffer,
               written,
               bytesRead - written,
             );
-            written += result.bytesWritten;
+            written += writeResult.bytesWritten;
           }
           sourcePosition += bytesRead;
         }
+        const growthProbe = Buffer.allocUnsafe(1);
+        const { bytesRead: extraBytes } = await source.read(
+          growthProbe,
+          0,
+          1,
+          sourcePosition,
+        );
+        if (extraBytes !== 0) return undefined;
       } finally {
         await target.close();
       }
-      return {
+      result = {
         filePath: snapshotPath,
         stats,
         cleanup: () =>
           fs.promises.rm(snapshotDir!, { recursive: true, force: true }),
       };
+      return result;
     } finally {
       await source.close();
     }
   } catch (error) {
-    if (snapshotDir) {
-      await fs.promises.rm(snapshotDir, { recursive: true, force: true });
-    }
     if (signal?.aborted || isAbortError(error)) throw error;
     return undefined;
+  } finally {
+    if (snapshotDir && !result) {
+      await fs.promises.rm(snapshotDir, { recursive: true, force: true });
+    }
   }
 }
 

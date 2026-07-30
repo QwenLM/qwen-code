@@ -375,6 +375,63 @@ describe('readManyFiles', () => {
       ]);
     });
 
+    it('reads a validated image from its approved snapshot during a path swap', async () => {
+      const relativePath = 'approved.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(absolutePath);
+      const approvedStats = await fs.stat(absolutePath);
+      const backupPath = `${absolutePath}.approved`;
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'read-many-files-outside-'),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.png');
+      await fs.writeFile(outsidePath, Buffer.from('outside secret'));
+      const readFile = fs.readFile.bind(fs);
+      const readFileSpy = vi
+        .spyOn(fs, 'readFile')
+        .mockImplementation(async (file, options) => {
+          const result = await readFile(file, options);
+          // The first snapshot read proves the descriptor is already bound to
+          // the approved inode before the visible path is swapped.
+          if (String(file).includes('qwen-validated-read-')) {
+            await fs.rename(absolutePath, backupPath);
+            await fs.symlink(outsidePath, absolutePath);
+          }
+          return result;
+        });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          preserveUnsupportedImageForBridge: true,
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+        const imagePart = findInlineDataPart(result.contentParts);
+
+        expect(imagePart).toBeDefined();
+        expect(contentToString(result.contentParts)).not.toContain(
+          'outside secret',
+        );
+      } finally {
+        readFileSpy.mockRestore();
+        await fs.rm(absolutePath, { force: true });
+        await fs.rename(backupPath, absolutePath).catch(() => undefined);
+        await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
     it('skips unsupported images when the bridge handoff flag is absent', async () => {
       const relativePath = 'screenshot.png';
       const absolutePath = path.join(tempRootDir, relativePath);
