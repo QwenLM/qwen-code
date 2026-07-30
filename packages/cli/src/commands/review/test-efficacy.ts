@@ -51,6 +51,7 @@ import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
+  readdirSync,
   writeFileSync,
   readFileSync,
   rmSync,
@@ -993,11 +994,21 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
   const source = join(dependencyRoot, 'node_modules');
   const target = join(probeTree, 'node_modules');
   if (!existsSync(source) || existsSync(target)) return;
-  symlinkSync(
-    source,
-    target,
-    process.platform === 'win32' ? 'junction' : 'dir',
-  );
+  mkdirSync(target);
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    const sourceEntry = join(source, entry.name);
+    const targetEntry = join(target, entry.name);
+    if (entry.name.startsWith('@') && entry.isDirectory()) {
+      mkdirSync(targetEntry);
+      for (const pkg of readdirSync(sourceEntry)) {
+        symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
+      }
+    } else {
+      symlinkSync(sourceEntry, targetEntry, linkType);
+    }
+  }
 }
 
 function runProbeSuite(
