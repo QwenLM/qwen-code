@@ -655,6 +655,16 @@ describe('GitlabChannel', () => {
   });
 
   describe('working reaction', () => {
+    class ReactingGitlabChannel extends GitlabChannel {
+      override async handleInbound(envelope: Envelope): Promise<void> {
+        this.onPromptStart(envelope.chatId, 'session-1', envelope.messageId);
+        await Promise.resolve();
+        this.onPromptEnd(envelope.chatId, 'session-1', envelope.messageId);
+      }
+
+      protected override startPollLoop(): void {}
+    }
+
     class LiveGitlabChannel extends GitlabChannel {
       setReactionForTest(
         messageId: string,
@@ -694,6 +704,74 @@ describe('GitlabChannel', () => {
       }
     }
 
+    it('drives award/remove through real pollOnce path for note mention', async () => {
+      const channel = new ReactingGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await channel.connect();
+      channel.disconnect();
+      (
+        channel as unknown as {
+          cursor: { lastProcessedId: number; initialized: boolean };
+        }
+      ).cursor = {
+        lastProcessedId: 0,
+        initialized: true,
+      };
+      mockApi.TodoLists.all.mockResolvedValueOnce([makeTodo()]);
+
+      await (
+        channel as unknown as { pollOnce: () => Promise<void> }
+      ).pollOnce();
+
+      expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        1001,
+        'eyes',
+      );
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.remove).toHaveBeenCalledWith(
+          'owner/repo',
+          42,
+          1001,
+          9000,
+        ),
+      );
+    });
+
+    it('does not award emoji for description mention via real path', async () => {
+      const channel = new ReactingGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await channel.connect();
+      channel.disconnect();
+      (
+        channel as unknown as {
+          cursor: { lastProcessedId: number; initialized: boolean };
+        }
+      ).cursor = {
+        lastProcessedId: 0,
+        initialized: true,
+      };
+      mockApi.TodoLists.all.mockResolvedValueOnce([
+        makeTodo({
+          target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+          body: 'Test Issue',
+        }),
+      ]);
+
+      await (
+        channel as unknown as { pollOnce: () => Promise<void> }
+      ).pollOnce();
+
+      expect(mockApi.IssueNoteAwardEmojis.award).not.toHaveBeenCalled();
+    });
+
     it('acknowledges a note mention with an eyes award emoji', async () => {
       const liveChannel = new LiveGitlabChannel(
         'test-gitlab',
@@ -715,21 +793,6 @@ describe('GitlabChannel', () => {
         1001,
         'eyes',
       );
-    });
-
-    it('does not acknowledge a description mention', async () => {
-      const liveChannel = new LiveGitlabChannel(
-        'test-gitlab',
-        makeConfig(),
-        makeBridge(),
-      );
-      await liveChannel.connect();
-      liveChannel.disconnect();
-
-      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
-      await Promise.resolve();
-
-      expect(mockApi.IssueNoteAwardEmojis.award).not.toHaveBeenCalled();
     });
 
     it('removes the award emoji when the prompt finishes', async () => {
@@ -799,10 +862,10 @@ describe('GitlabChannel', () => {
       });
 
       liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
-      await Promise.resolve();
-      await Promise.resolve();
 
-      expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalled(),
+      );
       liveChannel.endPromptForTest('owner/repo', 'session-1', '100');
       await Promise.resolve();
       expect(mockApi.IssueNoteAwardEmojis.remove).not.toHaveBeenCalled();
