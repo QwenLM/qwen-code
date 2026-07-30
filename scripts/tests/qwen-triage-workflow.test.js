@@ -3849,6 +3849,10 @@ describe('qwen-triage tmux lane parity', () => {
       const cacheStep = stepIn(jobName, 'Restore npm cache');
       expect(cacheStep).toContain('actions/cache/restore@');
       expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
+      // A separate save step would reopen the same hole the
+      // restore-only variant closes.
+      expect(job(jobName)).not.toContain('actions/cache/save@');
+      expect(job(jobName)).not.toMatch(/uses:\s*'actions\/cache@/);
     }
   });
 
@@ -3856,6 +3860,16 @@ describe('qwen-triage tmux lane parity', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
       const prepare = stepIn(jobName, 'Install and build PR app');
       expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+      );
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cachePath = cacheStep.match(
+        /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
+      )?.[1];
+      const npmCache = prepare.match(/--cache "\$RUNNER_TEMP\/([^"]+)"/)?.[1];
+      expect(cachePath).toBeTruthy();
+      expect(npmCache).toBe(cachePath);
     }
   });
 });

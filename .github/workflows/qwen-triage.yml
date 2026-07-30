@@ -1075,7 +1075,7 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
                 npm ci --prefer-offline --no-audit --progress=false \
                 --cache "$RUNNER_TEMP/npm-cache"
@@ -2490,7 +2490,7 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
                 npm ci --prefer-offline --no-audit --progress=false \
                 --cache "$RUNNER_TEMP/npm-cache"
