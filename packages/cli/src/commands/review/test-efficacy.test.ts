@@ -596,6 +596,27 @@ describe('selectMutants', () => {
     ]);
   });
 
+  it('selects a method-body statement when the method is the first class member', () => {
+    // The backward walk from the method's `{` reaches `class Store {` on the
+    // very first step. The `[;{}]` stop must fire before the `class` match on
+    // that same line, or the walk overshoots into the class header and rejects
+    // a statement that is inside the method body, not the class body.
+    const content = src([
+      'class Store {',
+      '  reset() {',
+      '    this.cache.clear();',
+      '  }',
+      '}',
+      '',
+    ]);
+    const { selected: got } = selectMutants([
+      { file: 'src/s.ts', content, addedLines: all(5), hasNewTests: false },
+    ]);
+    expect(got).toEqual([
+      { file: 'src/s.ts', line: 3, statement: 'this.cache.clear();' },
+    ]);
+  });
+
   it('skips what it cannot delete whole — declarations, headers, fragments', () => {
     // Every line here contains a safety verb; none is a deletable statement.
     // False negatives are fine, but each false positive wastes a suite run —

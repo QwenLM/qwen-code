@@ -360,8 +360,8 @@ function insideClassBody(lines: string[], idx: number): boolean {
           if (/\bclass\b/.test(code.slice(0, i))) return true;
           for (let k = j - 1; k >= 0; k--) {
             const prev = codeOnly(lines[k]);
-            if (/\bclass\b/.test(prev)) return true;
             if (/[;{}]/.test(prev)) break;
+            if (/\bclass\b/.test(prev)) return true;
           }
           return false;
         }
