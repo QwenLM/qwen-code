@@ -1079,6 +1079,15 @@ function mergeConsecutiveAssistantMessages(
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
  *
+ * A `tool_use` in the very last message (no message follows it at all) is
+ * never condemned as orphaned here -- "no result yet" isn't the same as
+ * "no result ever": the tool may simply not have finished executing yet,
+ * or this conversion may not be building the completed turn to send to
+ * Anthropic at all (token counting, a resumed/replayed session snapshot,
+ * a retry issued before tool execution completes, ...). Only a `tool_use`
+ * whose subsequent message was actually scanned and found lacking a
+ * matching `tool_result` is a genuine orphan.
+ *
  * Empty messages produced by the cleanup are dropped entirely. A subsequent
  * mergeConsecutiveAssistantMessages call fixes any alternation issues
  * created by dropped messages.
@@ -1106,6 +1115,20 @@ function cleanOrphanedToolCalls(
       }
     }
     if (toolUseBlocks.size === 0) continue;
+
+    // No message follows this assistant turn at all -- these tool_use
+    // blocks are unresolved (the tool hasn't finished executing yet, or
+    // this conversion isn't building the completed turn for Anthropic at
+    // all, e.g. a token-count pass or a mid-tool-call snapshot), not
+    // orphaned. Protect them from the filter below. A genuine orphan
+    // requires a subsequent message that was actually scanned and found
+    // to lack a matching tool_result -- "history ends here" is not that.
+    if (i === messages.length - 1) {
+      for (const block of toolUseBlocks.values()) {
+        validToolUseBlocks.add(block as object);
+      }
+      continue;
+    }
 
     for (let j = i + 1; j < messages.length; j++) {
       const nextMessage = messages[j];

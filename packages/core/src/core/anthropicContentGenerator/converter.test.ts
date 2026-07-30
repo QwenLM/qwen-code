@@ -1067,6 +1067,10 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('cleans orphaned tool_use blocks without matching tool_result', () => {
+      // A genuine orphan requires a subsequent message that was actually
+      // scanned and found lacking a matching tool_result -- not merely the
+      // absence of any subsequent message (see the "trailing tool_use"
+      // test below for that case).
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
@@ -1078,19 +1082,68 @@ describe('AnthropicContentConverter', () => {
               { functionCall: { id: 'orphan', name: 'tool', args: {} } },
             ],
           },
+          { role: 'user', parts: [{ text: 'never mind' }] },
         ],
       });
 
       expect(messages).toEqual([
         {
           role: 'user',
-          content: [
-            { type: 'text', text: 'Hi', cache_control: { type: 'ephemeral' } },
-          ],
+          content: [{ type: 'text', text: 'Hi' }],
         },
         {
           role: 'assistant',
           content: [{ type: 'text', text: 'Let me help' }],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'never mind',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('does not strip a trailing tool_use that has no subsequent message yet (unresolved, not orphaned)', () => {
+      // "History ends on a pending tool_use" is not evidence the call is
+      // orphaned -- the tool may simply not have finished executing yet,
+      // or this conversion may be happening for a reason other than
+      // sending the completed turn to Anthropic (token counting, a
+      // resumed/replayed session snapshot, ...). Regression test for the
+      // bug where this exact shape had its tool_use silently deleted.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'What is the weather in Paris?' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Let me check the weather.' },
+              {
+                functionCall: {
+                  id: 'toolu_pending',
+                  name: 'get_weather',
+                  args: { city: 'Paris' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastMsg = messages[messages.length - 1];
+      expect(lastMsg.role).toBe('assistant');
+      expect(lastMsg.content).toEqual([
+        { type: 'text', text: 'Let me check the weather.' },
+        {
+          type: 'tool_use',
+          id: 'toolu_pending',
+          name: 'get_weather',
+          input: { city: 'Paris' },
         },
       ]);
     });
