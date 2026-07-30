@@ -5302,12 +5302,11 @@ describe('qwen-autofix workflow', () => {
     // range string is unchanged and the error message still exists as dead
     // code, but execution falls through to the report section after 3
     // failed attempts and posts a round-complete comment as if the push
-    // succeeded.
+    // succeeded. Deleting exit 1 alone also survives without this pin:
+    // the guard fires and prints the error but execution continues past
+    // fi, the for-loop exhausts, and the report section runs.
     expect(pushAndReportStep).toMatch(
-      /if \[\[ "\$\{push_attempt\}" == 3 \]\]; then\n\s+echo "::error::push rejected/,
-    );
-    expect(pushAndReportStep).toContain(
-      'push rejected ${push_attempt} times; giving up',
+      /if \[\[ "\$\{push_attempt\}" == 3 \]\]; then\n\s+echo "::error::push rejected \$\{push_attempt\} times; giving up"\n\s+exit 1/,
     );
   });
 
