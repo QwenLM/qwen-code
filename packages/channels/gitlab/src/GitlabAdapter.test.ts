@@ -132,6 +132,14 @@ function createMockApi() {
     MergeRequests: {
       show: vi.fn().mockResolvedValue({ description: 'MR description' }),
     },
+    IssueNoteAwardEmojis: {
+      award: vi.fn().mockResolvedValue({ id: 9000 }),
+      remove: vi.fn().mockResolvedValue(undefined),
+    },
+    MergeRequestNoteAwardEmojis: {
+      award: vi.fn().mockResolvedValue({ id: 9000 }),
+      remove: vi.fn().mockResolvedValue(undefined),
+    },
   };
 }
 
@@ -643,6 +651,218 @@ describe('GitlabChannel', () => {
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 1 });
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 2 });
       expect(channel.cursor.lastProcessedId).toBe(2);
+    });
+  });
+
+  describe('working reaction', () => {
+    class LiveGitlabChannel extends GitlabChannel {
+      setReactionForTest(
+        messageId: string,
+        entry: {
+          target: { iid: number; title: string; isMr: boolean };
+          noteId: number;
+        },
+      ): void {
+        (
+          this as unknown as {
+            reactions: Map<
+              string,
+              {
+                target: { iid: number; title: string; isMr: boolean };
+                noteId: number;
+                award?: Promise<{ awardId: number }>;
+              }
+            >;
+          }
+        ).reactions.set(messageId, entry);
+      }
+
+      startPromptForTest(
+        chatId: string,
+        sessionId: string,
+        messageId: string,
+      ): void {
+        this.onPromptStart(chatId, sessionId, messageId);
+      }
+
+      endPromptForTest(
+        chatId: string,
+        sessionId: string,
+        messageId: string,
+      ): void {
+        this.onPromptEnd(chatId, sessionId, messageId);
+      }
+    }
+
+    it('acknowledges a note mention with an eyes award emoji', async () => {
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 42, title: '', isMr: false },
+        noteId: 1001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+
+      expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        1001,
+        'eyes',
+      );
+    });
+
+    it('does not acknowledge a description mention', async () => {
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+      await Promise.resolve();
+
+      expect(mockApi.IssueNoteAwardEmojis.award).not.toHaveBeenCalled();
+    });
+
+    it('removes the award emoji when the prompt finishes', async () => {
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 42, title: '', isMr: false },
+        noteId: 1001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+      await Promise.resolve();
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '100');
+
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.remove).toHaveBeenCalledWith(
+          'owner/repo',
+          42,
+          1001,
+          9000,
+        ),
+      );
+    });
+
+    it('uses MergeRequestNoteAwardEmojis for MR note mentions', async () => {
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 99, title: '', isMr: true },
+        noteId: 2001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+
+      expect(mockApi.MergeRequestNoteAwardEmojis.award).toHaveBeenCalledWith(
+        'owner/repo',
+        99,
+        2001,
+        'eyes',
+      );
+    });
+
+    it('handles award failure as best-effort', async () => {
+      mockApi.IssueNoteAwardEmojis.award.mockRejectedValueOnce(
+        new Error('403'),
+      );
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 42, title: '', isMr: false },
+        noteId: 1001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockApi.IssueNoteAwardEmojis.award).toHaveBeenCalled();
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '100');
+      await Promise.resolve();
+      expect(mockApi.IssueNoteAwardEmojis.remove).not.toHaveBeenCalled();
+    });
+
+    it('handles remove failure as best-effort', async () => {
+      mockApi.IssueNoteAwardEmojis.remove.mockRejectedValueOnce(
+        new Error('403'),
+      );
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 42, title: '', isMr: false },
+        noteId: 1001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+      await Promise.resolve();
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '100');
+
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.remove).toHaveBeenCalled(),
+      );
+    });
+
+    it('waits for pending award before removing', async () => {
+      const { promise: awardPending, resolve: resolveAward } =
+        Promise.withResolvers<{ id: number }>();
+      mockApi.IssueNoteAwardEmojis.award.mockReturnValueOnce(awardPending);
+      const liveChannel = new LiveGitlabChannel(
+        'test-gitlab',
+        makeConfig(),
+        makeBridge(),
+      );
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setReactionForTest('100', {
+        target: { iid: 42, title: '', isMr: false },
+        noteId: 1001,
+      });
+
+      liveChannel.startPromptForTest('owner/repo', 'session-1', '100');
+      liveChannel.endPromptForTest('owner/repo', 'session-1', '100');
+      expect(mockApi.IssueNoteAwardEmojis.remove).not.toHaveBeenCalled();
+
+      resolveAward({ id: 9001 });
+      await awardPending;
+      await vi.waitFor(() =>
+        expect(mockApi.IssueNoteAwardEmojis.remove).toHaveBeenCalledWith(
+          'owner/repo',
+          42,
+          1001,
+          9001,
+        ),
+      );
     });
   });
 });
