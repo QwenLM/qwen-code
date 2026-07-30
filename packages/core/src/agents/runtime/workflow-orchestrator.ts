@@ -6,7 +6,7 @@
 
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
-import type { Config } from '../../config/config.js';
+import { deriveWorktreeConfig, type Config } from '../../config/config.js';
 import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
@@ -40,8 +40,6 @@ import {
   generateAgentWorktreeSlug,
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
@@ -680,17 +678,16 @@ async function runOverridePath(
     ),
   };
 
-  // Provision worktree BEFORE createAgentHeadless so the override Config
+  // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
-  // resolve cwd-related getters via the prototype chain.
+  // resolve workspace-bound state through the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
-    effectiveContext = createWorktreeConfigOverride(
-      config,
-      worktreeIsolation.path,
-    );
+    effectiveContext = deriveWorktreeConfig(config, worktreeIsolation.path, {
+      customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
+    });
   }
 
   // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
@@ -1051,38 +1048,6 @@ async function provisionWorkflowWorktree(
     branch: created.worktree.branch,
     repoRoot: projectRoot,
   };
-}
-
-/**
- * Build a Config wrapper that rebinds every "where am I?" surface to the
- * isolated worktree path. `Object.create(base)` keeps prototype lookups
- * walking back to the parent for everything else (model config, session
- * id, MCP servers), while the own-property overrides shadow the cwd-
- * adjacent fields so the subagent's tools (Edit / Write / Read / Glob /
- * Grep / Ls / Shell) anchor inside the worktree.
- *
- * Mirrors the inline rebind block at agent.ts:2008-2024. Sets BOTH the
- * field shape (e.g. `targetDir`) AND the method shape (`getTargetDir`)
- * because JS does not promote a getter assignment to a field shadow —
- * call sites that read `this.targetDir` directly inside Config methods
- * would otherwise still resolve through the prototype to the parent.
- */
-function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ov: any = Object.create(base);
-  ov.targetDir = wtPath;
-  ov.cwd = wtPath;
-  ov.getTargetDir = () => wtPath;
-  ov.getCwd = () => wtPath;
-  ov.getWorkingDir = () => wtPath;
-  ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(wtPath);
-  ov.fileDiscoveryService = wtFileService;
-  ov.getFileService = () => wtFileService;
-  const wtWorkspace = new WorkspaceContext(wtPath);
-  ov.workspaceContext = wtWorkspace;
-  ov.getWorkspaceContext = () => wtWorkspace;
-  return ov as Config;
 }
 
 /**

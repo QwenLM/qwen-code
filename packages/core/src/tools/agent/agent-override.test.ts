@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Config, ApprovalMode } from '../../config/config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveWorktreeConfig,
+} from '../../config/config.js';
 import { isPlanModeBlocked } from '../../core/permissionFlow.js';
 import type { ToolCallConfirmationDetails } from '../tools.js';
 import {
@@ -214,6 +218,22 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
 
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+  });
+
+  it('lets an approval override above a worktree Config change mode', async () => {
+    const parent = await createParentWithRegistry();
+    const worktree = deriveWorktreeConfig(parent, '/tmp/worktree');
+    const { config: child } = await createApprovalModeOverride(
+      worktree,
+      ApprovalMode.PLAN,
+    );
+
+    expect(() => worktree.setApprovalMode(ApprovalMode.DEFAULT)).toThrow(
+      'Derived Configs cannot change approval mode',
+    );
+    expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
     expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
   });
