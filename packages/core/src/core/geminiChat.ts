@@ -2479,8 +2479,16 @@ export class GeminiChat {
         // send has already handed to callers across all continuation attempts,
         // so each attempt can show the model its own visible output and ask it
         // to resume instead of replaying (which would duplicate that output).
+        // Attempts are folded in one at a time, each with any overlap it
+        // replayed stripped, so the buffer holds no fragment twice.
         let transportContinuationCount = 0;
         let transportContinuationText = '';
+        // Text delivered by the attempt currently running, before it is folded
+        // into `transportContinuationText`. Kept separate so the overlap a
+        // continuation attempt replays is stripped once, at the attempt
+        // boundary where it occurs, rather than per chunk — the overlap scan is
+        // suffix-anchored and would eat legitimately repeated text mid-stream.
+        let transportAttemptText = '';
         // Text delivered *before* the attempt currently running. Empty unless
         // a continuation is in flight. `processStreamResponse` only pushes the
         // final attempt's own output to history, so this is what has to be
@@ -2577,10 +2585,24 @@ export class GeminiChat {
         const resetTransportContinuation = () => {
           transportContinuationCount = 0;
           transportContinuationText = '';
+          transportAttemptText = '';
           transportContinuationPrefix = '';
         };
 
+        // Fold the running attempt's text into the accumulated buffer,
+        // stripping any overlap it replayed from the previous attempt's tail.
+        // Called on both exits from an attempt — success and cut — so the
+        // accumulated buffer never contains text twice.
+        const foldTransportAttemptText = () => {
+          transportContinuationText += getRecoveryContinuationSuffix(
+            transportContinuationText,
+            transportAttemptText,
+          );
+          transportAttemptText = '';
+        };
+
         for (;;) {
+          transportAttemptText = '';
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
           // A cut that already delivered a `functionCall` cannot be continued
@@ -2632,7 +2654,7 @@ export class GeminiChat {
               // the catch below history holds nothing about what the user
               // already saw.
               const chunkParts = chunk.candidates?.[0]?.content?.parts;
-              transportContinuationText += getPlainTextFromParts(chunkParts);
+              transportAttemptText += getPlainTextFromParts(chunkParts);
               if (chunkParts?.some((part) => part.functionCall)) {
                 streamYieldedFunctionCall = true;
               }
@@ -2649,6 +2671,11 @@ export class GeminiChat {
             break;
           } catch (error) {
             lastError = error;
+            // This attempt is over; fold what it delivered into the running
+            // buffer before any branch below reads it. Doing this here rather
+            // than per chunk keeps the overlap scan anchored at the attempt
+            // boundary, which is the only place a replay can occur.
+            foldTransportAttemptText();
 
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
@@ -2819,7 +2846,9 @@ export class GeminiChat {
               transportContinuationCount++;
               // Everything delivered so far — across earlier continuation
               // attempts too, since `transportContinuationText` accumulates
-              // and is never reset while continuing.
+              // and is never reset while continuing. Each attempt's own text
+              // was folded in at the catch above with its replayed overlap
+              // stripped, so this carries no fragment twice.
               transportContinuationPrefix = transportContinuationText;
               const delayMs =
                 TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *

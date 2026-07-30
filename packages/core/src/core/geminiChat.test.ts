@@ -7772,6 +7772,136 @@ describe('GeminiChat', async () => {
         }
       });
 
+      it('drops replayed overlap when an intermediate attempt is cut again', async () => {
+        // The two cases above, combined: a middle attempt both replays the
+        // previous tail *and* is cut before finishing. Dedup at merge time
+        // only compares the final attempt against the accumulated prefix, so
+        // an overlap replayed by an intermediate attempt is baked into that
+        // prefix — it is propagated to every later request and into durable
+        // history, where it corrupts /compress, --resume, and the context of
+        // every following turn.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(cutAfter([textChunk('part one part two ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('part three', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-intermediate-replay',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          // The third request must not carry "part one" twice.
+          expect(requestContentsOfCall(2).at(-2)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two ' }],
+          });
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'part one part two part three' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('pins the delivered text after a thought part in the merged turn', async () => {
+        // Covers `textIndex > 0`: the continuation turn leads with a thought
+        // part, so the delivered text must merge into the *text* part rather
+        // than being spliced at index 0 ahead of the thinking.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [
+                          { text: 'still reasoning', thought: true },
+                          { text: 'part two' },
+                        ],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-thought-then-text',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [
+              { text: 'still reasoning', thought: true },
+              { text: 'part one part two' },
+            ],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('inserts the delivered text when the continuation has no text part', async () => {
+        // Covers `textIndex < 0`: a thinking model completes the continuation
+        // with only a thought part. The delivered text has nothing to merge
+        // into, so it is inserted as its own part — and must land *after* the
+        // thought, not ahead of it.
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('part one ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [{ text: 'only thinking', thought: true }],
+                      },
+                      finishReason: 'STOP',
+                    },
+                  ],
+                } as unknown as GenerateContentResponse;
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-thought-only',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [
+              { text: 'only thinking', thought: true },
+              { text: 'part one ' },
+            ],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('propagates once the continuation budget is exhausted', async () => {
         vi.useFakeTimers();
         try {
