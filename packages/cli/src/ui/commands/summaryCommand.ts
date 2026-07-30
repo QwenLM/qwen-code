@@ -22,7 +22,7 @@ export const summaryCommand: SlashCommand = {
   name: 'summary',
   get description() {
     return t(
-      'Generate a project summary and save it to .qwen/PROJECT_SUMMARY.md (or a custom path)',
+      'Generate a project summary and save it to .qwen/PROJECT_SUMMARY.md',
     );
   },
   argumentHint: '[path]',
@@ -156,8 +156,8 @@ export const summaryCommand: SlashCommand = {
         // If the path ends with a separator or is an existing directory,
         // append the default filename
         const isDir =
-          resolved.endsWith('/') ||
-          resolved.endsWith('\\') ||
+          customPath.endsWith('/') ||
+          customPath.endsWith(path.sep) ||
           (await fsPromises
             .stat(resolved)
             .then((s) => s.isDirectory())
