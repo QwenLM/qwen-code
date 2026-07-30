@@ -251,6 +251,13 @@ const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
+/** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
+const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
+
+// Default `tools.toolSearch.threshold` (percent of the context window):
+// mirrors the settings-schema default in packages/cli.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+
 import {
   ModelsConfig,
   type ModelProvidersConfig,
@@ -977,6 +984,16 @@ export interface ConfigParameters {
    * silently ignored (they don't cause config errors).
    */
   visibleTools?: string[];
+  /**
+   * Percentage of the model's context window used as the session-start
+   * budget for preloading deferred tools. When the combined estimated
+   * schema size of every deferred tool — bundled built-ins and MCP alike
+   * — fits within the budget, they are all revealed upfront instead of
+   * loaded on demand via `tool_search`, keeping the declaration list
+   * stable for the whole session (prefix-cache friendly). `0` disables
+   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   */
+  toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -1654,7 +1671,9 @@ export class Config {
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
   private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
+  private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
+  private sessionWriterHandoffRequested = false;
   private sessionWriterActivationPromise: Promise<void> | undefined;
   private sessionWriterClosePromise: Promise<void> | undefined;
   /**
@@ -1753,6 +1772,7 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
+  private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1840,6 +1860,9 @@ export class Config {
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
+  private activeTodoReminders = new Map<string, string>();
+  private activeTodoWorkChainOwners = new Map<string, string>();
+  private activeTodoReminderTurns = new Map<string, number>();
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
@@ -2054,6 +2077,8 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
+    this.toolSearchThreshold =
+      params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -2996,6 +3021,7 @@ export class Config {
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
+        takeoverPolicy: this.sessionWriterTakeoverPolicy,
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
@@ -3648,6 +3674,9 @@ export class Config {
     }
     this.sessionData = sessionData;
     this.pendingRecoveredAgentsNotice = null;
+    this.getOwnActiveTodoReminders().clear();
+    this.getOwnActiveTodoWorkChainOwners().clear();
+    this.getOwnActiveTodoReminderTurns().clear();
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -4896,6 +4925,15 @@ export class Config {
   }
 
   /**
+   * Percentage of the context window used as the session-start budget for
+   * preloading deferred tools. See
+   * {@link ConfigParameters.toolSearchThreshold}.
+   */
+  getToolSearchThreshold(): number {
+    return this.toolSearchThreshold;
+  }
+
+  /**
    * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
@@ -6043,6 +6081,122 @@ export class Config {
     return this.geminiClient;
   }
 
+  private getOwnActiveTodoReminders(): Map<string, string> {
+    if (!Object.prototype.hasOwnProperty.call(this, 'activeTodoReminders')) {
+      this.activeTodoReminders = new Map();
+    }
+    return this.activeTodoReminders;
+  }
+
+  private getOwnActiveTodoWorkChainOwners(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoWorkChainOwners')
+    ) {
+      this.activeTodoWorkChainOwners = new Map();
+    }
+    return this.activeTodoWorkChainOwners;
+  }
+
+  private getOwnActiveTodoReminderTurns(): Map<string, number> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'activeTodoReminderTurns')
+    ) {
+      this.activeTodoReminderTurns = new Map();
+    }
+    return this.activeTodoReminderTurns;
+  }
+
+  getActiveTodoWorkChainOwner(
+    promptId: string,
+    fallbackOwner = promptId,
+  ): string {
+    return (
+      this.getOwnActiveTodoWorkChainOwners().get(promptId) ?? fallbackOwner
+    );
+  }
+
+  getActiveTodoReminder(promptId: string): string | undefined {
+    return this.getOwnActiveTodoReminders().get(
+      this.getActiveTodoWorkChainOwner(promptId),
+    );
+  }
+
+  /**
+   * Reads the reminder for injection, re-issuing it only every
+   * ACTIVE_TODO_REMINDER_REFRESH_TURNS tool turns: each injected copy lands in
+   * chat history permanently, so per-turn injection would grow the context
+   * linearly with tool turns. `force` is for turn-start injections (retry /
+   * related automatic turns), which always need the context and reset the
+   * cadence.
+   */
+  takeActiveTodoReminder(promptId: string, force = false): string | undefined {
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    const reminder = this.getOwnActiveTodoReminders().get(owner);
+    if (!reminder) return undefined;
+    const turns = this.getOwnActiveTodoReminderTurns();
+    const elapsed = (turns.get(owner) ?? 0) + 1;
+    if (!force && elapsed < ACTIVE_TODO_REMINDER_REFRESH_TURNS) {
+      turns.set(owner, elapsed);
+      return undefined;
+    }
+    turns.set(owner, 0);
+    return reminder;
+  }
+
+  setActiveTodoReminder(promptId: string, reminder: string | undefined): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    if (reminder) {
+      reminders.set(owner, reminder);
+      // The todo_write result itself just presented the full state.
+      this.getOwnActiveTodoReminderTurns().set(owner, 0);
+    } else {
+      reminders.delete(owner);
+      this.getOwnActiveTodoReminderTurns().delete(owner);
+    }
+  }
+
+  startActiveTodoWorkChain(promptId: string, continuedFrom?: string): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    if (!continuedFrom) {
+      reminders.clear();
+      owners.clear();
+      this.getOwnActiveTodoReminderTurns().clear();
+      owners.set(promptId, promptId);
+      return;
+    }
+
+    const owner = this.getActiveTodoWorkChainOwner(continuedFrom);
+    for (const reminderOwner of reminders.keys()) {
+      if (reminderOwner !== owner) reminders.delete(reminderOwner);
+    }
+    owners.clear();
+    owners.set(promptId, owner);
+  }
+
+  startAutomaticActiveTodoWorkChain(
+    promptId: string,
+    continuedFrom?: string,
+  ): void {
+    const reminders = this.getOwnActiveTodoReminders();
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = continuedFrom
+      ? this.getActiveTodoWorkChainOwner(continuedFrom)
+      : promptId;
+    owners.set(promptId, owner);
+    if (owner === promptId) reminders.delete(owner);
+  }
+
+  endAutomaticActiveTodoWorkChain(promptId: string): void {
+    const owners = this.getOwnActiveTodoWorkChainOwners();
+    const owner = this.getActiveTodoWorkChainOwner(promptId);
+    owners.delete(promptId);
+    if (![...owners.values()].includes(owner)) {
+      this.getOwnActiveTodoReminders().delete(owner);
+    }
+  }
+
   /**
    * Session-scoped memory pressure monitor. Child Configs created with
    * `Object.create(parent)` inherit the parent's monitor through the prototype
@@ -7048,9 +7202,21 @@ export class Config {
     this.sessionWriterReclaimPolicy = policy;
   }
 
-  closeSessionWriter(): Promise<void> {
+  setSessionWriterTakeoverPolicy(policy: 'never' | 'certified'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterTakeoverPolicy = policy;
+  }
+
+  closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+    if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
+      this.sessionWriterHandoffRequested = true;
+    }
     this.sessionWriterShutdownRequested = true;
-    this.chatRecordingService?.beginClose();
+    this.chatRecordingService?.beginClose({
+      handoff: this.sessionWriterHandoffRequested,
+    });
     this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
     return this.sessionWriterClosePromise;
   }
@@ -7065,7 +7231,9 @@ export class Config {
       }
     }
     try {
-      await this.chatRecordingService?.close();
+      await this.chatRecordingService?.close({
+        handoff: this.sessionWriterHandoffRequested,
+      });
     } catch (error) {
       failures.push(error);
     }

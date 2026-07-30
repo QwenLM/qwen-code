@@ -2075,6 +2075,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
       'never',
     );
+    expect(innerConfig.setSessionWriterTakeoverPolicy).toHaveBeenCalledWith(
+      'certified',
+    );
+    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+      handoff: true,
+    });
     expect(order).toEqual(['writer', 'resources']);
     expect(mockRunExitCleanup).toHaveBeenCalledOnce();
   });
@@ -3016,6 +3022,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       setSessionWriterReclaimPolicy: vi.fn(),
+      setSessionWriterTakeoverPolicy: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),

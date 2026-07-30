@@ -1552,4 +1552,26 @@ describe('HistoryReplayer', () => {
       expect(hasGap).toBe(false);
     });
   });
+
+  describe('qwen.session.recordId stamping', () => {
+    it('should stamp persisted updates with activeRecordId for user messages', async () => {
+      const userRecord = createUserRecord('Hello');
+      await replayer.replay([userRecord]);
+
+      expect(setActiveRecordIdSpy).toHaveBeenCalledWith(
+        userRecord.uuid,
+        userRecord.timestamp,
+      );
+    });
+
+    it('should stamp persisted updates with activeRecordId for assistant messages', async () => {
+      const assistantRecord = createAssistantRecord('Hi there');
+      await replayer.replay([assistantRecord]);
+
+      expect(setActiveRecordIdSpy).toHaveBeenCalledWith(
+        assistantRecord.uuid,
+        assistantRecord.timestamp,
+      );
+    });
+  });
 });
