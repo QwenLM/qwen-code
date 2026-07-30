@@ -62,6 +62,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
 import {
   ApprovalMode,
@@ -2018,14 +2019,16 @@ describe('createAcpSessionBridge', () => {
 
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
+    let failNextExtensionRefresh = true;
     const bridge = makeBridge({
       channelFactory: async () => {
         const h = makeChannel({
-          extMethodImpl: (method, params) => {
+          extMethodImpl: (method) => {
             if (
               method === 'qwen/control/workspace/extensions/refresh' &&
-              String(params['sessionId']).endsWith('#2')
+              failNextExtensionRefresh
             ) {
+              failNextExtensionRefresh = false;
               throw new Error('refresh failed');
             }
             return {};
@@ -2059,6 +2062,13 @@ describe('createAcpSessionBridge', () => {
       {
         method: 'qwen/control/workspace/extensions/refresh',
         params: { sessionId: first.sessionId },
+      },
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: {
+          sessionId: second.sessionId,
+          refreshBootstrap: false,
+        },
       },
       {
         method: 'qwen/control/workspace/extensions/refresh',
@@ -10824,6 +10834,103 @@ describe('createAcpSessionBridge', () => {
         },
       });
 
+      await bridge.shutdown();
+    });
+
+    it('creates a side task with hidden inherited replay', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+            return { newSessionId: 'side-1', title: 'Side task' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            return { persisted: true };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const parent = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const sideTask = await bridge.createSideTaskSession(parent.sessionId, {
+        name: 'Side task',
+      });
+
+      expect(sideTask).toMatchObject({
+        sessionId: 'side-1',
+        sourceType: 'side_task',
+        sourceId: parent.sessionId,
+        sourcePersisted: true,
+        parentSessionId: parent.sessionId,
+      });
+      expect(bridge.getSessionSummary(sideTask.sessionId)).toMatchObject({
+        sourceType: 'side_task',
+        sourceId: parent.sessionId,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: sideTask.sessionId,
+          sourceType: 'side_task',
+          sourceId: parent.sessionId,
+        },
+      });
+      expect(handle.agent.loadSessionCalls[0]?._meta).toMatchObject({
+        [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true,
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('creates a side task while the parent prompt is active', async () => {
+      const promptGate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await promptGate.promise;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+            return { newSessionId: 'side-active', title: 'Side task' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            return { persisted: true };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const parent = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const prompt = bridge.sendPrompt(parent.sessionId, {
+        sessionId: parent.sessionId,
+        prompt: [{ type: 'text', text: 'keep working' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      await expect(
+        bridge.createSideTaskSession(parent.sessionId, { name: 'Side task' }),
+      ).resolves.toMatchObject({
+        sessionId: 'side-active',
+        parentSessionId: parent.sessionId,
+      });
+      expect(bridge.getSessionSummary(parent.sessionId)).toMatchObject({
+        hasActivePrompt: true,
+      });
+
+      promptGate.resolve();
+      await prompt;
       await bridge.shutdown();
     });
 

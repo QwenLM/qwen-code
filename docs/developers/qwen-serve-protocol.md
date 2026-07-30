@@ -1298,6 +1298,15 @@ tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted when
 discovery succeeds.
 
+Repeated reads are served from the last committed workspace snapshot,
+periodically revalidated against the child's in-memory cache. A read never
+scans skill directories or reparses `SKILL.md` files. The child does verify
+that its extension sources are unchanged — one `readdir` of the extensions
+directory plus a `stat` per entry, the enablement file, and the store's
+activation state — and refreshes only when they moved, so an extension
+installed or toggled outside the daemon is still picked up on the next read.
+Safe and bare mode skip the check, matching their exclusion of extensions.
+
 ### `GET /workspace/providers`
 
 ```json
@@ -1583,24 +1592,56 @@ Filesystem errors use this JSON shape:
 
 #### `GET /file`
 
-Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
-`limit`. The daemon rejects binary files. Files above the 256 KiB full-snapshot
-cap require a finite `limit`; no-limit, line-only, and maxBytes-only requests
-remain `file_too_large`. A finite large-file window is streamed and its returned
-UTF-8 content remains capped at 256 KiB. `maxBytes` always applies to the UTF-8
-response bytes after decoding, including when the source uses another supported
-encoding within the full-snapshot cap.
+Reads a text file. Query params: `path` (required), `maxBytes`, `line`, `limit`,
+and `cursor`. The daemon rejects binary files. Files above the 256 KiB
+full-snapshot
+cap require at least one explicit window argument (`line`, `limit`, or
+`maxBytes`); a request with none of them remains `file_too_large`. Such a
+window is streamed, and its returned UTF-8 content stays capped at 256 KiB.
+`maxBytes` always applies to the UTF-8 response bytes after decoding, including
+when the source uses another supported encoding within the full-snapshot cap.
+
+Line offsets are resolved by scanning from the start of the file, so a window
+is also refused with `file_too_large` when reaching it would read more than
+8 MiB (`MAX_TEXT_SCAN_BYTES`). Use `GET /file/bytes` to reach a deeper offset
+directly. Large text in an encoding the route cannot decode returns
+`binary_file`, not `file_too_large` — retrying with a smaller window cannot
+help, and `readBytes` is the same remedy that already applies to binary.
 
 For files within the full-snapshot cap, the response includes `hash`, a SHA-256
 digest over the raw on-disk bytes for the whole file, even when `line`, `limit`,
 or `maxBytes` returned a slice. Large partial windows omit `hash`, retain the
 complete `sizeBytes`, set `truncated: true`, and return
-`originalLineCount: null` when the stream stops before EOF. A streamed result
-is returned only when the file remains stable. Concurrent changes detected by
-the post-read device/inode, size, modification-time, and change-time checks
-return `hash_mismatch`, including when the same mutation also causes decoding
-to fail. Stable binary content remains `binary_file`, and path replacement
-retains the existing `symlink_escape` protection.
+`originalLineCount: null` when the stream stops before EOF.
+
+##### Paging with `cursor`
+
+Requires the `workspace_file_read_cursor` capability. A response that has more
+to give returns `hasMore: true` and, when a file byte offset is derivable, a
+`nextCursor` token. Passing it back as `cursor` resumes in O(1), where a deep
+`line` offset costs a scan from byte 0 and is refused past 8 MiB.
+
+```
+GET /file?path=big.log&limit=500          → { content, nextCursor, hasMore: true }
+GET /file?path=big.log&limit=500&cursor=… → next page
+```
+
+`cursor` and `line` are mutually exclusive (`parse_error`) — both name a
+starting point. A malformed or over-long cursor is `parse_error`; a cursor
+whose file has been replaced or truncated is `hash_mismatch` (409). Appending
+does **not** invalidate an outstanding cursor, which is the case the feature
+exists for.
+
+`content` omits the terminating newline of its last line, as every other read
+does, so a client reassembling pages joins them with `\n`. `hasMore` is not a
+restatement of `nextCursor`: a small non-UTF-8 file read with a `limit` has
+more content but no derivable byte offset, so it reports `hasMore: true` with
+`nextCursor: null`. The cursor is also null when the byte cap cuts the current
+line, because resuming from that offset would return a partial line. For many
+short lines, lower `limit` until the page ends before the byte cap and returns
+a cursor. For a single oversized line, request the following line explicitly
+(for example, `line=2` when starting at line 1), then continue with cursors;
+use `GET /file/bytes` when the complete oversized line is required.
 
 ```json
 {

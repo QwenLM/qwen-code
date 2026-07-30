@@ -10,6 +10,7 @@ import {
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
+import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
 
@@ -26,7 +27,8 @@ interface AskUserQuestionProps {
     id: string,
     selectedOption: string,
     answers?: Record<string, string>,
-  ) => void;
+  ) => Promise<boolean>;
+  onError: (error: unknown, fallback: string) => void;
   variant?: 'inline' | 'floating';
   /**
    * Whether this question should pull keyboard focus to its first option when it
@@ -41,6 +43,7 @@ interface AskUserQuestionProps {
 export function AskUserQuestion({
   request,
   onConfirm,
+  onError,
   variant = 'inline',
   keyboardActive = true,
 }: AskUserQuestionProps) {
@@ -61,7 +64,9 @@ export function AskUserQuestion({
   );
   const [customFocused, setCustomFocused] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const submittedRef = useRef(false);
+  const submissionAttemptRef = useRef(0);
   // Roving-tabindex refs: option buttons (one per question option) plus the
   // "Other" trigger that reveals the custom input.
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -74,6 +79,8 @@ export function AskUserQuestion({
   useEffect(() => {
     const firstQuestion = questions[0];
     submittedRef.current = false;
+    submissionAttemptRef.current++;
+    setSubmitting(false);
     setCollapsed(false);
     setCurrentIdx(0);
     // Sync the ref too so the focus effect (which runs in this same commit on a
@@ -114,13 +121,42 @@ export function AskUserQuestion({
     return result;
   }, [questions, selectedMulti, customInputs, answers]);
 
+  const submitDecision = useCallback(
+    async (
+      optionId: string,
+      submittedAnswers?: Record<string, string>,
+    ): Promise<void> => {
+      if (submittedRef.current) return;
+      submittedRef.current = true;
+      const attempt = ++submissionAttemptRef.current;
+      setSubmitting(true);
+      try {
+        const accepted = await onConfirm(
+          request.id,
+          optionId,
+          submittedAnswers,
+        );
+        if (!accepted) throw new Error(t('askUser.submitFailed'));
+      } catch (error) {
+        if (submissionAttemptRef.current !== attempt) return;
+        submittedRef.current = false;
+        setSubmitting(false);
+        onError(error, t('askUser.submitFailed'));
+      }
+    },
+    [onConfirm, onError, request.id, t],
+  );
+
   const handleSubmit = useCallback(() => {
     if (submittedRef.current) return;
     const submitOption = request.options.find((o) => o.kind === 'allow_once');
-    if (!submitOption) return;
-    submittedRef.current = true;
-    onConfirm(request.id, submitOption.id, buildResult());
-  }, [buildResult, request, onConfirm]);
+    if (!submitOption) {
+      const message = t('askUser.submitOptionUnavailable');
+      onError(new Error(message), message);
+      return;
+    }
+    void submitDecision(submitOption.id, buildResult());
+  }, [buildResult, onError, request.options, submitDecision, t]);
 
   const handleCancel = useCallback(() => {
     if (submittedRef.current) return;
@@ -128,9 +164,8 @@ export function AskUserQuestion({
       (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
     );
     if (!cancelOption) return;
-    submittedRef.current = true;
-    onConfirm(request.id, cancelOption.id, undefined);
-  }, [request, onConfirm]);
+    void submitDecision(cancelOption.id);
+  }, [request.options, submitDecision]);
 
   const focusCustomInput = useCallback(
     (initialValue?: string) => {
@@ -485,6 +520,7 @@ export function AskUserQuestion({
                       aria-checked={isMulti ? undefined : isSelected}
                       aria-pressed={isMulti ? isSelected : undefined}
                       aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
+                      disabled={submitting}
                       onClick={() => chooseOption(i)}
                       onFocus={() => setSelectedIdx(i)}
                     >
@@ -520,7 +556,9 @@ export function AskUserQuestion({
                       // inner trigger/input — activate the "Other" option. The
                       // trigger button has no onClick of its own; its click (and
                       // native Enter/Space activation) bubbles up to here.
-                      onClick={() => chooseOption(current.options.length)}
+                      onClick={() => {
+                        if (!submitting) chooseOption(current.options.length);
+                      }}
                     >
                       <span className={styles.pointer} aria-hidden="true">
                         {isCustomActive ? '›' : ' '}
@@ -543,6 +581,7 @@ export function AskUserQuestion({
                           placeholder={t('askUser.typePlaceholder')}
                           value={customInputs[currentIdx] || ''}
                           aria-label={t('askUser.typePlaceholder')}
+                          disabled={submitting}
                           onChange={(e) =>
                             setCustomInputs({
                               ...customInputs,
@@ -576,6 +615,7 @@ export function AskUserQuestion({
                               ? String(current.options.length + 1)
                               : undefined
                           }
+                          disabled={submitting}
                           onFocus={() => setSelectedIdx(current.options.length)}
                         >
                           {customInputs[currentIdx] ||
@@ -592,6 +632,7 @@ export function AskUserQuestion({
             <button
               type="button"
               className={styles.ignoreButton}
+              disabled={submitting}
               onClick={handleCancel}
             >
               {t('askUser.ignore')}
@@ -601,7 +642,7 @@ export function AskUserQuestion({
                 <button
                   type="button"
                   className={styles.button}
-                  disabled={currentIdx <= 0}
+                  disabled={submitting || currentIdx <= 0}
                   onClick={handlePrevious}
                 >
                   {t('common.previous')}
@@ -609,7 +650,7 @@ export function AskUserQuestion({
                 <button
                   type="button"
                   className={styles.button}
-                  disabled={currentIdx >= questions.length - 1}
+                  disabled={submitting || currentIdx >= questions.length - 1}
                   onClick={handleNext}
                 >
                   {t('common.next')}
@@ -619,10 +660,21 @@ export function AskUserQuestion({
             <button
               type="button"
               className={`${styles.button} ${styles.submitButton}`}
-              disabled={!canSubmit}
+              disabled={submitting || !canSubmit}
+              aria-busy={submitting}
               onClick={handleSubmit}
             >
-              {t('askUser.submit')}
+              {submitting ? (
+                <>
+                  <Spinner
+                    className={styles.submitSpinner}
+                    aria-hidden="true"
+                  />
+                  {t('askUser.submitting')}
+                </>
+              ) : (
+                t('askUser.submit')
+              )}
             </button>
           </div>
         </>

@@ -237,6 +237,7 @@ async function makeHarness(opts?: {
   const primary: WorkspaceRuntime = {
     workspaceId: 'same-as-path',
     workspaceCwd: primaryCwd,
+    sessionRuntimeBaseDir: path.join(primaryCwd, '.runtime'),
     primary: true,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -249,6 +250,7 @@ async function makeHarness(opts?: {
   const secondary: WorkspaceRuntime = {
     workspaceId: hashDaemonWorkspace(secondaryCwd),
     workspaceCwd: secondaryCwd,
+    sessionRuntimeBaseDir: path.join(secondaryCwd, '.runtime'),
     primary: false,
     trusted: opts?.secondaryTrusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -307,6 +309,7 @@ async function makeWindowsSelectorHarness() {
   const primary: WorkspaceRuntime = {
     workspaceId: 'primary-id',
     workspaceCwd: primaryCwd,
+    sessionRuntimeBaseDir: path.join(primaryCwd, '.runtime'),
     primary: true,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -318,6 +321,7 @@ async function makeWindowsSelectorHarness() {
   const windowsRuntime: WorkspaceRuntime = {
     workspaceId: 'windows-id',
     workspaceCwd: windowsCwd,
+    sessionRuntimeBaseDir: '/runtime/windows',
     primary: false,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },

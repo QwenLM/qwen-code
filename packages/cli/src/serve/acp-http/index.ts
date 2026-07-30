@@ -10,7 +10,10 @@ import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
+import {
+  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -804,6 +807,8 @@ export function mountAcpHttp(
       const guard = opts.workspaceRegistry?.primaryEntry.current?.guard;
       return guard ? () => guard.assertOpen() : undefined;
     },
+    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
+      Storage.getRuntimeBaseDir(),
   );
   dispatcherRef.current = dispatcher;
 
@@ -1283,6 +1288,7 @@ export function mountAcpHttp(
         const guard = rt.generationGuard;
         return guard ? () => guard.assertOpen() : undefined;
       },
+      rt.sessionRuntimeBaseDir,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
