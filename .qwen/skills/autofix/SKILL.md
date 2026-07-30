@@ -207,10 +207,13 @@ implement — satisfying a nit is never a reason to bloat the code.
   suggestion-capable, change-producing rounds. That section is an audit record,
   not work: do not modify code, resolve threads, or write comment replies for
   those items. Everything rendered in the actionable sections IS in scope —
-  the deterministic filter defers only the automated reviewer's non-Critical
-  suggestions, and maintainer feedback is never deferred (a maintainer writing
-  "fix X before merge" after round five means exactly that) — plus failed
-  checks and the requested base-conflict resolution.
+  the deterministic filter defers the automated reviewer's non-Critical
+  suggestions and, past a small per-window budget of already-addressed
+  batches, a human author's untagged feedback too (an account can host an
+  automated reviewer loop, so the brake keys on measured regeneration, not
+  identity). A maintainer writing "fix X before merge" after round five
+  means exactly that when it reaches you — plus failed checks and the
+  requested base-conflict resolution.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether

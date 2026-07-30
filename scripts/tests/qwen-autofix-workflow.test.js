@@ -2295,8 +2295,11 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
+    // Five sites now: the four feedback/deferral exclusions plus the
+    // over-budget census, which must not count command comments as
+    // feedback batches either.
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      4,
+      5,
     );
   });
 
@@ -3289,7 +3292,7 @@ describe('qwen-autofix workflow', () => {
         state: 'CHANGES_REQUESTED',
       },
     ];
-    const countInline = (criticalOnly) =>
+    const countInline = (criticalOnly, over = []) =>
       Number(
         execFileSync(
           'jq',
@@ -3311,6 +3314,9 @@ describe('qwen-autofix workflow', () => {
             'trust',
             '["OWNER","MEMBER","COLLABORATOR"]',
             '--argjson',
+            'over',
+            JSON.stringify(over),
+            '--argjson',
             'reviews',
             JSON.stringify([reviews]),
             `[\n${inlineFilter}\n] | length`,
@@ -3329,12 +3335,17 @@ describe('qwen-autofix workflow', () => {
     // "fix 1 and 3 before merge" was deferred wholesale as one
     // 'non-Critical item' and the agent never read it.
     expect(countInline(true)).toBe(4);
+    // …until that maintainer exhausts the per-window budget: an account can
+    // host an automated reviewer loop, so past K consumed batches their
+    // untagged feedback defers like the bot's. The tagged/CR escapes stay:
+    // the reply-to-Critical (14) and CR-review (15) items survive.
+    expect(countInline(true, ['maintainer'])).toBe(3);
 
     // Actionable reviews and issue-level comments filters: extract and
     // execute against fixture data with critical_only both ways, mirroring
     // the inline filter test above.
     const actionableReviewsFilter = prepareBranchAndFeedbackStep.match(
-      /echo "## Reviews"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+      /echo "## Reviews"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" \\\n\s+--argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
     )?.[1];
     expect(actionableReviewsFilter).toBeTruthy();
     const actionableReviews = [
@@ -3371,7 +3382,7 @@ describe('qwen-autofix workflow', () => {
         body: 'I verified locally; please fix findings 1 and 3 before merge.',
       },
     ];
-    const countActionableReviews = (criticalOnly) =>
+    const countActionableReviews = (criticalOnly, over = []) =>
       Number(
         execFileSync(
           'jq',
@@ -3391,6 +3402,9 @@ describe('qwen-autofix workflow', () => {
             '--argjson',
             'trust',
             '["OWNER","MEMBER","COLLABORATOR"]',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
             `[${actionableReviewsFilter}] | length`,
           ],
           { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
@@ -3401,9 +3415,12 @@ describe('qwen-autofix workflow', () => {
     // excluded — the maintainer's COMMENTED review stays actionable.
     expect(countActionableReviews(false)).toBe(4);
     expect(countActionableReviews(true)).toBe(3);
+    // Over-budget: the maintainer's COMMENTED review defers; their formal
+    // CHANGES_REQUESTED (20) still cuts through.
+    expect(countActionableReviews(true, ['maintainer'])).toBe(2);
 
     const actionableIssueFilter = prepareBranchAndFeedbackStep.match(
-      /echo "## Issue-level comments"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+      /echo "## Issue-level comments"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" \\\n\s+--argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
     )?.[1];
     expect(actionableIssueFilter).toBeTruthy();
     const actionableIssueComments = [
@@ -3429,7 +3446,7 @@ describe('qwen-autofix workflow', () => {
         body: '@qwen-code /review',
       },
     ];
-    const countActionableIssue = (criticalOnly) =>
+    const countActionableIssue = (criticalOnly, over = []) =>
       Number(
         execFileSync(
           'jq',
@@ -3449,6 +3466,9 @@ describe('qwen-autofix workflow', () => {
             '--argjson',
             'trust',
             '["OWNER","MEMBER","COLLABORATOR"]',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
             `[${actionableIssueFilter}] | length`,
           ],
           { encoding: 'utf8', input: JSON.stringify(actionableIssueComments) },
@@ -3460,11 +3480,14 @@ describe('qwen-autofix workflow', () => {
     // Critical one — only bot non-Critical output is filtered.
     expect(countActionableIssue(false)).toBe(2);
     expect(countActionableIssue(true)).toBe(2);
+    // Over-budget: the plain comment defers; the bot's **[Critical]** (31)
+    // still counts.
+    expect(countActionableIssue(true, ['maintainer'])).toBe(1);
 
     // Deferred queries: extract and execute against fixture data,
     // mirroring the actionable inline filter test above.
     const deferredReviewsFilter = prepareBranchAndFeedbackStep.match(
-      /## Deferred non-Critical feedback[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+      /## Deferred non-Critical feedback[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
     )?.[1];
     expect(deferredReviewsFilter).toBeTruthy();
     const deferredReviews = [
@@ -3497,75 +3520,87 @@ describe('qwen-autofix workflow', () => {
         html_url: 'https://github.com/test/pull/1#review-23',
       },
     ];
-    const countDeferredReviews = Number(
-      execFileSync(
-        'jq',
-        [
-          '--arg',
-          'wm',
-          '2026-01-01T00:00:00Z',
-          '--arg',
-          'rb',
-          'qwen-code-ci-bot',
-          '--arg',
-          'ab',
-          'qwen-code-dev-bot',
-          '--argjson',
-          'trust',
-          '["OWNER","MEMBER","COLLABORATOR"]',
-          '--arg',
-          'pr_url',
-          'https://github.com/test/pull/1',
-          `[${deferredReviewsFilter}] | length`,
-        ],
-        { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
-      ),
-    );
+    const countDeferredReviews = (over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--arg',
+            'pr_url',
+            'https://github.com/test/pull/1',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            `[${deferredReviewsFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
+        ),
+      );
     // Only the BOT's COMMENTED non-Critical review is deferred;
     // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
     // COMMENTED review are not.
-    expect(countDeferredReviews).toBe(1);
+    expect(countDeferredReviews()).toBe(1);
+    expect(countDeferredReviews(['maintainer'])).toBe(2);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
-      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
     expect(deferredInlineFilter).toBeTruthy();
-    const countDeferredInline = Number(
-      execFileSync(
-        'jq',
-        [
-          '-s',
-          '--arg',
-          'wm',
-          '2026-01-01T00:00:00Z',
-          '--arg',
-          'rb',
-          'qwen-code-ci-bot',
-          '--arg',
-          'ab',
-          'qwen-code-dev-bot',
-          '--argjson',
-          'trust',
-          '["OWNER","MEMBER","COLLABORATOR"]',
-          '--arg',
-          'pr_url',
-          'https://github.com/test/pull/1',
-          '--argjson',
-          'reviews',
-          JSON.stringify([reviews]),
-          `[\n${deferredInlineFilter}\n] | length`,
-        ],
-        { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
-      ),
-    );
+    const countDeferredInline = (over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '-s',
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--arg',
+            'pr_url',
+            'https://github.com/test/pull/1',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            '--argjson',
+            'reviews',
+            JSON.stringify([reviews]),
+            `[\n${deferredInlineFilter}\n] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
+        ),
+      );
     // Only the BOT's suggestion (id 12) is deferred; the maintainer's
     // unclassified comment (13) stays actionable, and Critical (11),
     // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
     // never deferred.
-    expect(countDeferredInline).toBe(1);
+    expect(countDeferredInline()).toBe(1);
+    // Over-budget maintainer: their unclassified comment (13) joins the
+    // deferred list; reply-to-Critical (14) and CR-associated (15) never do.
+    expect(countDeferredInline(['maintainer'])).toBe(2);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
-      /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+      /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
     )?.[1];
     expect(deferredIssueFilter).toBeTruthy();
     const issueComments = [
@@ -3602,33 +3637,38 @@ describe('qwen-autofix workflow', () => {
         html_url: 'https://github.com/test/pull/1#issuecomment-33',
       },
     ];
-    const countDeferredIssue = Number(
-      execFileSync(
-        'jq',
-        [
-          '--arg',
-          'wm',
-          '2026-01-01T00:00:00Z',
-          '--arg',
-          'rb',
-          'qwen-code-ci-bot',
-          '--arg',
-          'ab',
-          'qwen-code-dev-bot',
-          '--argjson',
-          'trust',
-          '["OWNER","MEMBER","COLLABORATOR"]',
-          '--arg',
-          'pr_url',
-          'https://github.com/test/pull/1',
-          `[${deferredIssueFilter}] | length`,
-        ],
-        { encoding: 'utf8', input: JSON.stringify(issueComments) },
-      ),
-    );
+    const countDeferredIssue = (over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--arg',
+            'pr_url',
+            'https://github.com/test/pull/1',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            `[${deferredIssueFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(issueComments) },
+        ),
+      );
     // Only the BOT's suggestion (33) is deferred; the maintainer's normal
     // comment (30), the Critical (31), and the command (32) are not.
-    expect(countDeferredIssue).toBe(1);
+    expect(countDeferredIssue()).toBe(1);
+    expect(countDeferredIssue(['maintainer'])).toBe(2);
 
     // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
     // associated inline details remain actionable even without the marker.
@@ -3639,16 +3679,90 @@ describe('qwen-autofix workflow', () => {
     // bot-only select in ALL THREE deferred builders — the lexical
     // **[Critical]** test applies exclusively to the review bot's output.
     expect(
-      prepareBranchAndFeedbackStep.split('or ((.user.login // "") != $rb)')
-        .length - 1,
+      prepareBranchAndFeedbackStep.split(
+        'or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))',
+      ).length - 1,
     ).toBe(3);
     expect(
       prepareBranchAndFeedbackStep
         .match(
           /## Deferred non-Critical feedback[\s\S]*?deferred-feedback\.md/,
         )?.[0]
-        ?.split('| select((.user.login // "") == $rb)').length - 1,
+        ?.split(
+          '| select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))',
+        ).length - 1,
     ).toBe(3);
+    // The budget census itself: replay the real jq over fixture files. A
+    // looped reviewer with two CONSUMED batches in the Critical-only tail
+    // is listed; one batch, pre-Critical batches, unconsumed (fresh)
+    // feedback, untrusted authors, and command comments never count.
+    expect(workflow).toContain("CRITICAL_ONLY_HUMAN_BATCHES: '2'");
+    const censusBlock = prepareBranchAndFeedbackStep.match(
+      /OVER_BUDGET_AUTHORS="\$\(jq -n[\s\S]*?' 2> \/dev\/null \|\| echo '\[\]'\)"/,
+    )?.[0];
+    expect(censusBlock).toBeTruthy();
+    const WKEY = '2026-07-01T00:00:00Z';
+    const markerC = (ts, acted, round, at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: `head\n<!-- autofix-eval ts=${ts} acted=${acted} round=${round} win=${WKEY} -->`,
+    });
+    const humanC = (login, at, assoc = 'MEMBER', body = 'feedback') => ({
+      user: { login },
+      created_at: at,
+      author_association: assoc,
+      body,
+    });
+    const budgetDir = mkdtempSync(join(tmpdir(), 'over-budget-'));
+    try {
+      writeFileSync(
+        join(budgetDir, 'ic.json'),
+        JSON.stringify([
+          markerC('2026-07-02T00:00:00Z', 'true', 5, '2026-07-02T01:00:00Z'),
+          markerC('2026-07-03T00:00:00Z', 'true', 6, '2026-07-03T01:00:00Z'),
+          markerC('2026-07-04T00:00:00Z', 'false', 6, '2026-07-04T01:00:00Z'),
+          humanC('looper', '2026-07-02T12:00:00Z'),
+          humanC('looper', '2026-07-03T12:00:00Z'),
+          humanC('onetime', '2026-07-03T13:00:00Z'),
+          humanC('looper', '2026-07-01T12:00:00Z'),
+          humanC('looper', '2026-07-05T00:00:00Z'),
+          humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
+          humanC(
+            'looper',
+            '2026-07-02T13:00:00Z',
+            'MEMBER',
+            '@qwen-code /review',
+          ),
+        ]),
+      );
+      writeFileSync(join(budgetDir, 'rv.json'), '[]');
+      writeFileSync(join(budgetDir, 'rc.json'), '[]');
+      const overOut = execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            `WORKDIR='${budgetDir}'`,
+            `LIVE_REARM_KEY='${WKEY}'`,
+            "AUTOFIX_BOT='qwen-code-dev-bot'",
+            "REVIEW_BOT='qwen-code-ci-bot'",
+            `TRUSTED_ASSOC='["OWNER","MEMBER","COLLABORATOR"]'`,
+            'CRITICAL_ONLY_AFTER_ROUND=5',
+            'CRITICAL_ONLY_HUMAN_BATCHES=2',
+            censusBlock.replace(/\n {10}/g, '\n'),
+            'printf %s "${OVER_BUDGET_AUTHORS}"',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(JSON.parse(overOut)).toEqual(['looper']);
+    } finally {
+      rmSync(budgetDir, { recursive: true, force: true });
+    }
+    // The deferral note names over-budget authors with the escapes.
+    expect(prepareBranchAndFeedbackStep).toContain('is at this window');
+    expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
     expect(inlineFilter).toContain('pull_request_review_id');
 
     // Scan still selects fresh suggestions so a no-op report can advance the
