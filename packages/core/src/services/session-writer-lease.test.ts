@@ -1248,6 +1248,46 @@ describe('SessionWriterLease', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
+    'does not follow a symlink installed between transcript inspection and append open',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const originalPath = `${fixture.transcriptPath}.original`;
+      let replaced = false;
+      let appendOpenFlags: number | undefined;
+      fsOpenTestHook.beforeOpen = async (filePath, flags) => {
+        if (
+          !replaced &&
+          filePath === fixture.transcriptPath &&
+          typeof flags === 'number' &&
+          (flags & fsConstants.O_APPEND) !== 0
+        ) {
+          replaced = true;
+          appendOpenFlags = flags;
+          await fs.rename(fixture.transcriptPath, originalPath);
+          await fs.symlink(originalPath, fixture.transcriptPath);
+        }
+      };
+
+      try {
+        await expect(
+          lease.appendJsonLine({ appended: true }),
+        ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+        expect(replaced).toBe(true);
+        expect(appendOpenFlags! & fsConstants.O_NOFOLLOW).not.toBe(0);
+        expect(appendOpenFlags! & fsConstants.O_NONBLOCK).not.toBe(0);
+      } finally {
+        fsOpenTestHook.beforeOpen = undefined;
+        await fs.unlink(fixture.transcriptPath);
+        await fs.rename(originalPath, fixture.transcriptPath);
+        await lease.release();
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'classifies a transcript FIFO replacement as changed without a peer',
     async () => {
       const fixture = await createFixture();
