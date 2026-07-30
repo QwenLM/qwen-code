@@ -2841,7 +2841,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Always drain the queue back into the buffer (claude-code parity:
       // popAllEditable preserves queued text on every cancel path, including
       // tool-execution cancels — never silently drop the user's queued work).
-      const popped = popAllMessages(releaseQueuedGoalReservations);
+      const goalTurnKeys = removeGoalTurns();
+      if (goalTurnKeys.length > 0) {
+        releaseQueuedGoalReservations(goalTurnKeys);
+      }
+      const popped = popAllMessages();
       if (popped) {
         restoredSubmissionRef.current = popped;
         submittedPromptProvenanceUnavailableRef.current = false;
@@ -3015,6 +3019,7 @@ export const AppContainer = (props: AppContainerProps) => {
       buffer,
       popAllMessages,
       releaseQueuedGoalReservations,
+      removeGoalTurns,
       historyManager,
       logger,
       geminiClient,

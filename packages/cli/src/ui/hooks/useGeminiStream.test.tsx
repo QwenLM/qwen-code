@@ -7651,6 +7651,105 @@ describe('useGeminiStream', () => {
         });
         expect(capturedRuntimeView).toBeUndefined();
       });
+
+      it('defers a cron notification while a Goal owns queued user messages, then delivers it exactly once', async () => {
+        let queuedUserMessages = true;
+        let pendingSubmissionCount = 2;
+        const goalQueueRef = {
+          current: {
+            hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+            getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+            claimGoalTurn: vi.fn(() => undefined),
+          },
+        };
+        let snapshot: { goal: { status: string } | null; activity: string } = {
+          goal: { status: 'active' },
+          activity: 'running',
+        };
+        const runtime = {
+          getSnapshot: vi.fn(() => snapshot),
+          subscribe: vi.fn(() => vi.fn()),
+        } as unknown as ReturnType<Config['getGoalRuntime']>;
+        mockConfig.getGoalRuntime = vi.fn(() => runtime);
+
+        let schedulerCallback:
+          | ((job: { prompt: string; cronExpr?: string }) => void)
+          | null = null;
+        const scheduler = {
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            schedulerCallback = callback;
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+        (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(
+          scheduler,
+        );
+
+        const { rerender, client } = renderTestHook(
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          goalQueueRef as never,
+        );
+        await waitFor(() => expect(schedulerCallback).not.toBeNull());
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+
+        // Phase 1: a Goal owns the turn and user messages are queued, so the
+        // gate reports not-ready and the cron notification must stay queued —
+        // neither submitted nor rendered as a history item.
+        act(() => {
+          schedulerCallback?.({
+            prompt: 'check the build',
+            cronExpr: '* * * * *',
+          });
+        });
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(mockSendMessageStream).not.toHaveBeenCalled();
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'notification' }),
+          expect.any(Number),
+        );
+
+        // Phase 2: the user messages drain and the Goal completes, so the gate
+        // admits the turn. The single queued notification is delivered once.
+        queuedUserMessages = false;
+        snapshot = { goal: null, activity: 'idle' };
+        pendingSubmissionCount = 1;
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+        rerender({
+          client,
+          history: [],
+          addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          handleSlashCommand: mockHandleSlashCommand as unknown as (
+            cmd: PartListUnion,
+          ) => Promise<SlashCommandProcessorResult | false>,
+          shellModeActive: false,
+          loadedSettings: mockLoadedSettings,
+          toolCalls: [],
+        });
+
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+        );
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Cron,
+        });
+        expect(
+          mockAddItem.mock.calls.filter(
+            ([item]) => (item as { type?: string }).type === 'notification',
+          ),
+        ).toHaveLength(1);
+      });
     });
   });
 

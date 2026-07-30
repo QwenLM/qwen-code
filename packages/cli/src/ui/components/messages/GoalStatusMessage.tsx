@@ -8,6 +8,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
+import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
 import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
@@ -51,7 +52,7 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
-          <Text color={theme.text.secondary}>○</Text>
+          <Text color={theme.text.secondary}>{ICON.CIRCLE_EMPTY}</Text>
         </Box>
         <Text color={theme.text.secondary}>Goal cleared</Text>
       </Box>
@@ -63,13 +64,13 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
       case 'active':
         if (snapshot.activity === 'verifying') {
           return {
-            prefix: '○',
+            prefix: ICON.CIRCLE_EMPTY,
             color: theme.text.secondary,
             title: 'Goal checking',
           };
         }
         return {
-          prefix: '◎',
+          prefix: ICON.BULLSEYE,
           color: theme.text.accent,
           title:
             snapshot.activity === 'running' ? 'Goal running' : 'Goal active',
@@ -82,7 +83,7 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
         };
       case 'blocked':
         return {
-          prefix: '✖',
+          prefix: ICON.CROSS,
           color: theme.status.error,
           title: 'Goal blocked',
         };
@@ -94,7 +95,7 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
         };
       case 'complete':
         return {
-          prefix: '✓',
+          prefix: ICON.CHECK,
           color: theme.status.success,
           title: 'Goal complete',
         };
@@ -156,7 +157,7 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
-          <Text color={theme.text.secondary}>○</Text>
+          <Text color={theme.text.secondary}>{ICON.CIRCLE_EMPTY}</Text>
         </Box>
         <Box flexGrow={1} flexDirection="column">
           <Text color={theme.text.secondary}>
@@ -183,25 +184,25 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
     switch (kind) {
       case 'set':
         return {
-          prefix: '◎',
+          prefix: ICON.BULLSEYE,
           prefixColor: theme.text.accent,
           title: 'Goal set',
         };
       case 'achieved':
         return {
-          prefix: '✓',
+          prefix: ICON.CHECK,
           prefixColor: theme.status.success,
           title: 'Goal achieved',
         };
       case 'cleared':
         return {
-          prefix: '○',
+          prefix: ICON.CIRCLE_EMPTY,
           prefixColor: theme.text.secondary,
           title: 'Goal cleared',
         };
       case 'failed':
         return {
-          prefix: '✖',
+          prefix: ICON.CROSS,
           prefixColor: theme.status.error,
           title: 'Goal could not be achieved',
         };

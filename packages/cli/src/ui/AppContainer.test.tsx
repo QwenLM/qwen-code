@@ -343,6 +343,7 @@ describe('AppContainer State Management', () => {
       restartReason: 'NONE',
     });
     mockedUseMessageQueue.mockReturnValue({
+      removeGoalTurns: vi.fn().mockReturnValue([]),
       messageQueue: [],
       addMessage: vi.fn(),
       clearQueue: vi.fn(),
@@ -530,6 +531,7 @@ describe('AppContainer State Management', () => {
     });
     const addMessage = vi.fn();
     mockedUseMessageQueue.mockReturnValue({
+      removeGoalTurns: vi.fn().mockReturnValue([]),
       messageQueue: [],
       addMessage,
       clearQueue: vi.fn(),
@@ -1662,6 +1664,7 @@ describe('AppContainer State Management', () => {
         isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -1709,6 +1712,7 @@ describe('AppContainer State Management', () => {
         isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -1756,6 +1760,7 @@ describe('AppContainer State Management', () => {
         isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -1804,6 +1809,7 @@ describe('AppContainer State Management', () => {
         isReceivingContent: false,
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2015,6 +2021,7 @@ describe('AppContainer State Management', () => {
         },
       );
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2075,6 +2082,7 @@ describe('AppContainer State Management', () => {
         },
       );
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage,
         clearQueue: vi.fn(),
@@ -2115,6 +2123,7 @@ describe('AppContainer State Management', () => {
     it('does not create provenance for a whitespace-only submission', () => {
       const mockQueueMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2143,6 +2152,7 @@ describe('AppContainer State Management', () => {
     it('captures trimmed multiline Unicode input as provenance', () => {
       const mockQueueMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2175,6 +2185,7 @@ describe('AppContainer State Management', () => {
     it('uses the explicit pre-attachment text as provenance', () => {
       const mockQueueMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2221,6 +2232,7 @@ describe('AppContainer State Management', () => {
         },
       );
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2269,6 +2281,7 @@ describe('AppContainer State Management', () => {
         vimMode: 'INSERT',
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2315,6 +2328,7 @@ describe('AppContainer State Management', () => {
       };
       mockedUseVimModeState.mockImplementation(useMockVimModeState);
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2363,6 +2377,7 @@ describe('AppContainer State Management', () => {
           confirmationRequest: null,
         });
         mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
           messageQueue: [],
           addMessage: mockQueueMessage,
           clearQueue: vi.fn(),
@@ -2413,6 +2428,7 @@ describe('AppContainer State Management', () => {
           isReceivingContent: false,
         });
         mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
           messageQueue: [],
           addMessage: mockQueueMessage,
           clearQueue: vi.fn(),
@@ -2522,6 +2538,7 @@ describe('AppContainer State Management', () => {
         setText: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -2591,6 +2608,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -2648,6 +2666,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: ['queued follow-up'],
         addMessage: vi.fn(),
         clearQueue: mockClearQueue,
@@ -2681,6 +2700,56 @@ describe('AppContainer State Management', () => {
       // popAllForEdit drains the queue internally, so the cancel handler
       // does not need to call clearQueue separately on this path.
       expect(mockClearQueue).not.toHaveBeenCalled();
+    });
+
+    it('releases queued Goal turn reservations on cancel using goal-turn keys', async () => {
+      const releaseTurn = vi.fn().mockResolvedValue(undefined);
+      const goalRuntime = {
+        releaseTurn,
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+      const removeGoalTurns = vi.fn().mockReturnValue(['goal-runtime:turn-1']);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        removeGoalTurns,
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      expect(removeGoalTurns).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(releaseTurn).toHaveBeenCalledWith('goal-runtime:turn-1'),
+      );
     });
 
     it('auto-restores the just-submitted prompt when cancelling before any meaningful output', async () => {
@@ -2731,6 +2800,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -2812,6 +2882,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -2878,6 +2949,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
@@ -2952,6 +3024,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3020,6 +3093,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3083,6 +3157,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3148,6 +3223,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3223,6 +3299,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3296,6 +3373,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3366,6 +3444,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3429,6 +3508,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: ['queued thought'],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3508,6 +3588,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: [],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
@@ -3583,6 +3664,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: ['/model', 'hi'],
         addMessage: vi.fn(),
         clearQueue: mockClearQueue,
@@ -3633,6 +3715,7 @@ describe('AppContainer State Management', () => {
         retryLastPrompt: vi.fn(),
       });
       mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
         messageQueue: ['queued follow-up'],
         addMessage: vi.fn(),
         clearQueue: vi.fn(),

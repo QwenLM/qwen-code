@@ -4089,6 +4089,7 @@ export const useGeminiStream = (
             `Goal turn could not finish: ${getErrorMessage(error)}`,
           );
         } finally {
+          // Idempotent with the release inside failClosedGoalTurn; also covers the success path.
           releaseGoalTurn(toolGoalBinding);
         }
         return;
