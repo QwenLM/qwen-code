@@ -110,4 +110,61 @@ describe('composer visual effects fallback', () => {
     expect(addColorStop).toHaveBeenCalledWith(1, 'rgba(0, 0, 0, 0)');
     expect(compositeOperations).toEqual(['destination-out', 'source-over']);
   });
+
+  it('keeps both animation layers inert under prefers-reduced-motion', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(prefers-reduced-motion: reduce)',
+          media: query,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as MediaQueryList,
+    );
+    const contextStub = {
+      arc: vi.fn(),
+      beginPath: vi.fn(),
+      clearRect: vi.fn(),
+      createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+      fill: vi.fn(),
+      fillRect: vi.fn(),
+      moveTo: vi.fn(),
+      setTransform: vi.fn(),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+      contextStub as unknown as CanvasRenderingContext2D,
+    );
+    const requestAnimationFrameSpy = vi.spyOn(window, 'requestAnimationFrame');
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+
+    function Harness() {
+      const composerRef = useRef<HTMLDivElement>(null);
+      return (
+        <ThemeProvider value={WebShellThemeId.Light}>
+          <div ref={composerRef} data-web-shell-composer-surface>
+            <SpecularComposerEffect targetRef={composerRef} />
+            <div data-web-shell-composer-editor />
+          </div>
+          <NewSessionDotField />
+        </ThemeProvider>
+      );
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    requestAnimationFrameSpy.mockClear();
+    setIntervalSpy.mockClear();
+    act(() => root.render(<Harness />));
+
+    expect(
+      container.querySelector('[data-web-shell-composer-specular] canvas'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-new-session-dot-field] canvas'),
+    ).not.toBeNull();
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+  });
 });

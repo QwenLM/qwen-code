@@ -394,6 +394,54 @@ describe('ChatEditor animation layers', () => {
     ).toBeNull();
     expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
   });
+
+  it('shows the full placeholder without a caret under prefers-reduced-motion', () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn(
+      (query: string) =>
+        ({
+          matches: query === '(prefers-reduced-motion: reduce)',
+          media: query,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as MediaQueryList,
+    );
+    try {
+      const container = renderChatEditor({ placeholderText: 'abc' });
+      const typewriter = container.querySelector(
+        '[data-web-shell-composer-typewriter]',
+      );
+
+      expect(typewriter?.textContent).toBe('abc');
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it('replays the typewriter sequence after the empty editor loses focus', () => {
+    vi.useFakeTimers();
+    const container = renderChatEditor({ placeholderText: 'abc' });
+    const editor = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-editor]',
+    );
+    const outside = document.createElement('button');
+    container.appendChild(outside);
+    editor!.tabIndex = 0;
+    const typewriter = () =>
+      container.querySelector('[data-web-shell-composer-typewriter]');
+
+    act(() => editor!.focus());
+    act(() => {
+      editor!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    });
+    expect(typewriter()).toBeNull();
+
+    act(() => outside.focus());
+    expect(typewriter()?.textContent).toBe('_');
+
+    act(() => vi.advanceTimersByTime(3 * 45));
+    expect(typewriter()?.textContent).toBe('abc_');
+  });
 });
 
 describe('ChatEditor attachment reporting', () => {

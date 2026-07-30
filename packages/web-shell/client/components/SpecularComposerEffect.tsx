@@ -158,7 +158,7 @@ export function SpecularComposerEffect({
     const shineFade = gl.getUniformLocation(program, 'shineFade');
     const thickness = gl.getUniformLocation(program, 'thickness');
 
-    const dpr = window.devicePixelRatio || 1;
+    let dpr = window.devicePixelRatio || 1;
     let width = 1;
     let height = 1;
     let cornerRadius = 12;
@@ -172,6 +172,7 @@ export function SpecularComposerEffect({
     let frameId = 0;
 
     const resize = () => {
+      dpr = window.devicePixelRatio || 1;
       const rect = target.getBoundingClientRect();
       width = rect.width;
       height = rect.height;

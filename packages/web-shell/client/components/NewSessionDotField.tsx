@@ -22,7 +22,6 @@ export function NewSessionDotField() {
     const context = canvas?.getContext('2d', { alpha: true });
     if (!root || !canvas || !context) return undefined;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const dots: Dot[] = [];
     const pointer = {
       x: -9999,
@@ -120,6 +119,7 @@ export function NewSessionDotField() {
     };
 
     const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const rect = root.getBoundingClientRect();
       width = rect.width;
       height = rect.height;
