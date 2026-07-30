@@ -2,7 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionMonitorTaskStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
 const { mockActions } = vi.hoisted(() => ({
@@ -29,7 +33,10 @@ const { ArtifactPanel } = await import('./ArtifactPanel');
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-function monitorPanel(task: DaemonSessionMonitorTaskStatus) {
+function monitorPanel(
+  task: DaemonSessionMonitorTaskStatus,
+  sessionActions?: DaemonSessionActions,
+) {
   return (
     <I18nProvider language="en">
       <ArtifactPanel
@@ -40,9 +47,35 @@ function monitorPanel(task: DaemonSessionMonitorTaskStatus) {
             kind: 'monitor',
             title: task.description,
             task,
+            sessionActions,
           },
         ]}
         activeTabId="monitor:monitor-1"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+}
+
+function shellPanel(task: DaemonSessionShellTaskStatus) {
+  return (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          {
+            id: 'shell:shell-1',
+            kind: 'shell',
+            title: task.command,
+            task,
+          },
+        ]}
+        activeTabId="shell:shell-1"
         reviewChanges={[]}
         selectedReviewPath={null}
         onSelectTab={() => {}}
@@ -64,7 +97,414 @@ afterEach(() => {
   mockActions.getTasks.mockReset();
 });
 
+function openAddMenu(container: HTMLElement) {
+  const add = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Add panel"]',
+  );
+  act(() => {
+    add?.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+    );
+  });
+  return add;
+}
+
+describe('ArtifactPanel add menu', () => {
+  it('keeps the disabled review action on the empty page and hides the add button', () => {
+    const onClose = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={onClose}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const review = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Review'));
+    expect(review?.disabled).toBe(true);
+    expect(review?.textContent).toContain('View recent file changes');
+    expect(container.textContent).not.toContain('⌘');
+    expect(
+      container.querySelector('button[aria-label="Add panel"]'),
+    ).toBeNull();
+
+    const panelToggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Toggle right panel"]',
+    );
+    expect(panelToggle).not.toBeNull();
+    act(() => panelToggle?.click());
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('filters empty-page actions through right-panel items', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            items={['sideTask']}
+            sideTaskAvailable
+            onCreateSideTask={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const emptyText = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    )?.textContent;
+    expect(emptyText).toContain('Side task');
+    expect(emptyText).not.toContain('Review');
+    expect(
+      container.querySelector('button[aria-label="Add panel"]'),
+    ).toBeNull();
+  });
+
+  it('supports opening an existing side task or creating one', () => {
+    const onCreateSideTask = vi.fn();
+    const onOpenSideTask = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            sideTasks={[
+              {
+                sessionId: 'side-1',
+                title: 'Investigate flaky tests',
+                workspaceCwd: '/work/project',
+              },
+            ]}
+            onCreateSideTask={onCreateSideTask}
+            onOpenSideTask={onOpenSideTask}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const sideTask = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Side task'));
+    act(() => {
+      sideTask?.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    const existing = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((button) => button.textContent === 'Investigate flaky tests');
+    const create = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((button) => button.textContent === 'New');
+    expect(existing).not.toBeUndefined();
+    expect(create).not.toBeUndefined();
+
+    act(() => existing?.click());
+    expect(onOpenSideTask).toHaveBeenCalledWith({
+      sessionId: 'side-1',
+      title: 'Investigate flaky tests',
+      workspaceCwd: '/work/project',
+    });
+
+    act(() => {
+      sideTask?.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      );
+    });
+    const reopenedCreate = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((button) => button.textContent === 'New');
+    act(() => reopenedCreate?.click());
+    expect(onCreateSideTask).toHaveBeenCalledOnce();
+  });
+
+  it('creates a side task directly from the empty page when there is no history', () => {
+    const onCreateSideTask = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            onCreateSideTask={onCreateSideTask}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const sideTask = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Side task'));
+    act(() => sideTask?.click());
+    expect(onCreateSideTask).toHaveBeenCalledOnce();
+  });
+
+  it('does not create a side task before its history finishes loading', () => {
+    const onCreateSideTask = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            sideTasksLoading
+            onCreateSideTask={onCreateSideTask}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const sideTask = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Side task'));
+    expect(sideTask?.disabled).toBe(true);
+    act(() => sideTask?.click());
+    expect(onCreateSideTask).not.toHaveBeenCalled();
+  });
+
+  it('opens the latest review from the empty page', () => {
+    const onOpenLatestReview = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            latestReviewAvailable
+            onOpenLatestReview={onOpenLatestReview}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const review = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Review'));
+    expect(review?.disabled).toBe(false);
+    act(() => review?.click());
+    expect(onOpenLatestReview).toHaveBeenCalledOnce();
+  });
+
+  it('hides review from the add menu when a review tab is already open', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[{ id: 'review', kind: 'review', title: 'Review' }]}
+            activeTabId="review"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            latestReviewAvailable
+            sideTaskAvailable
+            onOpenLatestReview={vi.fn()}
+            onCreateSideTask={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Review');
+    expect(menuText).toContain('New side task');
+  });
+
+  it('shows review and side-task actions in the add menu for a non-empty panel', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            latestReviewAvailable
+            sideTaskAvailable
+            sideTasks={[
+              {
+                sessionId: 'side-1',
+                title: 'Existing side task',
+                workspaceCwd: '/work/project',
+              },
+            ]}
+            onOpenLatestReview={vi.fn()}
+            onCreateSideTask={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).toContain('Review');
+    expect(menuText).toContain('New side task');
+    expect(menuText).not.toContain('Existing side task');
+  });
+});
+
 describe('ArtifactPanel monitor tab', () => {
+  it('uses the source pane actions for monitor controls', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch pane logs',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'tail -f pane.log',
+      eventCount: 1,
+      droppedLines: 0,
+    };
+    const paneActions = {
+      cancelTask: vi.fn().mockResolvedValue({ cancelled: true }),
+      getTasks: vi.fn().mockResolvedValue({
+        v: 1,
+        sessionId: 'pane-session',
+        now: 11,
+        tasks: [{ ...task, status: 'cancelled' }],
+      }),
+    } as unknown as DaemonSessionActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(monitorPanel(task, paneActions));
+    });
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop',
+    );
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(paneActions.cancelTask).toHaveBeenCalledWith('monitor-1', 'monitor');
+    expect(mockActions.cancelTask).not.toHaveBeenCalled();
+  });
+
   it('shows the monitor snapshot in a dedicated right-panel tab', () => {
     const task: DaemonSessionMonitorTaskStatus = {
       kind: 'monitor',
@@ -89,6 +529,9 @@ describe('ArtifactPanel monitor tab', () => {
       root.render(monitorPanel(task));
     });
 
+    expect(
+      container.querySelector('svg.lucide-square-activity'),
+    ).not.toBeNull();
     expect(container.textContent).toContain('watch server log');
     expect(
       container.querySelector('[data-status="running"]')?.textContent,
@@ -371,5 +814,44 @@ describe('ArtifactPanel monitor tab', () => {
     ).find((button) => button.textContent === 'Stop');
     expect(stopButtonAfter).toBeDefined();
     expect(stopButtonAfter?.disabled).toBe(false);
+  });
+});
+
+describe('ArtifactPanel shell tab', () => {
+  it('shows shell task details in a dedicated right-panel tab', () => {
+    const task: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-1',
+      label: 'Development server',
+      description: 'Run the development server',
+      status: 'failed',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'npm run dev',
+      cwd: '/work/project',
+      pid: 42,
+      exitCode: 1,
+      error: 'Command failed',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(shellPanel(task));
+    });
+
+    expect(
+      container.querySelector('svg.lucide-square-terminal'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-status="failed"]')?.textContent).toBe(
+      'Failed',
+    );
+    expect(container.querySelector('pre')?.textContent).toBe('npm run dev');
+    expect(container.textContent).toContain('npm run dev');
+    expect(container.textContent).toContain('/work/project');
+    expect(container.textContent).toContain('Exit code');
+    expect(container.textContent).toContain('Command failed');
   });
 });

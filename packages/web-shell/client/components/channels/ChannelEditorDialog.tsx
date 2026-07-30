@@ -16,7 +16,9 @@ import type {
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelInstanceSnapshot,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
@@ -95,6 +97,20 @@ export interface ChannelEditorDialogProps {
     name: string,
     code: string,
   ) => Promise<DaemonChannelPairingApprovalResult>;
+  listPairingApprovals: (
+    name: string,
+  ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revokePairingApproval: (
+    name: string,
+    senderId: string,
+  ) => Promise<DaemonChannelPairingRevocationResult>;
+}
+
+function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
+  const value = instance?.config['allowedUsers'];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
 }
 
 function FieldShell({
@@ -146,6 +162,8 @@ export function ChannelEditorDialog({
   onReload,
   listPairingRequests,
   approvePairingRequest,
+  listPairingApprovals,
+  revokePairingApproval,
 }: ChannelEditorDialogProps) {
   const { t } = useI18n();
   const formId = useId();
@@ -537,6 +555,9 @@ export function ChannelEditorDialog({
                     channelName={instance.name}
                     listRequests={listPairingRequests}
                     approveRequest={approvePairingRequest}
+                    listApprovals={listPairingApprovals}
+                    revokeApproval={revokePairingApproval}
+                    staticAllowedUsers={configuredAllowedUsers(instance)}
                   />
                 ) : (
                   <Alert>
