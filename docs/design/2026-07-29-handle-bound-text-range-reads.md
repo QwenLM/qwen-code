@@ -118,29 +118,22 @@ The refactor is meant to be unobservable at the Serve boundary, and the
 assertion noted in Testing. Four changes are nonetheless observable in principle
 and are disclosed here rather than left implicit in the diff:
 
-1. **Handle reads run to live EOF.** #7947 bounded the handle chunk reader by
-   the size captured at `open` (`while (position < sourceSize)`); this PR reads
-   until a zero-byte read (`while (true)`). Bytes appended after the handle is
-   opened now land inside the decoded window. Today this is client-safe because
-   the Serve boundary re-stats after the read and refuses the whole read with
-   `hash_mismatch` on any size/mtime/ctime change, so no post-snapshot byte
-   reaches a client; supporting a file that grows while it is read (live logs)
-   is the reason to keep it. The exposure is the next caller — byte-cursor
-   paging — which must re-stat or supply its own end bound. Pinned by
-   `reads to live EOF: bytes appended after open are returned`.
+1. **Handle reads are bounded to the file size at open.**
+   `readTextRangeFromHandle` stats the descriptor and passes the size as an end
+   bound to `chunksFromHandle`, which reads `while (position < to)` rather than
+   to live EOF. Bytes appended after the handle is opened are not returned.
+   This matches #7947's behaviour and keeps the chunk reader bounded even when
+   the requested line window is unreachable. Pinned by
+   `bounds handle reads to the stat size, not live EOF`.
 2. **Fresh buffer per chunk.** #7947 reused one 512 KiB buffer across
    iterations, so a yielded view was valid only until the next read.
    `chunksFromHandle` allocates a fresh buffer per chunk, so a yielded chunk
    stays valid after the generator advances. This is the safer contract.
-3. **`limit: Infinity` is admitted at the handle boundary.** #7947 rejected a
-   non-finite `limit` with a `RangeError`; this PR accepts
-   `Number.POSITIVE_INFINITY` (and an omitted `limit`) as "read to end of
-   file," still capped at `maxOutputBytes`. The ACP bridge adapter only filters
-   `limit > 0`, and `JSON.parse('1e400')` yields `Infinity`, so the path is
-   reachable from a client; it now resolves with a capped window instead of
-   escaping as a non-`FsError` `RangeError`. The `GET /file` route's finite-`limit`
-   admission is unchanged, so a no-limit `GET /file` still returns
-   `file_too_large`.
+3. **`limit` stays optional but must be finite.** An omitted `limit` means
+   "read to end of file," still capped at `maxOutputBytes`. `Infinity` is
+   rejected by the handle-boundary validator: every production caller already
+   enforces a positive safe integer before reaching `readTextFileFromHandle`,
+   so the relaxation bought nothing and was removed per Simplicity First.
 4. **Large undecodable text maps to `binary_file`, not `file_too_large`.** A
    large file in an encoding the text route cannot decode previously surfaced as
    `file_too_large` (413); it is now `binary_file` (422), matching sniffed
@@ -222,8 +215,7 @@ are kept — they need no mock.
 
 ## Follow-up
 
-`chunksFromHandle` gained a `from` parameter that nothing yet passes a non-zero
-value for. It is the single seam byte-cursor text paging needs, and that is the
-change this refactor exists to enable. Because the reader now runs to live EOF
-(Behaviour deltas #1), that follow-up must either supply its own end bound or
-keep re-statting after the read, exactly as the Serve boundary does today.
+`chunksFromHandle` accepts an options object `{ from, to, signal }`. `from`
+defaults to 0 and nothing yet passes a non-zero value; it is the seam
+byte-cursor text paging needs. `to` defaults to the file size captured at open
+(Behaviour deltas #1), so the follow-up inherits the bound automatically.

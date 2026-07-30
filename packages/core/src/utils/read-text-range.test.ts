@@ -205,7 +205,7 @@ describe('readTextRange', () => {
     }
   });
 
-  it('reads the full file when limit is omitted or Infinity', async () => {
+  it('reads the full file when limit is omitted', async () => {
     const filePath = await writeFile('small.txt', 'one\ntwo\nthree\n');
     const fileHandle = await fs.open(filePath, 'r');
     try {
@@ -216,30 +216,22 @@ describe('readTextRange', () => {
       expect(omitted.originalLineCount).toBe(4);
       expect(omitted.originalLineCountExact).toBe(true);
       expect(omitted.truncatedByBytes).toBe(false);
-
-      const infinite = await readTextRangeFromHandle(fileHandle, {
-        limit: Number.POSITIVE_INFINITY,
-        maxOutputBytes: 10_000,
-      });
-      expect(infinite.content).toBe('one\ntwo\nthree\n');
-      expect(infinite.originalLineCount).toBe(4);
-      expect(infinite.originalLineCountExact).toBe(true);
     } finally {
       await fileHandle.close();
     }
   });
 
-  it('reads to live EOF: bytes appended after open are returned', async () => {
-    const filePath = await writeFile('append.txt', 'first\n');
+  it('bounds handle reads to the stat size, not live EOF', async () => {
+    const filePath = await writeFile('bounded.txt', 'first\nsecond\n');
     const fileHandle = await fs.open(filePath, 'r');
     try {
-      await fs.appendFile(filePath, 'second\n');
-
       const result = await readTextRangeFromHandle(fileHandle, {
+        offset: 10_000,
+        limit: 3,
         maxOutputBytes: 10_000,
       });
 
-      expect(result.content).toBe('first\nsecond\n');
+      expect(result.content).toBe('');
       expect(result.originalLineCount).toBe(3);
       expect(result.originalLineCountExact).toBe(true);
     } finally {

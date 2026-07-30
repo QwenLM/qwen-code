@@ -91,6 +91,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
@@ -110,6 +112,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({
@@ -132,6 +136,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       await fileSystem.readTextFile({
@@ -152,6 +158,7 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
         truncatedByBytes: true,
       });
 
@@ -178,6 +185,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       await fileSystem.readTextFile({
@@ -200,9 +209,9 @@ describe('StandardFileSystemService', () => {
     // and at the real boundary in `workspace-file-system.test.ts`; only the
     // argument validation below needs a unit test, and it needs no mock.
     it.each([
-      ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
-      ['maxOutputBytes', { maxOutputBytes: 0 }],
-    ])('should reject a handle read with unbounded %s', async (bound, over) => {
+      ['infinite maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
+      ['zero maxOutputBytes', { maxOutputBytes: 0 }],
+    ])('should reject a handle read with %s', async (_label, over) => {
       const fileHandle = {} as import('node:fs/promises').FileHandle;
 
       await expect(
@@ -211,13 +220,14 @@ describe('StandardFileSystemService', () => {
           limit: 20,
           ...over,
         }),
-      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
+      ).rejects.toThrow(/positive finite maxOutputBytes/);
     });
 
     it.each([
       ['a fractional limit', 2.5],
       ['a zero limit', 0],
       ['a negative limit', -1],
+      ['an Infinity limit', Number.POSITIVE_INFINITY],
     ])('should reject %s on a handle read', async (_label, limit) => {
       const fileHandle = {} as import('node:fs/promises').FileHandle;
 
@@ -227,7 +237,7 @@ describe('StandardFileSystemService', () => {
           limit,
           maxOutputBytes: 262_144,
         }),
-      ).rejects.toThrow(/positive integer limit or Infinity/);
+      ).rejects.toThrow(/positive integer limit/);
     });
 
     it.each([
@@ -246,10 +256,7 @@ describe('StandardFileSystemService', () => {
       ).rejects.toThrow(/non-negative integer line/);
     });
 
-    it.each([
-      ['Infinity', Number.POSITIVE_INFINITY],
-      ['omitted', undefined],
-    ])('should accept %s limit on a handle read', async (_label, limit) => {
+    it('should accept an omitted limit on a handle read', async () => {
       vi.mocked(readTextRangeFromHandle).mockResolvedValue({
         content: 'hello',
         bom: false,
@@ -262,7 +269,6 @@ describe('StandardFileSystemService', () => {
 
       const result = await fileSystem.readTextFileFromHandle({
         fileHandle,
-        ...(limit !== undefined ? { limit } : {}),
         maxOutputBytes: 262_144,
       });
 
@@ -270,7 +276,6 @@ describe('StandardFileSystemService', () => {
       expect(readTextRangeFromHandle).toHaveBeenCalledWith(
         fileHandle,
         expect.objectContaining({
-          limit: Number.POSITIVE_INFINITY,
           maxOutputBytes: 262_144,
         }),
       );
@@ -282,6 +287,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'gb18030',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/gbk.txt' });
@@ -763,6 +770,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 3,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
@@ -776,6 +785,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 3,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });

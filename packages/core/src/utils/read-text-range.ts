@@ -100,16 +100,21 @@ export async function readTextRange(
  * caller reaches for a handle precisely when it needs the read bounded. The
  * handle is borrowed — every read uses an explicit position, and this function
  * never closes it.
+ *
+ * The read is bounded to the file size captured by an internal stat, so
+ * bytes appended during the read are not returned.
  */
 export async function readTextRangeFromHandle(
   fileHandle: FileHandle,
   request: ReadTextRangeFromHandleRequest,
 ): Promise<ReadTextRangeResult> {
   request.signal?.throwIfAborted();
+  const stats = await fileHandle.stat();
   return readLargeUtf8Range(
     fileHandle,
     request,
     normalizeMaxBytes(request.maxOutputBytes),
+    stats.size,
   );
 }
 
@@ -157,6 +162,7 @@ async function readLargeUtf8Range(
   source: string | FileHandle,
   request: { offset?: number; limit?: number; signal?: AbortSignal },
   maxOutputBytes: number,
+  sourceSize?: number,
 ): Promise<ReadTextRangeResult> {
   const encoding = await detectFileEncoding(source);
   // Detection is one bounded 8 KiB read, but check here anyway so an abort
@@ -193,7 +199,10 @@ async function readLargeUtf8Range(
     });
     chunks = pathStream;
   } else {
-    chunks = chunksFromHandle(source, 0, request.signal);
+    chunks = chunksFromHandle(source, {
+      to: sourceSize,
+      signal: request.signal,
+    });
   }
 
   function appendSelected(fragment: string): void {
@@ -300,7 +309,7 @@ async function readLargeUtf8Range(
 }
 
 /**
- * Sequential chunks off a borrowed descriptor, starting at `from`.
+ * Sequential chunks off a borrowed descriptor.
  *
  * Reads use explicit positions, so the caller's file position is untouched and
  * two readers can share one handle. Each chunk is a fresh buffer and stays
@@ -309,14 +318,15 @@ async function readLargeUtf8Range(
  */
 async function* chunksFromHandle(
   fileHandle: FileHandle,
-  from = 0,
-  signal?: AbortSignal,
+  options?: { from?: number; to?: number; signal?: AbortSignal },
 ): AsyncGenerator<Buffer> {
   const highWaterMark = 512 * 1024;
+  const { from = 0, to = Number.POSITIVE_INFINITY, signal } = options ?? {};
   let position = from;
-  while (true) {
+  while (position < to) {
     signal?.throwIfAborted();
-    const buffer = Buffer.allocUnsafe(highWaterMark);
+    const length = Math.min(highWaterMark, to - position);
+    const buffer = Buffer.allocUnsafe(length);
     const { bytesRead } = await fileHandle.read(
       buffer,
       0,

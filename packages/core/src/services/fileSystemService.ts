@@ -11,7 +11,10 @@ import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
-import { readTextRangeFromHandle } from '../utils/read-text-range.js';
+import {
+  readTextRangeFromHandle,
+  type ReadTextRangeResult,
+} from '../utils/read-text-range.js';
 import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
 import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
@@ -337,13 +340,9 @@ export class StandardFileSystemService implements FileSystemService {
         `handle-bound text reads require a positive finite maxOutputBytes, got ${params.maxOutputBytes}`,
       );
     }
-    if (
-      params.limit !== undefined &&
-      params.limit !== Number.POSITIVE_INFINITY &&
-      !isPositiveSafeInteger(params.limit)
-    ) {
+    if (params.limit !== undefined && !isPositiveSafeInteger(params.limit)) {
       throw new RangeError(
-        `handle-bound text reads require a positive integer limit or Infinity, got ${params.limit}`,
+        `handle-bound text reads require a positive integer limit, got ${params.limit}`,
       );
     }
     if (
@@ -357,7 +356,7 @@ export class StandardFileSystemService implements FileSystemService {
     }
     const range = await readTextRangeFromHandle(params.fileHandle, {
       offset: params.line ?? 0,
-      limit: params.limit ?? Number.POSITIVE_INFINITY,
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
       maxOutputBytes: params.maxOutputBytes,
       ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
@@ -414,15 +413,9 @@ async function readTextFileStandard(
 }
 
 /** Shared metadata shaping so both read paths report identically. */
-function toReadTextFileResponse(readResult: {
-  content: string;
-  bom?: boolean;
-  encoding?: string;
-  originalLineCount: number;
-  originalLineCountExact?: boolean;
-  lineEnding?: LineEnding;
-  truncatedByBytes?: boolean;
-}): ReadTextFileResponse {
+function toReadTextFileResponse(
+  readResult: ReadTextRangeResult,
+): ReadTextFileResponse {
   const detectedLineEnding =
     readResult.lineEnding ?? detectLineEnding(readResult.content);
   return {
