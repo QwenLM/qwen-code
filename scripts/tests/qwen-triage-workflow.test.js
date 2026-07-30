@@ -2996,6 +2996,68 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
   });
 
+  // One budget drives the agent's graceful kill and the watchdog threshold
+  // that distinguishes that kill from an OOM — both derive from a single
+  // AGENT_BUDGET_M, so they cannot drift apart. The job limit and the
+  // skill's advertised budget are still separate literals with their own
+  // quiet failures, so pin their relationship to the budget, not the number.
+  it('keeps the verify budget, watchdog and job limit consistent', () => {
+    const verifyJob = job('verify');
+    const runStep = stepIn('verify', 'Run verification agent');
+
+    const agentMinutes = Number(runStep.match(/AGENT_BUDGET_M=(\d+)/)?.[1]);
+    const jobMinutes = Number(
+      verifyJob.match(/^ {4}timeout-minutes: (\d+)/m)?.[1],
+    );
+    expect(agentMinutes).toBeGreaterThan(0);
+    expect(jobMinutes).toBeGreaterThan(0);
+
+    // The graceful kill and the watchdog threshold must both derive from
+    // AGENT_BUDGET_M rather than carry their own literals — that derivation
+    // is what makes the coupling correct by construction. A hardcoded
+    // `120m` or `7200` would reintroduce the drift this test exists to
+    // catch: set the threshold below the budget and a late OOM (137) reads
+    // as `timeout`, publishing "partial evidence" for a crash; set it above
+    // and a real timeout reads as a crash.
+    expect(runStep).toMatch(/timeout --kill-after=10s "\$\{AGENT_BUDGET_M\}m"/);
+    expect(runStep).toMatch(
+      /"\$AGENT_ELAPSED" -ge \$\(\(AGENT_BUDGET_M \* 60\)\)/,
+    );
+
+    // That comparison is only meaningful if the elapsed-time chain exists:
+    // drop the baseline and AGENT_ELAPSED is total shell uptime, so a late
+    // OOM reads as `timeout`; drop the assignment and it is empty, so the
+    // watchdog never fires and a real timeout reads as a crash. Pin both
+    // lines so deleting either fails here instead of silently in CI.
+    expect(runStep).toMatch(/AGENT_START=\$SECONDS/);
+    expect(runStep).toMatch(/AGENT_ELAPSED=\$\(\(SECONDS - AGENT_START\)\)/);
+
+    // A step-level `timeout-minutes` on the run step would cap the agent
+    // below the budget while every relationship above stays green — the
+    // job limit must be the only cap.
+    expect(runStep).not.toMatch(/^\s+timeout-minutes:/m);
+
+    // The job limit only guards infra hangs, so it must clear the agent
+    // budget plus install/build plus fixed overhead — otherwise the job
+    // is killed mid-run and the agent never ships its partial report.
+    // 20 minutes is the documented allowance (≈15m install/build + ≈5m
+    // tools, checkout, pin, upload, cleanup).
+    expect(jobMinutes).toBeGreaterThanOrEqual(agentMinutes + 20);
+
+    // And the skill has to advertise the same budget, or the agent
+    // self-limits to the old number and the raise does nothing.
+    const advertised = Number(verifySkill.match(/hard (\d+)-minute kill/)?.[1]);
+    expect(advertised).toBe(agentMinutes);
+    const soft = Number(verifySkill.match(/Time budget ≈ (\d+) minutes/)?.[1]);
+    expect(soft).toBeLessThan(agentMinutes);
+    expect(soft).toBeLessThanOrEqual(agentMinutes - 10);
+    // A proportional lower bound catches the most common drift — the hard
+    // kill is raised but the soft budget is forgotten, silently wasting CI
+    // time — without freezing the reserve at a fixed minute count for every
+    // future budget.
+    expect(soft).toBeGreaterThanOrEqual(Math.floor(agentMinutes * 0.8));
+  });
+
   // Cleanups must never descend through a PR-writable parent, and an
   // outward-resolving hooks entry must be removed rather than reported.
   it('survives symlink escapes in the workspace cleanup', () => {

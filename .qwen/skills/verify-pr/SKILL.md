@@ -30,9 +30,19 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
 - **You may execute PR code freely.** This job is the designated sandbox
   (container, no credentials) — the opposite of the `/triage` rules. Builds,
   node processes, loopback servers, and scratch `git worktree`s are all fine.
-- **Time budget ≈ 20 minutes** of agent time (hard 25-minute kill; install
+- **Time budget ≈ 110 minutes** of agent time (hard 120-minute kill; install
   and build happen before your clock starts and do not eat it). Pick scope
   first (below); when time runs out, ship the report with what ran.
+  This budget is large on purpose. It is enough to bisect a threshold
+  through the real code path, compile an intermediate build to separate the
+  halves of a bundled fix, run a mutation matrix and adjudicate its
+  survivors, or drive a real daemon end to end — the things a maintainer's
+  local round does and a 20-minute round had to skip. Spending it on more
+  breadth instead is the one way to waste it: the rule that one proven
+  load-bearing claim beats ten unverified observations does not relax
+  because the clock did. It is a ceiling, not a target: once the central
+  claim is proven and the report is written, ship. There is no credit for
+  using the clock.
 - If the directory holding `$QWEN_VERIFY_CONTEXT` contains
   `previous-report.md`, this is a **follow-up round**. The workflow snapshots
   the newest _substantive_ report — never a "running"/cancelled/infra
