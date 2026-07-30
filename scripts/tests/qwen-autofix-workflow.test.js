@@ -240,6 +240,23 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/^\s*(fi|done|esac)"\s*$/m);
   });
 
+  it('keeps the prepare-branch-and-feedback run block bash-parseable', () => {
+    // The deferred-feedback echo sits inside a double-quoted string, where the
+    // '"'"' idiom is a literal apostrophe followed by a string CLOSER rather
+    // than an embedded quote — a parse-time syntax error that aborts the step
+    // for every run while the jq-filter tests (which never run the echo lines)
+    // stay green. bash -n the whole run block so a future quoting regression in
+    // this step fails CI instead of breaking every autofix run.
+    const runBlock =
+      prepareBranchAndFeedbackStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(runBlock).toBeTruthy();
+    const res = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: runBlock.replace(/^ {10}/gm, ''),
+    });
+    expect(res.status).toBe(0);
+  });
+
   it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).not.toContain("cron: '0 0,12 * * *'");
@@ -3821,7 +3838,7 @@ describe('qwen-autofix workflow', () => {
     // Deferred queries: extract and execute against fixture data,
     // mirroring the actionable inline filter test above.
     const deferredReviewsFilter = prepareBranchAndFeedbackStep.match(
-      /## Deferred non-Critical feedback[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+      /## Deferred non-Critical feedback[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
     )?.[1];
     expect(deferredReviewsFilter).toBeTruthy();
     const deferredReviews = [
@@ -3868,9 +3885,6 @@ describe('qwen-autofix workflow', () => {
             '--arg',
             'ab',
             'qwen-code-dev-bot',
-            '--argjson',
-            'trust',
-            '["OWNER","MEMBER","COLLABORATOR"]',
             '--arg',
             'pr_url',
             'https://github.com/test/pull/1',
@@ -3889,7 +3903,7 @@ describe('qwen-autofix workflow', () => {
     expect(countDeferredReviews(['maintainer'])).toBe(2);
 
     const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
-      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
     )?.[1];
     expect(deferredInlineFilter).toBeTruthy();
     const countDeferredInline = (over = []) =>
@@ -3907,9 +3921,6 @@ describe('qwen-autofix workflow', () => {
             '--arg',
             'ab',
             'qwen-code-dev-bot',
-            '--argjson',
-            'trust',
-            '["OWNER","MEMBER","COLLABORATOR"]',
             '--arg',
             'pr_url',
             'https://github.com/test/pull/1',
@@ -3934,7 +3945,7 @@ describe('qwen-autofix workflow', () => {
     expect(countDeferredInline(['maintainer'])).toBe(2);
 
     const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
-      /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson trust "\$\{TRUSTED_ASSOC\}" --arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+      /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
     )?.[1];
     expect(deferredIssueFilter).toBeTruthy();
     const issueComments = [
@@ -3985,9 +3996,6 @@ describe('qwen-autofix workflow', () => {
             '--arg',
             'ab',
             'qwen-code-dev-bot',
-            '--argjson',
-            'trust',
-            '["OWNER","MEMBER","COLLABORATOR"]',
             '--arg',
             'pr_url',
             'https://github.com/test/pull/1',
@@ -4069,8 +4077,32 @@ describe('qwen-autofix workflow', () => {
           ),
         ]),
       );
-      writeFileSync(join(budgetDir, 'rv.json'), '[]');
-      writeFileSync(join(budgetDir, 'rc.json'), '[]');
+      // A second author whose two consumed batches arrive through the review
+      // (.submitted_at) and inline-comment (.created_at) branches, not ic.json:
+      // both are untagged, so they count under either census semantic.
+      writeFileSync(
+        join(budgetDir, 'rv.json'),
+        JSON.stringify([
+          {
+            user: { login: 'reviewer2' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-02T12:30:00Z',
+            body: 'feedback delivered through a review',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(budgetDir, 'rc.json'),
+        JSON.stringify([
+          {
+            user: { login: 'reviewer2' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-03T13:30:00Z',
+            body: 'feedback delivered through an inline comment',
+          },
+        ]),
+      );
       const overOut = execFileSync(
         'bash',
         [
@@ -4090,7 +4122,7 @@ describe('qwen-autofix workflow', () => {
         ],
         { encoding: 'utf8' },
       );
-      expect(JSON.parse(overOut)).toEqual(['looper']);
+      expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
     } finally {
       rmSync(budgetDir, { recursive: true, force: true });
     }

@@ -2989,10 +2989,10 @@ jobs:
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback defers only once its author has already had ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches addressed in this window'"'"'s Critical-only tail — an account can host an automated reviewer loop, so the brake keys on measured regeneration, not identity; authors at their budget, if any, are named below. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
+              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds: the automated reviewer's non-Critical suggestions below are deferred and stay open for human follow-up — do not modify code, resolve threads, or reply on their behalf. Maintainer feedback defers only once its author has already had ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches addressed in this window's Critical-only tail — an account can host an automated reviewer loop, so the brake keys on measured regeneration, not identity; authors at their budget, if any, are named below. (A maintainer can lift the mode itself: \`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
+                --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
                 .[]
                 | select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
@@ -3002,7 +3002,7 @@ jobs:
                 | "- Review by @\(.user.login): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/rv.json"
               jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" \
+                --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" \
                 --slurpfile reviews "${WORKDIR}/rv.json" '
                 add as $comments
                 | ($reviews | add) as $reviews
@@ -3026,7 +3026,7 @@ jobs:
                 | "- Inline rc:\(.id) \(.path // "?"):\(.line // "?"): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/rc.json"
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
-                --argjson trust "${TRUSTED_ASSOC}" --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
+                --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
                 .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
