@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -14,6 +15,8 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  DERIVED_CONFIG_STATE_OWNERSHIP,
+  deriveConfig,
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
@@ -1644,17 +1647,258 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
-  describe('FileReadCache isolation', () => {
-    it('returns a distinct cache for child Configs created via Object.create', () => {
-      // Subagent / scoped-agent / fork construction all use
-      // `Object.create(parent)`, which does NOT run field initializers.
-      // Without explicit handling the child would resolve fileReadCache
-      // through the prototype chain back to the parent's instance, so a
-      // subagent's ReadFile would see the parent's recorded reads and
-      // return file_unchanged placeholders for files the subagent has
-      // never received in its own transcript.
+  describe('derived Config ownership', () => {
+    it('declares the mutable ownership decisions enforced by Config accessors', () => {
+      expect(DERIVED_CONFIG_STATE_OWNERSHIP).toMatchObject({
+        fileReadCache: 'child-local',
+        memoryPressureMonitor: 'child-local',
+        activeTodoState: 'child-local',
+        goalRuntime: 'prohibited',
+        sessionWriterState: 'prohibited',
+        canonicalLifecycle: 'prohibited',
+        approvalModeMutation: 'prohibited',
+      });
+    });
+
+    it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent, {
+        getCwd: () => '/tmp/derived',
+      });
+
+      expect(child.getCwd()).toBe('/tmp/derived');
+      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      expect(Object.getPrototypeOf(child)).toBe(parent);
+    });
+
+    it('ignores undefined getter overrides', () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent, { getCwd: undefined });
+
+      expect(child.getCwd()).toBe(parent.getCwd());
+      expect(Object.hasOwn(child, 'getCwd')).toBe(false);
+    });
+
+    it('prohibits inherited session-writer lifecycle access', async () => {
+      const parent = new Config(baseParams);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+      (
+        parent as unknown as {
+          chatRecordingService: {
+            hasWriteOwnership: () => boolean;
+            beginClose: () => void;
+            close: () => Promise<void>;
+            assertCanStartTurn: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        hasWriteOwnership: () => true,
+        beginClose,
+        close,
+        assertCanStartTurn,
+      };
+      const child = deriveConfig(parent);
+
+      expect(child.hasSessionWriteOwnership()).toBe(false);
+      expect(() => child.setSessionWriterReclaimPolicy('never')).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => child.setSessionWriterTakeoverPolicy('certified')).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => child.closeSessionWriter()).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      await expect(child.assertCanStartTurn()).resolves.toBeUndefined();
+      expect(assertCanStartTurn).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(parent.hasSessionWriteOwnership()).toBe(true);
+    });
+
+    it('prohibits initializing a derived Config', async () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent);
+
+      await expect(child.initialize()).rejects.toThrow(
+        'Derived Configs cannot be initialized',
+      );
+    });
+
+    it('prohibits canonical lifecycle operations on derived Configs', async () => {
+      const parent = new Config(baseParams);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const teamCleanup = vi.fn().mockResolvedValue(undefined);
+      const arenaCleanup = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        chatRecordingService: {
+          hasWriteOwnership: () => boolean;
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+        teamManager: { cleanup: () => Promise<void> };
+        arenaManager: { cleanup: () => Promise<void> };
+      };
+      internal.chatRecordingService = {
+        hasWriteOwnership: () => false,
+        finalize,
+        flush,
+      };
+      internal.teamManager = { cleanup: teamCleanup };
+      internal.arenaManager = { cleanup: arenaCleanup };
+      const child = deriveConfig(parent);
+
+      expect(() => child.startNewSession()).toThrow(
+        'Derived Configs cannot start new sessions',
+      );
+      await expect(
+        child.relocateWorkingDirectory(baseParams.targetDir),
+      ).rejects.toThrow('Derived Configs cannot relocate working directories');
+      await expect(child.cleanupTeamRuntime()).rejects.toThrow(
+        'Derived Configs cannot clean up Team runtime',
+      );
+      await expect(child.cleanupArenaRuntime(true)).rejects.toThrow(
+        'Derived Configs cannot clean up Arena runtime',
+      );
+
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(teamCleanup).not.toHaveBeenCalled();
+      expect(arenaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('preserves ownership guards through nested prototype wrappers', async () => {
+      const parent = new Config(baseParams);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const teamCleanup = vi.fn().mockResolvedValue(undefined);
+      const arenaCleanup = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+        chatRecordingService: {
+          hasWriteOwnership: () => boolean;
+          beginClose: () => void;
+          close: () => Promise<void>;
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+        teamManager: { cleanup: () => Promise<void> };
+        arenaManager: { cleanup: () => Promise<void> };
+      };
+      internal.initialized = true;
+      internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      internal.chatRecordingService = {
+        hasWriteOwnership: () => false,
+        beginClose,
+        close,
+        finalize,
+        flush,
+      };
+      internal.teamManager = { cleanup: teamCleanup };
+      internal.arenaManager = { cleanup: arenaCleanup };
+      const wrapped = Object.create(deriveConfig(parent)) as Config;
+
+      expect(wrapped.hasSessionWriteOwnership()).toBe(false);
+      expect(() => wrapped.closeSessionWriter()).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => wrapped.startNewSession()).toThrow(
+        'Derived Configs cannot start new sessions',
+      );
+      await expect(
+        wrapped.relocateWorkingDirectory(baseParams.targetDir),
+      ).rejects.toThrow('Derived Configs cannot relocate working directories');
+      await expect(wrapped.cleanupTeamRuntime()).rejects.toThrow(
+        'Derived Configs cannot clean up Team runtime',
+      );
+      await expect(wrapped.cleanupArenaRuntime(true)).rejects.toThrow(
+        'Derived Configs cannot clean up Arena runtime',
+      );
+      await expect(
+        wrapped.shutdown({ shutdownTelemetry: false }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(teamCleanup).not.toHaveBeenCalled();
+      expect(arenaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('prohibits derived approval changes from mutating parent permissions', () => {
+      const parent = new Config(baseParams);
+      const restoreDangerousRules = vi.fn();
+      const internal = parent as unknown as {
+        approvalMode: ApprovalMode;
+        permissionManager: {
+          stripDangerousRulesForAutoMode: () => void;
+          restoreDangerousRules: () => void;
+        };
+      };
+      internal.approvalMode = ApprovalMode.AUTO;
+      internal.permissionManager = {
+        stripDangerousRulesForAutoMode: vi.fn(),
+        restoreDangerousRules,
+      };
+      const child = deriveConfig(parent);
+
+      expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).toThrow(
+        'Derived Configs cannot change approval mode',
+      );
+      expect(restoreDangerousRules).not.toHaveBeenCalled();
+      expect(parent.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('does not shut down resources inherited from the parent', async () => {
+      const parent = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          beginClose: () => void;
+          close: () => Promise<void>;
+        };
+      };
+      internal.initialized = true;
+      internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      internal.chatRecordingService = {
+        finalize,
+        flush,
+        beginClose,
+        close,
+      };
+      const child = deriveConfig(parent);
+
+      await expect(
+        child.shutdown({ shutdownTelemetry: false }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).not.toHaveBeenCalled();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('returns a distinct file-read cache for derived Configs', () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent);
 
       const parentCache = parent.getFileReadCache();
       const childCache = child.getFileReadCache();
@@ -1670,7 +1914,7 @@ describe('Server Config (config.ts)', () => {
           ino: 100,
           mtimeMs: 1_000_000,
           size: 42,
-        } as unknown as import('node:fs').Stats,
+        } as unknown as Stats,
         { full: true, cacheable: true },
       );
 
@@ -1679,9 +1923,6 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('returns the same cache instance on repeated getter calls within one Config', () => {
-      // Sanity: the lazy own-property initialization in
-      // getFileReadCache() must not allocate a fresh cache on every
-      // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
     });
@@ -2081,7 +2322,7 @@ describe('Server Config (config.ts)', () => {
     it('returns a distinct monitor for child Configs created via Object.create', async () => {
       const parent = new Config(baseParams);
       await parent.initialize({ skipGeminiInitialization: true });
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent);
 
       const parentMonitor = parent.getMemoryPressureMonitor();
       const childMonitor = child.getMemoryPressureMonitor();
@@ -2258,7 +2499,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent);
       mockMemoryRatio(0.35);
 
       expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
@@ -2726,7 +2967,7 @@ describe('Server Config (config.ts)', () => {
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const canonical = config.getGoalRuntime();
-      const child = Object.create(config) as Config;
+      const child = deriveConfig(config);
 
       expect(() => child.getGoalRuntime()).toThrow(
         GoalPersistenceUnavailableError,
@@ -10815,7 +11056,7 @@ describe('Model Switching and Config Updates', () => {
 
   it('isolates active Todo reminders inherited through child Configs', () => {
     const parent = Object.create(Config.prototype) as Config;
-    const child = Object.create(parent) as Config;
+    const child = deriveConfig(parent);
     parent.setActiveTodoReminder('parent-prompt', 'parent work');
 
     child.setActiveTodoReminder('child-prompt', 'child work');
