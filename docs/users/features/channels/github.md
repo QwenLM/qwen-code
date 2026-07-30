@@ -124,6 +124,13 @@ The GitHub channel always forces final-only delivery. The adapter sets `blockStr
 }
 ```
 
+If GitHub returns a definite no-write delivery failure, such as a rate-limit
+response, the channel stores the final reply in
+`~/.qwen/channels/<channel>-github-pending-deliveries.json` with private file
+permissions and retries it on the next channel start. Ambiguous delivery
+failures are not retried automatically because GitHub may have created the
+comment.
+
 ## Known Limitations
 
 - **First start skips existing unread notifications.** The cursor initializes to "now" on first launch. Notifications created before the bot starts are not processed unless the thread receives new activity afterwards.

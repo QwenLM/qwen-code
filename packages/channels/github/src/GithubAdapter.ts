@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, chmodSync, mkdirSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
 import { Octokit } from '@octokit/rest';
@@ -165,6 +173,30 @@ interface PublicationAuditRecord {
   bodyChars: number;
 }
 
+type PublicationAuditBase = Omit<
+  PublicationAuditRecord,
+  | 'at'
+  | 'type'
+  | 'outcome'
+  | 'commentId'
+  | 'commentUrl'
+  | 'failurePhase'
+  | 'failureError'
+>;
+
+interface PendingFinalDelivery {
+  id: string;
+  createdAt: string;
+  chatId: string;
+  threadId: string;
+  fullText: string;
+  sessionId: string;
+  sourceMessageId?: string;
+  actor?: string;
+  triggerKind?: string;
+  attempts?: number;
+}
+
 class FinalPublicationError extends Error {}
 
 const NO_REPLY_SENTINEL = '<no-reply/>';
@@ -205,6 +237,20 @@ function buildTriggerGuidance(reason: string): string {
     return 'For @mention, answer the request directly as a public reply.';
   }
   return `For ${reason}, output exactly ${NO_REPLY_SENTINEL} when a public reply is unnecessary.`;
+}
+
+function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
+  const item = value as PendingFinalDelivery;
+  return (
+    item !== null &&
+    typeof item === 'object' &&
+    typeof item.id === 'string' &&
+    typeof item.createdAt === 'string' &&
+    typeof item.chatId === 'string' &&
+    typeof item.threadId === 'string' &&
+    typeof item.fullText === 'string' &&
+    typeof item.sessionId === 'string'
+  );
 }
 
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
@@ -304,6 +350,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
+    void this.retryPendingFinalDeliveries().catch((err) => {
+      process.stderr.write(
+        `[Channel:${this.name}] pending GitHub delivery retry failed: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+    });
   }
 
   disconnect(): void {
@@ -345,18 +399,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): Promise<void> {
     const threadMatch = threadId?.match(/^(issue|pr):(\d+)$/);
     const metadata = this.getResponseMetadata(sessionId);
-    const auditBase = {
-      channel: this.name,
-      triggerKind: parseTriggerKind(metadata),
-      repository: chatId,
-      number: threadMatch ? Number(threadMatch[2]) : undefined,
+    const auditBase = this.buildPublicationAuditBase({
+      chatId,
+      threadId,
+      fullText,
       sessionId,
       sourceMessageId: this.getResponseMessageId(sessionId),
       actor: this.getResponseSenderId(sessionId),
-      threadId,
-      bodySha256: createHash('sha256').update(fullText).digest('hex'),
-      bodyChars: Array.from(fullText).length,
-    };
+      metadata,
+    });
     if (isNoReplySentinel(fullText)) {
       this.recordPublicationAudit({
         ...auditBase,
@@ -405,11 +456,191 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           200,
         ),
       });
+      if (threadId && isDefiniteNoWriteGithubError(err)) {
+        this.enqueuePendingFinalDelivery({
+          ...auditBase,
+          chatId,
+          threadId,
+          fullText,
+        });
+      }
       throw new FinalPublicationError(
         err instanceof Error ? err.message : String(err),
         { cause: err },
       );
     }
+  }
+
+  private buildPublicationAuditBase(input: {
+    chatId: string;
+    threadId?: string;
+    fullText: string;
+    sessionId: string;
+    sourceMessageId?: string;
+    actor?: string;
+    metadata?: string;
+  }): PublicationAuditBase {
+    const threadMatch = input.threadId?.match(/^(issue|pr):(\d+)$/);
+    return {
+      channel: this.name,
+      triggerKind: parseTriggerKind(input.metadata),
+      repository: input.chatId,
+      number: threadMatch ? Number(threadMatch[2]) : undefined,
+      sessionId: input.sessionId,
+      sourceMessageId: input.sourceMessageId,
+      actor: input.actor,
+      threadId: input.threadId,
+      bodySha256: createHash('sha256').update(input.fullText).digest('hex'),
+      bodyChars: Array.from(input.fullText).length,
+    };
+  }
+
+  private enqueuePendingFinalDelivery(
+    input: PublicationAuditBase & {
+      chatId: string;
+      threadId: string;
+      fullText: string;
+    },
+  ): void {
+    const record: PendingFinalDelivery = {
+      id: createHash('sha256')
+        .update(
+          JSON.stringify([
+            input.chatId,
+            input.threadId,
+            input.sessionId,
+            input.sourceMessageId ?? '',
+            input.bodySha256,
+          ]),
+        )
+        .digest('hex'),
+      createdAt: new Date().toISOString(),
+      chatId: input.chatId,
+      threadId: input.threadId,
+      fullText: input.fullText,
+      sessionId: input.sessionId,
+      sourceMessageId: input.sourceMessageId,
+      actor: input.actor,
+      triggerKind: input.triggerKind,
+      attempts: 0,
+    };
+    try {
+      const pending = this.readPendingFinalDeliveries().filter(
+        (item) => item.id !== record.id,
+      );
+      this.writePendingFinalDeliveries([...pending, record]);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to persist pending GitHub delivery: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+    }
+  }
+
+  private async retryPendingFinalDeliveries(): Promise<void> {
+    let pending = this.readPendingFinalDeliveries();
+    for (const record of pending) {
+      const auditBase = this.buildPublicationAuditBase({
+        chatId: record.chatId,
+        threadId: record.threadId,
+        fullText: record.fullText,
+        sessionId: record.sessionId,
+        sourceMessageId: record.sourceMessageId,
+        actor: record.actor,
+        metadata: record.triggerKind
+          ? `Trigger: ${record.triggerKind}.`
+          : undefined,
+      });
+      try {
+        const comment = await this.createIssueComment(
+          record.chatId,
+          record.threadId,
+          record.fullText,
+          3,
+          isDefiniteNoWriteGithubError,
+        );
+        pending = pending.filter((item) => item.id !== record.id);
+        // ponytail: GitHub has no createComment idempotency key without adding
+        // a public marker to the verbatim final body; marker-upsert if that
+        // contract changes.
+        this.writePendingFinalDeliveries(pending);
+        this.recordPublicationAudit({
+          ...auditBase,
+          at: new Date().toISOString(),
+          type: 'github_publication',
+          outcome: 'posted',
+          commentId: comment.id,
+          commentUrl: comment.html_url,
+        });
+      } catch (err) {
+        if (isDefiniteNoWriteGithubError(err)) {
+          record.attempts = (record.attempts ?? 0) + 1;
+          this.writePendingFinalDeliveries(pending);
+          continue;
+        }
+        pending = pending.filter((item) => item.id !== record.id);
+        this.writePendingFinalDeliveries(pending);
+        this.recordPublicationAudit({
+          ...auditBase,
+          at: new Date().toISOString(),
+          type: 'github_publication',
+          outcome: 'failed',
+          failurePhase: 'delivery',
+          failureError: sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          ),
+        });
+      }
+    }
+  }
+
+  private pendingFinalDeliveriesPath(): string {
+    return this.channelFilePath('github-pending-deliveries.json');
+  }
+
+  private readPendingFinalDeliveries(): PendingFinalDelivery[] {
+    try {
+      const parsed = JSON.parse(
+        readFileSync(this.pendingFinalDeliveriesPath(), 'utf-8'),
+      );
+      return Array.isArray(parsed) ? parsed.filter(isPendingFinalDelivery) : [];
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to read pending GitHub deliveries: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+      }
+      return [];
+    }
+  }
+
+  private writePendingFinalDeliveries(records: PendingFinalDelivery[]): void {
+    const path = this.pendingFinalDeliveriesPath();
+    if (records.length === 0) {
+      try {
+        unlinkSync(path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      return;
+    }
+    const dir = join(getGlobalQwenDir(), 'channels');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const tmpPath = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmpPath, `${JSON.stringify(records)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodSync(tmpPath, 0o600);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
   }
 
   private async createIssueComment(
@@ -955,11 +1186,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected recordPublicationAudit(record: PublicationAuditRecord): void {
     try {
-      const encodedName = this.name
-        .replace(/[^a-zA-Z0-9_-]/g, '_')
-        .slice(0, 200);
       const dir = join(getGlobalQwenDir(), 'channels');
-      const path = join(dir, `${encodedName}-github-audit.jsonl`);
+      const path = this.channelFilePath('github-audit.jsonl');
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
       appendFileSync(path, `${JSON.stringify(record)}\n`, {
@@ -975,6 +1203,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         )}\n`,
       );
     }
+  }
+
+  private channelFilePath(suffix: string): string {
+    const encodedName = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
+    return join(getGlobalQwenDir(), 'channels', `${encodedName}-${suffix}`);
   }
 
   private extractFromSubjectUrl(

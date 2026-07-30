@@ -8,7 +8,13 @@ import {
   type Mock,
 } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -1494,6 +1500,69 @@ describe('GithubChannel', () => {
         expect(sleep).toHaveBeenCalled();
       },
     );
+
+    it('persists and recovers final delivery when GitHub definitely did not write', async () => {
+      await connectForPublication();
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = sleep;
+      const error = Object.assign(new Error('rate limited'), { status: 429 });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ message: 'rate limited', cause: error });
+
+      const pendingPath = join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-pending-deliveries.json',
+      );
+      expect(JSON.parse(readFileSync(pendingPath, 'utf-8'))).toMatchObject([
+        {
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+          fullText: 'Final reply',
+          sessionId: 'session-publication',
+        },
+      ]);
+
+      mockOctokit.rest.issues.createComment.mockReset();
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: {
+          id: 2002,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-2002',
+        },
+      });
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await connectForPublication();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        issue_number: 42,
+        body: 'Final reply',
+      });
+      expect(existsSync(pendingPath)).toBe(false);
+    });
 
     it('distinguishes pre-delivery validation from ambiguous failures', async () => {
       await connectForPublication();
