@@ -41,11 +41,12 @@ projection.
    assignment that captures it into `preInjectionPromptText` (avoids a TDZ
    if the surrounding Goal try/catch is later reshuffled).
 2. **Display provenance** (`chatRecordingService.ts`): `recordUserMessage`
-   accepts an optional `UserPromptRecordPayload { displayText?, hookContext? }`
-   stored as `systemPayload`. `message` keeps the exact model-bound Content —
-   resume must replay what the model actually saw — while `displayText`
-   preserves the pre-injection user projection. The payload is only written
-   when a hook actually injected context.
+   accepts an optional `UserPromptRecordPayload { displayText? }` stored as
+   `systemPayload`. `message` keeps the exact model-bound Content — resume
+   must replay what the model actually saw — while `displayText` preserves
+   the pre-injection user projection. Hook-injected text remains in the
+   tagged `message.parts` entry (machine-parseable). The payload is only
+   written when a hook actually injected context.
 3. **Telemetry & recall** (`client.ts`): `addUserPromptAttributes` and
    `MemoryManager.recall` use the pre-injection prompt text when injection
    occurred.

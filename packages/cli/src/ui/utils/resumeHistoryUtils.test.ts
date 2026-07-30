@@ -138,7 +138,6 @@ describe('resumeHistoryUtils', () => {
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
         systemPayload: {
           displayText: 'my prompt',
-          hookContext: 'injected hook context',
         },
       });
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
@@ -158,7 +157,6 @@ describe('resumeHistoryUtils', () => {
         },
         systemPayload: {
           displayText: 'my prompt',
-          hookContext: 'injected hook context',
         },
       });
       expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);

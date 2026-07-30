@@ -168,7 +168,6 @@ describe('ChatRecordingService', () => {
       ];
       chatRecordingService.recordUserMessage(taggedParts, undefined, {
         displayText: 'my prompt',
-        hookContext: 'extra',
       });
       chatRecordingService.recordUserMessage([{ text: 'plain prompt' }]);
       await chatRecordingService.flush();
@@ -182,7 +181,6 @@ describe('ChatRecordingService', () => {
       expect(augmented.message).toEqual({ role: 'user', parts: taggedParts });
       expect(augmented.systemPayload).toEqual({
         displayText: 'my prompt',
-        hookContext: 'extra',
       });
       expect(plain.systemPayload).toBeUndefined();
     });

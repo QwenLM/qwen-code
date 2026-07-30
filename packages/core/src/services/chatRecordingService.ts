@@ -397,13 +397,12 @@ export interface ChatRecord {
  * augmented by a UserPromptSubmit hook. `message` keeps the exact
  * model-bound Content (resume must replay what the model actually saw);
  * this payload preserves the user-authored projection for UI/resume
- * display and offline analysis.
+ * display. Hook-injected text stays recoverable from the tagged part in
+ * `message.parts` via `isUserPromptSubmitContextPartText`.
  */
 export interface UserPromptRecordPayload {
   /** Pre-injection projection of the user's own prompt text. */
   displayText?: string;
-  /** Sanitized additional context injected by the hook (without the tag). */
-  hookContext?: string;
 }
 
 export interface NotificationRecordPayload {

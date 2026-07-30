@@ -220,7 +220,6 @@ describe('createTranscriptReplayMachine', () => {
           },
           systemPayload: {
             displayText: 'my prompt',
-            hookContext: 'injected hook context',
           },
         }),
       );
@@ -237,6 +236,47 @@ describe('createTranscriptReplayMachine', () => {
         {
           sessionUpdate: 'user_message_chunk',
           content: { type: 'text', text: 'my prompt' },
+        },
+      ]);
+      expect(projected).toHaveLength(2);
+    });
+
+    it('appends displayText after images when the record has no text part to replace', () => {
+      // Exercises the !replaced fallback: after stripping the trailing tagged
+      // block, only the image remains, so displayText is appended.
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-img-only', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: tagged },
+            ],
+          },
+          systemPayload: {
+            displayText: 'my image prompt',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc',
+            mimeType: 'image/png',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'my image prompt' },
         },
       ]);
       expect(projected).toHaveLength(2);

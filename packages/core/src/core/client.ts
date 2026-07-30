@@ -2268,10 +2268,8 @@ export class GeminiClient {
     }
 
     // Set when the UserPromptSubmit hook injects additional context: the
-    // sanitized injected string and the pre-injection prompt projection.
-    // Telemetry, memory recall, and chat recording must see the user's own
-    // text, not the augmented request.
-    let injectedHookContext: string | undefined;
+    // pre-injection prompt projection. Telemetry, memory recall, and chat
+    // recording must see the user's own text, not the augmented request.
     let preInjectionPromptText: string | undefined;
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -2369,7 +2367,6 @@ export class GeminiClient {
             ...requestArray,
             { text: wrapUserPromptSubmitContext(additionalContext) },
           ];
-          injectedHookContext = additionalContext;
           preInjectionPromptText = promptText;
         }
       }
@@ -2621,18 +2618,15 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
+          // Only pass the payload when a hook actually injected; omitting
+          // the third argument keeps existing two-arg spies/call sites
+          // exact (passing `undefined` would still count as a third arg).
           const recordingService = this.config.getChatRecordingService();
-          if (!recordingService) {
-            // no-op
-          } else if (injectedHookContext !== undefined) {
-            // Only pass the payload when a hook actually injected; omitting
-            // the third argument keeps existing two-arg spies/call sites
-            // exact (passing `undefined` would still count as a third arg).
+          if (recordingService && preInjectionPromptText !== undefined) {
             recordingService.recordUserMessage(request, goalPermit, {
               displayText: preInjectionPromptText,
-              hookContext: injectedHookContext,
             });
-          } else {
+          } else if (recordingService) {
             recordingService.recordUserMessage(request, goalPermit);
           }
         }
