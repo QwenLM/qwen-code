@@ -6,7 +6,11 @@
 
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
-import type { Config } from '../../config/config.js';
+import {
+  deriveConfig,
+  deriveWorktreeConfig,
+  type Config,
+} from '../../config/config.js';
 import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
@@ -40,8 +44,6 @@ import {
   generateAgentWorktreeSlug,
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
@@ -549,12 +551,10 @@ function reportTokens(
  * would bypass that normalization and require us to duplicate it here.
  *
  * Why the worktree-rebound Config is passed as `runtimeContext` (not
- * `toolConfigOverride`): `SubagentManager.buildSubagentContextOverride`
- * (subagent-manager.ts:857) builds the subagent context via
- * `Object.create(runtimeContext)`. The own-property rebinds we set on the
- * worktree override propagate through the prototype chain, so all
- * `getTargetDir() / getCwd() / getFileService() / getWorkspaceContext()`
- * call sites inside the subagent see the worktree path. Subsequent
+ * `toolConfigOverride`): `SubagentManager` derives its subagent context from
+ * this worktree profile.
+ * The worktree profile's own getter and field rebinds propagate through that
+ * derivation, so workspace-bound call sites keep the selected path.
  * `rebuildToolRegistryOnOverride` re-resolves `this.config` through the
  * chain and anchors EditTool / WriteFileTool / ReadFileTool to the
  * worktree's FileReadCache, so the subagent cannot leak writes back into
@@ -680,17 +680,16 @@ async function runOverridePath(
     ),
   };
 
-  // Provision worktree BEFORE createAgentHeadless so the override Config
+  // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
-  // resolve cwd-related getters via the prototype chain.
+  // resolve workspace-bound state through the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
-    effectiveContext = createWorktreeConfigOverride(
-      config,
-      worktreeIsolation.path,
-    );
+    effectiveContext = deriveWorktreeConfig(config, worktreeIsolation.path, {
+      customIgnoreFiles: config.getFileFilteringOptions().customIgnoreFiles,
+    });
   }
 
   // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
@@ -1054,38 +1053,6 @@ async function provisionWorkflowWorktree(
 }
 
 /**
- * Build a Config wrapper that rebinds every "where am I?" surface to the
- * isolated worktree path. `Object.create(base)` keeps prototype lookups
- * walking back to the parent for everything else (model config, session
- * id, MCP servers), while the own-property overrides shadow the cwd-
- * adjacent fields so the subagent's tools (Edit / Write / Read / Glob /
- * Grep / Ls / Shell) anchor inside the worktree.
- *
- * Mirrors the inline rebind block at agent.ts:2008-2024. Sets BOTH the
- * field shape (e.g. `targetDir`) AND the method shape (`getTargetDir`)
- * because JS does not promote a getter assignment to a field shadow —
- * call sites that read `this.targetDir` directly inside Config methods
- * would otherwise still resolve through the prototype to the parent.
- */
-function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ov: any = Object.create(base);
-  ov.targetDir = wtPath;
-  ov.cwd = wtPath;
-  ov.getTargetDir = () => wtPath;
-  ov.getCwd = () => wtPath;
-  ov.getWorkingDir = () => wtPath;
-  ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(wtPath);
-  ov.fileDiscoveryService = wtFileService;
-  ov.getFileService = () => wtFileService;
-  const wtWorkspace = new WorkspaceContext(wtPath);
-  ov.workspaceContext = wtWorkspace;
-  ov.getWorkspaceContext = () => wtWorkspace;
-  return ov as Config;
-}
-
-/**
  * Decide whether the isolation worktree carries work worth preserving:
  * uncommitted edits OR commits that the parent's history does not yet
  * cover. If either check fails-closed, preserve — the cost of preserving
@@ -1292,12 +1259,11 @@ async function createSchemaConfigOverride(
   base: Config,
   schema: Record<string, unknown>,
 ): Promise<Config> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override: any = Object.create(base);
-  await rebuildToolRegistryOnOverride(override as Config, base);
+  const override = deriveConfig(base);
+  await rebuildToolRegistryOnOverride(override, base);
   const registry = override.getToolRegistry();
   registry.registerTool(new SyntheticOutputTool(schema));
-  return override as Config;
+  return override;
 }
 
 export class WorkflowOrchestrator {
