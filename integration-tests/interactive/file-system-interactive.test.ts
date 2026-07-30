@@ -61,22 +61,10 @@ describe('Interactive file system', () => {
       await type(ptyProcess, writePrompt);
       await type(ptyProcess, '\r');
 
-      // Tool call detection can miss real calls in docker/podman sandbox
-      // (telemetry log flush races, stdout fallback in readToolLogs), and
-      // the model may use run_shell_command instead of write_file/edit.
-      // File content is the source of truth: if a tool call is detected
-      // the file must also be updated; if detection misses, correct file
-      // content alone still passes.
-      const toolCall = await rig.waitForAnyToolCall(
-        ['write_file', 'edit'],
-        rig.getDefaultTimeout(),
-      );
-
-      // The tool call is logged once the model issues it, but the turn may
-      // still be settling (a failed edit can be retried) and the model may
-      // write more than just '1.0.1'. Poll the file until it contains the new
-      // version, matching the lenient assertion used by the non-interactive
-      // sibling test (file-system.test.ts uses .toContain('1.0.1')).
+      // The model may apply the change through run_shell_command instead of
+      // write_file/edit, so a specific tool call is deliberately not asserted;
+      // the file content is the source of truth. Poll until the new version
+      // lands, as the turn may still be settling (a failed edit can be retried).
       const updated = await rig.poll(
         () => rig.readFile(fileName).includes('1.0.1'),
         rig.getDefaultTimeout(),
@@ -84,20 +72,9 @@ describe('Interactive file system', () => {
       );
 
       if (!updated) {
-        printDebugInfo(rig, rig._interactiveOutput, { toolCall, updated });
+        printDebugInfo(rig, rig._interactiveOutput, { updated });
       }
-
-      if (toolCall) {
-        expect(
-          updated,
-          'Expected file content to contain 1.0.1 after tool call',
-        ).toBe(true);
-      }
-
-      expect(
-        toolCall || updated,
-        'Expected a write_file/edit tool call or file content containing 1.0.1',
-      ).toBe(true);
+      expect(updated, 'Expected file content to contain 1.0.1').toBe(true);
     },
   );
 });
