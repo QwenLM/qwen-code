@@ -11715,6 +11715,65 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
       shellSpy.mockRestore();
     });
+
+    it('returns an aborted direct shell without waiting for a hung cwd change', async () => {
+      const shellSpy = mockShellExecute();
+      const cdResult = deferred<{
+        previousCwd: string;
+        newCwd: string;
+        warnings: string[];
+      }>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+            return cdResult.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const cd = bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+          params: {
+            sessionId: session.sessionId,
+            path: WS_B,
+          },
+        }),
+      );
+
+      const abort = new AbortController();
+      const shell = bridge.executeShellCommand(
+        session.sessionId,
+        'echo aborted-cd',
+        abort.signal,
+        { clientId: session.clientId },
+      );
+
+      await Promise.resolve();
+      expect(shellSpy).not.toHaveBeenCalled();
+      abort.abort();
+
+      // The cd extMethod never settles, yet the aborted command must return
+      // promptly instead of parking on the cwd queue forever.
+      await expect(shell).resolves.toEqual({
+        exitCode: null,
+        output: '',
+        aborted: true,
+      });
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      cdResult.resolve({ previousCwd: WS_A, newCwd: WS_B, warnings: [] });
+      await cd;
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
   });
 
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
