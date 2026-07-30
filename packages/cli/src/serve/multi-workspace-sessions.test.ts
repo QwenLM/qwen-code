@@ -153,7 +153,7 @@ interface FakeBridge extends AcpSessionBridge {
     context?: BridgeClientRequestContext;
   }>;
   readonly primaryOnlyMutationCalls: Array<{
-    route: 'branch' | 'fork' | 'cd';
+    route: 'branch' | 'side-task' | 'fork' | 'cd';
     sessionId: string;
   }>;
 }
@@ -621,6 +621,10 @@ function makeBridge(
     async branchSession(sessionId: string) {
       primaryOnlyMutationCalls.push({ route: 'branch', sessionId });
       throw new Error('Unexpected branchSession call');
+    },
+    async createSideTaskSession(sessionId: string) {
+      primaryOnlyMutationCalls.push({ route: 'side-task', sessionId });
+      throw new Error('Unexpected createSideTaskSession call');
     },
     async launchSessionForkAgent(sessionId: string) {
       primaryOnlyMutationCalls.push({ route: 'fork', sessionId });

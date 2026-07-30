@@ -35,6 +35,10 @@ export interface TranscriptRecordInput {
   readonly usageMetadata?: unknown;
   readonly toolCallResult?: unknown;
   readonly systemPayload?: unknown;
+  readonly forkedFrom?: {
+    readonly sessionId: string;
+    readonly messageUuid: string;
+  };
 }
 
 export interface TranscriptReplayGapInput {

@@ -334,6 +334,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_list',
   'session_info',
   'session_source_metadata',
+  'session_side_task',
   'session_prompt',
   'session_cancel',
   'session_events',
@@ -393,6 +394,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // Issue #4175 PR 20. Always-on. Daemon exposes raw byte windows and
   // hash-aware text mutation routes behind the strict mutation gate.
   'workspace_file_bytes',
+  'workspace_file_read_cursor',
   'workspace_file_write',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).

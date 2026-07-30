@@ -33,6 +33,7 @@ import {
   resolveBootstrapRoute,
   runCliEntry,
   runCliEntryPoint,
+  stampCliEntryEnv,
 } from './cli.js';
 
 const mocks = vi.hoisted(() => ({
@@ -355,6 +356,110 @@ describe('runCliEntry', () => {
     expect(mocks.initializeAcpStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.markAcpStartup).not.toHaveBeenCalled();
     expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('stampCliEntryEnv', () => {
+  // Isolated because the CLI exports QWEN_CODE_CLI to every shell it spawns —
+  // a test run started from inside a qwen session inherits it.
+  let originalCli: string | undefined;
+  let tempDir: string;
+
+  beforeEach(() => {
+    originalCli = process.env['QWEN_CODE_CLI'];
+    delete process.env['QWEN_CODE_CLI'];
+    tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-entry-stamp-'));
+  });
+
+  afterEach(() => {
+    if (originalCli !== undefined) {
+      process.env['QWEN_CODE_CLI'] = originalCli;
+    } else {
+      delete process.env['QWEN_CODE_CLI'];
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('stamps the built bin entry so skill shell-outs reach THIS build', () => {
+    // A direct workspace launch (`node dist/index.js`) never passes through
+    // scripts/cli-entry.js, so without this stamp every
+    // `"${QWEN_CODE_CLI:-qwen}"` resolved a global install off PATH.
+    const entry = path.join(tempDir, 'index.js');
+    writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n');
+
+    stampCliEntryEnv(entry);
+
+    expect(process.env['QWEN_CODE_CLI']).toBe(entry);
+  });
+
+  it("never overwrites an outer launcher's stamp", () => {
+    // cli-entry.js may have selected a standalone shim, and the desktop app
+    // stamps its vendored bundle — both know launch details this module
+    // cannot see, and both run before runCliEntryPoint in the same process.
+    const entry = path.join(tempDir, 'index.js');
+    writeFileSync(entry, '#!/usr/bin/env node\n');
+    process.env['QWEN_CODE_CLI'] = '/outer/launcher/qwen';
+
+    stampCliEntryEnv(entry);
+
+    expect(process.env['QWEN_CODE_CLI']).toBe('/outer/launcher/qwen');
+  });
+
+  it('treats an inherited empty string as unset', () => {
+    // A parent session's spawn filter writes '' for an entry its shell could
+    // not exec. That verdict is about the parent's entry — this build must
+    // still stamp its own.
+    const entry = path.join(tempDir, 'index.js');
+    writeFileSync(entry, '#!/usr/bin/env node\n');
+    process.env['QWEN_CODE_CLI'] = '';
+
+    stampCliEntryEnv(entry);
+
+    expect(process.env['QWEN_CODE_CLI']).toBe(entry);
+  });
+
+  it('grants the execute bit tsc never emits, so the spawn filter passes the stamp', () => {
+    // tsc writes dist/index.js as 0644 and only npm's bin-link chmods it; the
+    // spawn-time filter in core blanks a shebang-bearing entry without X_OK,
+    // which would turn this stamp into a no-op on every plain-build checkout.
+    const entry = path.join(tempDir, 'index.js');
+    writeFileSync(entry, '#!/usr/bin/env node\n', { mode: 0o644 });
+
+    stampCliEntryEnv(entry);
+
+    expect(process.env['QWEN_CODE_CLI']).toBe(entry);
+    expect(statSync(entry).mode & 0o111).not.toBe(0);
+  });
+
+  it('leaves the slot unset when the derived entry does not exist', () => {
+    stampCliEntryEnv(path.join(tempDir, 'no', 'such', 'index.js'));
+
+    expect(process.env['QWEN_CODE_CLI']).toBeUndefined();
+  });
+
+  it('derives the bin entry one level up from the compiled module', () => {
+    // cli.ts emits to dist/src/cli.js and the shebang bin is dist/index.js —
+    // one level up, not two. Two lands on the unbuilt packages/cli/index.js,
+    // which fails the existence check and silently never stamps, and no other
+    // test can catch that: the derivation is only reachable under a built
+    // layout, where vitest never runs.
+    const source = readFileSync('src/cli.ts', 'utf8');
+    expect(source).toContain("new URL('../index.js', import.meta.url)");
+    expect(
+      new URL('../index.js', 'file:///repo/packages/cli/dist/src/cli.js')
+        .pathname,
+    ).toBe('/repo/packages/cli/dist/index.js');
+  });
+
+  it('default derivation never throws and never stamps outside a built layout', () => {
+    // Under vitest Vite rewrites new URL(…, import.meta.url) to a non-file
+    // URL, and in dev runs the derived ../index.js is the unbuilt
+    // packages/cli/index.js. Both must keep the bare-`qwen` fallback — a
+    // failed derivation taking the CLI down would be worse than the version
+    // skew this stamp exists to fix.
+    stampCliEntryEnv();
+
+    expect(process.env['QWEN_CODE_CLI']).toBeUndefined();
   });
 });
 
@@ -1090,5 +1195,19 @@ describe('bootstrap error handling', () => {
     expect(output).toContain('run failed');
     expect(output).toContain('Error handler failed:');
     expect(output).toContain('handler failed');
+  });
+
+  it('wires stampCliEntryEnv into the entry point', () => {
+    const source = readFileSync('src/cli.ts', 'utf8');
+    const entryPoint = source.slice(
+      source.indexOf('export async function runCliEntryPoint'),
+    );
+    expect(entryPoint).toContain('stampCliEntryEnv()');
+    // "First thing in runCliEntryPoint" is the property the doc relies on: the
+    // stamp must land before the CLI runs, not merely somewhere in the body —
+    // a stamp moved below `await run()` would still pass a contains() check.
+    expect(entryPoint.indexOf('stampCliEntryEnv()')).toBeLessThan(
+      entryPoint.indexOf('await run()'),
+    );
   });
 });

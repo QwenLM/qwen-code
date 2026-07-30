@@ -903,6 +903,9 @@ export class VirtualSubagentSessions {
       runtime,
       parentSessionId,
       (candidate) =>
+        // /fork has no parent transcript tool call, so its task ID is the
+        // stable reference used by Web Shell.
+        candidate.id === toolCallId ||
         candidate.toolUseId === toolCallId ||
         candidate.id.endsWith(`-${toolCallId}`),
     );
