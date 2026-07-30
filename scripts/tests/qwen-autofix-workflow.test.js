@@ -2483,9 +2483,155 @@ describe('qwen-autofix workflow', () => {
     // starve the oldest tail forever once the pool exceeds the budget.
     expect(reviewScanJob).toContain('ROT_OFF=');
     expect(reviewScanJob).toContain('.[$o:] + .[:$o]');
-    expect(reviewScanJob).toMatch(
-      /BUSY_PRS[\s\S]{0,240}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
+    // The free skips (busy, idle-backoff) both live in the loop head,
+    // BEFORE the budget increment — assert on the slice, not a byte
+    // distance (comment growth must not red-light CI, and arbitrary code
+    // between the skips and the increment must).
+    const loopHead = reviewScanJob.slice(
+      reviewScanJob.indexOf('for PR in ${CANDIDATES}'),
+      reviewScanJob.indexOf('INSPECTED=$(( INSPECTED + 1 ))'),
     );
+    expect(loopHead).toContain("'busy'");
+    expect(loopHead).toContain("'idle-backoff'");
+    expect(loopHead).not.toContain('INSPECTED=');
+  });
+
+  it('backs off idle candidates without spending inspection budget', () => {
+    // Measured 2026-07-29: 28 open takeover PRs, 8 idle in "nothing new"
+    // state for 10+ hours. Every idle inspection costs a unit of the
+    // shared MAX_CANDIDATE_INSPECTIONS budget and a slice of the serial
+    // API walk (a few fewer gh round-trips per scan; the #8002 delay was
+    // queue/startup, which the candidate loop cannot recover). Candidates
+    // idle >24h are inspected on about one scan in four. The staleness
+    // signal is the list's own updatedAt — no API call, and no
+    // per-candidate process fork either: one jq builds the idle SET, and
+    // the loop tests membership like the busy skip does.
+    expect(
+      (reviewScanJob.match(/--json [^\n]*\bupdatedAt\b/g) ?? []).length,
+    ).toBe(2);
+    expect(reviewScanJob).toContain(`IDLE_CUTOFF="$(date -u -d '24 hours ago'`);
+    // The slot is a time quantum mod 4 keyed against PR % 4 (same quantum
+    // family as ROT_OFF). The exact quantum is deliberately NOT pinned:
+    // against the real irregular scan cadence (~40-70 min gaps, not */10)
+    // no constant quantum bounds the gap — the wait is geometric (measured
+    // median ~2h, p90 ~6h) — and 3600 s actually measures better on p90/max
+    // than 600 s, so CI must not forbid a future quantum change. The
+    // behavioral replay below (which passes slotNow explicitly) protects
+    // the slot logic; this pin only asserts the mod-4 time-quantum shape.
+    expect(reviewScanJob).toMatch(
+      /IDLE_SLOT_NOW="\$\(\(.*\$\(date -u \+%s\) \/ \d+\) % 4 \)\)"/,
+    );
+    expect(reviewScanJob).toContain(
+      'inspected ~1 scan in 4 (median ~2h, p90 ~6h)',
+    );
+    // Fail-open on the forced-dispatch path: it never builds the list
+    // files, so the set stays empty and a forced PR is always inspected.
+    expect(reviewScanJob).toContain("IDLE_PRS=' '");
+    expect(reviewScanJob).toMatch(
+      /if \[\[ -f "\$\{WORKDIR\}\/bot-prs\.json" && -f "\$\{WORKDIR\}\/takeover-prs\.json" \]\]; then\n\s+IDLE_CUTOFF=/,
+    );
+
+    // Behavioral replay of the set builder + skip predicate (the string
+    // pins alone cannot catch a flipped comparison or slot equality):
+    // run the real jq and the real predicate over four candidate shapes.
+    const setSrc = reviewScanJob.match(
+      /IDLE_PRS=" \$\(jq -rs[\s\S]*?\) "/,
+    )?.[0];
+    expect(setSrc).toBeTruthy();
+    expect(setSrc).toContain('takeover-prs.json');
+    const predSrc = reviewScanJob.match(
+      /if \[\[ "\$\{IDLE_PRS\}" == \*" \$\{PR\} "\* &&[^\n]*\]\]; then/,
+    )?.[0];
+    expect(predSrc).toBeTruthy();
+    const runBackoff = ({
+      pr,
+      updatedAt,
+      slotNow,
+      listed = true,
+      inTakeover = false,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'idle-backoff-'));
+      try {
+        const row = listed
+          ? [{ number: Number(pr), updatedAt }]
+          : [{ number: 99999, updatedAt: '2026-01-01T00:00:00Z' }];
+        writeFileSync(
+          join(dir, 'bot-prs.json'),
+          inTakeover ? '[]' : JSON.stringify(row),
+        );
+        writeFileSync(
+          join(dir, 'takeover-prs.json'),
+          inTakeover ? JSON.stringify(row) : '[]',
+        );
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `WORKDIR='${dir}'`,
+              `IDLE_CUTOFF='2026-07-28T12:00:00Z'`,
+              setSrc,
+              `IDLE_SLOT_NOW='${slotNow}'`,
+              `PR='${pr}'`,
+              `${predSrc} printf skip; else printf inspect; fi`,
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Idle and out of slot → deferred (8001 % 4 = 1).
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 0 }),
+    ).toBe('skip');
+    // Idle but IN its slot → inspected (its slot matched this scan).
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 1 }),
+    ).toBe('inspect');
+    // Fresh activity → inspected regardless of slot.
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-28T13:00:00Z', slotNow: 0 }),
+    ).toBe('inspect');
+    // Missing from the lookup (forced-dispatch shape) → inspected.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        listed: false,
+      }),
+    ).toBe('inspect');
+
+    // Null/empty updatedAt (defensive guard) → inspected, not idle.
+    expect(runBackoff({ pr: '8001', updatedAt: null, slotNow: 0 })).toBe(
+      'inspect',
+    );
+    // Idle candidate in takeover-prs.json (the cohort this targets) → deferred.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        inTakeover: true,
+      }),
+    ).toBe('skip');
+
+    // Visible in the fleet dashboard, like the busy skip.
+    expect(reviewScanJob).toContain("'idle-backoff'");
+    // The workflow comment must not claim the 10-target cap is relieved —
+    // idle candidates hit `continue` before the TARGETS append, so they
+    // never contend for it; the real win is inspection budget + walk
+    // latency, and the comment says so.
+    expect(reviewScanJob).toContain(
+      'Idle PRs never reach the\n          # 10-target budget',
+    );
+    // The two scan-only signals updatedAt cannot see are named, not
+    // papered over by an absolute invariant.
+    expect(reviewScanJob).toContain('base conflict');
+    expect(reviewScanJob).toContain('still-red checks');
   });
 
   it('behaviorally replays the takeover-command toggle across all four paths', () => {
