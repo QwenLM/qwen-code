@@ -46,7 +46,80 @@ const EXCLUDED_FILE_REGEXES = [
   /schema/i,
 ];
 export const OVERSIZED_FILE_LINE_THRESHOLD = 1000;
-const GENAI_IMPORT_PATTERN = /^\s*import\b[\s\S]*?['"]@google\/genai['"];?/m;
+
+/**
+ * Detect static imports, re-exports, and dynamic imports of @google/genai.
+ * Comments, ordinary strings, and templates are tokenized without matching
+ * their contents as code.
+ *
+ * @param {string} source source text
+ * @returns {boolean} whether the source imports @google/genai
+ */
+export function hasGoogleGenaiImport(source) {
+  const tokens = [];
+  for (let index = 0; index < source.length; ) {
+    if (/\s/.test(source[index])) {
+      index += 1;
+      continue;
+    }
+    if (source.startsWith('//', index)) {
+      const newline = source.indexOf('\n', index + 2);
+      index = newline === -1 ? source.length : newline + 1;
+      continue;
+    }
+    if (source.startsWith('/*', index)) {
+      const end = source.indexOf('*/', index + 2);
+      index = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    const quote = source[index];
+    if (quote === "'" || quote === '"' || quote === '`') {
+      let value = '';
+      index += 1;
+      while (index < source.length && source[index] !== quote) {
+        if (source[index] === '\\') {
+          value += source[index + 1] ?? '';
+          index += 2;
+        } else {
+          value += source[index];
+          index += 1;
+        }
+      }
+      index += 1;
+      tokens.push({ type: 'string', value });
+      continue;
+    }
+    const identifier = /^[A-Za-z_$][\w$]*/.exec(source.slice(index));
+    if (identifier) {
+      tokens.push({ type: 'identifier', value: identifier[0] });
+      index += identifier[0].length;
+      continue;
+    }
+    tokens.push({ type: 'punctuation', value: source[index] });
+    index += 1;
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type !== 'identifier') continue;
+    if (
+      token.value === 'import' &&
+      tokens[index + 1]?.value === '(' &&
+      tokens[index + 2]?.value === '@google/genai'
+    ) {
+      return true;
+    }
+    if (token.value !== 'import' && token.value !== 'export') continue;
+    for (let cursor = index + 1; cursor < tokens.length; cursor += 1) {
+      const next = tokens[cursor];
+      if (next.value === ';') break;
+      if (next.type === 'identifier' && (next.value === 'import' || next.value === 'export')) break;
+      if (next.type === 'string' && next.value === '@google/genai') {
+        if (token.value === 'import' || tokens[cursor - 1]?.value === 'from') return true;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * Return whether a source path is production code covered by the ratchet.
@@ -145,10 +218,9 @@ export function measureArchitectureDebt({ files, coreIndexSource }) {
     if (lineCount >= OVERSIZED_FILE_LINE_THRESHOLD) {
       oversizedFiles[file.path] = lineCount;
     }
-    if (GENAI_IMPORT_PATTERN.test(file.content)) {
+    if (hasGoogleGenaiImport(file.content)) {
       genaiImportFiles.push(file.path);
     }
-    GENAI_IMPORT_PATTERN.lastIndex = 0;
   }
   return {
     oversizedFiles,
