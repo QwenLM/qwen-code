@@ -354,6 +354,18 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # Self-hosted runners reuse the workspace; restore permissions before
+      # checkout tries to wipe files left by prior containerised jobs.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`), or
