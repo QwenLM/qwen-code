@@ -1689,6 +1689,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+          EVENT_NAME: '${{ github.event_name }}'
         run: |-
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
@@ -2209,11 +2210,16 @@ jobs:
               # unhandled for hours. The shepherd also dedups per head SHA,
               # and a capped PR gets no pushes, so its head never changes:
               # silence here freezes conflict handling until a human notices
-              # by accident. Every forced dispatch is explicit intent (the
-              # shepherd lever or a human), so every refusal is answered —
-              # no dedup: the shepherd sends at most one dispatch per head,
-              # and a human asking twice deserves two answers.
-              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" ]]; then
+              # by accident. Gate on workflow_dispatch — that is the explicit
+              # dispatch lever (the shepherd's `gh workflow run` or a human).
+              # FORCED_PR is ALSO set for every trusted pull_request_review
+              # (route emits pr_number for those), which is not an explicit
+              # dispatch: answering each one here spammed 7 refusals on
+              # #7836, so review submissions stay covered by the
+              # once-per-window pause notice below. No dedup on the dispatch
+              # itself: the shepherd sends at most one per head, and a human
+              # asking twice deserves two answers.
+              if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
                 if [[ "${DRY_RUN}" == "true" ]]; then
                   echo "🧪 DRY-RUN: would post cap-refused notice on #${PR}"
                 else

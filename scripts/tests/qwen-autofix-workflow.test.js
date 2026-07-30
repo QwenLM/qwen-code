@@ -2407,11 +2407,15 @@ describe('qwen-autofix workflow', () => {
     // A FORCED dispatch (shepherd conflict lever or a human) refused at the
     // cap gate answers on the PR — observed on #7836: '🐑 dispatched the
     // autofix loop' followed by a green run that did nothing, with the
-    // refusal visible only in the Actions log. No dedup: the shepherd
-    // sends at most one dispatch per head, and a human asking twice
+    // refusal visible only in the Actions log. Gated on workflow_dispatch:
+    // FORCED_PR is ALSO set for trusted pull_request_review submissions
+    // (route emits pr_number for those), and answering each one loudly
+    // spammed 7 refusals on #7836 — those stay covered by the
+    // once-per-window pause notice. No dedup on the dispatch itself: the
+    // shepherd sends at most one per head, and a human asking twice
     // deserves two answers.
     expect(reviewScanJob).toContain(
-      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" ]]; then',
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
     );
     expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
     expect(reviewScanJob).toContain('Dispatch refused');
@@ -2419,6 +2423,26 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'cap-refused notice skipped: PAT authenticates as',
     );
+    // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
+    // for trusted review submissions). Replay the guard VERBATIM so a
+    // dropped EVENT_NAME condition fails the test, not just a substring: a
+    // dispatch is answered, a review submission is left to the pause notice.
+    const refusedGuard = reviewScanJob.match(
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+    )?.[1];
+    expect(refusedGuard).toBeTruthy();
+    const refuses = (eventName) =>
+      execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
+        env: {
+          ...process.env,
+          FORCED_PR: '7836',
+          PR: '7836',
+          EVENT_NAME: eventName,
+        },
+        encoding: 'utf8',
+      }).trim();
+    expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('pull_request_review')).not.toContain('REFUSED');
     // The standard-mode pause and the refusal both point at the actual
     // recovery command as a printf ARG (the takeover variant keeps its
     // takeover-command-only wording).
