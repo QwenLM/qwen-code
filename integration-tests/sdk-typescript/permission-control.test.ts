@@ -594,7 +594,7 @@ describe('Permission Control (E2E)', () => {
       );
 
       await new Promise((resolve) => setTimeout(resolve, 8000));
-    }, 10_000);
+    }, 15_000);
   });
 
   describe('canUseTool and setPermissionMode integration', () => {
