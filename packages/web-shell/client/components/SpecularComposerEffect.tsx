@@ -40,7 +40,7 @@ const FRAGMENT_SHADER = `#version 300 es
     vec2 point = gl_FragCoord.xy - center;
     float distanceToEdge = roundedRect(point);
     vec2 light = vec2(cos(angle), sin(angle));
-    vec2 normal = normalize(point / (halfSize * halfSize) + 0.000001);
+    vec2 normal = normalize(point / halfSize + 0.000001);
     float phi = acos(clamp(abs(dot(normal, light)), 0.0, 1.0));
     float rim = 1.0 - smoothstep(
       shineSize - shineFade,
@@ -170,6 +170,7 @@ export function SpecularComposerEffect({
     let focused = false;
     let lastFrame = performance.now();
     let frameId = 0;
+    let running = false;
 
     const resize = () => {
       dpr = window.devicePixelRatio || 1;
@@ -188,6 +189,14 @@ export function SpecularComposerEffect({
       return (
         eventTarget instanceof Node && Boolean(editor?.contains(eventTarget))
       );
+    };
+
+    const startLoop = () => {
+      if (!running) {
+        running = true;
+        lastFrame = performance.now();
+        frameId = window.requestAnimationFrame(draw);
+      }
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -222,6 +231,7 @@ export function SpecularComposerEffect({
       }
       const amount = Math.max(0, 1 - distance / 250);
       proximity = amount * amount * (3 - 2 * amount);
+      startLoop();
     };
 
     const onFocusIn = (event: FocusEvent) => {
@@ -229,6 +239,7 @@ export function SpecularComposerEffect({
       pointerAngle = angle;
       idleAngle = angle;
       focused = true;
+      startLoop();
     };
     const onFocusOut = (event: FocusEvent) => {
       if (
@@ -243,7 +254,7 @@ export function SpecularComposerEffect({
     const draw = (now: number) => {
       const delta = Math.min((now - lastFrame) / 1000, 0.05);
       lastFrame = now;
-      if (focused) idleAngle += 0.85 * delta;
+      if (focused) idleAngle -= 0.85 * delta;
       else idleAngle = angle;
       const targetAngle = focused
         ? idleAngle
@@ -256,6 +267,13 @@ export function SpecularComposerEffect({
       const targetBrightness = focused ? 1.4 : proximity;
       brightness +=
         (targetBrightness - brightness) * (1 - Math.exp(-delta * 8));
+
+      if (brightness < 0.002 && !focused && proximity === 0) {
+        running = false;
+        frameId = 0;
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        return;
+      }
 
       gl.uniform2f(center, (20 + width / 2) * dpr, (20 + height / 2) * dpr);
       gl.uniform2f(halfSize, (width / 2) * dpr, (height / 2) * dpr);
@@ -289,9 +307,10 @@ export function SpecularComposerEffect({
       target
         .querySelector('[data-web-shell-composer-editor]')
         ?.contains(activeElement) === true;
-    frameId = window.requestAnimationFrame(draw);
+    startLoop();
 
     return () => {
+      running = false;
       window.cancelAnimationFrame(frameId);
       resizeObserver.disconnect();
       window.removeEventListener('pointermove', onPointerMove);

@@ -64,6 +64,23 @@ export function NewSessionDotField() {
       if (engagement < 0.001) engagement = 0;
       glowOpacity += (engagement - glowOpacity) * 0.08;
 
+      if (engagement === 0 && glowOpacity < 0.001) {
+        let settled = true;
+        for (const dot of dots) {
+          if (
+            Math.abs(dot.x - dot.anchorX) > 0.01 ||
+            Math.abs(dot.y - dot.anchorY) > 0.01
+          ) {
+            settled = false;
+            break;
+          }
+        }
+        if (settled) {
+          if (!reducedMotion) frameId = window.requestAnimationFrame(draw);
+          return;
+        }
+      }
+
       context.clearRect(0, 0, width, height);
       context.fillStyle =
         theme === WebShellThemeId.Light
