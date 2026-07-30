@@ -11,6 +11,7 @@ on:
     branches:
       - 'main'
       - 'release/**'
+      - 'omni-experiment'
   merge_group:
   workflow_dispatch:
     inputs:
