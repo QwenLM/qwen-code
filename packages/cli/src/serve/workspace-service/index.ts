@@ -215,6 +215,7 @@ export function createDaemonWorkspaceService(
     isWorkspaceTrusted,
     assertGenerationOpen,
     contextFilename,
+    resolveContextFile,
     statusProvider,
     workspaceProvidersStatusProvider,
     workspaceSkillsStatusProvider,
@@ -978,18 +979,25 @@ export function createDaemonWorkspaceService(
       assertActiveGeneration();
       // Resolve the context filename against the workspace root.
       const filename = contextFilename;
-      const target = path.resolve(boundWorkspace, filename);
+      const resolved = resolveContextFile
+        ? resolveContextFile(filename, boundWorkspace)
+        : {
+            target: path.resolve(boundWorkspace, filename),
+            effectiveWorkspace: boundWorkspace,
+          };
+      const target = resolved.target;
+      const effectiveWorkspace = resolved.effectiveWorkspace;
 
       // Textual boundary check: reject paths that escape the workspace.
       const withinWorkspace =
-        target === boundWorkspace ||
-        target.startsWith(boundWorkspace + path.sep);
+        target === effectiveWorkspace ||
+        target.startsWith(effectiveWorkspace + path.sep);
       if (!withinWorkspace) {
-        throw new WorkspaceInitPathEscapeError(filename, boundWorkspace);
+        throw new WorkspaceInitPathEscapeError(filename, effectiveWorkspace);
       }
 
       // Symlink check on parent path: canonicalize and verify.
-      const wsCanonical = await fs.realpath(boundWorkspace);
+      const wsCanonical = await fs.realpath(effectiveWorkspace);
       const parentCanonical = await canonicalizeExistingAncestor(
         path.dirname(target),
       );

@@ -2895,5 +2895,48 @@ describe('createDaemonWorkspaceService', () => {
         /parent.*resolves outside|parent.*workspace/i,
       );
     });
+
+    it('uses resolveContextFile when provided', async () => {
+      const worktreeDir = path.join(tmpDir, 'worktree');
+      await fs.mkdir(worktreeDir, { recursive: true });
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          resolveContextFile: (filename, _ws) => ({
+            target: path.resolve(worktreeDir, filename),
+            effectiveWorkspace: worktreeDir,
+          }),
+        }),
+      );
+
+      const result = await svc.initWorkspace(
+        makeCtx({ workspaceCwd: tmpDir }),
+        {},
+      );
+
+      expect(result.action).toBe('created');
+      expect(result.path).toBe(path.join(worktreeDir, 'QWEN.md'));
+      const stat = await fs.stat(result.path);
+      expect(stat.isFile()).toBe(true);
+    });
+
+    it('falls back to boundWorkspace without resolveContextFile', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const result = await svc.initWorkspace(
+        makeCtx({ workspaceCwd: tmpDir }),
+        {},
+      );
+
+      expect(result.action).toBe('created');
+      expect(result.path).toBe(path.join(tmpDir, 'QWEN.md'));
+    });
   });
 });

@@ -3351,6 +3351,12 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  /**
+   * Default cwd for settings handlers when the client does not supply one.
+   * Set to the worktree path when a session inside a worktree is created;
+   * falls back to `null` (meaning `process.cwd()`) for regular sessions.
+   */
+  private defaultSettingsCwd: string | null = null;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   private privateParentState:
@@ -3900,6 +3906,12 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    if (
+      session.worktreeCwd &&
+      session.worktreeCwd === this.defaultSettingsCwd
+    ) {
+      this.defaultSettingsCwd = null;
+    }
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -7237,7 +7249,7 @@ class QwenAgent implements Agent {
   ): Promise<Record<string, unknown>> {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
-    const cwd = requestedCwd || process.cwd();
+    const cwd = requestedCwd || this.defaultSettingsCwd || process.cwd();
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
@@ -11127,6 +11139,15 @@ class QwenAgent implements Agent {
 
     const session = new Session(sessionId, config, this.connection, settings);
     this.sessions.set(sessionId, session);
+
+    const targetDir = config.getTargetDir();
+    if (targetDir !== process.cwd()) {
+      session.worktreeCwd = targetDir;
+      this.defaultSettingsCwd = targetDir;
+    } else {
+      this.defaultSettingsCwd = null;
+    }
+
     this.initializingConfigs.delete(config);
     try {
       if (sessionData?.fileHistorySnapshots?.length) {

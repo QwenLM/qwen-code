@@ -198,6 +198,8 @@ export interface BridgeUpdateContext {
 export interface BackendHostRuntimeContext {
   /** App root path (packaged app path or repository root in development) */
   appRootPath: string;
+  /** Worktree root path when the session operates inside a git worktree */
+  worktreeRootPath?: string;
   /** Optional resources path (needed for packaged Windows runtime resolution) */
   resourcesPath?: string;
   /** Whether the host app is running as a packaged build */

@@ -375,6 +375,20 @@ describe('Session.pendingWorktreeNotice', () => {
     expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('worktreeCwd defaults to null and can be set', () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    expect(session.worktreeCwd).toBeNull();
+
+    session.worktreeCwd = '/repo/.qwen/worktrees/feat';
+    expect(session.worktreeCwd).toBe('/repo/.qwen/worktrees/feat');
+  });
+
   // VP5: ordering contract when the worktree notice, system reminders, and a
   // continuation that leads with functionResponse parts all combine. Locks the
   // `[...functionResponses, worktreeNotice, ...systemReminders, ...]` order so

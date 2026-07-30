@@ -3712,6 +3712,10 @@ async function runQwenServeImpl(
       isWorkspaceTrusted: () => trustedWorkspace,
       assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
+      resolveContextFile: (filename, ws) => ({
+        target: path.resolve(ws, filename),
+        effectiveWorkspace: ws,
+      }),
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
