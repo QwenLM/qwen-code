@@ -433,6 +433,46 @@ describe('session-start-profiler', () => {
     }
   });
 
+  it('writes profile records when O_NOFOLLOW is unavailable', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
+    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+      };
+    });
+
+    try {
+      const { createSessionStartProfiler: createProfiler } = await import(
+        './session-start-profiler.js'
+      );
+      const profiler = createProfiler(SessionStartSource.Clear, {
+        now: clockFrom([10, 20]),
+        getTimestamp: () => new Date('2026-07-06T12:34:56.789Z'),
+      });
+      profiler.finish({ ok: true });
+
+      const raw = await readFile(
+        join(
+          runtimeDir,
+          'session-start-perf',
+          'session-start-2026-07-06.jsonl',
+        ),
+        'utf8',
+      );
+      expect(JSON.parse(raw.trim())).toMatchObject({ ok: true });
+      expect(debugLoggerMock.error).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+      await rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
   it('appends to an existing JSONL file', async () => {
     const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
     vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
