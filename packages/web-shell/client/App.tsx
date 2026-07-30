@@ -94,6 +94,7 @@ import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
+import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
   type ArtifactPanelTab,
@@ -403,6 +404,37 @@ interface SendPromptOptionsWithRetry {
   onAdmitted?: () => void;
 }
 
+interface OptimisticUserMessage {
+  sessionId: string;
+  messageId: string;
+}
+
+interface FailedPrompt {
+  sessionId: string;
+  messageId: string;
+  text: string;
+  images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
+}
+
+interface FailedPromptRetry {
+  sessionId: string;
+  messageId: string;
+  startedAt: number;
+  admitted: boolean;
+  settled: boolean;
+}
+
+function getLatestUserBlockId(
+  blocks: readonly DaemonTranscriptBlock[],
+): string | undefined {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block?.kind === 'user') return block.id;
+  }
+  return undefined;
+}
+
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
   text: string;
   source?: string;
@@ -541,6 +573,12 @@ export interface WebShellProps {
   splitSessionIds?: readonly string[];
   /** Called when the split pane list changes from inside WebShell. */
   onSplitSessionIdsChange?: (sessionIds: string[]) => void;
+  /**
+   * Extra actions rendered in each split-pane header, before the built-in
+   * close button. Receives the pane's session id (and workspace when known).
+   * When the actions no longer fit they collapse into a `…` overflow menu.
+   */
+  renderPaneHeaderActions?: PaneHeaderActionsRenderer;
   /**
    * Called instead of the built-in right panel open behavior when a user clicks
    * a turn output such as review changes, an artifact, or a scheduled task.
@@ -1144,6 +1182,7 @@ export function App({
   sidebar,
   splitSessionIds: externalSplitSessionIds,
   onSplitSessionIdsChange,
+  renderPaneHeaderActions,
   onRightPanelOpen,
   messageTurnOutputs,
   shellRef,
@@ -1694,6 +1733,14 @@ export function App({
   const messages = useMessagesFromBlocks(t, blocks);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
+  const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
+  const [failedPromptRetry, setFailedPromptRetry] =
+    useState<FailedPromptRetry | null>(null);
+  const updateFailedPrompt = useCallback((next: FailedPrompt | null) => {
+    failedPromptRef.current = next;
+    setFailedPrompt(next);
+  }, []);
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
     null,
   );
@@ -1732,6 +1779,22 @@ export function App({
     }
     return filterModelSwitchMessages(result);
   }, [messages, recapMessage]);
+  useEffect(() => {
+    const failed = failedPromptRef.current;
+    if (!failed) return;
+    const failedIndex = displayMessages.findIndex(
+      (message) => message.id === failed.messageId,
+    );
+    if (
+      failed.sessionId !== connection.sessionId ||
+      failedIndex < 0 ||
+      displayMessages
+        .slice(failedIndex + 1)
+        .some((message) => message.role === 'user')
+    ) {
+      updateFailedPrompt(null);
+    }
+  }, [connection.sessionId, displayMessages, failedPrompt, updateFailedPrompt]);
   const {
     artifacts,
     loading: artifactsLoading,
@@ -2617,6 +2680,20 @@ export function App({
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
+  useEffect(() => {
+    if (
+      failedPromptRetry &&
+      (failedPromptRetry.sessionId !== connection.sessionId ||
+        (streamingState === 'idle' && failedPromptRetry.settled))
+    ) {
+      setFailedPromptRetry(null);
+    }
+  }, [connection.sessionId, failedPromptRetry, streamingState]);
+  const suppressFailedPromptRetryStreaming = Boolean(
+    failedPromptRetry &&
+      failedPromptRetry.sessionId === connection.sessionId &&
+      (!failedPromptRetry.admitted || failedPromptRetry.settled),
+  );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
@@ -3408,6 +3485,7 @@ export function App({
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmitted?: () => void;
+        onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
       },
     ) => {
       const isUserPrompt = !text.trimStart().startsWith('/');
@@ -3467,8 +3545,9 @@ export function App({
         setIsPreparingPrompt(true);
       }
       clearFollowup();
+      let allocatedSessionId: string | undefined;
       try {
-        await ensureSessionForPrompt();
+        allocatedSessionId = await ensureSessionForPrompt();
       } finally {
         if (shouldShowPreparing) {
           setIsPreparingPrompt(false);
@@ -3486,7 +3565,8 @@ export function App({
       } else if (opts?.clearComposerOnPromptStart) {
         editorRef.current?.clear();
       }
-      const sessionIdAfterEnsure = connectionRef.current.sessionId;
+      const sessionIdAfterEnsure =
+        connectionRef.current.sessionId ?? allocatedSessionId;
       if (sessionIdAfterEnsure && text.trim()) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
@@ -3496,13 +3576,29 @@ export function App({
         });
         scheduleDelayedSessionListReload();
       }
-      const result = await (
+      const previousUserMessageId = opts?.onOptimisticUserMessage
+        ? getLatestUserBlockId(store.getSnapshot().blocks)
+        : undefined;
+      const resultPromise = (
         sessionActions.sendPrompt as (
           promptText: string,
           options?: SendPromptOptionsWithRetry,
         ) => ReturnType<typeof sessionActions.sendPrompt>
       )(text, promptOptions);
-      return result;
+      if (
+        sessionIdAfterEnsure &&
+        opts?.optimisticUserMessage !== false &&
+        opts?.onOptimisticUserMessage
+      ) {
+        const messageId = getLatestUserBlockId(store.getSnapshot().blocks);
+        if (messageId && messageId !== previousUserMessageId) {
+          opts.onOptimisticUserMessage({
+            sessionId: sessionIdAfterEnsure,
+            messageId,
+          });
+        }
+      }
+      return await resultPromise;
     },
     [
       clearFollowup,
@@ -3510,6 +3606,7 @@ export function App({
       getComposerWorkspaceCwd,
       scheduleDelayedSessionListReload,
       sessionActions,
+      store,
     ],
   );
 
@@ -3685,6 +3782,54 @@ export function App({
     },
     [pushToast],
   );
+  const handleFailedPromptRetry = useCallback(() => {
+    const failed = failedPromptRef.current;
+    if (!failed || failed.sessionId !== connectionRef.current.sessionId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    updateFailedPrompt(null);
+    const retryStartedAt = Date.now();
+    setFailedPromptRetry({
+      sessionId: failed.sessionId,
+      messageId: failed.messageId,
+      startedAt: retryStartedAt,
+      admitted: false,
+      settled: false,
+    });
+    let admitted = false;
+    sendPrompt(failed.text, failed.images, {
+      optimisticUserMessage: false,
+      inputAnnotations: failed.inputAnnotations,
+      onAdmitted: () => {
+        admitted = true;
+        setFailedPromptRetry((current) =>
+          current?.sessionId === failed.sessionId &&
+          current.messageId === failed.messageId
+            ? { ...current, admitted: true }
+            : current,
+        );
+      },
+    })
+      .catch((error: unknown) => {
+        if (
+          !admitted &&
+          connectionRef.current.sessionId === failed.sessionId &&
+          getLatestUserBlockId(store.getSnapshot().blocks) === failed.messageId
+        ) {
+          updateFailedPrompt(failed);
+        }
+        reportError(error, 'Failed to resend message');
+      })
+      .finally(() => {
+        setFailedPromptRetry((current) =>
+          current?.sessionId === failed.sessionId &&
+          current.messageId === failed.messageId
+            ? { ...current, settled: true }
+            : current,
+        );
+      });
+  }, [reportError, sendPrompt, store, updateFailedPrompt]);
   const notifySuccess = useCallback(
     (message: string) => pushToast('success', message),
     [pushToast],
@@ -5760,18 +5905,54 @@ export function App({
           optimisticUserMessage?: boolean;
           retry?: boolean;
           inputAnnotations?: DaemonInputAnnotation[];
+          trackSendFailure?: boolean;
         },
       ) => {
+        const { trackSendFailure = false, ...sendOptions } = opts ?? {};
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
+        let optimisticUserMessage: OptimisticUserMessage | undefined;
+        let admitted = false;
         sendPrompt(promptText, promptImages, {
-          ...opts,
+          ...sendOptions,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
             ? commitComposerAccepted
             : undefined,
-        }).catch((error: unknown) => reportError(error, errorMessage));
+          onAdmitted: () => {
+            admitted = true;
+          },
+          ...(trackSendFailure
+            ? {
+                onOptimisticUserMessage: (message: OptimisticUserMessage) => {
+                  optimisticUserMessage = message;
+                },
+              }
+            : {}),
+        }).catch((error: unknown) => {
+          const failedMessage = optimisticUserMessage;
+          if (
+            trackSendFailure &&
+            !admitted &&
+            failedMessage &&
+            failedMessage.sessionId === connectionRef.current.sessionId &&
+            store
+              .getSnapshot()
+              .blocks.some(
+                (block) =>
+                  block.kind === 'user' && block.id === failedMessage.messageId,
+              )
+          ) {
+            updateFailedPrompt({
+              ...failedMessage,
+              text: promptText,
+              images: promptImages,
+              inputAnnotations: sendOptions.inputAnnotations,
+            });
+          }
+          reportError(error, errorMessage);
+        });
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
@@ -6139,9 +6320,10 @@ export function App({
             if (!skillArg || skillArg === 'detail' || skillArg === 'details') {
               openPanel('skills');
             } else {
+              const skillPrompt = `/${skillArg}`;
               if (promptBlocked) {
                 return enqueuePrompt(
-                  text,
+                  skillPrompt,
                   images,
                   undefined,
                   commitComposerAccepted,
@@ -6149,7 +6331,7 @@ export function App({
                 );
               }
               return submitPromptFromEditor(
-                text,
+                skillPrompt,
                 images,
                 'Failed to send /skills command',
                 { inputAnnotations: metadata?.inputAnnotations },
@@ -6644,6 +6826,7 @@ export function App({
         }
         return submitPromptFromEditor(text, images, 'Failed to send message', {
           inputAnnotations: metadata?.inputAnnotations,
+          trackSendFailure: true,
         });
       }
     },
@@ -6689,6 +6872,7 @@ export function App({
       showContextUsage,
       t,
       workspaceActions,
+      updateFailedPrompt,
     ],
   );
 
@@ -6724,6 +6908,11 @@ export function App({
         });
     },
     [sessionActions, reportError],
+  );
+  const handleAskUserConfirm = useCallback(
+    (id: string, selectedOption: string, answers?: Record<string, string>) =>
+      sessionActions.submitPermission(id, selectedOption, answers),
+    [sessionActions],
   );
 
   const handleCancel = useCallback(() => {
@@ -6765,18 +6954,45 @@ export function App({
       connected &&
       streamingStateRef.current === 'idle' &&
       retryableTurnErrorIdRef.current &&
+      connectionRef.current.sessionId &&
       lastSubmittedPromptRef.current
     ) {
-      retriedTurnErrorIdRef.current = retryableTurnErrorIdRef.current;
+      const retryErrorId = retryableTurnErrorIdRef.current;
+      const retrySessionId = connectionRef.current.sessionId;
+      retriedTurnErrorIdRef.current = retryErrorId;
       setShowRetryHint(false);
+      setFailedPromptRetry({
+        sessionId: retrySessionId,
+        messageId: retryErrorId,
+        startedAt: Date.now(),
+        admitted: false,
+        settled: false,
+      });
       sendPrompt(
         lastSubmittedPromptRef.current,
         lastSubmittedImagesRef.current,
         {
           optimisticUserMessage: false,
           retry: true,
+          onAdmitted: () => {
+            setFailedPromptRetry((current) =>
+              current?.sessionId === retrySessionId &&
+              current.messageId === retryErrorId
+                ? { ...current, admitted: true }
+                : current,
+            );
+          },
         },
-      ).catch((error: unknown) => reportError(error, 'Failed to retry prompt'));
+      )
+        .catch((error: unknown) => reportError(error, 'Failed to retry prompt'))
+        .finally(() => {
+          setFailedPromptRetry((current) =>
+            current?.sessionId === retrySessionId &&
+            current.messageId === retryErrorId
+              ? { ...current, settled: true }
+              : current,
+          );
+        });
     } else {
       store.dispatch([{ type: 'status', text: t('retry.none') }]);
     }
@@ -8353,6 +8569,7 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
+                        renderPaneHeaderActions={renderPaneHeaderActions}
                         voiceUserRevision={voiceUserRevision}
                         voiceWorkspaceRevisions={voiceWorkspaceRevisions}
                         voiceWorkspaces={
@@ -8456,14 +8673,26 @@ export function App({
                                     ? reloadTranscript
                                     : undefined
                                 }
-                                isResponding={streamingState !== 'idle'}
-                                activeTurnStartedAt={activeTurnStartedAt}
+                                isResponding={
+                                  streamingState !== 'idle' &&
+                                  !suppressFailedPromptRetryStreaming
+                                }
+                                activeTurnStartedAt={
+                                  suppressFailedPromptRetryStreaming
+                                    ? undefined
+                                    : (failedPromptRetry?.startedAt ??
+                                      activeTurnStartedAt)
+                                }
                                 workspaceCwd={connection.workspaceCwd || ''}
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }
                                 showRetryHint={showRetryHint}
                                 onRetryClick={handleRetry}
+                                failedPromptMessageId={
+                                  failedPrompt?.messageId
+                                }
+                                onRetryFailedPrompt={handleFailedPromptRetry}
                                 onBranchSession={handleBranchCurrentSession}
                                 bottomOverlayInset={bottomPanelInset}
                                 welcomeHeader={
@@ -8655,7 +8884,8 @@ export function App({
                         >
                           <AskUserQuestion
                             request={pendingAskUserApproval}
-                            onConfirm={handleConfirm}
+                            onConfirm={handleAskUserConfirm}
+                            onError={reportError}
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
                           />
@@ -8663,7 +8893,14 @@ export function App({
                       )}
                       <div className={styles.composer}>
                         {streamingState !== 'idle' ? (
-                          <StreamingStatus startedAt={activeTurnStartedAt} />
+                          suppressFailedPromptRetryStreaming ? null : (
+                            <StreamingStatus
+                              startedAt={
+                                failedPromptRetry?.startedAt ??
+                                activeTurnStartedAt
+                              }
+                            />
+                          )
                         ) : newSessionSuggestion ? (
                           <div
                             className={styles.composerActionTip}

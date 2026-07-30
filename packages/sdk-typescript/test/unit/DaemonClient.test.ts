@@ -455,6 +455,36 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('forwards a workspace text cursor', async () => {
+      const payload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'next\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 20,
+        returnedBytes: 5,
+        truncated: true,
+        matchedIgnore: null,
+        originalLineCount: null,
+        nextCursor: null,
+        hasMore: false,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon/', fetch });
+
+      await expect(
+        client.readWorkspaceFile('src/a.ts', {
+          limit: 3,
+          cursor: 'cursor 1',
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/file?path=src%2Fa.ts&limit=3&cursor=cursor+1',
+      );
+    });
+
     it('reads raw bytes as base64 payloads', async () => {
       const payload = {
         kind: 'file_bytes',
@@ -7265,6 +7295,10 @@ describe('DaemonClient', () => {
       await client.approveWorkspaceChannelPairing('bot/name', {
         code: 'ABCDEFGH',
       });
+      await client.workspaceChannelPairingApprovals('bot/name');
+      await client.revokeWorkspaceChannelPairingApproval('bot/name', {
+        senderId: 'sender/1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspace/channel-types'],
@@ -7280,9 +7314,18 @@ describe('DaemonClient', () => {
           'POST',
           'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
         ],
+        [
+          'GET',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[11]!.body!)).toEqual({ senderId: 'sender/1' });
     });
 
     it('uses the exact qualified workspace routes', async () => {
@@ -7300,6 +7343,10 @@ describe('DaemonClient', () => {
         config: { type: 'dingtalk' },
       });
       await workspace.workspaceChannelPairingRequests('bot');
+      await workspace.workspaceChannelPairingApprovals('bot');
+      await workspace.revokeWorkspaceChannelPairingApproval('bot', {
+        senderId: 'sender-1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
@@ -7313,9 +7360,20 @@ describe('DaemonClient', () => {
           'GET',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests',
         ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        senderId: 'sender-1',
+      });
     });
   });
 });

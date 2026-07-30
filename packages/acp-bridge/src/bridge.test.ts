@@ -42,6 +42,7 @@ import {
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
+import { SESSION_SOURCE_META_KEY } from './session-source.js';
 import {
   classifyTurnErrorKind,
   extractErrorMessage,
@@ -2017,14 +2018,16 @@ describe('createAcpSessionBridge', () => {
 
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
+    let failNextExtensionRefresh = true;
     const bridge = makeBridge({
       channelFactory: async () => {
         const h = makeChannel({
-          extMethodImpl: (method, params) => {
+          extMethodImpl: (method) => {
             if (
               method === 'qwen/control/workspace/extensions/refresh' &&
-              String(params['sessionId']).endsWith('#2')
+              failNextExtensionRefresh
             ) {
+              failNextExtensionRefresh = false;
               throw new Error('refresh failed');
             }
             return {};
@@ -2058,6 +2061,13 @@ describe('createAcpSessionBridge', () => {
       {
         method: 'qwen/control/workspace/extensions/refresh',
         params: { sessionId: first.sessionId },
+      },
+      {
+        method: 'qwen/control/workspace/extensions/refresh',
+        params: {
+          sessionId: second.sessionId,
+          refreshBootstrap: false,
+        },
       },
       {
         method: 'qwen/control/workspace/extensions/refresh',
@@ -10816,8 +10826,47 @@ describe('createAcpSessionBridge', () => {
           sourceId: 'task-123',
         },
       });
+      expect(handles[0]?.agent.newSessionCalls[0]?._meta).toMatchObject({
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        },
+      });
 
       await bridge.shutdown();
+    });
+
+    it('carries persisted source metadata into ACP session restore', async () => {
+      for (const action of ['load', 'resume'] as const) {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const request = {
+          sessionId: `channel-${action}`,
+          workspaceCwd: WS_A,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        };
+
+        if (action === 'load') {
+          await bridge.loadSession(request);
+        } else {
+          await bridge.resumeSession(request);
+        }
+
+        const call =
+          action === 'load'
+            ? handle.agent.loadSessionCalls[0]
+            : handle.agent.resumeSessionCalls[0];
+        expect(call?._meta).toMatchObject({
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          },
+        });
+        await bridge.shutdown();
+      }
     });
 
     it('does not replace the source when single scope attaches', async () => {

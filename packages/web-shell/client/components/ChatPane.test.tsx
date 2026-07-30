@@ -36,7 +36,7 @@ const clearFollowup = vi.fn();
 const insertText = vi.fn();
 const transcriptDispatch = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
-const submitPermission = vi.fn(async () => {});
+const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
@@ -911,7 +911,7 @@ describe('ChatPane', () => {
   it('invokes onClose from the header close button', () => {
     const onClose = vi.fn();
     render({ onClose });
-    const closeBtn = container!.querySelector('header button');
+    const closeBtn = container!.querySelector('[data-testid="pane-close"]');
     act(() =>
       closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
@@ -946,6 +946,27 @@ describe('ChatPane', () => {
     expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
     // The label flips to "restore" — no stale "maximize" affordance remains.
     expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+  });
+
+  it('renders host header actions scoped to the pane session', () => {
+    const renderHeaderActions = vi.fn(
+      (info: { sessionId: string; workspaceCwd?: string }) => (
+        <button type="button" data-testid="host-pane-action">
+          {info.sessionId}:{info.workspaceCwd ?? ''}
+        </button>
+      ),
+    );
+    render({
+      title: 'Refactor core',
+      workspaceCwd: '/work/api',
+      renderHeaderActions,
+    });
+    expect(renderHeaderActions).toHaveBeenCalledWith({
+      sessionId: 'sess-1',
+      workspaceCwd: '/work/api',
+    });
+    expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
+    expect(testid('pane-header-actions')).not.toBeNull();
   });
 
   it('cancels the active turn via the composer cancel action', () => {

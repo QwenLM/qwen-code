@@ -1866,6 +1866,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${planPath}`,
     );
     expect(p).toContain('--base abc123');
+    // All three finding kinds are named, or the agent meets a `mutant-survived`
+    // it was never told how to file — and the skipped/inconclusive mutants must
+    // be fenced off from findings the same way the probes' inconclusive is.
+    expect(p).toContain('`kind: "mutant-survived"`');
+    expect(p).toContain('mutants.skippedForBudget');
+    expect(p).toContain('mutants.skippedForCap');
+    expect(p).toContain('mutants.skippedForBaseline');
+    expect(p).toContain('mutants.note');
     // No bare executable `qwen` anywhere in this brief. Agent 7 is the one
     // SUBAGENT that shells out to the review CLI — the one call site neither the
     // SKILL.md sweep nor check-coverage's stderr hints can reach — and its shell

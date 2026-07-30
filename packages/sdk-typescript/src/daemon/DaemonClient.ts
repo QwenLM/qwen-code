@@ -128,7 +128,10 @@ import type {
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -1640,7 +1643,12 @@ export class DaemonClient {
 
   async readWorkspaceFile(
     filePath: string,
-    opts: { maxBytes?: number; line?: number; limit?: number } = {},
+    opts: {
+      maxBytes?: number;
+      line?: number;
+      limit?: number;
+      cursor?: string;
+    } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
     const url = new URL(`${this.baseUrl}/file`);
@@ -1653,6 +1661,9 @@ export class DaemonClient {
     }
     if (opts.limit !== undefined) {
       url.searchParams.set('limit', String(opts.limit));
+    }
+    if (opts.cursor !== undefined) {
+      url.searchParams.set('cursor', opts.cursor);
     }
     return await this.fetchWithTimeout(
       url.toString(),
@@ -3649,6 +3660,35 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelPairingApprovals(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalsSnapshot> {
+    return this.jsonRequest<DaemonChannelPairingApprovalsSnapshot>(
+      `/workspace/channels/${urlEncode(name)}/pairing-approvals`,
+      'GET /workspace/channels/:name/pairing-approvals',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  revokeWorkspaceChannelPairingApproval(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRevocationResult> {
+    return this.jsonRequest<DaemonChannelPairingRevocationResult>(
+      `/workspace/channels/${urlEncode(name)}/pairing-approvals`,
+      'DELETE /workspace/channels/:name/pairing-approvals',
+      {
+        method: 'DELETE',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   private workspaceChannelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -4741,6 +4781,31 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceChannelPairingApprovals(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalsSnapshot> {
+    return this.channelRequest(
+      `/channels/${urlEncode(name)}/pairing-approvals`,
+      'GET /workspaces/:workspace/channels/:name/pairing-approvals',
+      undefined,
+      opts,
+    );
+  }
+
+  revokeWorkspaceChannelPairingApproval(
+    name: string,
+    request: DaemonChannelPairingRevocationRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRevocationResult> {
+    return this.channelRequest(
+      `/channels/${urlEncode(name)}/pairing-approvals`,
+      'DELETE /workspaces/:workspace/channels/:name/pairing-approvals',
+      { method: 'DELETE', body: request },
+      opts,
+    );
+  }
+
   private channelAction(
     name: string,
     action: 'start' | 'stop' | 'restart',
@@ -5351,7 +5416,12 @@ export class WorkspaceDaemonClient {
 
   readWorkspaceFile(
     filePath: string,
-    opts: { maxBytes?: number; line?: number; limit?: number } = {},
+    opts: {
+      maxBytes?: number;
+      line?: number;
+      limit?: number;
+      cursor?: string;
+    } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
     const query = new URLSearchParams({ path: filePath });
@@ -5359,6 +5429,7 @@ export class WorkspaceDaemonClient {
       query.set('maxBytes', String(opts.maxBytes));
     if (opts.line !== undefined) query.set('line', String(opts.line));
     if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
     return this.get(
       `/file?${query.toString()}`,
       'GET /workspaces/:workspace/file',

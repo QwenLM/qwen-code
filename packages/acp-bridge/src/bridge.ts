@@ -94,7 +94,10 @@ import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from './workspacePaths.js';
-import { parseSessionSource } from './session-source.js';
+import {
+  parseSessionSource,
+  SESSION_SOURCE_META_KEY,
+} from './session-source.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -212,6 +215,20 @@ const MAX_BULK_REPLAY_UPDATES = 10_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sessionSourceRequestMeta(
+  sourceType: string | undefined,
+  sourceId: string | undefined,
+): Record<string, unknown> {
+  return sourceType
+    ? {
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType,
+          ...(sourceId !== undefined ? { sourceId } : {}),
+        },
+      }
+    : {};
 }
 
 function isDefinitiveAcpRequestError(error: unknown): boolean {
@@ -1896,7 +1913,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   >();
   const inFlightExtensionRefreshes = new Map<
     string,
-    { connection: ClientSideConnection; promise: Promise<void> }
+    {
+      connection: ClientSideConnection;
+      promise: Promise<void>;
+      refreshBootstrap: boolean;
+    }
   >();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
@@ -2633,6 +2654,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 telemetry.injectPromptContext({
                   cwd: boundWorkspace,
                   mcpServers: [],
+                  ...(sourceType
+                    ? {
+                        _meta: sessionSourceRequestMeta(sourceType, sourceId),
+                      }
+                    : {}),
                 }),
               ),
               initTimeoutMs,
@@ -4562,14 +4588,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // intentionally has no `mcpServers` field for the
                 // same reason.
                 mcpServers: [],
-                ...(historyReplay === 'response'
+                ...(historyReplay === 'response' || req.sourceType
                   ? {
                       _meta: {
-                        [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
-                        ...(req.historyPageSize !== undefined
+                        ...sessionSourceRequestMeta(
+                          req.sourceType,
+                          req.sourceId,
+                        ),
+                        ...(historyReplay === 'response'
                           ? {
-                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
-                                req.historyPageSize,
+                              [LOAD_REPLAY_MODE_META_KEY]:
+                                LOAD_REPLAY_BULK_MODE,
+                              ...(req.historyPageSize !== undefined
+                                ? {
+                                    [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
+                                      req.historyPageSize,
+                                  }
+                                : {}),
                             }
                           : {}),
                       },
@@ -4588,6 +4623,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
                 mcpServers: [],
+                ...(req.sourceType
+                  ? {
+                      _meta: sessionSourceRequestMeta(
+                        req.sourceType,
+                        req.sourceId,
+                      ),
+                    }
+                  : {}),
               }),
               initTimeoutMs,
               'resumeSession',
@@ -7065,50 +7108,98 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async refreshExtensionsForAllSessions(data) {
       const sessions = Array.from(byId.values());
+      const bootstrapRefreshConnections = new Set<
+        (typeof sessions)[number]['connection']
+      >();
+      const refreshSession = async (
+        entry: (typeof sessions)[number],
+        refreshBootstrap: boolean,
+      ) => {
+        let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+        if (
+          !inFlight ||
+          inFlight.connection !== entry.connection ||
+          (refreshBootstrap && !inFlight.refreshBootstrap)
+        ) {
+          const promise = (async () => {
+            await entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              {
+                sessionId: entry.sessionId,
+                ...(refreshBootstrap ? {} : { refreshBootstrap: false }),
+              },
+            );
+          })();
+          inFlight = {
+            connection: entry.connection,
+            promise,
+            refreshBootstrap,
+          };
+          inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
+          const clear = () => {
+            if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
+              inFlightExtensionRefreshes.delete(entry.sessionId);
+            }
+          };
+          void promise.then(clear, clear);
+        }
+        await Promise.race([
+          withTimeout(
+            inFlight.promise,
+            30_000,
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+      };
 
       const results = await Promise.all(
         sessions.map(async (entry) => {
           const info = channelInfoForEntry(entry);
           if (!info || info.isDying) {
-            return { refreshed: 0, failed: 0 };
+            return {
+              refreshed: 0,
+              failed: 0,
+              entry,
+              refreshBootstrap: false,
+            };
           }
+          const refreshBootstrap = !bootstrapRefreshConnections.has(
+            entry.connection,
+          );
+          bootstrapRefreshConnections.add(entry.connection);
           try {
-            let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
-            if (!inFlight || inFlight.connection !== entry.connection) {
-              const promise = (async () => {
-                await entry.connection.extMethod(
-                  SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-                  { sessionId: entry.sessionId },
-                );
-              })();
-              inFlight = { connection: entry.connection, promise };
-              inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
-              const clear = () => {
-                if (
-                  inFlightExtensionRefreshes.get(entry.sessionId) === inFlight
-                ) {
-                  inFlightExtensionRefreshes.delete(entry.sessionId);
-                }
-              };
-              void promise.then(clear, clear);
-            }
-            await Promise.race([
-              withTimeout(
-                inFlight.promise,
-                30_000,
-                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-              ),
-              getTransportClosedReject(entry),
-            ]);
-            return { refreshed: 1, failed: 0 };
+            await refreshSession(entry, refreshBootstrap);
+            return { refreshed: 1, failed: 0, entry, refreshBootstrap };
           } catch (err) {
             writeServeDebugLine(
               `refreshExtensions: session ${entry.sessionId} failed: ` +
                 `${err instanceof Error ? err.message : String(err)}`,
             );
-            return { refreshed: 0, failed: 1 };
+            return { refreshed: 0, failed: 1, entry, refreshBootstrap };
           }
         }),
+      );
+
+      await Promise.all(
+        results
+          .filter((result) => result.failed > 0 && result.refreshBootstrap)
+          .map(async (failedBootstrap) => {
+            const retry = results.find(
+              (result) =>
+                result.refreshed > 0 &&
+                result.entry.connection === failedBootstrap.entry.connection,
+            );
+            if (!retry) return;
+            try {
+              await refreshSession(retry.entry, true);
+            } catch (err) {
+              writeServeDebugLine(
+                `refreshExtensions: bootstrap retry via session ${retry.entry.sessionId} failed: ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }),
       );
 
       const refreshed = results.reduce(

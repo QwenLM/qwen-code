@@ -182,7 +182,7 @@ const {
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
-      submitPermission: vi.fn().mockResolvedValue(undefined),
+      submitPermission: vi.fn().mockResolvedValue(true),
       clearGoal: vi.fn().mockResolvedValue(undefined),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
@@ -232,6 +232,7 @@ const {
       error: undefined,
     },
     mockStore: {
+      getSnapshot: vi.fn(() => ({ blocks: testState.blocks })),
       dispatch: vi.fn(),
       reset: vi.fn(),
       appendLocalUserMessage: vi.fn(),
@@ -253,9 +254,18 @@ const {
       messages: [] as unknown[],
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestMessageListProps: null as {
+        failedPromptMessageId?: string;
+        onRetryFailedPrompt?: () => void;
+        isResponding?: boolean;
+        activeTurnStartedAt?: number;
+      } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestAskUserQuestionOnError: null as
+        | ((error: unknown, fallback: string) => void)
+        | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
       latestMonitorDetailsOnOpen: null as
@@ -526,10 +536,15 @@ vi.mock('./components/MessageList', async () => {
       props: {
         showRetryHint?: boolean;
         onRetryClick?: () => void;
+        failedPromptMessageId?: string;
+        onRetryFailedPrompt?: () => void;
+        isResponding?: boolean;
+        activeTurnStartedAt?: number;
         welcomeHeader?: React.ReactNode;
       },
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
+      testState.latestMessageListProps = props;
       React.useImperativeHandle(ref, () => ({ scrollToBottom: vi.fn() }));
       return React.createElement(
         'div',
@@ -545,6 +560,17 @@ vi.mock('./components/MessageList', async () => {
                 type: 'button',
               },
               'retry',
+            )
+          : null,
+        props.failedPromptMessageId
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'failed-prompt-retry',
+                onClick: props.onRetryFailedPrompt,
+                type: 'button',
+              },
+              props.failedPromptMessageId,
             )
           : null,
       );
@@ -792,7 +818,16 @@ function mockComponent(path: string, exportName: string): void {
 }
 
 mockComponent('./components/StatusBar', 'StatusBar');
-mockComponent('./components/StreamingStatus', 'StreamingStatus');
+vi.doMock('./components/StreamingStatus', async () => {
+  const React = await import('react');
+  return {
+    StreamingStatus: ({ startedAt }: { startedAt?: number }) =>
+      React.createElement('div', {
+        'data-testid': 'streaming-status',
+        'data-started-at': startedAt,
+      }),
+  };
+});
 mockComponent('./components/ToastHost', 'ToastHost');
 mockComponent('./components/panels/TodoPanel', 'TodoPanel');
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
@@ -823,6 +858,10 @@ vi.doMock('./components/SplitView', async () => {
         workspaceActions: unknown,
       ) => void;
       onRightPanelOpen?: (request: unknown) => void;
+      renderPaneHeaderActions?: (info: {
+        sessionId: string;
+        workspaceCwd?: string;
+      }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
       const paneActions = {
@@ -936,6 +975,11 @@ vi.doMock('./components/SplitView', async () => {
           },
           'back',
         ),
+        React.createElement(
+          'span',
+          { 'data-testid': 'split-has-header-actions' },
+          props.renderPaneHeaderActions ? 'yes' : 'no',
+        ),
       );
     },
   };
@@ -1027,9 +1071,13 @@ vi.doMock('./components/messages/ToolApproval', async () => {
 vi.doMock('./components/messages/AskUserQuestion', async () => {
   const React = await import('react');
   return {
-    AskUserQuestion: (props: { keyboardActive?: boolean }) => {
+    AskUserQuestion: (props: {
+      keyboardActive?: boolean;
+      onError: (error: unknown, fallback: string) => void;
+    }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
+      testState.latestAskUserQuestionOnError = props.onError;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
     },
   };
@@ -1564,9 +1612,11 @@ beforeEach(() => {
   testState.messages = [];
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestMessageListProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestAskUserQuestionOnError = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
@@ -1644,6 +1694,7 @@ beforeEach(() => {
   });
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockStore.reset.mockClear();
+  mockStore.getSnapshot.mockClear();
   mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
@@ -6295,6 +6346,7 @@ describe('App session callbacks', () => {
   });
 
   it('allows manual retry after a model stream interrupted turn error', async () => {
+    const retrySend = deferred<void>();
     const { container, rerender } = renderApp();
     await flush();
 
@@ -6321,6 +6373,10 @@ describe('App session callbacks', () => {
 
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
 
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      () => retrySend.promise,
+    );
+    const retryStartedAt = Date.now();
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
@@ -6335,6 +6391,30 @@ describe('App session callbacks', () => {
         retry: true,
       }),
     );
+
+    testState.streamingState = 'responding';
+    rerender();
+    expect(testState.latestMessageListProps?.isResponding).toBe(false);
+    expect(
+      testState.latestMessageListProps?.activeTurnStartedAt,
+    ).toBeUndefined();
+
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls.at(
+      -1,
+    )?.[1] as { onAdmitted?: () => void } | undefined;
+    act(() => retryOptions?.onAdmitted?.());
+
+    expect(testState.latestMessageListProps?.isResponding).toBe(true);
+    expect(
+      testState.latestMessageListProps?.activeTurnStartedAt,
+    ).toBeGreaterThanOrEqual(retryStartedAt);
+
+    await act(async () => {
+      retrySend.resolve();
+      testState.streamingState = 'idle';
+      rerender();
+      await Promise.resolve();
+    });
   });
 
   it('gates queued submissions and only enqueues after approval', async () => {
@@ -6741,6 +6821,21 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     },
   );
+
+  it('converts /skills arguments to a direct skill command', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/skills bugfix';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/bugfix',
+      expect.any(Object),
+    );
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
 
   it('opens plugin management tabs from the sidebar', async () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
@@ -7342,6 +7437,7 @@ describe('App session callbacks', () => {
     const { container, rerender } = renderApp({
       sidebar: false,
       splitSessionIds: ['s1'],
+      renderPaneHeaderActions: () => null,
     });
     await flush();
 
@@ -7352,6 +7448,10 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('s1');
+    expect(
+      container.querySelector('[data-testid="split-has-header-actions"]')
+        ?.textContent,
+    ).toBe('yes');
 
     rerender({ sidebar: false, splitSessionIds: ['s1', 's2'] });
     await flush();
@@ -8790,6 +8890,32 @@ describe('App session callbacks', () => {
     expect(testState.latestAskUserQuestionKeyboardActive).toBe(true);
   });
 
+  it('routes AskUserQuestion submission errors to an error toast', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender({ onToast });
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.latestAskUserQuestionOnError?.(
+        new Error('Submit option is unavailable'),
+        'Failed to submit answer',
+      );
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'Submit option is unavailable',
+    );
+  });
+
   it('closes the panel on Escape from outside the sidebar', async () => {
     const { container } = renderApp();
     await flush();
@@ -9135,6 +9261,389 @@ describe('App session callbacks', () => {
       rerender({ onSessionChange });
     });
     expect(onSessionChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('App prompt send failure retry', () => {
+  it('marks the failed message and retries its original payload without a duplicate', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const inputAnnotations = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      },
+    ] as DaemonInputAnnotation[];
+    const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello', images, editorCommit, {
+        inputAnnotations,
+      });
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new Error('network down'));
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('u1');
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'hello',
+      expect.objectContaining({
+        images,
+        inputAnnotations,
+        optimisticUserMessage: false,
+      }),
+    );
+  });
+
+  it('tracks the first failed message with the lazily allocated session id', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-created',
+    });
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first message');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+    expect(mockConnection.sessionId).toBeUndefined();
+
+    act(() => {
+      mockConnection.sessionId = 'session-created';
+      testState.messages = [
+        { id: 'u1', role: 'user', content: 'first message' },
+      ];
+      rerender();
+    });
+    await act(async () => {
+      firstSend.reject(new Error('network down'));
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('u1');
+  });
+
+  it('restores the retry action when resending fails again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const retrySend = deferred<void>();
+    const secondRetrySend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockImplementationOnce(() => {
+        testState.blocks = [{ id: 'u1', kind: 'user' }];
+        return firstSend.promise;
+      })
+      .mockImplementationOnce(() => retrySend.promise)
+      .mockImplementationOnce(() => secondRetrySend.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new Error('network down'));
+      await Promise.resolve();
+    });
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click(),
+    );
+    await act(async () => {
+      retrySend.reject(new Error('still down'));
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('u1');
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click(),
+    );
+    testState.streamingState = 'responding';
+    rerender();
+
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(testState.latestMessageListProps?.isResponding).toBe(false);
+    expect(
+      testState.latestMessageListProps?.activeTurnStartedAt,
+    ).toBeUndefined();
+
+    await act(async () => {
+      secondRetrySend.resolve();
+      testState.streamingState = 'idle';
+      rerender();
+      await Promise.resolve();
+    });
+  });
+
+  it('shows processing only after retry admission and restarts its timer', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const retrySend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockImplementationOnce(() => {
+        testState.blocks = [{ id: 'u1', kind: 'user' }];
+        return firstSend.promise;
+      })
+      .mockImplementationOnce(() => retrySend.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new Error('network down'));
+      await Promise.resolve();
+    });
+
+    const retryStartedAt = Date.now();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    testState.streamingState = 'responding';
+    rerender();
+
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(testState.latestMessageListProps?.isResponding).toBe(false);
+    expect(
+      testState.latestMessageListProps?.activeTurnStartedAt,
+    ).toBeUndefined();
+
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls.at(
+      -1,
+    )?.[1] as { onAdmitted?: () => void } | undefined;
+    act(() => retryOptions?.onAdmitted?.());
+
+    const status = container.querySelector('[data-testid="streaming-status"]');
+    expect(status).not.toBeNull();
+    expect(
+      Number(status?.getAttribute('data-started-at')),
+    ).toBeGreaterThanOrEqual(retryStartedAt);
+    expect(testState.latestMessageListProps?.isResponding).toBe(true);
+    expect(
+      testState.latestMessageListProps?.activeTurnStartedAt,
+    ).toBeGreaterThanOrEqual(retryStartedAt);
+
+    await act(async () => {
+      retrySend.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).toBeNull();
+    expect(testState.latestMessageListProps?.isResponding).toBe(false);
+    expect(
+      testState.latestMessageListProps?.activeTurnStartedAt,
+    ).toBeUndefined();
+
+    testState.streamingState = 'idle';
+    rerender();
+  });
+
+  it('hides the old retry action when a newer user message appears', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const newerSend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockImplementationOnce(() => {
+        testState.blocks = [{ id: 'u1', kind: 'user' }];
+        return firstSend.promise;
+      })
+      .mockImplementationOnce(() => newerSend.promise);
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'first' }];
+    await act(async () => {
+      firstSend.reject(new Error('network down'));
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('second');
+    });
+    testState.blocks = [
+      { id: 'u1', kind: 'user' },
+      { id: 'u2', kind: 'user' },
+    ];
+    testState.messages = [
+      { id: 'u1', role: 'user', content: 'first' },
+      { id: 'u2', role: 'user', content: 'second' },
+    ];
+    rerender();
+    await flush();
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    newerSend.resolve();
+  });
+
+  it('does not attach an old send failure to the newly selected session', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('from session one');
+    });
+    testState.messages = [
+      { id: 'u1', role: 'user', content: 'from session one' },
+    ];
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.blocks = [{ id: 'u2', kind: 'user' }];
+      testState.messages = [
+        { id: 'u2', role: 'user', content: 'from session two' },
+      ];
+      rerender();
+    });
+    await act(async () => {
+      firstSend.reject(new Error('old session disconnected'));
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+  });
+
+  it('does not restore retry when a newer user message arrived before failure', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      testState.blocks = [
+        { id: 'u1', kind: 'user' },
+        { id: 'u2', kind: 'user' },
+      ];
+      testState.messages = [
+        { id: 'u1', role: 'user', content: 'first' },
+        { id: 'u2', role: 'user', content: 'newer' },
+      ];
+      rerender();
+    });
+    await act(async () => {
+      firstSend.reject(new Error('first send failed late'));
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+  });
+
+  it('leaves admitted turn failures to the existing turn-error UI', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (
+        _text: string,
+        options?: {
+          onAdmitted?: () => void;
+        },
+      ) => {
+        options?.onAdmitted?.();
+        return Promise.reject(new Error('generation failed'));
+      },
+    );
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.blocks = [{ id: 'u1', kind: 'user' }];
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await flush();
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
   });
 });
 
