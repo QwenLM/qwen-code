@@ -353,6 +353,100 @@ describe('test-efficacy probe isolation (#6832)', () => {
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
   });
 
+  it('kills a mutant the suite catches — the A/B control for the survivor test', async () => {
+    // Same source, same statement, same line as the survivor test above. The
+    // ONLY variable is the fake runner: here it reads the source and fails when
+    // `state.clear()` is gone — a genuinely gating test. The mutant must be
+    // KILLED (no finding), proving the verdict tracks the test, not the harness.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function use(k: string) {\n' +
+        '  return state.get(k);\n' +
+        '}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const state = new Map<string, string>();\n' +
+        'export function use(k: string) {\n' +
+        '  return state.get(k);\n' +
+        '}\n' +
+        'export function reset() {\n' +
+        '  state.clear();\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { reset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof reset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // The fake runner reads the source: green when `state.clear()` is present,
+    // red when it is gone. The baseline passes; the mutant (statement deleted)
+    // fails — KILLED.
+    const bin = join(repo, 'node_modules', '.bin', 'vitest');
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const src = fs.readFileSync(path.join(process.cwd(), 'packages/lib/src/f.ts'), 'utf8');
+const failed = src.includes('state.clear()') ? 0 : 1;
+process.stdout.write(JSON.stringify({
+  numPassedTests: failed ? 0 : files.length,
+  numFailedTests: failed ? files.length : 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: failed ? 'failed' : 'passed' }],
+  })),
+}));
+`,
+    );
+    chmodSync(bin, 0o755);
+
+    const before = treeState(wt);
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toEqual([
+      {
+        file: 'packages/lib/src/f.ts',
+        line: 6,
+        statement: 'state.clear();',
+        verdict: 'killed',
+        detail: expect.stringContaining('suite went red'),
+      },
+    ]);
+    expect(out.mutants.killed).toBe(1);
+    expect(out.mutants.survived).toBe(0);
+    // A killed mutant is the GOOD outcome — no finding.
+    expect(
+      (out.findings as Array<{ kind: string }>).some(
+        (f) => f.kind === 'mutant-survived',
+      ),
+    ).toBe(false);
+    expect(treeState(wt)).toBe(before);
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
   it('skips the mutants wholesale when the unmutated baseline is not green', async () => {
     // A mutant is only evidence against a suite that is green WITHOUT it: against
     // a baseline that already fails, every mutant would be "killed" by failures
@@ -479,12 +573,13 @@ describe('test-efficacy probe isolation (#6832)', () => {
   });
 
   it('reports mutants skipped for budget when time runs out mid-loop', async () => {
-    // Three safety-verb candidates, but the budget expires after two: the
+    // Three safety-verb candidates, but the budget expires after one: the
     // counter, the `skippedForBudget` report field, and the stdout line are
     // exercised end-to-end. `Date.now()` is mocked to advance 50 s per call
     // (the real budget is 540 s and a real run cannot reach it in a test):
-    // the baseline measures 50 s, so `estimatedRunMs` is 65 s, and the
-    // remaining budget drops below `2 × 65 s` on the third loop check.
+    // the mutant deadline is 290 s (540 − 300 revert reservation), the
+    // baseline measures 50 s, so `estimatedRunMs` is 65 s, and the remaining
+    // window drops below 65 s on the second loop check.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
     write(
       'packages/lib/src/f.ts',
@@ -548,14 +643,14 @@ describe('test-efficacy probe isolation (#6832)', () => {
     }
 
     const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-    expect(out.mutants.probed.length).toBe(2);
-    expect(out.mutants.skippedForBudget).toBe(1);
+    expect(out.mutants.probed.length).toBe(1);
+    expect(out.mutants.skippedForBudget).toBe(2);
     expect(out.mutants.probed.length + out.mutants.skippedForBudget).toBe(3);
     for (const m of out.mutants.probed) {
       expect(m.verdict).toBe('survived');
     }
     expect(stdoutChunks.join('')).toContain(
-      '1 mutant(s) skipped: the remaining budget cannot fit another suite run',
+      '2 mutant(s) skipped: the remaining budget cannot fit another suite run',
     );
   });
 

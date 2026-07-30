@@ -964,10 +964,9 @@ describe('classifyMutantRun', () => {
 });
 
 describe('fitsAnotherMutantRun', () => {
-  it('requires room for TWO runs — the mutant and the reserved revert probe', () => {
-    expect(fitsAnotherMutantRun(120_000, 60_000)).toBe(true);
-    // One run's worth left: the slot belongs to the revert probe, not a mutant.
-    expect(fitsAnotherMutantRun(119_999, 60_000)).toBe(false);
+  it('requires room for one more mutant run — the revert is reserved by the deadline', () => {
+    expect(fitsAnotherMutantRun(60_000, 60_000)).toBe(true);
+    expect(fitsAnotherMutantRun(59_999, 60_000)).toBe(false);
     expect(fitsAnotherMutantRun(0, 60_000)).toBe(false);
   });
 });

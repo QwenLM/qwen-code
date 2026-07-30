@@ -594,15 +594,15 @@ export function classifyMutantRun(
 }
 
 /**
- * Can the remaining budget fit one more mutant? TWO runs must fit, not one: the
- * mutant's own suite run, and the revert probe still to come — spending the
- * last slot on a mutant would trade the load-bearing probe for it.
+ * Can the remaining budget fit one more mutant? The revert probe's slot is
+ * reserved by the deadline passed to {@link runProbeSuite}, so this guard
+ * only prices the mutant's own suite run.
  */
 export function fitsAnotherMutantRun(
   remainingMs: number,
   estimatedRunMs: number,
 ): boolean {
-  return remainingMs >= estimatedRunMs * 2;
+  return remainingMs >= estimatedRunMs;
 }
 
 interface VitestAssertion {
@@ -902,19 +902,29 @@ export function probeCleanupFailureDetail(
  * baseline run, every mutant run, and the revert probe — the same suite, the
  * same runner, the same classifier. Throws when the run never produced output
  * to classify (spawn failure, or killed by the deadline).
+ *
+ * `deadlineAt` clamps the per-run timeout so the baseline + mutants + revert
+ * cannot together exceed {@link TOTAL_BUDGET_MS}: the baseline and mutant
+ * runs share a window that reserves the revert probe's full slot, and the
+ * revert probe gets the remainder of the whole budget.
  */
 function runProbeSuite(
   probeTree: string,
   probes: string[],
+  deadlineAt?: number,
 ): {
   perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
   ms: number;
 } {
   const started = Date.now();
+  const timeout =
+    deadlineAt !== undefined
+      ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
+      : PROBE_RUN_TIMEOUT_MS;
   const r = spawnSync('npx', ['vitest', 'run', '--reporter=json', ...probes], {
     cwd: probeTree,
     encoding: 'utf8',
-    timeout: PROBE_RUN_TIMEOUT_MS,
+    timeout,
     // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
     // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
     // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
@@ -927,7 +937,7 @@ function runProbeSuite(
   if (r.error) throw r.error;
   if (r.signal) {
     throw new Error(
-      `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${PROBE_RUN_TIMEOUT_MS / 1000}s)` : ''}`,
+      `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${Math.round(timeout / 1000)}s)` : ''}`,
     );
   }
   return {
@@ -960,6 +970,7 @@ export function runOneMutant(
   probeTree: string,
   mutant: MutantCandidate,
   probes: string[],
+  deadlineAt?: number,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   const original = readFileSync(abs, 'utf8');
@@ -978,7 +989,7 @@ export function runOneMutant(
   lines.splice(mutant.line - 1, 1);
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
-    const { perFile } = runProbeSuite(probeTree, probes);
+    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt);
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
@@ -1131,7 +1142,13 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // fails, every mutant would be "killed" by failures it did not cause.
         // And its measured duration is the unit the budget check prices a
         // suite run at.
-        const baseline = runProbeSuite(probeTree, probes);
+        // The baseline and mutant runs share a window that ends one
+        // PROBE_RUN_TIMEOUT_MS before the whole budget, reserving the
+        // revert probe's full slot so the pair can never exceed the
+        // 600s tool ceiling (540s budget: at most 240s here + 300s revert).
+        const mutantDeadline =
+          startedAt + TOTAL_BUDGET_MS - PROBE_RUN_TIMEOUT_MS;
+        const baseline = runProbeSuite(probeTree, probes, mutantDeadline);
         // A mutant is only evidence against a probe file that is green WITHOUT
         // it: against a file already red the mutant is "killed" by failures it
         // did not cause, and a file that collected nothing proves nothing. Gate
@@ -1146,13 +1163,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
           for (const c of candidates) {
-            const remaining = startedAt + TOTAL_BUDGET_MS - Date.now();
+            const remaining = mutantDeadline - Date.now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
                 candidates.length - mutantResults.length;
               break;
             }
-            mutantResults.push(runOneMutant(probeTree, c, greenProbes));
+            mutantResults.push(
+              runOneMutant(probeTree, c, greenProbes, mutantDeadline),
+            );
           }
         }
       } catch (e) {
@@ -1188,7 +1207,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
-        results.push(...runProbeSuite(probeTree, probes).perFile);
+        results.push(
+          ...runProbeSuite(probeTree, probes, startedAt + TOTAL_BUDGET_MS)
+            .perFile,
+        );
       } catch (e) {
         // The probe could not be set up or run. That is not evidence about any
         // test — record it and keep going, so the report (and the unreachable
