@@ -4044,10 +4044,10 @@ describe('qwen-autofix workflow', () => {
     )?.[0];
     expect(censusBlock).toBeTruthy();
     const WKEY = '2026-07-01T00:00:00Z';
-    const markerC = (ts, acted, round, at) => ({
+    const markerC = (ts, acted, round, at, win = WKEY) => ({
       user: { login: 'qwen-code-dev-bot' },
       created_at: at,
-      body: `head\n<!-- autofix-eval ts=${ts} acted=${acted} round=${round} win=${WKEY} -->`,
+      body: `head\n<!-- autofix-eval ts=${ts} acted=${acted} round=${round} win=${win} -->`,
     });
     const humanC = (login, at, assoc = 'MEMBER', body = 'feedback') => ({
       user: { login },
@@ -4063,9 +4063,19 @@ describe('qwen-autofix workflow', () => {
           markerC('2026-07-02T00:00:00Z', 'true', 5, '2026-07-02T01:00:00Z'),
           markerC('2026-07-03T00:00:00Z', 'true', 6, '2026-07-03T01:00:00Z'),
           markerC('2026-07-04T00:00:00Z', 'false', 6, '2026-07-04T01:00:00Z'),
+          // Stale-window marker: qualifies for a span but win != WKEY.
+          markerC(
+            '2026-06-15T00:00:00Z',
+            'true',
+            6,
+            '2026-06-15T01:00:00Z',
+            '2026-06-01T00:00:00Z',
+          ),
           humanC('looper', '2026-07-02T12:00:00Z'),
           humanC('looper', '2026-07-03T12:00:00Z'),
           humanC('onetime', '2026-07-03T13:00:00Z'),
+          // Stale-window human inside the stale span; must not count.
+          humanC('onetime', '2026-06-14T12:00:00Z'),
           humanC('looper', '2026-07-01T12:00:00Z'),
           humanC('looper', '2026-07-05T00:00:00Z'),
           humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
