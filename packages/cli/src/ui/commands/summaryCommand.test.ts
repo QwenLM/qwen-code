@@ -94,6 +94,10 @@ describe('summaryCommand custom export path', () => {
     expect(written).toContain('## Summary Metadata');
     expect(result).toMatchObject({ type: 'message', messageType: 'info' });
     expect(result.content).toContain('.qwen/PROJECT_SUMMARY.md');
+    if (process.platform !== 'win32') {
+      const stat = await fs.stat(path.dirname(fullPath));
+      expect(stat.mode & 0o777).toBe(0o700);
+    }
   });
 
   it('writes a relative file path as-is', async () => {
