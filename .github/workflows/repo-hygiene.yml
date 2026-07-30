@@ -2,8 +2,8 @@ name: 'Repo Hygiene Patrol'
 
 # Weekly consolidated hygiene PR (see issue #7383): the agent scans for small,
 # certain docs/test/code hygiene issues and commits fixes on ONE branch.
-# Two-phase design: scan job (read-only, ~15min) produces findings.json as an
-# artifact; fix job (write, ~25min) reads it, fixes, and pushes the PR.
+# Two-phase design: scan job (read-only) produces findings.json as an
+# artifact; fix job (write) reads it, fixes, and pushes the PR.
 # Splitting keeps each phase within the model's tool-call budget.
 
 on:
@@ -130,6 +130,11 @@ jobs:
           PATH="${qwen_bin}:${PATH}"
           qwen --version
 
+      - name: 'Resolve sandbox image'
+        run: |-
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"
+
       - name: 'Run scan agent'
         id: 'scan'
         env:
@@ -213,6 +218,7 @@ jobs:
       - name: 'Stage trusted gates'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
 
       - name: 'Download scan findings'
@@ -321,6 +327,12 @@ jobs:
         run: |-
           echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
 
+      - name: 'Resolve sandbox image'
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
+        run: |-
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"
+
       - name: 'Run fix agent'
         if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         id: 'agent'
@@ -428,12 +440,28 @@ jobs:
           git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
 
+          # Move committed findings to reportOnly so they surface in the
+          # consolidated issue instead of vanishing when the artifact expires.
+          move_committed_to_report_only() {
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const moved = f.fixes.splice(0, f.fixes.length);
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (gate failed before push)", status: "gate-failed" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log("Moved " + moved.length + " committed finding(s) to reportOnly (gate failed).");
+            '
+          }
+
           # Dirty-tree check must precede the no-diff early exit: an agent
           # that edited files but never committed has no committed diff, and
           # that failure must not pass as a clean no-fixes run.
           if [[ -n "$(git status --porcelain)" ]]; then
             echo '❌ Working tree is dirty:'
             git status --short
+            move_committed_to_report_only
             exit 1
           fi
 
@@ -446,6 +474,7 @@ jobs:
           for f in pr-title.txt pr-body.md; do
             if [[ ! -s "${WORKDIR}/${f}" ]]; then
               echo "❌ Branch has commits but ${f} is missing"
+              move_committed_to_report_only
               exit 1
             fi
           done
@@ -537,6 +566,7 @@ jobs:
           # commits cheaply. Lint/build breakage still fails the job below.
           REVERTED=0
           REVERTED_MSGS=''
+          BREAKER_MSG=''
           while true; do
             if npm run typecheck; then break; fi
             COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
@@ -551,10 +581,14 @@ jobs:
             REVERTED=$((REVERTED + 1))
           done
           if [[ "${REVERTED}" -gt 0 ]]; then
-            echo "⚠️  Reverted ${REVERTED} commit(s)."
+            # The last commit reverted is the one whose removal made typecheck
+            # pass — the actual breaker. Everything reverted before it is
+            # collateral: healthy commits discarded while isolating the fault.
+            BREAKER_MSG="$(tail -n 1 <<< "${REVERTED_MSGS%$'\n'}")"
+            echo "⚠️  Reverted ${REVERTED} commit(s); breaker: ${BREAKER_MSG}"
             {
               echo
-              echo '> **Note**: CI reverted the following commit(s) after typecheck failed; they are not included in this PR:'
+              echo '> **Note**: CI reverted the following commit(s) while isolating a typecheck failure; they are not included in this PR:'
               while IFS= read -r msg; do
                 if [[ -n "${msg}" ]]; then echo "> - ${msg}"; fi
               done <<< "${REVERTED_MSGS}"
@@ -562,22 +596,31 @@ jobs:
 
             # Mirror the gate step: a reverted finding must not stay
             # "committed" in findings.json, or the consolidated issue
-            # never reports it.
-            export REVERTED_MSGS
+            # never reports it. The breaker gets "reverted-verify";
+            # collateral commits get "reverted-collateral" so the
+            # consolidated issue does not report healthy findings as failed.
+            export REVERTED_MSGS BREAKER_MSG
             node -e '
               const fs = require("fs");
               const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
               const reverted = (process.env.REVERTED_MSGS || "").split("\n").filter(Boolean);
+              const breaker = (process.env.BREAKER_MSG || "").trim();
               const moved = [];
               f.fixes = f.fixes.filter(fix => {
                 if (!reverted.some(msg => msg.includes(`[${fix.id}]`))) return true;
-                fix.status = "reverted-verify"; moved.push(fix); return false;
+                const isBreaker = breaker.includes(`[${fix.id}]`);
+                fix.status = isBreaker ? "reverted-verify" : "reverted-collateral";
+                moved.push({ fix: fix, isBreaker: isBreaker });
+                return false;
               });
-              for (const m of moved) {
-                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (reverted by CI: typecheck failed)", status: "reverted-verify" });
+              for (const { fix: m, isBreaker } of moved) {
+                const suffix = isBreaker
+                  ? " (reverted by CI: typecheck failed)"
+                  : " (reverted by CI: collateral while isolating typecheck failure)";
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + suffix, status: m.status });
               }
               fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
-              console.log(`Moved ${moved.length} reverted finding(s) to reportOnly.`);
+              console.log(`Moved ${moved.length} reverted finding(s) to reportOnly (${moved.filter(m => m.isBreaker).length} breaker, ${moved.filter(m => !m.isBreaker).length} collateral).`);
             '
 
             COMMITS="$(git rev-list --count origin/main..HEAD)"
@@ -611,6 +654,8 @@ jobs:
           npm run build
           npm run lint
           bash "${RUNNER_TEMP}/check-settings-schema.sh"
+          git diff --name-only origin/main...HEAD \
+            | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
 
           CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
             | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
@@ -710,7 +755,7 @@ jobs:
             echo "Appended ${COUNT} report-only findings to existing issue #${EXISTING_NUMBER}."
             exit 0
           fi
-          ISSUE_TITLE="[repo-hygiene] $(date -u '+%Y-W%V') report-only findings (${COUNT} items)"
+          ISSUE_TITLE="[repo-hygiene] $(date -u '+%G-W%V') report-only findings (${COUNT} items)"
           GH_TOKEN="${GITHUB_TOKEN}" gh issue create \
             --repo "${REPO}" \
             --title "${ISSUE_TITLE}" \
