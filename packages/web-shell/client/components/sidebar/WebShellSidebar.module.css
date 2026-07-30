@@ -733,10 +733,60 @@
   color: var(--agent-blue-500);
 }
 
-.tooltipMeta {
+.sessionDetailsContent {
+  width: min(16rem, var(--radix-dropdown-menu-content-available-width));
+  max-width: var(--radix-dropdown-menu-content-available-width);
+  min-width: 0;
+  padding: 12px;
+}
+
+.sessionDetailsIdRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionDetailsId {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 400;
+  line-height: 18px;
+}
+
+.sessionDetailsCopyButton {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.sessionDetailsCopyButton:hover,
+.sessionDetailsCopyButton:focus-visible {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  outline: none;
+}
+
+.sessionDetailsCopyButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sessionDetailsCopied {
+  color: var(--muted-foreground);
+  font-size: 12px;
   line-height: 18px;
 }
 

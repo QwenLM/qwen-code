@@ -35,7 +35,6 @@ import {
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
-  InfoIcon,
   EllipsisVerticalIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -75,15 +74,13 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionDetailsSubmenu } from './SessionDetailsSubmenu';
 import {
   isPrimaryCollapsedSectionId,
   readCollapsedSessionSectionIds,
@@ -760,6 +757,7 @@ export function WebShellSidebar({
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
   const previousRunningRef = useRef<Map<string, boolean> | null>(null);
@@ -2668,6 +2666,13 @@ export function WebShellSidebar({
     });
   }, []);
 
+  const getSessionDetailsCollisionBoundary = useCallback(
+    () =>
+      sidebarRef.current?.closest<HTMLElement>('[data-web-shell-root]') ??
+      sidebarRef.current,
+    [],
+  );
+
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (collapsed) return;
@@ -2804,27 +2809,6 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const details = (
-        <div className={styles.tooltipContent}>
-          <div className={styles.tooltipTitle}>{label}</div>
-          <div className={styles.tooltipTags}>
-            {session.hasActivePrompt && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagRunning)}>
-                {t('sidebar.running')}
-              </span>
-            )}
-            {completedUnread && (
-              <span className={cx(styles.tooltipTag, styles.tooltipTagNew)}>
-                {t('sidebar.completedUnread')}
-              </span>
-            )}
-            <span className={styles.tooltipTag}>
-              {t('sidebar.clients', { count: session.clientCount ?? 0 })}
-            </span>
-          </div>
-          <div className={styles.tooltipMeta}>{session.sessionId}</div>
-        </div>
-      );
       if (isArchived) {
         const archivedExportWorkspaceCwd =
           getArchivedExportWorkspaceCwd(session);
@@ -2884,15 +2868,15 @@ export function WebShellSidebar({
                     >
                       <DropdownMenuGroup>
                         {showArchivedDetails && (
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>
-                              <InfoIcon />
-                              {t('sidebar.details')}
-                            </DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent className="min-w-64 p-3">
-                              {details}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
+                          <SessionDetailsSubmenu
+                            session={session}
+                            label={label}
+                            completedUnread={completedUnread}
+                            onError={onError}
+                            getCollisionBoundary={
+                              getSessionDetailsCollisionBoundary
+                            }
+                          />
                         )}
                         {showArchivedExport && (
                           <DropdownMenuItem
@@ -3280,15 +3264,15 @@ export function WebShellSidebar({
                                     </DropdownMenuItem>
                                   )}
                                 {sessionActionItems.has('details') && (
-                                  <DropdownMenuSub>
-                                    <DropdownMenuSubTrigger>
-                                      <InfoIcon />
-                                      {t('sidebar.details')}
-                                    </DropdownMenuSubTrigger>
-                                    <DropdownMenuSubContent className="min-w-64 p-3">
-                                      {details}
-                                    </DropdownMenuSubContent>
-                                  </DropdownMenuSub>
+                                  <SessionDetailsSubmenu
+                                    session={session}
+                                    label={label}
+                                    completedUnread={completedUnread}
+                                    onError={onError}
+                                    getCollisionBoundary={
+                                      getSessionDetailsCollisionBoundary
+                                    }
+                                  />
                                 )}
                                 {showRename &&
                                   !inlineActionItems.has('rename') && (
@@ -3382,6 +3366,8 @@ export function WebShellSidebar({
       getArchivedExportWorkspaceCwd,
       getActiveExportScope,
       getIdentityForSession,
+      getSessionDetailsCollisionBoundary,
+      onError,
       handleArchive,
       handleDeleteSession,
       handleExportSession,
@@ -3562,6 +3548,7 @@ export function WebShellSidebar({
   return (
     <>
       <aside
+        ref={sidebarRef}
         className={cx(
           styles.sidebar,
           collapsed && styles.collapsed,
