@@ -1815,8 +1815,194 @@ export type DerivedConfigOverrides = Partial<
   >
 >;
 
+export interface DerivedApprovalModeConfigHooks {
+  acquireAutoApprovalOverride(): boolean;
+  releaseAutoApprovalOverride(): void;
+}
+
+export interface DerivedApprovalModeConfigOptions {
+  hooks?: DerivedApprovalModeConfigHooks;
+}
+
+export interface DerivedApprovalModeConfigHandle {
+  config: Config;
+  cleanup: () => void;
+}
+
+export interface DerivedAgentConfigOptions {
+  customIgnoreFiles?: string[];
+  getPlanFilePath?: Config['getPlanFilePath'];
+}
+
+export interface DerivedAgentConfigHandle {
+  config: Config;
+  fileService: FileDiscoveryService;
+  workspaceContext: WorkspaceContext;
+}
+
 export interface DerivedWorktreeConfigOptions {
   customIgnoreFiles?: string[];
+}
+
+/**
+ * Derives a Config with child-local approval state while preserving the
+ * canonical PermissionManager's AUTO strip/restore lifecycle.
+ */
+export function deriveApprovalModeConfig(
+  base: Config,
+  mode: ApprovalMode,
+  options: DerivedApprovalModeConfigOptions = {},
+): DerivedApprovalModeConfigHandle {
+  const baseApprovalMode = base.getApprovalMode();
+  const initialMode = getTrustedDerivedApprovalMode(base, mode);
+  let autoOverrideAcquired = false;
+  const acquireAutoOverride = () => {
+    if (autoOverrideAcquired || base.getApprovalMode() === ApprovalMode.AUTO) {
+      return;
+    }
+    if (options.hooks) {
+      autoOverrideAcquired = options.hooks.acquireAutoApprovalOverride();
+      return;
+    }
+    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
+    autoOverrideAcquired = true;
+  };
+  const releaseAutoOverride = () => {
+    if (!autoOverrideAcquired) return;
+    if (options.hooks) {
+      options.hooks.releaseAutoApprovalOverride();
+    } else if (base.getApprovalMode() !== ApprovalMode.AUTO) {
+      base.getPermissionManager?.()?.restoreDangerousRules();
+    }
+    autoOverrideAcquired = false;
+  };
+
+  const derived = deriveConfig(base, {
+    getApprovalMode: Config.prototype.getApprovalMode,
+  });
+  const state = derived as unknown as {
+    approvalMode: ApprovalMode;
+    prePlanMode?: ApprovalMode;
+    approvalModeRevision: number;
+    manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState;
+    autoModeDenialState: AutoModeDenialState;
+    permissionManager: PermissionManager | null;
+  };
+  state.approvalMode = initialMode;
+  state.prePlanMode =
+    initialMode === ApprovalMode.PLAN
+      ? baseApprovalMode === ApprovalMode.PLAN
+        ? base.getPrePlanMode()
+        : baseApprovalMode
+      : undefined;
+  state.approvalModeRevision = 0;
+  state.manualPlanExitNoticeEventState = {
+    ...((
+      base as unknown as {
+        manualPlanExitNoticeEventState?: ManualPlanExitNoticeEventState;
+      }
+    ).manualPlanExitNoticeEventState ?? { version: 0, kind: 'clear' }),
+  };
+  state.autoModeDenialState = createDenialState();
+
+  Object.defineProperty(derived, 'setApprovalMode', {
+    value: (
+      nextMode: ApprovalMode,
+      setOptions?: Parameters<Config['setApprovalMode']>[1],
+    ): void => {
+      const beforeMode = derived.getApprovalMode();
+      const hadOwnPermissionManager = Object.hasOwn(
+        derived,
+        'permissionManager',
+      );
+      const ownPermissionManager = state.permissionManager;
+      state.permissionManager = null;
+      try {
+        Config.prototype.setApprovalMode.call(derived, nextMode, setOptions);
+      } finally {
+        if (hadOwnPermissionManager) {
+          state.permissionManager = ownPermissionManager;
+        } else {
+          delete (state as Partial<typeof state>).permissionManager;
+        }
+      }
+
+      const afterMode = derived.getApprovalMode();
+      if (beforeMode !== ApprovalMode.AUTO && afterMode === ApprovalMode.AUTO) {
+        acquireAutoOverride();
+      } else if (
+        beforeMode === ApprovalMode.AUTO &&
+        afterMode !== ApprovalMode.AUTO
+      ) {
+        releaseAutoOverride();
+      }
+    },
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+
+  if (
+    initialMode === ApprovalMode.AUTO &&
+    base.getApprovalMode() !== ApprovalMode.AUTO
+  ) {
+    acquireAutoOverride();
+  }
+
+  return { config: derived, cleanup: releaseAutoOverride };
+}
+
+/**
+ * Derives the workspace and optional approval-mode state for one agent.
+ */
+export function deriveAgentConfig(
+  base: Config,
+  workingDirectory: string,
+  options: DerivedAgentConfigOptions = {},
+): DerivedAgentConfigHandle {
+  const fileService = new FileDiscoveryService(
+    workingDirectory,
+    options.customIgnoreFiles,
+  );
+  const workspaceContext = new WorkspaceContext(workingDirectory);
+  const derived = deriveConfig(base, {
+    getTargetDir: () => workingDirectory,
+    getCwd: () => workingDirectory,
+    getWorkingDir: () => workingDirectory,
+    getProjectRoot: () => workingDirectory,
+    getPlanFilePath: options.getPlanFilePath,
+    getFileService: () => fileService,
+    getWorkspaceContext: () => workspaceContext,
+  });
+  const workspaceState = derived as unknown as {
+    targetDir: string;
+    cwd: string;
+    fileDiscoveryService: FileDiscoveryService;
+    workspaceContext: WorkspaceContext;
+  };
+  workspaceState.targetDir = workingDirectory;
+  workspaceState.cwd = workingDirectory;
+  workspaceState.fileDiscoveryService = fileService;
+  workspaceState.workspaceContext = workspaceContext;
+  return {
+    config: derived,
+    fileService,
+    workspaceContext,
+  };
+}
+
+function getTrustedDerivedApprovalMode(
+  base: Config,
+  requestedMode: ApprovalMode,
+): ApprovalMode {
+  if (
+    !base.isTrustedFolder() &&
+    requestedMode !== ApprovalMode.DEFAULT &&
+    requestedMode !== ApprovalMode.PLAN
+  ) {
+    return ApprovalMode.DEFAULT;
+  }
+  return requestedMode;
 }
 
 /**
@@ -1859,8 +2045,8 @@ export function deriveWorktreeConfig(
  * Creates a Config overlay while keeping prototype delegation inside one
  * reviewable boundary. Callers supply only public getter overrides; Config's
  * child-local and prohibited runtime state remains enforced by its accessors.
- * Approval-mode override wrappers that call Config prototype mutators must keep
- * owning their strip/restore lifecycle before migrating to this factory.
+ * Named profiles layer any private-state rebinding and cleanup contract above
+ * this generic factory.
  */
 export function deriveConfig(
   base: Config,

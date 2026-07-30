@@ -107,12 +107,12 @@ import {
 import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import {
   ApprovalMode,
-  Config,
+  deriveApprovalModeConfig,
   deriveWorktreeConfig,
   normalizeMaxSubagentDepth,
   validateMaxSessionTurns,
+  type Config,
 } from '../../config/config.js';
-import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
@@ -606,118 +606,23 @@ function capturePersistedCliFlags(
 }
 
 /**
- * Creates a Config override with a different approval mode.
- *
- * Uses prototype delegation (Object.create) to avoid mutating the parent
- * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
- * override's tool registry has core tools bound to the override rather
- * than to the parent. Without that rebuild, the parent's cached tool
- * instances continue to resolve `this.config` to the parent, defeating
- * per-Config isolation of FileReadCache / approval mode for any code
- * path that goes through the bound tool.
- *
- * Returns `{ config, cleanup }`. Callers MUST invoke `cleanup` in a
- * `finally` block after the override is no longer in use, otherwise
- * the parent's PermissionManager may leak a strip across the sub-agent
- * boundary (see strip lifecycle below).
- *
- * Strip lifecycle for AUTO overrides:
- *   - parent not in AUTO, override starts in AUTO: this function strips
- *     the PARENT's PM (shared via prototype chain — the override cannot
- *     have its own PM without a much bigger refactor).
- *   - parent already in AUTO, override starts in AUTO: parent's
- *     `setApprovalMode` already stripped on its own entry, so this
- *     function does not strip again.
- *   - override enters/leaves AUTO later: `setApprovalMode` reuses Config's
- *     normal state transition, but suppresses AUTO strip/restore while the
- *     parent is already in AUTO because the parent owns that strip lifecycle.
- *     `cleanup` only restores if the child finishes still in AUTO while the
- *     parent is not in AUTO.
+ * Creates an agent approval profile, then rebuilds its tool registry so bound
+ * tools resolve the derived Config and its child-local state.
  */
 export async function createApprovalModeOverride(
   base: Config,
   mode: ApprovalMode,
   options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override = Object.create(base) as any;
-  const baseApprovalMode = base.getApprovalMode();
-  // These own properties intentionally mirror Config's TS-private field names.
-  // Config prototype methods read/write them at runtime on this override object.
-  override.approvalMode = mode;
-  override.manualPlanExitNoticeEventState = {
-    ...(override.manualPlanExitNoticeEventState ?? {
-      version: 0,
-      kind: 'clear',
-    }),
-  };
-  override.getApprovalMode = Config.prototype.getApprovalMode;
-  override.prePlanMode =
-    mode === ApprovalMode.PLAN
-      ? baseApprovalMode === ApprovalMode.PLAN
-        ? base.getPrePlanMode()
-        : baseApprovalMode
-      : undefined;
-  override.approvalModeRevision = 0;
-  override.autoModeDenialState = createDenialState();
-  override.setApprovalMode = (
-    nextMode: ApprovalMode,
-    setOptions?: Parameters<Config['setApprovalMode']>[1],
-  ): void => {
-    if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        setOptions,
-      );
-      return;
-    }
-
-    const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
-      override,
-      'permissionManager',
-    );
-    const ownPermissionManager = override.permissionManager;
-    override.permissionManager = null;
-    try {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        setOptions,
-      );
-    } finally {
-      if (hadOwnPermissionManager) {
-        override.permissionManager = ownPermissionManager;
-      } else {
-        delete override.permissionManager;
-      }
-    }
-  };
-  applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
-  await rebuildToolRegistryOnOverride(override as Config, base);
-
-  const cleanup = () => {
-    if (
-      (override as Config).getApprovalMode() === ApprovalMode.AUTO &&
-      base.getApprovalMode() !== ApprovalMode.AUTO
-    ) {
-      base.getPermissionManager?.()?.restoreDangerousRules();
-    }
-  };
-
-  if (mode === ApprovalMode.AUTO) {
-    const baseWasAuto = base.getApprovalMode() === ApprovalMode.AUTO;
-    if (!baseWasAuto) {
-      // This override is bringing AUTO into a non-AUTO parent. Strip
-      // dangerous allow rules so the sub-agent's classifier actually
-      // gates them. Cleanup handles restore if the child finishes in AUTO.
-      base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
-    }
-    // baseWasAuto: parent's setApprovalMode already stripped; cleanup
-    // will not restore while the parent remains in AUTO.
+  const { config: override, cleanup } = deriveApprovalModeConfig(base, mode);
+  try {
+    applyPersistedCliFlagOverrides(override, options.persistedCliFlags);
+    await rebuildToolRegistryOnOverride(override, base);
+    return { config: override, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
-
-  return { config: override as Config, cleanup };
 }
 
 /**

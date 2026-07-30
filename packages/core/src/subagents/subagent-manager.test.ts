@@ -2407,8 +2407,8 @@ bad`);
         const { runtimeContext, runtimeView } = destructureAgentHeadlessCall(
           mockAgentHeadlessCreate.mock.calls[0],
         );
-        // Subagents always get an `Object.create(parent)` wrapper for
-        // FileReadCache isolation — distinct instance, prototype === parent.
+        // Subagents always get a derived wrapper for child-local state.
+        // It remains a distinct instance whose prototype is the parent.
         expect(runtimeContext).not.toBe(mockConfig);
         expect(Object.getPrototypeOf(runtimeContext)).toBe(mockConfig);
         expect(runtimeView).toBeDefined();
