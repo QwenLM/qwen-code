@@ -285,10 +285,52 @@ describe('ChannelPairingRequests', () => {
     });
 
     expect(listApprovals).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain('Pairing approval was not found.');
+    expect(container.textContent).toContain('No pairing approvals');
+    expect(container.textContent).not.toContain(
+      'Pairing approval was not found.',
+    );
     expect(
       container.querySelector('button[aria-label="Revoke paired-user"]'),
     ).toBeNull();
+  });
+
+  it('shows an error when refreshing after a missing approval fails', async () => {
+    const refreshError = Object.assign(new Error('Refresh failed.'), {
+      status: 503,
+      body: { error: 'Refresh failed.' },
+    });
+    const listApprovals = vi
+      .fn()
+      .mockResolvedValueOnce({ senderIds: ['paired-user'] })
+      .mockRejectedValueOnce(refreshError);
+    const revokeError = Object.assign(new Error('Approval is gone.'), {
+      status: 404,
+      body: {
+        error: 'Pairing approval was not found.',
+        code: 'channel_pairing_approval_not_found',
+      },
+    });
+    const revokeApproval = vi.fn().mockRejectedValue(revokeError);
+    await renderRequests({ listApprovals, revokeApproval });
+
+    const revoke = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke paired-user"]',
+    );
+    await act(async () => {
+      revoke?.click();
+    });
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Revoke approval',
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(listApprovals).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Refresh failed.');
+    expect(
+      container.querySelector('button[aria-label="Revoke paired-user"]'),
+    ).not.toBeNull();
   });
 
   it('keeps a request visible when approval fails', async () => {

@@ -263,6 +263,7 @@ export function ChannelPairingRequests({
           if (mounted.current && currentChannelName.current === revokeChannel) {
             setApprovedSenderIds(snapshot.senderIds);
           }
+          return;
         } catch (refreshError) {
           if (mounted.current && currentChannelName.current === revokeChannel) {
             setApprovalsError(
