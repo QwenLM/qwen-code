@@ -138,12 +138,14 @@ describe('agent-transcript', () => {
         status: 'running',
         subagentName: 'explore',
         resolvedApprovalMode: 'auto-edit',
+        executionAllowedTools: [],
       });
 
       expect(readAgentMeta(metaPath)).toMatchObject({
         agentId: 'a',
         status: 'running',
         subagentName: 'explore',
+        executionAllowedTools: [],
       });
     });
   });
@@ -273,6 +275,9 @@ describe('agent-transcript', () => {
         kind: 'fork',
         history: [],
       });
+      expect(records[0]?.systemPayload).not.toHaveProperty(
+        'executionAllowedTools',
+      );
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
