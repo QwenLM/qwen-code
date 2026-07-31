@@ -3870,6 +3870,34 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('forwards terminal image renderer support to the display tool', async () => {
+      const provider = vi.fn().mockResolvedValue({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      const config = new Config({
+        ...baseParams,
+        terminalImageRenderSupportProvider: provider,
+      });
+
+      await expect(
+        config.getTerminalImageRenderSupport('/workspace/image.png'),
+      ).resolves.toEqual({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      expect(provider).toHaveBeenCalledWith('/workspace/image.png');
+
+      await expect(
+        new Config(baseParams).getTerminalImageRenderSupport(
+          '/workspace/image.png',
+        ),
+      ).resolves.toEqual({
+        available: false,
+        reason: 'No terminal image renderer is configured.',
+      });
+    });
+
     it('registers only record_artifact by default for daemon artifact metadata', async () => {
       const config = new Config({
         ...baseParams,

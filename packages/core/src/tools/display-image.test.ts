@@ -37,6 +37,7 @@ describe('DisplayImageTool', () => {
           );
         },
       }),
+      getTerminalImageRenderSupport: async () => ({ available: true }),
     } as unknown as Config);
   });
 
@@ -70,6 +71,31 @@ describe('DisplayImageTool', () => {
     expect(() =>
       tool.build({ file_path: path.join(os.tmpdir(), 'outside.png') }),
     ).toThrow(/outside the current workspace/);
+  });
+
+  it('reports a renderer failure to the model and TUI', async () => {
+    const imagePath = path.join(workspace, 'pixel.png');
+    await fs.writeFile(imagePath, PNG_1X1);
+    tool = new DisplayImageTool({
+      getTargetDir: () => workspace,
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: () => true,
+      }),
+      getTerminalImageRenderSupport: async () => ({
+        available: false,
+        reason:
+          'No compatible native image protocol was detected, and chafa is not installed.',
+      }),
+    } as unknown as Config);
+
+    const result = await tool
+      .build({ file_path: imagePath })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(result.llmContent).toContain('The image was not displayed');
+    expect(result.returnDisplay).toContain('The image was not displayed');
+    expect(result.returnDisplay).not.toHaveProperty('type', 'terminal_image');
   });
 
   it('rejects missing files and directories', async () => {

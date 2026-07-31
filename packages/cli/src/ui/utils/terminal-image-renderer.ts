@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import {
   MAX_TERMINAL_IMAGE_BYTES,
+  type TerminalImageRenderSupport,
   type TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -42,6 +43,7 @@ export interface TerminalImageRenderOptions {
 export function supportsKittyImageProtocol(
   env: NodeJS.ProcessEnv = process.env,
   stdoutIsTTY = process.stdout.isTTY,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (!stdoutIsTTY || env['TMUX'] || env['SSH_TTY'] || env['SSH_CLIENT']) {
     return false;
@@ -52,8 +54,24 @@ export function supportsKittyImageProtocol(
   return Boolean(
     env['KITTY_WINDOW_ID'] ||
       term.includes('kitty') ||
-      termProgram.includes('ghostty'),
+      termProgram.includes('ghostty') ||
+      (termProgram === 'warpterminal' && platform !== 'win32'),
   );
+}
+
+export function getTerminalImageRenderSupport(
+  filePath: string,
+  env: NodeJS.ProcessEnv = process.env,
+  stdoutIsTTY = process.stdout.isTTY,
+): TerminalImageRenderSupport {
+  if (supportsKittyImageProtocol(env, stdoutIsTTY)) {
+    return { available: true };
+  }
+
+  const result = renderWithChafa(filePath, { widthCells: 4, rows: 4 }, env);
+  return result.kind === 'ansi'
+    ? { available: true }
+    : { available: false, reason: result.reason };
 }
 
 export function renderTerminalImage({
@@ -164,7 +182,7 @@ function renderWithChafa(
   filePath: string,
   shape: { widthCells: number; rows: number },
   env: NodeJS.ProcessEnv,
-): TerminalImageRenderResult {
+): Extract<TerminalImageRenderResult, { kind: 'ansi' | 'unavailable' }> {
   try {
     const stdout = execFileSync(
       'chafa',
@@ -195,7 +213,7 @@ function renderWithChafa(
       kind: 'unavailable',
       reason:
         execError.code === 'ENOENT'
-          ? 'This terminal does not support Kitty images and chafa is not installed.'
+          ? 'No compatible native image protocol was detected, and chafa is not installed.'
           : String(execError.stderr ?? '').trim() ||
             execError.message ||
             'chafa could not render the image.',

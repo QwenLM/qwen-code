@@ -123,6 +123,15 @@ class DisplayImageInvocation extends BaseToolInvocation<
       await fileHandle?.close();
     }
 
+    const renderSupport =
+      await this.config.getTerminalImageRenderSupport(filePath);
+    if (!renderSupport.available) {
+      return errorResult(
+        `The image was not displayed: ${renderSupport.reason}`,
+        ToolErrorType.EXECUTION_FAILED,
+      );
+    }
+
     const display: TerminalImageDisplay = {
       type: 'terminal_image',
       filePath,
@@ -130,7 +139,7 @@ class DisplayImageInvocation extends BaseToolInvocation<
     };
     return {
       llmContent:
-        `Requested a terminal preview of "${path.basename(filePath)}". ` +
+        `The terminal renderer accepted "${path.basename(filePath)}" for display. ` +
         'This display-only tool does not provide the image contents to you; use read_file if you need to inspect the image.',
       returnDisplay: display,
       resultFilePaths: [filePath],

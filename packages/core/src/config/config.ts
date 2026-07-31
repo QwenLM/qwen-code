@@ -961,6 +961,9 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  terminalImageRenderSupportProvider?: (
+    filePath: string,
+  ) => Promise<TerminalImageRenderSupport>;
   /**
    * Additional directories to scan for skills (SKILL.md files).
    * Sourced from `settings.skills.directories`. Paths are raw
@@ -1350,6 +1353,10 @@ export interface ConfigParameters {
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
 }
+
+export type TerminalImageRenderSupport =
+  | { available: true }
+  | { available: false; reason: string };
 
 export interface ImageGenerationConfig {
   model: string;
@@ -1778,6 +1785,9 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly terminalImageRenderSupportProvider:
+    | ((filePath: string) => Promise<TerminalImageRenderSupport>)
+    | null;
   private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
@@ -2091,6 +2101,8 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.terminalImageRenderSupportProvider =
+      params.terminalImageRenderSupportProvider ?? null;
     this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
@@ -7023,6 +7035,17 @@ export class Config {
 
   isInteractive(): boolean {
     return this.interactive;
+  }
+
+  async getTerminalImageRenderSupport(
+    filePath: string,
+  ): Promise<TerminalImageRenderSupport> {
+    return this.terminalImageRenderSupportProvider
+      ? this.terminalImageRenderSupportProvider(filePath)
+      : {
+          available: false,
+          reason: 'No terminal image renderer is configured.',
+        };
   }
 
   getUseRipgrep(): boolean {

@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  getTerminalImageRenderSupport,
   renderTerminalImage,
   supportsKittyImageProtocol,
 } from './terminal-image-renderer.js';
@@ -74,6 +75,29 @@ describe('terminalImageRenderer', () => {
     );
   });
 
+  it('recognizes Warp as supporting the Kitty image protocol', () => {
+    expect(
+      supportsKittyImageProtocol(
+        { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      supportsKittyImageProtocol(
+        { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
+        true,
+        'win32',
+      ),
+    ).toBe(false);
+    expect(
+      getTerminalImageRenderSupport(
+        imagePath,
+        { TERM: 'xterm-256color', TERM_PROGRAM: 'WarpTerminal' },
+        true,
+      ),
+    ).toEqual({ available: true });
+  });
+
   it.runIf(process.platform !== 'win32')(
     'falls back to chafa symbol output',
     async () => {
@@ -104,6 +128,15 @@ describe('terminalImageRenderer', () => {
         kind: 'ansi',
         lines: ['\x1b[31mFAKE_CHAFA\x1b[0m'],
       });
+      expect(
+        getTerminalImageRenderSupport(
+          imagePath,
+          {
+            PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          },
+          false,
+        ),
+      ).toEqual({ available: true });
     },
   );
 
@@ -123,6 +156,13 @@ describe('terminalImageRenderer', () => {
     expect(result.kind === 'unavailable' && result.reason).toContain(
       'chafa is not installed',
     );
+    expect(
+      getTerminalImageRenderSupport(imagePath, { PATH: tempDir }, true),
+    ).toEqual({
+      available: false,
+      reason:
+        'No compatible native image protocol was detected, and chafa is not installed.',
+    });
   });
 
   it('rejects missing and invalid PNG files during restored rendering', async () => {
