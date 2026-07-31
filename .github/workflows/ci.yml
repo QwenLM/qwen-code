@@ -152,67 +152,33 @@ jobs:
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
-      # verify) may leave root-owned, read-only files in the workspace.
-      # Restore ownership first; when passwordless sudo is unavailable, rename
-      # unwriteable dirs aside — rename() only needs write on the parent
-      # ($GITHUB_WORKSPACE, owned by the runner user), not on the dir itself.
+      # verify) may leave root-owned, read-only files anywhere in the workspace.
+      # Restore ownership and write permission unconditionally so the checkout
+      # below can wipe the tree without EACCES. Do not gate this behind a
+      # .qwen/.git probe: poisoning is workspace-wide (root-owned node_modules/
+      # dist with no .qwen/.git), so a probe reports "healthy" and skips the
+      # recovery exactly when it is needed.
       - name: 'Restore workspace ownership'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
-          # Probe first: skip the expensive recursive chown/chmod on the
-          # healthy path (every normal PR run).  Only when a dir is
-          # actually unwriteable do we pay for the full-tree walk.
-          recovery_needed=0
-          for stale in .qwen .git; do
-            target="$GITHUB_WORKSPACE/$stale"
-            [ -d "$target" ] && [ ! -L "$target" ] || continue
-            if ! mkdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null; then
-              recovery_needed=1
-              break
-            fi
-            rmdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-          done
-          if [ "$recovery_needed" = 1 ]; then
-            if [ "$RUNNER_UID" != "0" ]; then
-              chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
-            fi
-            chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          # NOTE: This rename-aside block is duplicated across ci.yml
-          # (test, web_shell_e2e_smoke, integration_cli) and
-          # qwen-code-pr-review.yml because it runs BEFORE checkout, so
-          # extraction into .github/scripts/ is not possible.  Keep all
-          # copies byte-identical.
-          for stale in .qwen .git; do
-            target="$GITHUB_WORKSPACE/$stale"
-            # -d (not -e): only directories cause the EACCES checkout
-            # failure; .git as a gitlink file in a worktree is harmless.
-            [ -d "$target" ] && [ ! -L "$target" ] || continue
-            if mkdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null; then
-              rmdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-              continue
-            fi
-            mv "$target" "${target}.stale.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null \
-              && echo "::warning::renamed unwriteable ${stale} aside to ${stale}.stale.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" \
-              || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
-          done
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      # Remove .qwen/ and any .qwen.stale.* / .git.stale.* dirs renamed
-      # aside above so actions/checkout doesn't trip on restrictive
-      # permissions and stale root-owned dirs don't accumulate on the runner.
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
-          for d in "$GITHUB_WORKSPACE"/.qwen "$GITHUB_WORKSPACE"/.qwen.stale.* "$GITHUB_WORKSPACE"/.git.stale.*; do
-            [ -d "$d" ] || continue
-            chmod -R u+w "$d" 2>/dev/null || true
-            rm -rf "$d" 2>/dev/null || sudo -n rm -rf "$d" 2>/dev/null || echo "::warning::leaked ${d}; runner needs manual cleanup"
-          done
-
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
 
       - name: 'Checkout'
         id: 'checkout'
@@ -488,48 +454,19 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # Self-hosted runners reuse the workspace; restore permissions before
-      # checkout tries to wipe files left by prior containerised jobs.
-      # Duplicated from the test job above — see the NOTE there.
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout — see the test job's
+      # 'Restore workspace ownership' step for why probing first is unsafe.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
-          recovery_needed=0
-          for stale in .qwen .git; do
-            target="$GITHUB_WORKSPACE/$stale"
-            [ -d "$target" ] && [ ! -L "$target" ] || continue
-            if ! mkdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null; then
-              recovery_needed=1
-              break
-            fi
-            rmdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-          done
-          if [ "$recovery_needed" = 1 ]; then
-            if [ "$RUNNER_UID" != "0" ]; then
-              chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
-            fi
-            chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          # NOTE: This rename-aside block is duplicated across ci.yml
-          # (test, web_shell_e2e_smoke, integration_cli) and
-          # qwen-code-pr-review.yml because it runs BEFORE checkout, so
-          # extraction into .github/scripts/ is not possible.  Keep all
-          # copies byte-identical.
-          for stale in .qwen .git; do
-            target="$GITHUB_WORKSPACE/$stale"
-            # -d (not -e): only directories cause the EACCES checkout
-            # failure; .git as a gitlink file in a worktree is harmless.
-            [ -d "$target" ] && [ ! -L "$target" ] || continue
-            if mkdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null; then
-              rmdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-              continue
-            fi
-            mv "$target" "${target}.stale.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null \
-              && echo "::warning::renamed unwriteable ${stale} aside to ${stale}.stale.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" \
-              || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
-          done
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -809,48 +746,19 @@ jobs:
       OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
     steps:
-      # Self-hosted runners reuse the workspace; restore permissions before
-      # checkout tries to wipe files left by prior containerised jobs.
-      # Duplicated from the test job above — see the NOTE there.
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout — see the test job's
+      # 'Restore workspace ownership' step for why probing first is unsafe.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
-          recovery_needed=0
-          for stale in .qwen .git; do
-            target="$GITHUB_WORKSPACE/$stale"
-            [ -d "$target" ] && [ ! -L "$target" ] || continue
-            if ! mkdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null; then
-              recovery_needed=1
-              break
-            fi
-            rmdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-          done
-          if [ "$recovery_needed" = 1 ]; then
-            if [ "$RUNNER_UID" != "0" ]; then
-              chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
-            fi
-            chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          # NOTE: This rename-aside block is duplicated across ci.yml
-          # (test, web_shell_e2e_smoke, integration_cli) and
-          # qwen-code-pr-review.yml because it runs BEFORE checkout, so
-          # extraction into .github/scripts/ is not possible.  Keep all
-          # copies byte-identical.
-          for stale in .qwen .git; do
-            target="$GITHUB_WORKSPACE/$stale"
-            # -d (not -e): only directories cause the EACCES checkout
-            # failure; .git as a gitlink file in a worktree is harmless.
-            [ -d "$target" ] && [ ! -L "$target" ] || continue
-            if mkdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null; then
-              rmdir "$target/.probe.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-              continue
-            fi
-            mv "$target" "${target}.stale.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" 2>/dev/null \
-              && echo "::warning::renamed unwriteable ${stale} aside to ${stale}.stale.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" \
-              || echo "::warning::could not rename unwriteable ${stale}; checkout may fail"
-          done
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
