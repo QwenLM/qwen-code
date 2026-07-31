@@ -23,6 +23,7 @@ static NEXT_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 const TEST_RUNTIME_INFO_ENV: &str = "QWEN_DESKTOP_TEST_RUNTIME_INFO";
 
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RuntimeStopped {
     runtime_id: u64,
     status: String,
@@ -460,7 +461,7 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
 mod tests {
     use super::{
         append_failure_output, authenticated_web_url, parse_listening_url, runtime_arguments,
-        FAILURE_OUTPUT_LIMIT,
+        RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
     use std::path::Path;
     use std::sync::Mutex;
@@ -514,6 +515,19 @@ mod tests {
                 "/tmp/workspace",
                 "--no-open",
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_stopped_payload_uses_camel_case_runtime_id() {
+        let payload = RuntimeStopped {
+            runtime_id: 7,
+            status: "exited".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(payload).expect("payload"),
+            serde_json::json!({ "runtimeId": 7, "status": "exited" }),
         );
     }
 

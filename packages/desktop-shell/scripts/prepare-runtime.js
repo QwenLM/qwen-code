@@ -84,7 +84,7 @@ fs.mkdirSync(libDir, { recursive: true });
 fs.mkdirSync(binDir, { recursive: true });
 copyDirectory(distDir, libDir);
 await installNodeRuntime(nodeDir, target);
-writeLaunchers();
+writeLaunchers(target);
 copyRequiredFile(
   path.join(sourceRoot, 'LICENSE'),
   path.join(packageRoot, 'LICENSE'),
@@ -213,8 +213,8 @@ function extractNodeArchive(archivePath, destination) {
   execFileSync('tar', ['-xf', archivePath, '-C', destination]);
 }
 
-function writeLaunchers() {
-  if (process.platform === 'win32') {
+function writeLaunchers(desktopTarget) {
+  if (desktopTarget.startsWith('win32-')) {
     fs.writeFileSync(
       path.join(binDir, 'qwen.cmd'),
       '@echo off\r\nsetlocal\r\nset "ROOT=%~dp0.."\r\n"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*\r\nexit /b %ERRORLEVEL%\r\n',

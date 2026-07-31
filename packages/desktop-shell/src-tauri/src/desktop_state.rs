@@ -152,6 +152,13 @@ fn saved_window_state(
                 ..previous.clone()
             };
         }
+        return WindowState {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            x: position.x,
+            y: position.y,
+            maximized: true,
+        };
     }
     WindowState {
         width: size.width.max(MIN_WIDTH),
@@ -176,12 +183,20 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("Failed to write desktop settings: {error}"))?;
     if let Err(error) = fs::rename(&temporary, path) {
         if cfg!(windows) && path.exists() {
-            fs::remove_file(path).map_err(|remove_error| {
-                format!("Failed to replace desktop settings: {remove_error}")
+            let backup = path.with_extension(format!(
+                "json.{}.bak",
+                NEXT_WRITE_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::rename(path, &backup).map_err(|backup_error| {
+                format!("Failed to prepare desktop settings replacement: {backup_error}")
             })?;
-            fs::rename(&temporary, path).map_err(|rename_error| {
-                format!("Failed to replace desktop settings: {rename_error}")
-            })?;
+            if let Err(rename_error) = fs::rename(&temporary, path) {
+                let _ = fs::rename(&backup, path);
+                return Err(format!(
+                    "Failed to replace desktop settings: {rename_error}"
+                ));
+            }
+            let _ = fs::remove_file(backup);
         } else {
             return Err(format!("Failed to replace desktop settings: {error}"));
         }
@@ -243,6 +258,21 @@ mod tests {
         assert_eq!(state.height, 700);
         assert_eq!(state.x, 10);
         assert_eq!(state.y, 20);
+        assert!(state.maximized);
+    }
+
+    #[test]
+    fn maximized_first_save_uses_default_normal_size() {
+        let state = saved_window_state(
+            None,
+            PhysicalPosition::new(40, 50),
+            PhysicalSize::new(2560, 1440),
+            true,
+        );
+        assert_eq!(state.width, 1280);
+        assert_eq!(state.height, 820);
+        assert_eq!(state.x, 40);
+        assert_eq!(state.y, 50);
         assert!(state.maximized);
     }
 
