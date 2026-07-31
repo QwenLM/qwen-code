@@ -61,6 +61,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/side-task',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/side-task',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/cd',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/cd',

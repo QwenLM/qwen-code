@@ -3164,13 +3164,17 @@ describe('qwen-triage verify round-3 hardening', () => {
       'QWEN_VERIFY_CHROMIUM',
     );
 
-    // And the skill must stop calling captures optional, must name the
-    // gate, and must forbid the install the agent cannot complete.
+    // And the skill must stop calling captures optional.
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).toContain('Produce these whenever you ran a harness');
-    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
-    expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
+    // The TERMINAL capture route no longer depends on this browser at all —
+    // it is @xterm/headless + sharp, so the skill must not gate captures on
+    // QWEN_VERIFY_CHROMIUM or the agent skips when the browser is absent.
+    // The variable and its install stay for a future web-UI capture; see
+    // scripts/verify-capture.mjs for why the terminal route needs neither.
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
   });
 
   // The browser step's require.resolve + cli.js join is otherwise guarded
@@ -3380,6 +3384,38 @@ describe('qwen-triage verify round-3 hardening', () => {
     // time — without freezing the reserve at a fixed minute count for every
     // future budget.
     expect(soft).toBeGreaterThanOrEqual(Math.floor(agentMinutes * 0.8));
+  });
+
+  // Third instance of one structural bug: an instruction placed outside the
+  // flow the agent actually follows. #7917 buried the /verify recommendation
+  // in a "local invocation ONLY" section; #8016 marked captures "Optionally";
+  // and captures still came out ZERO on two live runs (#7975, #8066) where
+  // the browser installed fine — because the plan the agent executes is the
+  // Scope-selection budget list, and that list had no capture line at all.
+  it('budgets evidence capture in scope selection, not only in the contract', () => {
+    const scope = verifySkill.slice(
+      verifySkill.indexOf('## Scope selection'),
+      verifySkill.indexOf('## Method'),
+    );
+    // A numbered budget item alongside the A/B, harnesses and gates.
+    expect(scope).toMatch(/^4\. \*\*Capture/m);
+    // The command, so budgeting does not mean budgeting for pipeline
+    // authoring — that is what made this cost ~5 minutes and never happen.
+    expect(scope).toContain('node scripts/verify-capture.mjs');
+    expect(scope).toContain('~2 minutes');
+    // Time reserved, and the failure that motivated it named — a rule
+    // stated without its failure reads as advice and gets skipped.
+    expect(scope).toContain('four live runs produced zero images');
+    // Bounded: the cap exists so "budget it" does not become eight images.
+    expect(scope).toMatch(/normally two, at most a handful/);
+
+    // And the report has somewhere to put it, or a produced capture has no
+    // referent and the naming rule means nothing.
+    const structure = verifySkill.slice(
+      verifySkill.indexOf('### report.md structure'),
+      verifySkill.indexOf('## Hard rules'),
+    );
+    expect(structure).toContain('Reference the capture of those cells here');
   });
 
   // Cleanups must never descend through a PR-writable parent, and an

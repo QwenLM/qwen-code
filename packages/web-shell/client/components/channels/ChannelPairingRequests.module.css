@@ -35,6 +35,12 @@
   gap: 4px;
 }
 
+.divider {
+  height: 1px;
+  margin-block: 2px;
+  background: var(--border);
+}
+
 .success {
   display: flex;
   align-items: center;
@@ -91,6 +97,44 @@
   background: var(--card);
 }
 
+.approval {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.approvalIdentity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.approvalIdentity > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.approvalSenderId,
+.allowlist {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.allowlist {
+  display: block;
+  margin-top: 5px;
+  color: var(--foreground);
+}
+
 .requestIdentity {
   display: flex;
   min-width: 0;
@@ -132,5 +176,10 @@
 
   .requestIdentity {
     grid-column: 1 / -1;
+  }
+
+  .approval {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
