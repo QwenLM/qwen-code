@@ -1322,33 +1322,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private migrateLegacyPublicationState(): void {
-    const channelsRoot = join(getGlobalQwenDir(), 'channels');
-    const encodedName = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
-    const sentinel = this.channelFilePath('github-state-migrated');
-    if (existsSync(sentinel)) return;
-    mkdirSync(dirname(sentinel), { recursive: true, mode: 0o700 });
-    let migrated = true;
-    for (const suffix of [
-      'github-pending-deliveries.json',
-      'github-audit.jsonl',
-    ]) {
-      const legacyPath = join(channelsRoot, `${encodedName}-${suffix}`);
-      const scopedPath = this.channelFilePath(suffix);
-      try {
+    try {
+      const channelsRoot = join(getGlobalQwenDir(), 'channels');
+      const encodedName = this.name
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 200);
+      const sentinel = this.channelFilePath('github-state-migrated');
+      if (existsSync(sentinel)) return;
+      mkdirSync(dirname(sentinel), { recursive: true, mode: 0o700 });
+      for (const suffix of [
+        'github-pending-deliveries.json',
+        'github-audit.jsonl',
+      ]) {
+        const legacyPath = join(channelsRoot, `${encodedName}-${suffix}`);
+        const scopedPath = this.channelFilePath(suffix);
         if (!existsSync(scopedPath) && existsSync(legacyPath)) {
           renameSync(legacyPath, scopedPath);
         }
-      } catch (err) {
-        migrated = false;
-        process.stderr.write(
-          `[Channel:${this.name}] legacy GitHub state migration failed: ${sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          )}\n`,
-        );
       }
+      writeFileSync(sentinel, '', { mode: 0o600 });
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] legacy GitHub state migration failed: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
     }
-    if (migrated) writeFileSync(sentinel, '', { mode: 0o600 });
   }
 
   private channelFilePath(suffix: string): string {

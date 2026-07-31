@@ -1304,6 +1304,14 @@ describe('GithubChannel', () => {
       );
     }
 
+    function stateDir(): string {
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        getWorkspaceScopeDirName('/tmp/test'),
+      );
+    }
+
     function pendingRecord(overrides: Record<string, unknown> = {}) {
       return {
         id: 'pending',
@@ -1929,8 +1937,14 @@ describe('GithubChannel', () => {
         'channels',
         'test-github-github-pending-deliveries.json',
       );
+      const legacyAuditPath = join(
+        process.env.QWEN_HOME!,
+        'channels',
+        'test-github-github-audit.jsonl',
+      );
       mkdirSync(join(legacyPath, '..'), { recursive: true });
       writeFileSync(legacyPath, JSON.stringify([pendingRecord()]));
+      writeFileSync(legacyAuditPath, '{"outcome":"posted"}\n');
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: {
           id: 2007,
@@ -1950,6 +1964,19 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(pendingPath())).toBe(false);
       expect(existsSync(legacyPath)).toBe(false);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '{"outcome":"posted"}\n',
+      );
+      expect(existsSync(legacyAuditPath)).toBe(false);
+      channel.disconnect();
+    });
+
+    it('keeps connecting when legacy state migration cannot write', async () => {
+      mkdirSync(join(stateDir(), '..'), { recursive: true });
+      writeFileSync(stateDir(), '');
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await expect(channel.connect()).resolves.toBeUndefined();
       channel.disconnect();
     });
 
