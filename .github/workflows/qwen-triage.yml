@@ -3342,8 +3342,15 @@ jobs:
           # on four line-independent guarantees:
           #   1. in PROSE every < is escaped, then only the structural tags
           #      the report uses as raw HTML (details/summary) are un-escaped
-          #      back to live tags — no other tag can form, so
-          #      <img>/<script>/onerror never render. & and > are left alone
+          #      back to live tags — no other tag can form in ordinary
+          #      prose, so <img>/<script>/onerror never render there. A
+          #      line-level inHtml flag tracks raw-HTML blocks opened by
+          #      details/summary: inside one, backtick lines are NOT fences
+          #      (CommonMark/GitHub reads them as literal text), so the
+          #      sanitizer prose-escapes their content instead of passing it
+          #      through escCode — closing the divergence where GitHub saw
+          #      live HTML the sanitizer treated as inert code. & and > are
+          #      left alone
           #      in prose (a decoded entity yields text, never markup, and an
           #      unescaped > cannot open a tag once < is escaped), which keeps
           #      &&, ->, and blockquotes readable. Inside code spans/fences
@@ -3355,9 +3362,12 @@ jobs:
           #      neutralizer). The break must stay global: the upsert greps
           #      the RAW body for the running marker and a fence prints
           #      verbatim, so a forged marker inside a fence must not survive;
-          #   3. in prose @ becomes &#64; — renders identically, never fires a
-          #      mention (a mention cannot fire under a code/pre ancestor, so
-          #      code keeps a literal @);
+          #   3. in prose @ gains a zero-width space (@&#8203;) — renders
+          #      identically, never fires a mention (GitHub decodes &#64;
+          #      back to @ before the mention filter runs, so the entity
+          #      alone was inert; the ZWSP breaks the mention token). A
+          #      mention cannot fire under a code/pre ancestor, so code
+          #      keeps a literal @;
           #   4. <details> folds are balanced over PROSE only — a </details>
           #      quoted in a code span/fence is inert text and is no longer
           #      counted — surplus closers are dropped (they would otherwise
@@ -3395,7 +3405,7 @@ jobs:
                   .replace(/</g, "&lt;")
                   .replace(/&lt;(\/?)(details|summary)>/g, "<$1$2>")
                   .replace(/&lt;!--/g, "&lt;!\\-\\-")
-                  .replace(/@/g, "&#64;");
+                  .replace(/@/g, "@&#8203;");
               }
               function escCode(s) {
                 return s.replace(/<!--/g, "&lt;!\\-\\-");
@@ -3437,16 +3447,19 @@ jobs:
               }
               const lines = text.split("\n");
               const out = [];
-              let inFence = false, fc = "", fl = 0;
+              let inFence = false, fc = "", fl = 0, inHtml = false;
               for (const line of lines) {
                 if (!inFence) {
-                  const m = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+                  if (inHtml && /^\s*$/.test(line)) inHtml = false;
+                  const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
                   if (m && !(m[1][0] === "`" && m[2].indexOf("`") !== -1)) {
                     inFence = true; fc = m[1][0]; fl = m[1].length;
                     out.push(escCode(line));
                     continue;
                   }
-                  out.push(proseLine(line));
+                  const rendered = proseLine(line);
+                  if (/^ {0,3}<\/?(details|summary)\b/.test(rendered)) inHtml = true;
+                  out.push(rendered);
                 } else {
                   const cm = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
                   if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;

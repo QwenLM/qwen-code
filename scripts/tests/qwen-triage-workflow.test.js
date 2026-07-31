@@ -1599,15 +1599,18 @@ describe('qwen-triage verify hardening', () => {
       let inFence = false;
       let fc = '';
       let fl = 0;
+      let inHtml = false;
       for (const line of s.split('\n')) {
         if (!inFence) {
-          const m = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+          if (inHtml && /^\s*$/.test(line)) inHtml = false;
+          const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
           if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
             inFence = true;
             fc = m[1][0];
             fl = m[1].length;
             continue;
           }
+          if (/^ {0,3}<\/?(details|summary)\b/.test(line)) inHtml = true;
           kept.push(line.replace(/`[^`]*`/g, ''));
         } else {
           const cm = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
@@ -1692,12 +1695,14 @@ describe('qwen-triage verify hardening', () => {
       // anywhere (broken globally, prose AND code), so the upsert grep for
       // the running marker cannot be forged from a fenced quote.
       expect(out).not.toContain('<!--');
-      // Security floor over PROSE: the mention is neutralized, no live
-      // non-allowlisted tag, and prose folds balance (the fenced </details>
-      // is NOT counted, so the genuinely unclosed fold still gets closed).
+      // Security floor over PROSE: the mention is neutralized by a ZWSP
+      // (GitHub decodes &#64; before the mention filter, so the entity alone
+      // was inert), no live non-allowlisted tag, and prose folds balance
+      // (the fenced </details> is NOT counted, so the genuinely unclosed
+      // fold still gets closed).
       const prose = stripCode(out);
       expect(prose).not.toContain('@everyone');
-      expect(prose).toContain('&#64;everyone');
+      expect(prose).toContain('@&#8203;everyone');
       expect(prose).not.toContain('<img');
       expect(prose.match(/<(?!\/?(details|summary)\b)[A-Za-z]/g)).toBe(null);
       const opens = prose.split('<details>').length - 1;
@@ -1717,6 +1722,32 @@ describe('qwen-triage verify hardening', () => {
       const holeProse = stripCode(holeOut);
       expect(holeProse.split('<details>').length).toBe(
         holeProse.split('</details>').length,
+      );
+
+      // HTML-block divergence: a fence opener inside a <details> HTML
+      // block is literal text per CommonMark/GitHub, not a fence. The
+      // sanitizer must prose-escape the content (neutralizing <img>)
+      // rather than passing it through escCode as inert code.
+      const htmlblk = join(dir, 'htmlblk.md');
+      writeFileSync(
+        htmlblk,
+        [
+          '<details>',
+          '<summary>fold</summary>',
+          '```',
+          '<img src=x onerror=alert(1)>',
+          '```',
+          '</details>',
+          '',
+        ].join('\n'),
+      );
+      const htmlOut = emit(htmlblk, 45000);
+      // The <img> is prose-escaped, not passed through as inert code.
+      expect(htmlOut).toContain('&lt;img src=x onerror=alert(1)>');
+      expect(htmlOut).not.toContain('<img');
+      // The fold balances: wrapper 1 open / 1 close, report fold balanced.
+      expect(htmlOut.split('<details>').length - 1).toBe(
+        htmlOut.split('</details>').length - 1,
       );
 
       // Mirror case: a surplus </details> with no open is dropped so it
