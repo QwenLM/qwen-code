@@ -574,6 +574,11 @@ function findNextUrlStart(
  * without the port, `:8443"abc secret@host` cuts at the closer inside the
  * password; without `lastIndexOf`, a closer in the password ends the span
  * whenever no later one exists on the line.
+ *
+ * A closer to the left of the last one can still be this URL's, when a second
+ * quoted span follows on the same line. That case is admitted separately, under
+ * the stricter test in `CREDENTIALED_AUTHORITY_AT_END` — the two signals above
+ * are what a *last* closer must carry, not what any closer must.
  */
 const URL_QUOTE_PAIRS = new Map([
   ['"', '"'],
@@ -594,6 +599,34 @@ const URL_QUOTE_PAIRS = new Map([
  */
 const PORT_AT_END = /:\d+$/;
 
+/**
+ * A whole credentialed authority ending in a port: `userinfo@host:port`.
+ *
+ * The `lastIndexOf` above is the *last* closer on the line, which is the wrong
+ * one as soon as a second quoted span follows — a quoted email being the case
+ * that occurs. Its span then holds an `@`, `PORT_AT_END` fails on the text
+ * between, and the closer carries no information, so the span runs to
+ * end-of-line and a later `:` becomes the username.
+ *
+ * Looking further left needs a stricter test than `PORT_AT_END` and the absence
+ * of an `@`, because the credentialed URL's own span contains an `@` and a
+ * password can end in `:digits` — `user:8443` is character-for-character a
+ * `host:port`. Requiring the userinfo *and* the host separates them: `user:8443`
+ * has no `@` at all, so only a span that is a complete authority qualifies.
+ *
+ * Which leaves the uncredentialed `"https://internal:8443" … "ops@company.com"`
+ * still wrong, as it is on base. There is no signal to separate its
+ * `internal:8443` from the pinned `user:8443`: identical shapes, and what
+ * follows the closer is prose in one case and the rest of a credential in the
+ * other. Widening this to accept a bare `host:port` fixes that message and
+ * leaves the password in the pinned one, which is the worse trade.
+ */
+const CREDENTIALED_AUTHORITY_AT_END = new RegExp(
+  String.raw`^[^\s/?#'"\x60<>]*:[^/?#]*?@` +
+    String.raw`${HOST_CHAR}(?:[\p{L}\p{N}\p{M}.-]*${HOST_CHAR})?:\d+$`,
+  'u',
+);
+
 function findUrlSegmentEnd(
   value: string,
   start: number,
@@ -612,10 +645,23 @@ function findUrlSegmentEnd(
 
   const closer = URL_QUOTE_PAIRS.get(before.slice(-1));
   if (closer !== undefined) {
-    const closed = value.lastIndexOf(closer, bound - 1);
-    if (closed >= afterMarker) {
-      const upTo = value.slice(afterMarker, closed);
-      if (PORT_AT_END.test(upTo) && !upTo.includes('@')) return closed;
+    const last = value.lastIndexOf(closer, bound - 1);
+    if (last >= afterMarker) {
+      const upTo = value.slice(afterMarker, last);
+      if (PORT_AT_END.test(upTo) && !upTo.includes('@')) return last;
+
+      // The last closer was not this URL's — a second quoted span follows. Walk
+      // left, but only a complete `userinfo@host:port` may end the span here: a
+      // closer inside a password reaches this walk too, and `PORT_AT_END` alone
+      // would cut at it.
+      let at = last - 1;
+      while (at >= afterMarker) {
+        const closed = value.lastIndexOf(closer, at);
+        if (closed < afterMarker) break;
+        const span = value.slice(afterMarker, closed);
+        if (CREDENTIALED_AUTHORITY_AT_END.test(span)) return closed;
+        at = closed - 1;
+      }
     }
   }
 

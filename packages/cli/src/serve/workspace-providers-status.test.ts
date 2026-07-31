@@ -1339,6 +1339,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('secret');
   });
 
+  it('keeps the host when a quoted email follows a quoted credentialed URL', async () => {
+    // `lastIndexOf` finds the *email's* closing quote, not the URL's. The text
+    // between then fails the port test, the closer carries nothing, and the span
+    // runs to end-of-line, where a later `:` becomes the username and the prose
+    // `@` its terminator — rewriting the host and deleting the contact text. The
+    // credential is stripped either way, so only asserting on the surviving host
+    // catches this.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Error at "https://admin:s3cr3t@internal:8443" - email "ops@company.com" for help';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Error at "https://internal:8443" - email "ops@company.com" for help',
+    );
+    expect(JSON.stringify(result)).not.toContain('s3cr3t');
+  });
+
   it('strips a quoted URL whose closing quote is on a later line', async () => {
     // The span still ends at the newline, so the only closer available is the
     // one inside the password. Taking it would end the span mid-credential.
