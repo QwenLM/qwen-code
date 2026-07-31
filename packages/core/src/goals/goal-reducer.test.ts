@@ -88,6 +88,28 @@ describe('goal reducer', () => {
     });
   });
 
+  it('clears lastReason when editing the objective', () => {
+    const previous = goalRecord({
+      goalId: 'g-1',
+      revision: 2,
+      lastReason: 'stale verifier rejection',
+    });
+    const next = reduceGoalControl(previous, {
+      request: {
+        action: 'edit',
+        objective: 'updated objective',
+        expectedGoalId: 'g-1',
+        expectedRevision: 2,
+      },
+      now: 300,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-300' },
+    });
+
+    expect(next?.lastReason).toBeUndefined();
+    expect(next?.objective).toBe('updated objective');
+  });
+
   it('creates a trimmed active goal only when no goal exists', () => {
     const next = reduceGoalControl(null, {
       request: { action: 'create', objective: '  ship  ' },

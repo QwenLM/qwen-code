@@ -9979,6 +9979,48 @@ describe('useGeminiStream', () => {
       }
     });
 
+    it('should not wipe a Goal turn terminal error in post-stream cleanup', async () => {
+      (mockConfig as any).getHookSystem = vi.fn(() => null);
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'Goal terminal error' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const goal: QueuedGoalTurn = {
+        kind: 'goal',
+        permit: { goalId: 'goal-cleanup', revision: 1, turnId: 'turn-cleanup' },
+        turnKey: 'goal-runtime:turn-cleanup',
+        continuationContext: 'continue toward the objective',
+      };
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          goal.continuationContext,
+          SendMessageType.Goal,
+          'prompt-id-goal-cleanup',
+          { goal },
+        );
+      });
+
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+        expect((errorItem as { hint?: string })?.hint).toBeUndefined();
+      });
+    });
+
     it('should memoize pendingHistoryItems', () => {
       mockUseReactToolScheduler.mockReturnValue([
         [],

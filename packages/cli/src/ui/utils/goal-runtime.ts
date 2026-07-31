@@ -14,8 +14,8 @@ export function shouldDisplayGoalStateCause(cause: GoalStateCause): boolean {
   switch (cause) {
     case 'turn_finished':
     case 'verifier_accept':
-    case 'verifier_reject':
       return false;
+    case 'verifier_reject':
     case 'create':
     case 'replace':
     case 'edit':

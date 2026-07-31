@@ -649,6 +649,7 @@ export const useGeminiStream = (
   // alongside lastTurnUserItemRef.
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
+  const goalTerminalErrorRef = useRef(false);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
   // Only 'gemini' (new assistant turn) gets a timestamp; 'gemini_content'
@@ -1832,6 +1833,8 @@ export const useGeminiStream = (
     ) => {
       if (submitType !== SendMessageType.Goal) {
         lastPromptErroredRef.current = true;
+      } else {
+        goalTerminalErrorRef.current = true;
       }
       // Persist any streamed reasoning (collapsed) above the error.
       commitPendingThought(userMessageTimestamp);
@@ -3150,6 +3153,7 @@ export const useGeminiStream = (
         }
 
         const finalQueryToSend = queryToSend;
+        goalTerminalErrorRef.current = false;
         if (submitType !== SendMessageType.Goal) {
           lastPromptRef.current = finalQueryToSend;
           lastPromptErroredRef.current = false;
@@ -3346,12 +3350,14 @@ export const useGeminiStream = (
             clearRetryCountdown();
           } else if (
             pendingRetryErrorItemRef.current &&
-            !lastPromptErroredRef.current
+            !lastPromptErroredRef.current &&
+            !goalTerminalErrorRef.current
           ) {
             // A countdown-originated error item lingers after the timer
             // expired and the retry succeeded. Clear it so it does not
             // stay on screen. Terminal errors (handleErrorEvent) set
-            // lastPromptErroredRef and are intentionally left visible.
+            // lastPromptErroredRef (or goalTerminalErrorRef for Goal turns)
+            // and are intentionally left visible.
             clearRetryCountdown();
           }
           const loopDetected = loopDetectedRef.current;

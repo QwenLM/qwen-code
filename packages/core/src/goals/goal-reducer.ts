@@ -96,6 +96,7 @@ export function reduceGoalControl(
       revision: current.revision + 1,
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
+      lastReason: undefined,
     });
   }
 

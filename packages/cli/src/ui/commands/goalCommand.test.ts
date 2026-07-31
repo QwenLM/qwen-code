@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   Config,
   GoalRuntime,
@@ -13,6 +13,23 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+
+const mockRegisterGoalHook = vi.hoisted(() => vi.fn());
+const mockGetActiveGoal = vi.hoisted(() => vi.fn());
+const mockGetLastGoalTerminal = vi.hoisted(() => vi.fn());
+const mockUnregisterGoalHook = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    registerGoalHook: mockRegisterGoalHook,
+    getActiveGoal: mockGetActiveGoal,
+    getLastGoalTerminal: mockGetLastGoalTerminal,
+    unregisterGoalHook: mockUnregisterGoalHook,
+  };
+});
 
 function goalSnapshot(
   overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
@@ -108,6 +125,13 @@ describe('parseGoalCommand', () => {
 });
 
 describe('goalCommand', () => {
+  beforeEach(() => {
+    mockRegisterGoalHook.mockReset();
+    mockGetActiveGoal.mockReset();
+    mockGetLastGoalTerminal.mockReset();
+    mockUnregisterGoalHook.mockReset();
+  });
+
   it('is available in interactive, non-interactive, and ACP modes', () => {
     expect(goalCommand.supportedModes).toEqual([
       'interactive',
@@ -130,6 +154,29 @@ describe('goalCommand', () => {
       });
     },
   );
+
+  it('strips the set keyword before forwarding to the legacy path in non-interactive mode', async () => {
+    mockRegisterGoalHook.mockReturnValue({
+      condition: 'Ship it',
+      setAt: Date.now(),
+    });
+    const config = {
+      getSessionId: () => 'test-session',
+      isTrustedFolder: () => true,
+      getDisableAllHooks: () => false,
+      getHookSystem: () => ({}),
+    } as unknown as Config;
+    const context = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: { config },
+    });
+
+    await goalCommand.action!(context, 'set Ship it');
+
+    expect(mockRegisterGoalHook).toHaveBeenCalledWith(
+      expect.objectContaining({ condition: 'Ship it' }),
+    );
+  });
 
   it('rejects invalid set and edit commands before runtime admission', async () => {
     const { runtime } = makeRuntime(noGoalSnapshot());

@@ -35,7 +35,7 @@ describe('waitForGoalRuntime', () => {
   it('keeps turn and verifier bookkeeping out of scrollback', () => {
     expect(shouldDisplayGoalStateCause('turn_finished')).toBe(false);
     expect(shouldDisplayGoalStateCause('verifier_accept')).toBe(false);
-    expect(shouldDisplayGoalStateCause('verifier_reject')).toBe(false);
+    expect(shouldDisplayGoalStateCause('verifier_reject')).toBe(true);
     expect(shouldDisplayGoalStateCause('create')).toBe(true);
     expect(shouldDisplayGoalStateCause('complete')).toBe(true);
     expect(shouldDisplayGoalStateCause('clear')).toBe(true);

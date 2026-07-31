@@ -269,8 +269,9 @@ export const goalCommand: SlashCommand = {
           `'/goal ${operation.kind}' is only available in interactive mode.`,
         );
       }
+      const legacyArgs = operation.kind === 'set' ? operation.objective : args;
       return (
-        (await runLegacyGoalCommand(context, args)) ?? {
+        (await runLegacyGoalCommand(context, legacyArgs)) ?? {
           type: 'message',
           messageType: 'info',
           content: 'Command executed successfully.',

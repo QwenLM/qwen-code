@@ -18,6 +18,7 @@ import {
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
+  MAX_GOAL_CONTINUATION_TURNS,
   type GoalEvidenceSource,
   type GoalJournal,
   type GoalTurnHost,
@@ -921,6 +922,30 @@ describe('goal runtime', () => {
     expect(host.inputs[1]?.verifierFeedback).toBe('retry');
     expect(observed).toHaveLength(1);
     expect(observed[0]?.activity).toBe('running');
+  });
+
+  it('transitions to usage_limited after exceeding the continuation turn budget', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
+
+    // Drive turns up to the budget cap.
+    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS; i++) {
+      const permit = host.started[host.started.length - 1];
+      expect(permit).toBeDefined();
+      await runtime.finishTurn(permit);
+    }
+
+    // Allow the async usage_limited transition to settle.
+    await vi.waitFor(() =>
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
+    );
+    expect(runtime.getSnapshot().goal?.lastReason).toContain(
+      String(MAX_GOAL_CONTINUATION_TURNS),
+    );
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
   });
 
   it('returns a bounded catalog without exposing full evidence content', async () => {
