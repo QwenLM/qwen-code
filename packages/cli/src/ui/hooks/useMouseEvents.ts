@@ -164,8 +164,16 @@ export function useMouseEvents(
   // transcript's focused ScrollableList (`bypassVpGate`) — would otherwise emit
   // raw control bytes into the captured output. Mirrors AlternateScreen's
   // `process.stdout.isTTY` guard so the non-TTY fallback stays byte-clean.
+  // Respect the ui.mouseTracking setting: when explicitly disabled, skip SGR
+  // mouse tracking so the terminal can handle right-click context menus and
+  // OSC 8 hyperlink clicks natively. Defaults to true when unset.
+  const mouseTrackingEnabled = settings?.merged.ui?.mouseTracking !== false;
   const enabled =
-    isActive && isRawModeSupported && vpGateOpen && Boolean(stdout.isTTY);
+    isActive &&
+    isRawModeSupported &&
+    vpGateOpen &&
+    mouseTrackingEnabled &&
+    Boolean(stdout.isTTY);
 
   useEffect(() => {
     if (!enabled) return;

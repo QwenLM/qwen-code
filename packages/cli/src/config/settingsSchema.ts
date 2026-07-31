@@ -1059,6 +1059,16 @@ const SETTINGS_SCHEMA = {
           'Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.',
         showInDialog: true,
       },
+      mouseTracking: {
+        type: 'boolean',
+        label: 'Mouse Tracking (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable SGR mouse tracking in the virtualized viewport for mouse wheel scrolling and scrollbar dragging. When enabled, the terminal cannot handle right-click context menus or OSC 8 hyperlink clicks natively. Disable if you need right-click or clickable URL links to work in your terminal.',
+        showInDialog: true,
+      },
       shellOutputMaxLines: {
         type: 'number',
         label: 'Shell Output Max Lines',

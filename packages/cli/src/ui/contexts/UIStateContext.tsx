@@ -133,6 +133,7 @@ export interface UIState {
   useTerminalBuffer: boolean;
   /** Whether the VP scrollbar is shown (auto-hides while idle). */
   showScrollbar?: boolean;
+  mouseTracking?: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;
