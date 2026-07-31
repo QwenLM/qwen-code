@@ -17,7 +17,6 @@ import type {
 } from './fileUtils.js';
 import {
   detectFileType,
-  getRangeReadByteLimit,
   isCacheableReadResult,
   processSingleFileContent,
 } from './fileUtils.js';
@@ -187,21 +186,18 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const standardFileSystem =
-          config.getFileSystemService() instanceof StandardFileSystemService;
-        const fileType = await detectFileType(fullPath);
-        const textHandleReadByteLimit = getRangeReadByteLimit(config);
-        const shouldUseTextHandle =
-          validatedIdentity &&
-          standardFileSystem &&
-          fileType === 'text' &&
-          Number.isFinite(textHandleReadByteLimit);
-        const shouldSnapshot =
-          validatedIdentity &&
-          !shouldUseTextHandle &&
-          (standardFileSystem || fileType !== 'text');
+        let shouldUseTextHandle = false;
+        let shouldSnapshot = false;
+        if (validatedIdentity) {
+          const standardFileSystem =
+            config.getFileSystemService() instanceof StandardFileSystemService;
+          const fileType = await detectFileType(fullPath);
+          shouldUseTextHandle = standardFileSystem && fileType === 'text';
+          shouldSnapshot =
+            !shouldUseTextHandle && (standardFileSystem || fileType !== 'text');
+        }
         const snapshot = shouldSnapshot
-          ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
+          ? await snapshotValidatedFile(fullPath, validatedIdentity!, signal)
           : undefined;
         if (shouldSnapshot && !snapshot) continue;
         let readResult;
@@ -210,15 +206,31 @@ export async function readManyFiles(
             ? () => matchesValidatedPathIdentity(fullPath, validatedIdentity)
             : undefined;
         if (shouldUseTextHandle) {
-          readResult = await readValidatedTextFileContent(
-            config,
-            fullPath,
-            validatedIdentity,
-            preserveUnsupportedImageForBridge,
-            signal,
-            displayPath,
-            textHandleReadByteLimit,
-          );
+          try {
+            readResult = await readValidatedTextFileContent(
+              config,
+              fullPath,
+              validatedIdentity!,
+              preserveUnsupportedImageForBridge,
+              signal,
+              displayPath,
+            );
+          } catch (error) {
+            if (signal?.aborted || isAbortError(error)) throw error;
+            const errorMessage = getErrorMessage(error);
+            readResult = {
+              contentParts: [
+                { text: `\nContent from ${displayPath}:\n` },
+                { text: `Error reading ${displayPath}: ${errorMessage}` },
+              ],
+              info: {
+                filePath: displayPath,
+                content: `Error reading ${displayPath}: ${errorMessage}`,
+                isDirectory: false,
+                error: errorMessage,
+              },
+            };
+          }
         } else {
           try {
             readResult = await readFileContent(
@@ -273,7 +285,6 @@ async function readValidatedTextFileContent(
   preserveUnsupportedImage = false,
   signal: AbortSignal | undefined,
   displayPath: string,
-  maxScanBytes: number,
 ): ReturnType<typeof readFileContent> {
   const source = await fs.promises.open(
     filePath,
@@ -299,7 +310,7 @@ async function readValidatedTextFileContent(
       {
         textFileHandle: source,
         textFileStats: stats,
-        textFileMaxScanBytes: maxScanBytes,
+        textFileMaxScanBytes: Math.max(1, stats.size),
       },
       filePath,
     );
@@ -313,15 +324,10 @@ async function matchesValidatedPathIdentity(
   expected: ReadManyFilesPathIdentity,
 ): Promise<boolean> {
   try {
-    const [canonicalPath, stats] = await Promise.all([
-      fs.promises.realpath(filePath),
-      fs.promises.stat(filePath),
-    ]);
-    return (
-      canonicalPath === filePath &&
-      stats.dev === expected.dev &&
-      stats.ino === expected.ino
-    );
+    const canonicalPath = await fs.promises.realpath(filePath);
+    if (canonicalPath !== filePath) return false;
+    const stats = await fs.promises.stat(canonicalPath);
+    return stats.dev === expected.dev && stats.ino === expected.ino;
   } catch {
     return false;
   }

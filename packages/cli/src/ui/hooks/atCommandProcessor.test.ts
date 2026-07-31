@@ -283,7 +283,7 @@ describe('handleAtCommand', () => {
     },
   );
 
-  it('should surface a byte-cap read error for a text file larger than 10MB', async () => {
+  it('should attach a truncated text file larger than 10MB', async () => {
     const filePath = await createTestFile(
       path.join(testRootDir, 'large.log'),
       'x'.repeat(11 * 1024 * 1024),
@@ -309,12 +309,10 @@ describe('handleAtCommand', () => {
           .join('')
       : '';
 
-    expect(processedText).toContain('Error reading file large.log');
-    expect(processedText).toContain(
-      'Locating the requested line window would read more than 25000 bytes',
-    );
+    expect(processedText).toContain('Showing lines 1-');
+    expect(processedText).toContain('... [truncated]');
     expect(result.shouldProceed).toBe(true);
-    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Error);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
   it('should only allow actual temp directory paths outside the workspace', async () => {

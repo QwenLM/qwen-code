@@ -327,9 +327,55 @@ describe('readManyFiles', () => {
       expect(readTextFileFromHandleSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           maxOutputBytes: Number.MAX_SAFE_INTEGER,
-          maxScanBytes: Number.MAX_SAFE_INTEGER,
+          maxScanBytes: approvedStats.size,
         }),
       );
+    });
+
+    it('keeps sibling files when one validated text file fails to open', async () => {
+      const good = await createTestFile('good.txt');
+      const bad = await createTestFile('bad.txt');
+      const goodStats = await fs.stat(good.absolutePath);
+      const badStats = await fs.stat(bad.absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const originalOpen = fs.open.bind(fs);
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args) => {
+          if (String(args[0]) === bad.absolutePath) {
+            const err: NodeJS.ErrnoException = new Error(
+              'EACCES: permission denied',
+            );
+            err.code = 'EACCES';
+            throw err;
+          }
+          return originalOpen(...args);
+        });
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [good.relativePath, bad.relativePath],
+          validatedPathIdentities: new Map([
+            [good.absolutePath, { dev: goodStats.dev, ino: goodStats.ino }],
+            [bad.absolutePath, { dev: badStats.dev, ino: badStats.ino }],
+          ]),
+        });
+        const text = contentToString(result.contentParts);
+
+        expect(text).toContain('Content of good.txt');
+        expect(text).toContain('Error reading');
+        expect(text).toContain('EACCES');
+        expect(result.files).toHaveLength(2);
+        expect(result.files[0]!.error).toBeUndefined();
+        expect(result.files[1]!.error).toContain('EACCES');
+        expect(result.error).toBeUndefined();
+      } finally {
+        openSpy.mockRestore();
+      }
     });
 
     it('keeps validated text reads on custom file systems on the original path', async () => {
