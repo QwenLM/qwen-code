@@ -271,6 +271,19 @@ export class HookSystem {
       : undefined;
   }
 
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionDeleteEvent(
+      deletedSessionId,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionDelete', result.finalOutput)
+      : undefined;
+  }
+
   /**
    * Fire a PreToolUse event - called before tool execution
    */
