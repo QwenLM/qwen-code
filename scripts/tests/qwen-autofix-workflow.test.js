@@ -5219,14 +5219,20 @@ describe('qwen-autofix workflow', () => {
     const skill = readAutofixSkill();
     const flatSkill = skill.replace(/\s+/g, ' ');
     const launchIndex = skill.indexOf('Launch exactly this command');
+    const flatLaunchIndex = flatSkill.indexOf('Launch exactly this command');
 
     expect(skill).toContain('disable-model-invocation: true');
     expect(skill).toContain('Mode: local working tree');
-    expect(skill).toContain('explicit confirmation');
-    expect(skill).toContain('bare `/autofix` invocation is not consent');
+    expect(flatSkill).toContain('explicit confirmation');
+    expect(skill).toContain('repository-defined build or test commands');
+    expect(skill).toContain('retains model credentials and network access');
+    expect(flatSkill).toContain('bare `/autofix` invocation is not consent');
     expect(skill).toContain('Git Bash/MSYS');
     expect(launchIndex).toBeGreaterThan(0);
-    expect(skill.indexOf('explicit confirmation')).toBeLessThan(launchIndex);
+    expect(flatLaunchIndex).toBeGreaterThan(0);
+    expect(flatSkill.indexOf('explicit confirmation')).toBeLessThan(
+      flatLaunchIndex,
+    );
     expect(skill.indexOf('Git Bash/MSYS')).toBeLessThan(launchIndex);
     expect(skill.slice(0, launchIndex)).toContain('`BLOCKED`');
     expect(skill).toContain(

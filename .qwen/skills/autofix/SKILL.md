@@ -36,12 +36,14 @@ review comments, and it does not use `/loop`.
    `git diff --cached --binary`, a content fingerprint covering
    `git diff --binary HEAD` plus every untracked file, and
    `git status --porcelain=v1 --untracked-files=all`. If status is empty, finish
-   `NO_CHANGES` without starting a review. If any untracked, non-ignored files
-   exist, list their paths and explain that review sends their contents to the
-   configured review models. Wait for the user's explicit confirmation before
-   continuing; a bare `/autofix` invocation is not consent to disclose
-   untracked contents. If the interaction mode cannot obtain confirmation, stop
-   `BLOCKED` without starting a review.
+   `NO_CHANGES` without starting a review. Explain that review may run
+   repository-defined build or test commands inside the Qwen sandbox, whose
+   process retains model credentials and network access. If any untracked,
+   non-ignored files exist, also list their paths and explain that review sends
+   their contents to the configured review models. Wait for the user's explicit
+   confirmation that they trust this repository and want to continue; a bare
+   `/autofix` invocation is not consent. If the interaction mode cannot obtain
+   confirmation, stop `BLOCKED` without starting a review.
 2. The bundled review workflow requires a POSIX shell. On Windows, continue only
    when the active shell is Git Bash/MSYS; otherwise stop `BLOCKED` with that
    requirement. Launch exactly this command with `run_shell_command` and
