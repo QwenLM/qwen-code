@@ -109,6 +109,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
 } from './bridgeTypes.js';
@@ -1346,7 +1347,7 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // it to a `BridgeOptions` knob the same way `maxPendingPromptsPerSession`
 // (the analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 /**
@@ -1379,7 +1380,7 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
-  // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
+  // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
   //              long-standing alias since the cap check is `>= max`).
@@ -2602,6 +2603,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sourceId?: string,
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
+    requestedSessionId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2658,8 +2660,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const request = telemetry.injectPromptContext({
               cwd: boundWorkspace,
               mcpServers: [],
-              ...(sourceType
-                ? { _meta: sessionSourceRequestMeta(sourceType, sourceId) }
+              ...(requestedSessionId || sourceType
+                ? {
+                    _meta: {
+                      ...sessionSourceRequestMeta(sourceType, sourceId),
+                      ...(requestedSessionId
+                        ? {
+                            [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                          }
+                        : {}),
+                    },
+                  }
                 : {}),
             });
             const response = await withTimeout(
@@ -5355,6 +5366,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         source.sourceId,
         req.worktree,
         req.branch,
+        req.sessionId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel

@@ -135,19 +135,22 @@ const escapeXml = (s) =>
 /** Collect the bytes to render: either a child command's output, or stdin. */
 function collectOutput(cmd) {
   if (cmd.length === 0) {
-    if (process.stdin.isTTY) usage('no command given and nothing piped to stdin');
+    if (process.stdin.isTTY)
+      usage('no command given and nothing piped to stdin');
     try {
       return readFileSync(0, 'utf8');
     } catch {
       usage('no command given and stdin is empty');
     }
   }
+  const env = { ...process.env };
+  delete env.NO_COLOR;
   const res = spawnSync(cmd[0], cmd.slice(1), {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     // Ask for colour without a pty: most tools honour one of these, and a
     // purpose-built harness emits ANSI unconditionally anyway.
-    env: { ...process.env, FORCE_COLOR: '1', CLICOLOR_FORCE: '1' },
+    env: { ...env, FORCE_COLOR: '1', CLICOLOR_FORCE: '1' },
   });
   if (res.error) {
     process.stderr.write(`verify-capture: ${res.error.message}\n`);

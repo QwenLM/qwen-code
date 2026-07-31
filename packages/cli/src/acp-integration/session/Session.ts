@@ -98,6 +98,7 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
+  evaluateToolInvocationGuard,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -7302,7 +7303,9 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
       opts?: {
+        errorType?: ToolErrorType;
         recordInvalidToolParams?: boolean;
+        status?: 'error' | 'cancelled';
         stopAfterPermissionCancel?: boolean;
       },
     ) => {
@@ -7319,10 +7322,10 @@ export class Session implements SessionContext {
         responseParts: errorParts,
         metadata: {
           callId,
-          status: 'error',
+          status: opts?.status ?? 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType: opts?.errorType,
         },
       });
       const loopDetected =
@@ -8155,6 +8158,33 @@ export class Session implements SessionContext {
             if (preHookResult.additionalContext) {
               debugLogger.debug(
                 `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
+              );
+            }
+          }
+
+          const toolInvocationGuard = this.config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId,
+                toolName: policyToolName,
+                args: invocation.params as Record<string, unknown>,
+                signal: activeToolAbortSignal,
+              },
+            );
+            if (activeToolAbortSignal.aborted) {
+              return earlyErrorResponse(
+                new Error('Tool invocation was cancelled'),
+                toolName,
+                { status: 'cancelled' },
+              );
+            }
+            if (!guardDecision.allowed) {
+              return earlyErrorResponse(
+                new Error(guardDecision.reason),
+                toolName,
+                { errorType: ToolErrorType.EXECUTION_DENIED },
               );
             }
           }
