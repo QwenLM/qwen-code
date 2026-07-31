@@ -912,7 +912,7 @@ const TRUNCATION_RETRY_LOOP_DIRECTIVE =
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
-  errorType: ToolErrorType | undefined,
+  errorType: ToolErrorType,
   artifacts?: ToolArtifact[],
   resultDisplay?: ToolResultDisplay,
 ): ToolCallResponseInfo => ({
@@ -4984,7 +4984,7 @@ export class CoreToolScheduler {
         let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
-          toolResult.error.type,
+          toolResult.error.type ?? ToolErrorType.UNKNOWN,
           failureHookArtifacts,
           typeof toolResult.returnDisplay === 'string'
             ? undefined
