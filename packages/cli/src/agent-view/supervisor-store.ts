@@ -340,15 +340,11 @@ async function readJsonRecord(
     const text = await fs.readFile(filePath, 'utf8');
     const parsed = JSON.parse(text);
     return isRecord(parsed) ? parsed : undefined;
-  } catch (error) {
-    if (
-      error instanceof SyntaxError ||
-      (isNodeError(error) &&
-        (error.code === 'ENOENT' || error.code === 'ENOTDIR'))
-    ) {
-      return undefined;
-    }
-    throw error;
+  } catch {
+    // Fail soft on any read or parse error: one corrupt or odd entry under
+    // jobs/ must not poison a full listing, which the supervisor would
+    // misread as "unreachable" and then answer with a duplicate spawn.
+    return undefined;
   }
 }
 
@@ -407,7 +403,10 @@ function normalizeSessionState(
   expectedSessionId: string,
 ): AgentViewSessionStateFile | undefined {
   if (!raw) return undefined;
-  const sessionId = stringValue(raw['sessionId']) ?? expectedSessionId;
+  // The directory name (already sanitized) is the source of truth; trusting
+  // the file's sessionId would let one directory impersonate another and mix
+  // per-session files across directories.
+  const sessionId = expectedSessionId || stringValue(raw['sessionId']);
   const projectCwd = stringValue(raw['projectCwd']);
   const originalCwd = stringValue(raw['originalCwd']);
   const activeCwd = stringValue(raw['activeCwd']);

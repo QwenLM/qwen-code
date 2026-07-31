@@ -103,7 +103,7 @@ describe('Agent View supervisor server', () => {
     }
   });
 
-  it('allows worker sideband operations without auth', async () => {
+  it('rejects worker sideband operations when no authorizer is registered', async () => {
     const { dir, socketPath } = await makeSocketPath();
     cleanupPaths.push(dir);
     const handler = {
@@ -119,15 +119,57 @@ describe('Agent View supervisor server', () => {
 
     await server.listen();
     try {
+      // Sideband ops carry prompt text and approval outcomes, so they fail
+      // closed until a per-session token validator is registered.
       await expect(
         callAgentViewSupervisor(socketPath, 'workerEvent', {
           type: 'heartbeat',
           sessionId: 'session-1',
         }),
+      ).rejects.toMatchObject({ code: 'unauthorized' });
+      expect(handler.workerEvent).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('delegates worker sideband authorization to the registered validator', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      workerEvent: vi.fn(() => ({ received: true })),
+    };
+    const server = createAgentViewSupervisorServer(handler, {
+      socketPath,
+      authToken: 'secret-token',
+      authorizeSideband: (_op, params) => params?.['token'] === 'session-token',
+    });
+
+    await server.listen();
+    try {
+      await expect(
+        callAgentViewSupervisor(socketPath, 'workerEvent', {
+          type: 'heartbeat',
+          sessionId: 'session-1',
+          token: 'wrong-token',
+        }),
+      ).rejects.toMatchObject({ code: 'unauthorized' });
+      expect(handler.workerEvent).not.toHaveBeenCalled();
+
+      await expect(
+        callAgentViewSupervisor(socketPath, 'workerEvent', {
+          type: 'heartbeat',
+          sessionId: 'session-1',
+          token: 'session-token',
+        }),
       ).resolves.toEqual({ received: true });
       expect(handler.workerEvent).toHaveBeenCalledWith({
         type: 'heartbeat',
         sessionId: 'session-1',
+        token: 'session-token',
       });
     } finally {
       await server.close();
@@ -497,6 +539,58 @@ describe('Agent View supervisor server', () => {
           socket.on('data', (chunk) => {
             attachedBytes += String(chunk);
           });
+          socket.resume();
+        },
+      ),
+    };
+    const server = createAgentViewSupervisorServer(handler, { socketPath });
+    await server.listen();
+    try {
+      const socket = net.createConnection(socketPath);
+      socket.setEncoding('utf8');
+      await new Promise<void>((resolve) => socket.once('connect', resolve));
+      socket.write(
+        `${JSON.stringify({
+          id: 'attach-request',
+          op: 'attachStream',
+          params: { sessionId: 'session-1' },
+        })}\nhello`,
+      );
+      await waitFor(() => attachedBytes === 'hello');
+      socket.destroy();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('preserves coalesced attach bytes for an async streaming handler', async () => {
+    const { dir, socketPath } = await makeSocketPath();
+    cleanupPaths.push(dir);
+    let attachedBytes = '';
+    const handler = {
+      status: vi.fn(() => ({})),
+      list: vi.fn(() => []),
+      shutdown: vi.fn(() => ({})),
+      attachStream: vi.fn(
+        async (
+          _params,
+          socket: import('node:net').Socket,
+          requestId: string,
+        ) => {
+          socket.write(
+            `${JSON.stringify({
+              id: requestId,
+              ok: true,
+              result: { attached: true },
+            })}\n`,
+          );
+          // A real attach handler awaits (read launch.json, reattach the PTY)
+          // before it can listen; the socket must stay paused until then.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          socket.on('data', (chunk) => {
+            attachedBytes += String(chunk);
+          });
+          socket.resume();
         },
       ),
     };
@@ -575,6 +669,7 @@ describe('Agent View supervisor server', () => {
               Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
             );
           });
+          socket.resume();
         },
       ),
     };

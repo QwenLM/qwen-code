@@ -239,6 +239,34 @@ describe('agent view supervisor store', () => {
     expect(states.map((state) => state.sessionId)).toEqual(['newer', 'older']);
   });
 
+  it('isolates an unreadable session entry instead of failing the list', async () => {
+    await writeAgentViewSessionState(
+      sessionState('healthy', { updatedAt: '2026-07-16T00:00:01.000Z' }),
+      { globalDir: tempDir },
+    );
+    // A directory where state.json should be makes readFile fail with EISDIR,
+    // which previously rejected the entire listing.
+    const bad = getAgentViewSessionPaths('bad', { globalDir: tempDir });
+    fs.mkdirSync(bad.statePath, { recursive: true });
+
+    await expect(
+      listAgentViewSessionStates({ globalDir: tempDir }),
+    ).resolves.toMatchObject([{ sessionId: 'healthy' }]);
+  });
+
+  it('trusts the session directory name over the state file contents', async () => {
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    const sessionDir = path.join(paths.jobsDir, 'dir-alpha');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionDir, 'state.json'),
+      JSON.stringify(sessionState('victim-session')),
+    );
+
+    const states = await listAgentViewSessionStates({ globalDir: tempDir });
+    expect(states.map((state) => state.sessionId)).toEqual(['dir-alpha']);
+  });
+
   it('includes roster entries in session snapshots', async () => {
     await writeAgentViewSessionState(sessionState('session-1'), {
       globalDir: tempDir,

@@ -14,7 +14,10 @@ import {
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
-import { writeAgentViewSessionState } from './supervisor-store.js';
+import {
+  getAgentViewSessionPaths,
+  writeAgentViewSessionState,
+} from './supervisor-store.js';
 
 describe('getAgentViewSupervisorSocketPath', () => {
   it('returns a named pipe on win32', () => {
@@ -53,6 +56,20 @@ describe('getAgentViewSupervisorSocketPath', () => {
     expect(
       getAgentViewSupervisorSocketPath({ globalDir, platform: 'linux' }),
     ).toBe(getAgentViewSupervisorSocketPath({ globalDir, platform: 'linux' }));
+  });
+
+  it('isolates the tmpdir fallback socket in a per-uid directory', () => {
+    if (process.platform === 'win32') return;
+    const globalDir = path.join(os.tmpdir(), `qwen-${'x'.repeat(200)}`);
+    const socketPath = getAgentViewSupervisorSocketPath({
+      globalDir,
+      platform: 'linux',
+    });
+    const uid = process.getuid?.();
+    expect(socketPath).toContain(
+      `${path.sep}qwen-agent-view-${uid}${path.sep}`,
+    );
+    expect(socketPath.endsWith('.sock')).toBe(true);
   });
 });
 
@@ -118,6 +135,23 @@ describe('createAgentViewSupervisorHandler', () => {
         platform: process.platform,
       }),
     );
+  });
+
+  it('reports status even when a jobs entry cannot be read', async () => {
+    const globalDir = await makeGlobalDir();
+    await writeSession(globalDir);
+    // A directory where state.json should be makes the read fail with EISDIR;
+    // status must stay healthy rather than wedge on the bad entry.
+    const bad = getAgentViewSessionPaths('bad', { globalDir });
+    await fs.mkdir(bad.statePath, { recursive: true });
+    const handler = createAgentViewSupervisorHandler({ globalDir });
+
+    const status = (await handler.status()) as {
+      state: string;
+      sessions: number;
+    };
+    expect(status.state).toBe('ready');
+    expect(status.sessions).toBe(1);
   });
 
   it('acknowledges subscribers and registers a close handler', () => {

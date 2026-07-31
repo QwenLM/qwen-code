@@ -50,9 +50,15 @@ export interface AgentViewSupervisorHandler {
   rename?: AgentViewSupervisorHandlerMethod<'rename'>;
 }
 
+export type AgentViewSidebandAuthorizer = (
+  op: 'workerEvent' | 'workerControl',
+  params: Record<string, unknown> | undefined,
+) => boolean | Promise<boolean>;
+
 export interface AgentViewSupervisorServerOptions {
   socketPath: string;
   authToken?: string;
+  authorizeSideband?: AgentViewSidebandAuthorizer;
 }
 
 export interface AgentViewSupervisorServerHandle {
@@ -86,7 +92,14 @@ export function createAgentViewSupervisorServer(
       const line = buffer.subarray(0, newline).toString('utf8');
       const remaining = buffer.subarray(newline + 1);
       socket.pause();
-      void respondToLine(line, handler, socket, options.authToken, remaining);
+      void respondToLine(
+        line,
+        handler,
+        socket,
+        options.authToken,
+        options.authorizeSideband,
+        remaining,
+      );
     });
   });
 
@@ -129,6 +142,7 @@ export async function handleAgentViewSupervisorRequest(
   request: unknown,
   handler: AgentViewSupervisorHandler,
   authToken?: string,
+  authorizeSideband?: AgentViewSidebandAuthorizer,
 ): Promise<AgentViewSupervisorResponse> {
   if (!isRecord(request) || typeof request['id'] !== 'string') {
     return errorResponse('', 'invalid_request', 'Invalid supervisor request.');
@@ -149,7 +163,13 @@ export async function handleAgentViewSupervisorRequest(
       'Unknown supervisor operation.',
     );
   }
-  if (!isAuthorizedSupervisorRequest(request, authToken)) {
+  if (
+    !(await isAuthorizedSupervisorRequest(
+      request,
+      authToken,
+      authorizeSideband,
+    ))
+  ) {
     return errorResponse(
       request['id'],
       'unauthorized',
@@ -213,6 +233,7 @@ async function respondToLine(
   handler: AgentViewSupervisorHandler,
   socket: net.Socket,
   authToken: string | undefined,
+  authorizeSideband: AgentViewSidebandAuthorizer | undefined,
   remaining: Buffer,
 ): Promise<void> {
   const request = parseRequestLine(line);
@@ -256,6 +277,7 @@ async function respondToLine(
       request ?? JSON.parse(line),
       handler,
       authToken,
+      authorizeSideband,
     );
   } catch {
     response = errorResponse('', 'invalid_json', 'Invalid JSON request.');
@@ -305,7 +327,8 @@ async function handleStreamingOp<Op extends 'attachStream' | 'subscribe'>(
     // Preserve terminal bytes that arrived in the same packet as the request.
     socket.unshift(remaining);
   }
-  socket.resume();
+  // Leave the socket paused; the handler resumes it once its data listener is
+  // attached. Resuming here would drop bytes for a handler that awaits first.
   try {
     await method(parseSupervisorParams(op, request.params), socket, request.id);
   } catch (error) {
@@ -423,7 +446,9 @@ function isWindowsPipePath(socketPath: string): boolean {
 
 async function socketPathExists(socketPath: string): Promise<boolean> {
   try {
-    await fs.stat(socketPath);
+    // lstat (not stat) so a symlink at a shared-dir path is seen as the link
+    // itself rather than its target.
+    await fs.lstat(socketPath);
     return true;
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') return false;
@@ -468,11 +493,22 @@ function isCompatibleParsedRequest(request: {
   );
 }
 
-function isAuthorizedSupervisorRequest(
+async function isAuthorizedSupervisorRequest(
   request: Record<string, unknown>,
   authToken: string | undefined,
-): boolean {
-  if (!authToken || isWorkerSidebandOperation(request['op'])) return true;
+  authorizeSideband: AgentViewSidebandAuthorizer | undefined,
+): Promise<boolean> {
+  const op = request['op'];
+  if (isWorkerSidebandOperation(op)) {
+    // Fail closed: sideband ops carry prompt text and approval outcomes, so
+    // reject them until a per-session token validator is registered.
+    if (!authorizeSideband) return false;
+    return authorizeSideband(
+      op,
+      isRecord(request['params']) ? request['params'] : undefined,
+    );
+  }
+  if (!authToken) return true;
   return request['authToken'] === authToken;
 }
 
@@ -480,11 +516,13 @@ function isAuthorizedParsedRequest(
   request: { op: string; authToken?: string },
   authToken: string | undefined,
 ): boolean {
-  if (!authToken || isWorkerSidebandOperation(request.op)) return true;
+  if (!authToken) return true;
   return request.authToken === authToken;
 }
 
-function isWorkerSidebandOperation(op: unknown): boolean {
+function isWorkerSidebandOperation(
+  op: unknown,
+): op is 'workerEvent' | 'workerControl' {
   return op === 'workerEvent' || op === 'workerControl';
 }
 

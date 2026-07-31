@@ -77,9 +77,16 @@ export function getAgentViewSupervisorSocketPath(
     return primaryPath;
   }
 
+  // Fall back to a per-uid directory (created 0700 by prepareSocketPath) so a
+  // predictable socket in a shared tmpdir cannot be squatted or read by
+  // another local user.
+  const uid = process.getuid?.();
+  const fallbackDir =
+    uid === undefined ? `qwen-agent-view-${digest}` : `qwen-agent-view-${uid}`;
   return path.join(
     options.runtimeDir ?? os.tmpdir(),
-    `qwen-agent-view-${digest}.sock`,
+    fallbackDir,
+    `supervisor-${digest}.sock`,
   );
 }
 
