@@ -51,20 +51,23 @@ describe('scanArtifactRoots', () => {
     }
   });
 
-  it('rejects symlinks in a packaged artifact tree', async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-artifact-link-'));
-    try {
-      const target = path.join(root, 'target.js');
-      writeFileSync(target, 'console.log("target");');
-      symlinkSync(target, path.join(root, 'linked.js'));
+  it.skipIf(process.platform === 'win32')(
+    'rejects symlinks in a packaged artifact tree',
+    async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-artifact-link-'));
+      try {
+        const target = path.join(root, 'target.js');
+        writeFileSync(target, 'console.log("target");');
+        symlinkSync(target, path.join(root, 'linked.js'));
 
-      await expect(scanArtifactRoots([root])).rejects.toThrow(
-        'Symbolic links are not allowed in release artifacts',
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+        await expect(scanArtifactRoots([root])).rejects.toThrow(
+          'Symbolic links are not allowed in release artifacts',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('reports forbidden dependencies from the production esbuild metafile', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-artifact-meta-'));

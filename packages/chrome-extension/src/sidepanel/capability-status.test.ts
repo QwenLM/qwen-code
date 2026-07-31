@@ -43,13 +43,13 @@ describe('deriveCapabilityStatus', () => {
     });
   });
 
-  it('hides the warning when browser automation is configured', () => {
+  it('reports configured, not pending, when the ACP child has not started discovery', () => {
     expect(
-      deriveCapabilityStatus(true, [
-        'allow_origin',
-        'cdp_tunnel_over_ws',
-        'browser_automation_mcp',
-      ]),
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        { initialized: false, discoveryState: 'not_started', servers: [] },
+      ),
     ).toEqual({
       state: 'automation-configured',
       shellReady: true,
@@ -87,6 +87,7 @@ describe('deriveCapabilityStatus', () => {
             },
           ],
         },
+        'http://127.0.0.1:4170',
       ),
     ).toEqual({
       state: 'automation-connected',
@@ -111,6 +112,7 @@ describe('deriveCapabilityStatus', () => {
             },
           ],
         },
+        'http://127.0.0.1:4170',
       ),
     ).toEqual({
       state: 'automation-connected',
@@ -149,6 +151,7 @@ describe('deriveCapabilityStatus', () => {
             },
           ],
         },
+        'http://127.0.0.1:4170',
       ),
     ).toEqual({
       state: 'automation-pending',
@@ -173,6 +176,33 @@ describe('deriveCapabilityStatus', () => {
             },
           ],
         },
+        'http://127.0.0.1:4170',
+      ),
+    ).toEqual({
+      state: 'automation-shadowed',
+      shellReady: true,
+      warning:
+        'An existing chrome-devtools MCP configuration is taking precedence. Disable or rename it to use the extension tunnel.',
+    });
+  });
+
+  it('detects shadowing when a different daemon serves the /cdp endpoint', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--wsEndpoint', 'ws://127.0.0.1:4171/cdp'],
+              },
+            },
+          ],
+        },
+        'http://127.0.0.1:4170',
       ),
     ).toEqual({
       state: 'automation-shadowed',

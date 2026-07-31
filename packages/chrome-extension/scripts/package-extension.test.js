@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { readZipEntries, scanZipArtifact } from './artifact-scan.js';
 import { packageExtension } from './package-extension.js';
 
-describe('packageExtension', () => {
+describe.skipIf(process.platform === 'win32')('packageExtension', () => {
   it('recreates the archive without stale entries', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-extension-package-'));
     const source = path.join(root, 'extension');

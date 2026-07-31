@@ -72,7 +72,7 @@ describe('side panel capability status assets', () => {
     expect(script).toContain("features.includes('browser_automation_mcp')");
     expect(script).toContain('probeJson(`${baseUrl}/workspace/mcp`, token)');
     expect(script).toContain(
-      'deriveCapabilityStatus(true, features, mcpSnapshot)',
+      'deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl)',
     );
   });
 
@@ -205,6 +205,17 @@ describe('side panel capability status assets', () => {
         'Browser tools status could not be verified.',
       ),
     );
+
+    mcpResponse = {
+      ok: true,
+      value: { initialized: false, discoveryState: 'not_started', servers: [] },
+    };
+    await poll?.();
+    expect(
+      document
+        .getElementById('capability-warning')
+        ?.classList.contains('hidden'),
+    ).toBe(true);
 
     mcpResponse = { ok: true, value: { servers: [] } };
     await poll?.();

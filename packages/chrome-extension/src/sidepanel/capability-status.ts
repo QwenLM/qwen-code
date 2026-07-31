@@ -22,6 +22,8 @@ export interface CapabilityStatus {
 }
 
 export interface WorkspaceMcpSnapshot {
+  initialized?: boolean;
+  discoveryState?: string;
   servers?: ReadonlyArray<{
     name?: string;
     mcpStatus?: string;
@@ -33,6 +35,7 @@ export function deriveCapabilityStatus(
   daemonReachable: boolean,
   features: readonly string[],
   mcpSnapshot?: WorkspaceMcpSnapshot | null,
+  baseUrl?: string,
 ): CapabilityStatus {
   if (!daemonReachable) {
     return { state: 'down', shellReady: false, warning: null };
@@ -68,6 +71,21 @@ export function deriveCapabilityStatus(
   }
 
   if (mcpSnapshot) {
+    // The ACP child serves an idle placeholder ({ initialized: false,
+    // discoveryState: 'not_started', servers: [] }) before the first session,
+    // after the child is reaped, and on cold-start preheat timeout. That is
+    // "no data yet", not "adapter missing".
+    if (
+      mcpSnapshot.initialized === false ||
+      mcpSnapshot.discoveryState === 'not_started'
+    ) {
+      return {
+        state: 'automation-configured',
+        shellReady: true,
+        warning: null,
+      };
+    }
+
     const server = mcpSnapshot.servers?.find(
       (candidate) => candidate.name === 'chrome-devtools',
     );
@@ -79,9 +97,21 @@ export function deriveCapabilityStatus(
           'Browser tools are configured but the adapter is not connected.',
       };
     }
-    const usesTunnel = server.config?.args?.some((arg) =>
-      /\/cdp(?:$|[/?#])/.test(arg),
-    );
+    // The /cdp path pattern mirrors run-real-chrome.mjs's acceptance wait.
+    const usesTunnel = server.config?.args?.some((arg) => {
+      if (!/\/cdp(?:$|[/?#])/.test(arg)) return false;
+      if (!baseUrl) return true;
+      try {
+        const argUrl = new URL(arg);
+        const daemonUrl = new URL(baseUrl);
+        return (
+          argUrl.hostname === daemonUrl.hostname &&
+          argUrl.port === daemonUrl.port
+        );
+      } catch {
+        return true;
+      }
+    });
     if (!usesTunnel) {
       return {
         state: 'automation-shadowed',

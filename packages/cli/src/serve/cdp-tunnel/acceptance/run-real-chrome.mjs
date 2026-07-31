@@ -147,6 +147,7 @@ try {
           (server) =>
             server.name === 'chrome-devtools' &&
             server.mcpStatus === 'connected' &&
+            // Mirrors the tunnel-endpoint pattern in chrome-extension capability-status.ts.
             server.config?.args?.some((arg) => /\/cdp(?:$|[/?#])/.test(arg)),
         ),
       ).catch((error) => {

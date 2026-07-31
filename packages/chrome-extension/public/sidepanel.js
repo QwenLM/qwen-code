@@ -9,7 +9,8 @@
  * panel just frames the daemon once one is reachable and permits framing.
  *
  * Static asset (no bundler). Constants intentionally duplicate daemon/config.ts
- * (which the bundled service worker uses) to stay standalone.
+ * (which the bundled service worker uses). The capability model is loaded from
+ * sidepanel/capability-status.js via a script tag in sidepanel.html.
  */
 /* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, QwenCapabilityStatus */
 
@@ -35,8 +36,6 @@ const els = {
   copyLabel: document.getElementById('copy-label'),
   warning: document.getElementById('capability-warning'),
 };
-
-const { deriveCapabilityStatus } = QwenCapabilityStatus;
 
 /** Whether a URL points at the local loopback interface. */
 function isLoopback(baseUrl) {
@@ -91,6 +90,7 @@ async function probeJson(url, token) {
 
 /** Probe `/health` then `/capabilities` and reduce to an onboarding state. */
 async function probeState(baseUrl, token) {
+  const { deriveCapabilityStatus } = QwenCapabilityStatus;
   const health = await probeJson(`${baseUrl}/health`, token);
   if (!health) return deriveCapabilityStatus(false, []);
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
@@ -98,7 +98,7 @@ async function probeState(baseUrl, token) {
   const mcpSnapshot = features.includes('browser_automation_mcp')
     ? await probeJson(`${baseUrl}/workspace/mcp`, token)
     : undefined;
-  return deriveCapabilityStatus(true, features, mcpSnapshot);
+  return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl);
 }
 
 /** Render the welcome screen for a non-ready state. */
