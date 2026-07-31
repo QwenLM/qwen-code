@@ -63,6 +63,7 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['memory-project-scope', 'memoryProjectScope'],
   ['tls-cert', 'tlsCert'],
   ['tls-key', 'tlsKey'],
 ]);
@@ -418,6 +419,14 @@ export function parseServeFastPathArgs(
     mcpBudgetModeRaw !== 'enforce' &&
     mcpBudgetModeRaw !== 'warn' &&
     mcpBudgetModeRaw !== 'off'
+  ) {
+    return { kind: 'fallback' };
+  }
+
+  if (
+    options.memoryProjectScope !== undefined &&
+    options.memoryProjectScope !== 'git-root' &&
+    options.memoryProjectScope !== 'workspace'
   ) {
     return { kind: 'fallback' };
   }
