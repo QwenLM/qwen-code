@@ -2573,7 +2573,7 @@ jobs:
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 150
+    timeout-minutes: 300
     permissions:
       contents: 'read'
     strategy:
@@ -3374,13 +3374,48 @@ jobs:
         # revalidation in prepare) — no agent run, no marker, no comment.
         if: |-
           ${{ steps.prepare.outputs.stale != 'true' }}
-        # Bound the agent well below the 150-minute job timeout so a runaway agent
-        # fails THIS step (not the whole job), leaving the always() verify and
-        # report steps time to run and post a handoff. A job-level timeout would
-        # cancel those steps too and leave the loop silent. The 80-minute primary
-        # attempt plus one 20-minute repair leaves ~50 minutes for setup, two
-        # verification passes, and reporting.
-        timeout-minutes: 80
+        # Bound the agent below the job timeout so a runaway agent fails THIS
+        # step (not the whole job), leaving the always() verify and report
+        # steps time to run and post a handoff. A job-level timeout would
+        # cancel those steps too and leave the loop silent.
+        #
+        # This step timeout is the BACKSTOP for a runaway that ignores the
+        # agent's own timer; QWEN_TIMEOUT_MS below is the real budget. The two
+        # had drifted 30 minutes apart — run-agent.mjs defaults to 50 minutes
+        # against what was an 80-minute cap — so a third of the step was
+        # unreachable and every "ran out of time" round ended for a reason
+        # this file never mentioned.
+        #
+        # Every number below is measured, from one scan (run 30646547838):
+        #
+        #   setup (12 steps, ends at 'Post autofix status comment')  5-7m
+        #   Triage and address   #8005 round 9  50m03s (its own timer)
+        #                        #8211          12m45s
+        #   Verification gate    #8211          22m48s   <- the big one, and
+        #                        it had NO step bound of its own until now
+        #   push + report + finalize                     3-4s
+        #
+        # Setup runs in EARLIER steps, so it never competes with the agent for
+        # this cap. The old arithmetic ("80 + 20 leaves ~50 for setup, two
+        # verification passes, and reporting") was wrong once verification was
+        # measured: 7 + 80 + 23 + 20 + 23 = 153 against a 150-minute job, so
+        # the worst case already overran the job timeout — the silent-loop
+        # failure this whole design exists to avoid.
+        #
+        # Sized for the PRs that actually time out (47 and 35 changed files),
+        # since those are the ones the budget is for:
+        #
+        #   setup                    7
+        #   Triage and address     130  (120 budget + 10 margin)
+        #   Verification gate       60  (2.6x the measured 22m48s)
+        #   Repair                  20
+        #   Repair verification     60
+        #   report                   3
+        #   -------------------------------
+        #   worst case             280  => job timeout 300, and the job runs
+        #                                  on ubuntu-latest, whose own ceiling
+        #                                  is 360.
+        timeout-minutes: 130
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
@@ -3389,6 +3424,26 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
+          # The primary attempt's real budget. Left implicit until now, so it
+          # silently took run-agent.mjs's 50-minute default and left 30 of the
+          # step's 80 minutes unreachable. Stated here, next to the cap it
+          # must stay under, because a budget nobody can see is a budget
+          # nobody re-checks when the cap moves.
+          #
+          # 120m, with a 10-minute margin under the step backstop above —
+          # enough for the internal kill path, which only writes
+          # `agent-timeout` and exits (measured: the 3 seconds between the
+          # agent's death and the job's last step). That file is how the
+          # report step tells a timeout apart from a crash, so if the step
+          # cap ever fires first the round is misreported.
+          #
+          # Raising it does NOT make a doomed round cheaper — the workflow's
+          # own breakers exist because each exhausted budget pushes nothing —
+          # so TIMEOUT_WINDOW_CAP still stops the PR after 3 in a window. This
+          # buys rounds that were close to finishing, not rounds that were
+          # never going to. QWEN_AUTOFIX_TIMEOUT_MS overrides it without a
+          # code change; a malformed value falls back to the runner default.
+          QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
           SETTINGS_JSON: |-
@@ -3456,6 +3511,14 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         continue-on-error: true
+        # Unbounded until now, and the largest consumer in the job (22m48s
+        # measured on #8211). Left unbounded it eats the job timeout, and a
+        # JOB timeout cancels the always() reporters — the silent round this
+        # design exists to prevent. Bounded here it degrades to the ordinary
+        # verification-failure path instead: continue-on-error keeps the job
+        # alive, 'Finalize verification' sees an empty outcome, falls through
+        # its case to exit 1, and the always() report step posts.
+        timeout-minutes: 60
         run: |-
           bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
@@ -3560,6 +3623,8 @@ jobs:
         if: |-
           ${{ always() && steps.repair.outputs.attempted == 'true' }}
         continue-on-error: true
+        # Same bound as the first pass, for the same reason.
+        timeout-minutes: 60
         run: |-
           bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 

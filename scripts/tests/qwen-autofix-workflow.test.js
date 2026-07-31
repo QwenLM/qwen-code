@@ -8318,18 +8318,95 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {
-    // The primary + repair steps are bounded below the 150-minute job timeout
-    // so a runaway
-    // agent fails the STEP, not the job, leaving the always() report step time to
-    // run (a job-level timeout would cancel that step too and go silent).
-    // 150 is the review-address job timeout (unique; other jobs use 5/15/180).
-    expect(workflow).toContain('timeout-minutes: 150');
+    // Every long step is bounded BELOW the job timeout so a runaway fails its
+    // own STEP, leaving the always() report step time to run — a job-level
+    // timeout cancels that step too and the round goes silent.
+    //
+    // The invariant is the SUM, not any single number, and asserting the
+    // numbers individually is what let it break: with an unbounded
+    // verification gate measured at 22m48s, the worst case was
+    // 7 + 80 + 23 + 20 + 23 = 153 against a 150-minute job, and every
+    // assertion here still passed. Derive the whole budget from the workflow
+    // and check it fits.
     const addressStep =
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
-    expect(addressStep).toContain('timeout-minutes: 80');
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    // review-address is the LAST job in the file, so the terminator has to
+    // accept end-of-input as well as the next job header.
+    const jobBlock =
+      workflow.match(
+        /\n {2}review-address:\n[\s\S]*?(?=\n {2}\w[\w-]*:\n|$)/,
+      )?.[0] ?? '';
+    expect(jobBlock).toBeTruthy();
+    const jobCapMin = Number(
+      jobBlock.match(/\n {4}timeout-minutes: (\d+)/)?.[1],
+    );
+    expect(Number.isFinite(jobCapMin)).toBe(true);
+
+    // Sum every bounded step in the job. `always()` steps all run, so the
+    // worst case is the sum, not the max.
+    const stepCaps = [
+      ...jobBlock.matchAll(/\n {8}timeout-minutes: (\d+)/g),
+    ].map((m) => Number(m[1]));
+    // Primary, first verification, repair, repair verification. A step that
+    // loses its bound drops out of this list and shrinks the sum, so the
+    // count is asserted too.
+    expect(stepCaps).toHaveLength(4);
+    // Measured on run 30646547838: setup 5-7m in earlier steps, reporting 3-4s.
+    const SETUP_AND_REPORT_MIN = 10;
+    const worstCaseMin =
+      stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
+    expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
+    // ubuntu-latest cannot run a job longer than 6 hours whatever we write.
+    expect(jobCapMin).toBeLessThanOrEqual(360);
+
+    // Both verification gates must stay bounded: unbounded, the larger one
+    // consumed the job budget and took the always() reporters down with it.
+    for (const name of ['Verification gate', 'Repair verification gate']) {
+      const gate =
+        jobBlock.match(
+          new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n {6}- name: )`),
+        )?.[0] ?? '';
+      expect(gate, `${name} is missing from review-address`).toBeTruthy();
+      expect(gate).toMatch(/\n {8}timeout-minutes: \d+/);
+      // continue-on-error is what makes bounding them a graceful degrade
+      // rather than a new way to kill the job.
+      expect(gate).toContain('continue-on-error: true');
+    }
+
+    // The step cap is only a backstop for a runaway that ignores the agent's
+    // own timer; QWEN_TIMEOUT_MS is the budget that actually ends a round.
+    // Leaving it implicit let the two drift 30 minutes apart — run-agent.mjs
+    // defaults to 50 minutes against an 80-minute cap, so a third of the
+    // step was unreachable and every "ran out of time" round stopped early
+    // for a reason no one could see in this file. Derive BOTH numbers from
+    // the workflow rather than restating them: a pair asserted as two
+    // literals cannot catch the pair drifting.
+    const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
+    const budgetMs = Number(
+      addressStep.match(
+        /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
+      )?.[1],
+    );
+    expect(Number.isFinite(stepCapMin)).toBe(true);
+    expect(Number.isFinite(budgetMs)).toBe(true);
+    const marginMin = stepCapMin - budgetMs / 60000;
+    // Under the cap, or the cap fires first and the internal kill path never
+    // writes `agent-timeout` — the file the report step reads to tell a
+    // timeout apart from a crash.
+    expect(marginMin).toBeGreaterThan(0);
+    // ...and far enough under it that the kill path (which only writes that
+    // file and exits — measured at 3s on run 30646547838) always completes.
+    expect(marginMin).toBeGreaterThanOrEqual(5);
+    // The repair attempt stays inside its own smaller step the same way.
+    const repairCapMin = Number(
+      repairDeterministicRejectionStep.match(/timeout-minutes: (\d+)/)?.[1],
+    );
+    const repairMs = Number(
+      repairDeterministicRejectionStep.match(/QWEN_TIMEOUT_MS: '(\d+)'/)?.[1],
+    );
+    expect(repairCapMin - repairMs / 60000).toBeGreaterThan(0);
 
     // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
     // state transitions are exercised, not merely string-matched.
