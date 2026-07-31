@@ -141,6 +141,25 @@ function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
   return !hasCandidateOutput && !response.usageMetadata;
 }
 
+/**
+ * True when the chunk carries model output beyond ephemeral reasoning:
+ * any candidate part without the `thought` flag (text, functionCall,
+ * inlineData, …). Thought parts stream reasoning that is never recorded
+ * as the assistant's final response in history, so replaying a request
+ * that has produced only thought parts cannot duplicate user-visible
+ * output — the distinction the transport stream retry gate relies on
+ * (#7832).
+ */
+function hasNonThoughtCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => !part.thought),
+    ),
+  );
+}
+
 function syncFunctionCallsField(
   response: GenerateContentResponse,
   parts: readonly Part[],
@@ -2367,6 +2386,7 @@ export class GeminiChat {
               this.lastPromptTokenCount,
               this.lastOutputTokenCount,
               imageTokenEstimate,
+              /* conservative= */ true,
             )
           : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
@@ -2475,6 +2495,7 @@ export class GeminiChat {
 
         for (;;) {
           let streamYieldedChunk = false;
+          let streamYieldedContentChunk = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
@@ -2500,6 +2521,9 @@ export class GeminiChat {
               if (!isToolCallPreparationOnly(chunk)) {
                 streamYieldedChunk = true;
                 streamYieldedAnyChunk = true;
+              }
+              if (hasNonThoughtCandidateParts(chunk)) {
+                streamYieldedContentChunk = true;
               }
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
@@ -2604,8 +2628,14 @@ export class GeminiChat {
               });
             }
 
-            // Replay only curated socket-level failures before any response
-            // chunk has reached callers.
+            // Replay only curated socket-level failures before any
+            // user-visible content has reached callers. Thinking-only
+            // output does not block the replay: thought parts are
+            // ephemeral (never recorded as the assistant's response in
+            // history), so retrying after them cannot duplicate visible
+            // output — and thinking models can spend minutes in that
+            // phase, exactly when gateways close long-lived SSE
+            // connections (#7832).
             const isRetryableStreamTransportError =
               classification.kind === 'transport' &&
               classification.transportCode !== undefined &&
@@ -2614,7 +2644,7 @@ export class GeminiChat {
               );
             if (
               isRetryableStreamTransportError &&
-              !streamYieldedChunk &&
+              !streamYieldedContentChunk &&
               transportStreamRetryCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
             ) {
@@ -2629,6 +2659,7 @@ export class GeminiChat {
                 attempt: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
                 retryDelayMs: delayMs,
+                yieldedNonContentChunks: streamYieldedChunk,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
               });
@@ -2729,14 +2760,15 @@ export class GeminiChat {
             }
             if (isRetryableStreamTransportError) {
               // Reached only when neither retry fired: the budget is
-              // exhausted, or a chunk was already yielded and the partial
-              // cannot drive a continuation (functionCall partials are kept
-              // out of the stash by construction). Either way the error
-              // propagates.
+              // exhausted, or user-visible content was already yielded and
+              // the partial cannot drive a continuation (functionCall
+              // partials are kept out of the stash by construction;
+              // thinking-only output is replayed from zero above). Either
+              // way the error propagates.
               debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
-                retryDecision: streamYieldedChunk
-                  ? 'skipped_after_chunk'
+                retryDecision: streamYieldedContentChunk
+                  ? 'skipped_after_content'
                   : 'exhausted',
                 attempts: transportStreamRetryCount,
                 maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
@@ -3175,6 +3207,7 @@ export class GeminiChat {
                     self.lastPromptTokenCount,
                     self.lastOutputTokenCount,
                     recoveryImageTokenEstimate,
+                    /* conservative= */ true,
                   )
                 : 0;
             self.history.push(recoveryUserContent);

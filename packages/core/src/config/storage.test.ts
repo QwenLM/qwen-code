@@ -642,6 +642,35 @@ describe('Storage – runtime base dir async context isolation', () => {
     expect(b).toBe(path.join(cwdB, '.qwen-b'));
   });
 
+  it('lets a resolved runtime pin override later process env changes', async () => {
+    const pinned = path.resolve('workspace', 'pinned-runtime');
+    process.env['QWEN_RUNTIME_DIR'] = path.resolve(
+      'workspace',
+      'ambient-runtime',
+    );
+
+    await Storage.runWithResolvedRuntimeBaseDir(pinned, async () => {
+      expect(Storage.getRuntimeBaseDir()).toBe(pinned);
+      await Promise.resolve();
+      expect(new Storage('/workspace').getRuntimeBaseDir()).toBe(pinned);
+    });
+  });
+
+  it('keeps a resolved runtime pin across nested configurable contexts', () => {
+    const pinned = path.resolve('workspace', 'pinned-runtime');
+
+    Storage.runWithResolvedRuntimeBaseDir(pinned, () => {
+      Storage.runWithRuntimeBaseDir(
+        path.resolve('workspace', 'nested-runtime'),
+        undefined,
+        () => {
+          expect(Storage.getRuntimeBaseDir()).toBe(pinned);
+          expect(new Storage('/workspace').getRuntimeBaseDir()).toBe(pinned);
+        },
+      );
+    });
+  });
+
   it('pins an instance to the runtime dir where it was created', () => {
     const cwd = path.resolve('workspace', 'pinned');
     const runtimeDir = path.join(cwd, '.qwen-a');

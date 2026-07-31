@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
+import { ToolNames } from '../tool-names.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
@@ -62,6 +63,15 @@ export function isInForkExecution(): boolean {
 
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
+
+export function buildForkExecutionAllowlist(
+  requestedTools: readonly string[] | undefined,
+  declaredTools: readonly string[],
+): string[] {
+  return (requestedTools ?? declaredTools).filter(
+    (toolName) => toolName !== ToolNames.ASK_USER_QUESTION,
+  );
+}
 
 export type ForkTurns = 'all' | `${number}`;
 export type NormalizedForkTurns = 'all' | number;
@@ -186,6 +196,7 @@ export function selectForkHistory(
 export function buildForkedMessages(
   directive: string,
   assistantMessage: Content,
+  executionAllowedTools?: readonly string[],
 ): Content[] {
   const toolUseParts =
     assistantMessage.parts?.filter((part) => part.functionCall) || [];
@@ -215,7 +226,7 @@ export function buildForkedMessages(
     parts: [
       ...toolResultParts,
       {
-        text: buildChildMessage(directive),
+        text: buildChildMessage(directive, executionAllowedTools),
       },
     ],
   };
@@ -264,7 +275,20 @@ export function buildPinnedWorktreeNotice(worktreeCwd: string): string {
   );
 }
 
-export function buildChildMessage(directive: string): string {
+export function buildChildMessage(
+  directive: string,
+  executionAllowedTools?: readonly string[],
+): string {
+  const executionRestriction =
+    executionAllowedTools === undefined
+      ? ''
+      : executionAllowedTools.length === 0
+        ? `\n\nTOOL EXECUTION RESTRICTION:
+You may not execute any tools, even though tool declarations remain visible. Do not attempt tool calls.`
+        : `\n\nTOOL EXECUTION RESTRICTION:
+You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)}.
+Other visible tool declarations are unavailable to you. Do not call them.`;
+
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
 
@@ -272,7 +296,7 @@ You are a forked worker process. You are NOT the main agent.
 
 RULES (non-negotiable):
 1. You ARE the fork. Do NOT spawn sub-agents; execute directly.
-2. Do NOT converse, ask questions, or suggest next steps
+2. Do NOT converse, ask questions, or suggest next steps. The ${ToolNames.ASK_USER_QUESTION} tool cannot be executed. If missing user input blocks the directive, report the blocker to the parent in Issues and stop.
 3. Do NOT editorialize or add meta-commentary
 4. USE your tools directly: Bash, Read, Write, etc.
 5. If you modify files, report the files changed and verification performed. Do NOT create a commit unless the directive explicitly asks you to.
@@ -291,5 +315,5 @@ Output format (plain text labels, not markdown headers):
   Issues: <list — include only if there are issues to flag>
 </${FORK_BOILERPLATE_TAG}>
 
-${FORK_DIRECTIVE_PREFIX}${directive}`;
+${FORK_DIRECTIVE_PREFIX}${directive}${executionRestriction}`;
 }

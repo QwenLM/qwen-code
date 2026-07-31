@@ -84,6 +84,10 @@ import {
 } from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -737,6 +741,10 @@ describe('CoreToolScheduler', () => {
     visionBridge?: boolean;
     visionAgent?: boolean;
     onToolResultFullTurnModel?: (model: string) => boolean;
+    getActiveTodoWorkChainOwner?: (
+      promptId: string,
+      fallbackOwner?: string,
+    ) => string;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -829,6 +837,7 @@ describe('CoreToolScheduler', () => {
         isInteractive: () => true,
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
+        getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
       } as unknown as Config,
       onAllToolCallsComplete,
       onToolCallsUpdate,
@@ -858,6 +867,8 @@ describe('CoreToolScheduler', () => {
       promptId: 'unrelated-prompt',
     };
     let observedContext: InvocationContextV1 | undefined;
+    let observedPromptId: string | undefined;
+    let observedTodoWorkChainId: string | undefined;
     const tool = new MockTool({
       name: 'approval-context-tool',
       getDefaultPermission: async () => 'ask',
@@ -869,12 +880,15 @@ describe('CoreToolScheduler', () => {
       }),
       execute: async () => {
         observedContext = getInvocationContext();
+        observedPromptId = promptIdContext.getStore();
+        observedTodoWorkChainId = todoWorkChainContext.getStore();
         return { llmContent: 'ok', returnDisplay: 'ok' };
       },
     });
     const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
       toolsByName: new Map([[tool.name, tool]]),
       approvalMode: ApprovalMode.DEFAULT,
+      getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
     });
 
     await runWithInvocationContext(invocationContext, () =>
@@ -896,13 +910,17 @@ describe('CoreToolScheduler', () => {
       'awaiting_approval',
     )) as WaitingToolCall;
 
-    await runWithInvocationContext(unrelatedContext, () =>
-      waiting.confirmationDetails.onConfirm(
-        ToolConfirmationOutcome.ProceedOnce,
+    await todoWorkChainContext.run('stale-work-chain', () =>
+      runWithInvocationContext(unrelatedContext, () =>
+        waiting.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
       ),
     );
 
     expect(observedContext).toEqual(invocationContext);
+    expect(observedPromptId).toBe(invocationContext.promptId);
+    expect(observedTodoWorkChainId).toBe('mapped-work-chain');
   });
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
@@ -3964,6 +3982,11 @@ describe('CoreToolScheduler', () => {
       returnDisplay: 'alpha output',
     });
     const executeB = vi.fn().mockRejectedValue(new Error('beta failed'));
+    const executeC = vi.fn().mockResolvedValue({
+      llmContent: 'gamma failed',
+      returnDisplay: 'gamma failed',
+      error: { message: 'gamma failed' },
+    });
     const toolsByName = new Map<string, MockTool>([
       [
         'alpha',
@@ -3981,6 +4004,14 @@ describe('CoreToolScheduler', () => {
           execute: executeB,
         }),
       ],
+      [
+        'gamma',
+        new MockTool({
+          name: 'gamma',
+          kind: Kind.Read,
+          execute: executeC,
+        }),
+      ],
     ]);
     const messageBus = {
       request: vi.fn().mockImplementation(
@@ -3995,11 +4026,15 @@ describe('CoreToolScheduler', () => {
       ),
     };
     const onAllToolCallsComplete = vi.fn();
+    const recordToolResult = vi.fn();
     const { scheduler } = createSchedulerForLegacyToolTests({
       toolsByName,
       messageBus,
       disableHooks: false,
       onAllToolCallsComplete,
+      chatRecordingService: {
+        recordToolResult,
+      } as unknown as ChatRecordingService,
     });
 
     await scheduler.schedule(
@@ -4015,6 +4050,13 @@ describe('CoreToolScheduler', () => {
           callId: 'call-beta',
           name: 'beta',
           args: { value: 'b' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-failure',
+        },
+        {
+          callId: 'call-gamma',
+          name: 'gamma',
+          args: { value: 'c' },
           isClientInitiated: false,
           prompt_id: 'prompt-batch-failure',
         },
@@ -4050,10 +4092,36 @@ describe('CoreToolScheduler', () => {
                 error_type: ToolErrorType.UNHANDLED_EXCEPTION,
               }),
             }),
+            expect.objectContaining({
+              tool_name: 'gamma',
+              status: 'error',
+              tool_response: expect.objectContaining({
+                error: 'gamma failed',
+                error_type: ToolErrorType.UNKNOWN,
+              }),
+            }),
           ],
         },
       }),
     );
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(
+      completedCalls.find((call) => call.request.callId === 'call-gamma'),
+    ).toMatchObject({
+      status: 'error',
+      response: {
+        errorType: ToolErrorType.UNKNOWN,
+      },
+    });
+    expect(
+      recordToolResult.mock.calls.find(
+        ([, metadata]) => metadata?.callId === 'call-gamma',
+      )?.[1],
+    ).toMatchObject({
+      status: 'error',
+      errorType: ToolErrorType.UNKNOWN,
+    });
   });
 
   it('queues new tool calls while a PostToolBatch hook is still running', async () => {

@@ -19,10 +19,6 @@
   --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
   --chat-editor-attachments-max-height: 136px;
-  --dac-glow-on: 0;
-  --dac-glow-pulse: 0;
-  --dac-g1: #6a78ff;
-  --dac-g2: #8a7bff;
   --chat-send-button-disabled-foreground: var(--secondary-foreground);
   --chat-send-button-foreground: #fafafa;
 }
@@ -43,146 +39,45 @@
   padding: 12px;
 }
 
-.dacAura,
-.dacHalo {
+.specularEffect {
+  position: absolute;
+  inset: -20px;
+  z-index: 3;
+  overflow: visible;
   pointer-events: none;
 }
 
-.dacAura {
+.specularEffect::before {
   position: absolute;
-  inset: -50px;
-  z-index: 0;
-  opacity: calc(var(--dac-glow-on) * (0.66 + var(--dac-glow-pulse) * 0.34));
-  -webkit-mask: radial-gradient(
-    ellipse 56% 64% at center,
-    transparent 28%,
-    #000 48%,
-    transparent 94%
-  );
-  mask: radial-gradient(
-    ellipse 56% 64% at center,
-    transparent 28%,
-    #000 48%,
-    transparent 94%
-  );
-  will-change: opacity;
-}
-
-.dacAura::before,
-.dacAura::after {
-  position: absolute;
-  inset: 0;
+  inset: 20px;
+  border-radius: 12px;
   content: '';
+  opacity: 0;
+  transition: opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1);
   will-change: opacity;
 }
 
-.dacAura::before {
-  background: color-mix(in srgb, var(--dac-g1) 58%, transparent);
-  -webkit-mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px);
-  -webkit-mask-composite: source-in;
-  mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px);
-  mask-composite: intersect;
-  opacity: 1;
-  transition: opacity 0.2s ease;
-}
-
-.dacAura::after {
-  background: color-mix(in srgb, var(--dac-g1) 66%, transparent);
-  -webkit-mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(
-      90deg,
-      #000 0,
-      rgba(0, 0, 0, 0.08) 28px,
-      #000 56px
-    );
-  -webkit-mask-composite: source-in, source-in;
-  mask:
-    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px),
-    repeating-linear-gradient(
-      90deg,
-      #000 0,
-      rgba(0, 0, 0, 0.08) 28px,
-      #000 56px
-    );
-  mask-composite: intersect, intersect;
-  opacity: 0;
-  animation: dac-aura-cols 2.4s linear infinite paused;
-  transition: opacity 0.2s ease;
-}
-
-.container[data-dac-typing] .dacAura::before {
-  opacity: 0;
-}
-
-.container[data-dac-typing] .dacAura::after {
-  opacity: 1;
-  animation-play-state: running;
-}
-
-.dacHalo {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  border-radius: inherit;
-  opacity: var(--dac-glow-on);
+.specularEffect[data-theme='light']::before {
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--dac-g2) 36%, transparent),
-    0 1px 5px color-mix(in srgb, var(--dac-g1) 18%, transparent),
-    0 6px 30px color-mix(in srgb, var(--dac-g1) 22%, transparent);
-  will-change: opacity;
+    0 0 0 4px rgba(205, 217, 255, 0.5),
+    0 16px 46px rgba(51, 92, 255, 0.08);
 }
 
-.dacHalo::after {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: 0 6px 40px color-mix(in srgb, var(--dac-g1) 14%, transparent);
-  content: '';
-  opacity: calc(var(--dac-glow-on) * var(--dac-glow-pulse));
-  will-change: opacity;
+.specularEffect[data-theme='dark']::before {
+  box-shadow:
+    0 0 0 4px rgba(83, 103, 159, 0.3),
+    0 18px 54px rgba(51, 92, 255, 0.18);
 }
 
-@keyframes dac-aura-cols {
-  from {
-    -webkit-mask-position:
-      0 0,
-      0 0,
-      0 0;
-    mask-position:
-      0 0,
-      0 0,
-      0 0;
-  }
-
-  to {
-    -webkit-mask-position:
-      0 0,
-      0 0,
-      56px 0;
-    mask-position:
-      0 0,
-      0 0,
-      56px 0;
-  }
+.container:hover .specularEffect::before,
+.container:focus-within .specularEffect::before {
+  opacity: 1;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .dacAura::after,
-  .container[data-dac-typing] .dacAura::after {
-    opacity: 0;
-    animation: none;
-  }
-
-  .container[data-dac-typing] .dacAura::before {
-    opacity: 1;
-  }
+.specularEffect canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .atPortalLayer {
@@ -208,7 +103,7 @@
 }
 
 :global([data-web-shell-toolbar-popover]) {
-  width: min(18rem, var(--radix-popover-content-available-width));
+  width: min(max-content, var(--radix-popover-content-available-width));
   max-height: var(--radix-popover-content-available-height);
   overflow: hidden;
 }
@@ -812,6 +707,7 @@
 }
 
 .editorArea {
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
@@ -819,6 +715,69 @@
   min-height: var(--chat-editor-input-min-height, 44px);
   padding: 4px 0;
   overflow: clip;
+}
+
+.typewriterPlaceholder {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  z-index: 1;
+  color: var(--chat-editor-text-dimmed, #666);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.6;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+
+.typewriterCaret {
+  display: inline-block;
+  margin-left: 1px;
+  color: #6785ff;
+}
+
+:global(.dark) .typewriterCaret {
+  color: rgba(205, 215, 255, 0.6);
+}
+
+.typewriterCaretFinished {
+  animation: typewriter-caret-blink 0.5s steps(1) 2 forwards;
+}
+
+.container[data-typewriter-visible] .editorArea :global(.cm-placeholder) {
+  opacity: 0;
+}
+
+.container[data-typewriter-visible] .mobileTextarea::placeholder {
+  color: transparent;
+}
+
+@keyframes typewriter-caret-blink {
+  0%,
+  48% {
+    opacity: 1;
+  }
+
+  49%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (pointer: coarse) {
+  .typewriterPlaceholder {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .specularEffect::before {
+    transition: none;
+  }
+
+  .typewriterCaretFinished {
+    animation: none;
+  }
 }
 
 .editorArea > :last-child {

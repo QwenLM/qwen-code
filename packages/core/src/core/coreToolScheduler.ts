@@ -70,6 +70,10 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -906,7 +910,7 @@ const TRUNCATION_RETRY_LOOP_DIRECTIVE =
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
-  errorType: ToolErrorType | undefined,
+  errorType: ToolErrorType,
   artifacts?: ToolArtifact[],
   resultDisplay?: ToolResultDisplay,
 ): ToolCallResponseInfo => ({
@@ -4217,6 +4221,15 @@ export class CoreToolScheduler {
         }
       }
 
+      const inheritedTodoWorkChainId = todoWorkChainContext.getStore();
+      const todoWorkChainId =
+        this.config.getActiveTodoWorkChainOwner?.(
+          scheduledCall.request.prompt_id,
+          inheritedTodoWorkChainId,
+        ) ??
+        inheritedTodoWorkChainId ??
+        scheduledCall.request.prompt_id;
+
       if (invocation instanceof ShellToolInvocation) {
         const setPidCallback = (pid: number) => {
           this.toolCalls = this.toolCalls.map((tc) =>
@@ -4250,20 +4263,28 @@ export class CoreToolScheduler {
           );
         };
         this.safelyAddToolArgumentsAttributes(span, invocation.params);
-        promise = invocation.execute(
-          execSignal,
-          liveOutputCallback,
-          shellExecutionConfig,
-          setPidCallback,
-          setPromoteAbortControllerCallback,
-          canPromoteForegroundShell,
+        promise = todoWorkChainContext.run(todoWorkChainId, () =>
+          promptIdContext.run(scheduledCall.request.prompt_id, () =>
+            invocation.execute(
+              execSignal,
+              liveOutputCallback,
+              shellExecutionConfig,
+              setPidCallback,
+              setPromoteAbortControllerCallback,
+              canPromoteForegroundShell,
+            ),
+          ),
         );
       } else {
         this.safelyAddToolArgumentsAttributes(span, invocation.params);
-        promise = invocation.execute(
-          execSignal,
-          liveOutputCallback,
-          shellExecutionConfig,
+        promise = todoWorkChainContext.run(todoWorkChainId, () =>
+          promptIdContext.run(scheduledCall.request.prompt_id, () =>
+            invocation.execute(
+              execSignal,
+              liveOutputCallback,
+              shellExecutionConfig,
+            ),
+          ),
         );
       }
 
@@ -4961,7 +4982,7 @@ export class CoreToolScheduler {
         let errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
-          toolResult.error.type,
+          toolResult.error.type ?? ToolErrorType.UNKNOWN,
           failureHookArtifacts,
           typeof toolResult.returnDisplay === 'string'
             ? undefined

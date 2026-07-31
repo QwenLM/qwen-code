@@ -50,6 +50,7 @@ import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
+  buildForkExecutionAllowlist,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
 import {
@@ -980,6 +981,7 @@ export class BackgroundAgentResumeService {
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
+          meta.executionAllowedTools,
         );
       } else {
         const resumeSubagentConfig =
@@ -1659,6 +1661,7 @@ export class BackgroundAgentResumeService {
     eventEmitter: AgentEventEmitter,
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
+    executionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1666,6 +1669,10 @@ export class BackgroundAgentResumeService {
     };
     const toolConfig: ToolConfig = {
       tools: [...runtime.toolNames],
+      executionAllowedTools: buildForkExecutionAllowlist(
+        executionAllowedTools,
+        runtime.toolNames,
+      ),
     };
 
     return AgentHeadless.create(
