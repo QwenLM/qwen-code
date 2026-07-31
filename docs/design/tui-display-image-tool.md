@@ -22,12 +22,13 @@ display value:
 ```
 
 Before returning success, the tool asks a CLI-injected provider whether the
-current terminal has a working renderer. Native protocols pass immediately;
-the fallback performs a small `chafa` render using the selected file. If no
-renderer is available, the tool returns an execution error so both the TUI and
-the model know that the image was not displayed. `llmContent` tells the model
-to use `read_file` if it needs to inspect the image. Image bytes and terminal
-escape sequences never enter model history or the persisted display value.
+current terminal has an available renderer. Native protocols pass immediately;
+the fallback checks that `chafa` is available on `PATH` without rendering the
+selected file. If no renderer is available, the tool returns an execution error
+so both the TUI and the model know that the image was not displayed.
+`llmContent` tells the model to use `read_file` if it needs to inspect the image.
+Image bytes and terminal escape sequences never enter model history or the
+persisted display value.
 
 `ToolMessage` recognizes the structured value and delegates it to a TUI
 component. The component revalidates the path against the current workspace

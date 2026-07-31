@@ -133,6 +133,12 @@ describe('terminalImageRenderer', () => {
         true,
       ),
     ).toBe(false);
+    expect(
+      supportsKittyImageProtocol(
+        { TERM: 'xterm-kitty', SSH_CLIENT: '10.0.0.1 51234 22' },
+        true,
+      ),
+    ).toBe(false);
     expect(supportsKittyImageProtocol({ TERM: 'xterm-kitty' }, false)).toBe(
       false,
     );

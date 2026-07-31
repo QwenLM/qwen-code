@@ -112,7 +112,7 @@ describe('DisplayImageTool', () => {
 
   it('rejects non-PNG and oversized files', async () => {
     const textPath = path.join(workspace, 'not-an-image.png');
-    await fs.writeFile(textPath, 'not a png');
+    await fs.writeFile(textPath, Buffer.from(`GIF89a${'x'.repeat(32)}`));
     const nonPng = await tool
       .build({ file_path: textPath })
       .execute(new AbortController().signal);
