@@ -152,6 +152,15 @@ export class BundledSkillLoader implements ICommandLoader {
                   ].join(', ')}`,
                 };
           }
+          const scheduler = this.config!.getCronScheduler();
+          if (match[1] !== 'status' && scheduler.disabled) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content:
+                'Autofix cannot start because scheduled tasks are disabled for this session. Restart Qwen Code and try again.',
+            };
+          }
           const resolved = await (
             this.options.resolveCurrentAutofixPullRequest ??
             resolveCurrentAutofixPullRequest
@@ -164,7 +173,6 @@ export class BundledSkillLoader implements ICommandLoader {
             };
           }
           const { pullRequest, repo } = resolved.value;
-          const scheduler = this.config!.getCronScheduler();
           const watchers = matchingAutofixWatchers(
             scheduler.list(),
             repo,
@@ -189,14 +197,6 @@ export class BundledSkillLoader implements ICommandLoader {
               type: 'message',
               messageType: 'info',
               content: `Autofix watcher is already on for ${repo}#${pullRequest.number}. ${watcherSummary(watchers[0])}`,
-            };
-          }
-          if (scheduler.disabled) {
-            return {
-              type: 'message',
-              messageType: 'error',
-              content:
-                'Autofix cannot start because scheduled tasks are disabled for this session. Restart Qwen Code and try again.',
             };
           }
 

@@ -641,8 +641,7 @@ describe('BundledSkillLoader', () => {
       expect(mockAddSessionAllowRule).toHaveBeenCalledWith('cron_create');
     });
 
-    it('rejects enabling Autofix when scheduled tasks are disabled', async () => {
-      resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
+    it('rejects enabling Autofix before resolving GitHub when scheduled tasks are disabled', async () => {
       scheduler.disabled = true;
 
       const result = await invokeAutofix('on');
@@ -653,7 +652,23 @@ describe('BundledSkillLoader', () => {
         content:
           'Autofix cannot start because scheduled tasks are disabled for this session. Restart Qwen Code and try again.',
       });
+      expect(resolveCurrentAutofixPullRequest).not.toHaveBeenCalled();
       expect(scheduler.create).not.toHaveBeenCalled();
+    });
+
+    it('reports watcher creation failures', async () => {
+      resolveCurrentAutofixPullRequest.mockResolvedValue(currentPullRequest);
+      scheduler.create.mockImplementationOnce(() => {
+        throw new Error('job store is full');
+      });
+
+      const result = await invokeAutofix('on');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Autofix could not start its watcher: job store is full',
+      });
     });
 
     it('does not create a duplicate watcher for the same pull request', async () => {

@@ -245,6 +245,20 @@ describe('Autofix prompt authority', () => {
     expect(deleteJob).toHaveBeenCalledWith('job-1');
   });
 
+  it('reports when a rejected watcher could not be confirmed disabled', async () => {
+    const watcherJob = job({ prompt: 'autofix tick mode=auto-push' });
+    const { config } = promptConfig(watcherJob, {
+      deleteJob: vi.fn().mockResolvedValue(false),
+    });
+
+    const result = await resolveAutofixCronPrompt(config, watcherJob);
+
+    expect(result?.displayText).toBe('Autofix rejected: job-1');
+    expect(result?.modelText).toContain(
+      'The watcher could not be confirmed disabled; use /autofix off.',
+    );
+  });
+
   it('pins repository identity in the immediate user-authorized prompt', () => {
     const watcher = parseAutofixWatcher(job());
     expect(watcher).not.toBeNull();
