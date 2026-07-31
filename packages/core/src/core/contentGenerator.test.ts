@@ -227,6 +227,35 @@ describe('createContentGenerator', () => {
     expect(openaiMockState.createCount).toBe(1);
   });
 
+  it('routes USE_OPENAI_RESPONSES to the Responses API generator', async () => {
+    // Regression guard for the import path / auth-type check in the
+    // USE_OPENAI_RESPONSES branch: a typo there would silently break
+    // generator creation only once a real method is invoked (the returned
+    // generator is a LazyContentGenerator), so this must exercise a call,
+    // not just check the returned object's shape.
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+      },
+      mockConfig,
+    );
+
+    const result = await generator.countTokens({
+      model: 'gpt-5',
+      contents: 'hello world',
+    });
+    expect(result.totalTokens).toBeGreaterThan(0);
+  });
+
   it('does not preload non-lazy content generators', async () => {
     const generator: ContentGenerator = {
       generateContent: vi.fn(),

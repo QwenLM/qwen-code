@@ -23,8 +23,9 @@ vi.mock('./responses-pipeline.js', () => ({
 }));
 
 const mockEmbeddingsCreate = vi.fn();
+const mockOpenAIConstructor = vi.fn();
 vi.mock('openai', () => ({
-  default: vi.fn().mockImplementation(() => ({
+  default: mockOpenAIConstructor.mockImplementation(() => ({
     embeddings: { create: mockEmbeddingsCreate },
   })),
 }));
@@ -179,6 +180,59 @@ describe('OpenAIResponsesContentGenerator', () => {
           contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
         }),
       ).rejects.toThrow(/Embedding error: network down/);
+    });
+
+    it('redacts proxy credentials from a thrown error message', async () => {
+      // The sibling openaiContentGenerator already redacts here; this
+      // generator's embedContent skipped it, leaking a configured proxy's
+      // credentials into the error surfaced to the caller/logs on failure.
+      mockEmbeddingsCreate.mockRejectedValue(
+        new Error('connect ECONNREFUSED http://user:secret@proxy.local:8080'),
+      );
+      await expect(
+        generator.embedContent({
+          model: 'text-embedding-ada-002',
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        }),
+      ).rejects.toThrow(/<redacted>@proxy\.local:8080/);
+    });
+
+    it('appends /v1 to a bare-origin baseUrl before constructing the OpenAI SDK client', async () => {
+      // This generator's own baseUrl convention (used by the streaming
+      // pipeline) is /v1-less, but the OpenAI SDK does not append /v1 to a
+      // custom baseURL on its own -- only to its own built-in default.
+      // Passing the bare origin straight through 404s every embedding call.
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const bareOriginGenerator = new OpenAIResponsesContentGenerator(
+        { ...makeGeneratorConfig(), baseUrl: 'https://api.openai.com' },
+        makeCliConfig(),
+      );
+      await bareOriginGenerator.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
+      );
+    });
+
+    it('does not append a second /v1 when baseUrl already has one', async () => {
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const generatorWithV1 = new OpenAIResponsesContentGenerator(
+        { ...makeGeneratorConfig(), baseUrl: 'https://api.openai.com/v1' },
+        makeCliConfig(),
+      );
+      await generatorWithV1.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
+      );
     });
   });
 

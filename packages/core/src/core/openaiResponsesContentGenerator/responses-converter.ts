@@ -92,11 +92,6 @@ export class ResponsesStreamState {
     const buf = this.funcCallArgs.get(outputIndex);
     if (buf) buf.args += delta;
   }
-
-  reset(): void {
-    this.responseId = null;
-    this.funcCallArgs.clear();
-  }
 }
 
 /**
@@ -167,7 +162,13 @@ export function convertResponsesEventToGemini(
         // non-compliant proxy doesn't silently drop the whole tool call.
         const id = buf?.id ?? fc.call_id;
         const name = buf?.name ?? fc.name;
-        const rawArgs = buf?.args ?? fc.arguments;
+        // `||` not `??`: initFunctionCall seeds buf.args to '', so a buffer
+        // that received output_item.added but no function_call_arguments.delta
+        // events (e.g. a non-compliant proxy that only sends output_item.done
+        // with the complete arguments) must still fall through to fc.arguments
+        // -- an empty string is not nullish and would otherwise short-circuit
+        // this fallback, sending an empty-args tool call to the model.
+        const rawArgs = buf?.args || fc.arguments;
         let args: Record<string, unknown> = {};
         try {
           args = JSON.parse(rawArgs) as Record<string, unknown>;
@@ -365,17 +366,34 @@ export function convertGeminiContentsToResponsesInput(
     const role = content.role === 'model' ? 'assistant' : 'user';
     const parts = content.parts ?? [];
 
+    // Text and image parts within one turn accumulate here and are flushed
+    // as a single 'message' item with a multi-part content array, rather
+    // than one 'message' item per part -- the Responses API treats separate
+    // message items as separate turns, so a {text, inlineData} pair (e.g.
+    // "What is in this image?" + the image) would otherwise become two
+    // consecutive user turns the model may not associate with each other.
+    // Flushed before any function_call/function_call_output/reasoning item
+    // so relative ordering within the turn is preserved.
+    let pendingContentParts: ResponsesApiContentPart[] = [];
+    const flushPendingMessage = () => {
+      if (pendingContentParts.length === 0) return;
+      const content: string | ResponsesApiContentPart[] =
+        pendingContentParts.length === 1 &&
+        pendingContentParts[0]!.type === 'input_text'
+          ? pendingContentParts[0]!.text
+          : pendingContentParts;
+      items.push({ type: 'message', role, content } as ResponsesApiMessageItem);
+      pendingContentParts = [];
+    };
+
     for (const part of parts) {
       if (typeof part === 'string') {
-        items.push({
-          type: 'message',
-          role,
-          content: part,
-        } as ResponsesApiMessageItem);
+        pendingContentParts.push({ type: 'input_text', text: part });
         continue;
       }
 
       if ('thought' in part && part.thought) {
+        flushPendingMessage();
         // Prior-turn reasoning can only be replayed as a real 'reasoning'
         // item if we captured its id + encrypted_content via thoughtSignature
         // when it first streamed in. If it's missing (older history, a model
@@ -410,14 +428,11 @@ export function convertGeminiContentsToResponsesInput(
       }
 
       if ('text' in part && part.text) {
-        items.push({
-          type: 'message',
-          role,
-          content: part.text,
-        } as ResponsesApiMessageItem);
+        pendingContentParts.push({ type: 'input_text', text: part.text });
       }
 
       if ('functionCall' in part && part.functionCall) {
+        flushPendingMessage();
         const callId =
           part.functionCall.id || `call_${Date.now()}_${callIdCounter++}`;
         items.push({
@@ -429,10 +444,24 @@ export function convertGeminiContentsToResponsesInput(
       }
 
       if ('functionResponse' in part && part.functionResponse) {
+        flushPendingMessage();
         const fr = part.functionResponse;
+        const responseRecord = fr.response as
+          | Record<string, unknown>
+          | null
+          | undefined;
         let output: string;
         if (typeof fr.response === 'string') {
           output = fr.response;
+        } else if (typeof responseRecord?.['output'] === 'string') {
+          // Unwrap the { output } envelope coreToolScheduler wraps tool
+          // results in (and { error } for failures), matching the sibling
+          // Chat Completions converter -- sending the raw JSON envelope
+          // instead double-encodes and quote-escapes tool output that is
+          // itself JSON, and costs extra tokens on every turn.
+          output = responseRecord['output'] as string;
+        } else if (typeof responseRecord?.['error'] === 'string') {
+          output = responseRecord['error'] as string;
         } else {
           output = JSON.stringify(fr.response ?? {});
         }
@@ -446,20 +475,32 @@ export function convertGeminiContentsToResponsesInput(
       if ('inlineData' in part && part.inlineData && role === 'user') {
         const mimeType = part.inlineData.mimeType ?? 'image/png';
         if (mimeType.startsWith('image/')) {
-          const contentParts: ResponsesApiContentPart[] = [
-            {
-              type: 'input_image',
-              image_url: `data:${mimeType};base64,${part.inlineData.data}`,
-            },
-          ];
-          items.push({
-            type: 'message',
-            role: 'user',
-            content: contentParts,
-          } as ResponsesApiMessageItem);
+          pendingContentParts.push({
+            type: 'input_image',
+            image_url: `data:${mimeType};base64,${part.inlineData.data}`,
+          });
+        } else {
+          // No input_file part type is wired up for this generator yet
+          // (unlike the sibling Chat Completions converter, which sends
+          // PDFs as a file part) -- rather than silently dropping the
+          // attachment with zero diagnostic, tell the model it was there
+          // but isn't supported so a "summarize my PDF" prompt gets an
+          // explanation instead of "I don't see a document".
+          pendingContentParts.push({
+            type: 'input_text',
+            text: `[Unsupported inline media type: ${mimeType}]`,
+          });
         }
       }
+
+      if ('fileData' in part && part.fileData && role === 'user') {
+        pendingContentParts.push({
+          type: 'input_text',
+          text: `[Unsupported file reference: ${part.fileData.mimeType ?? 'unknown mime type'}]`,
+        });
+      }
     }
+    flushPendingMessage();
   }
 
   return { instructions, input: items };

@@ -21,7 +21,10 @@ import {
   convertGeminiToolsToResponsesTools,
   cleanOrphanedFunctionCalls,
 } from './responses-converter.js';
-import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import {
+  buildRuntimeFetchOptions,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
@@ -167,7 +170,7 @@ export class ResponsesPipeline {
     streamState: ResponsesStreamState,
     signal?: AbortSignal,
   ): AsyncGenerator<GenerateContentResponse> {
-    const baseUrl = (this.config.baseUrl ?? 'https://api.openai.com')
+    const baseUrl = (this.config.baseUrl || 'https://api.openai.com')
       .replace(/\/v1\/?$/, '')
       .replace(/\/$/, '');
     const url = `${baseUrl}/v1/responses`;
@@ -207,8 +210,20 @@ export class ResponsesPipeline {
     if (runtimeOptions?.fetchOptions?.dispatcher) {
       fetchOpts.dispatcher = runtimeOptions.fetchOptions.dispatcher;
     }
+    // Use the fetch buildRuntimeFetchOptions pins alongside the dispatcher
+    // (same undici version as the dispatcher) rather than Node's global
+    // fetch -- Node's built-in undici can be a different major version than
+    // the bundled one, and handing it a foreign dispatcher throws `invalid
+    // onError method`.
+    const fetchFn =
+      (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ?? fetch;
 
-    const response = await fetch(url, fetchOpts as RequestInit);
+    let response: Response;
+    try {
+      response = await fetchFn(url, fetchOpts as RequestInit);
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
@@ -217,12 +232,59 @@ export class ResponsesPipeline {
       );
       (err as ResponsesApiError).status = response.status;
       (err as ResponsesApiError).responseBody = errBody;
-      throw err;
+      throw redactProxyError(err);
     }
 
     if (!response.body) {
       throw new Error('Responses API returned no body');
     }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    if (
+      contentType &&
+      !/text\/event-stream|application\/x-ndjson|application\/stream\+json/.test(
+        contentType,
+      )
+    ) {
+      throw new Error(
+        `Responses API returned non-SSE content-type: ${contentType}`,
+      );
+    }
+
+    const convertParsedFrame = (
+      eventType: ResponsesSSEEventType,
+      data: Record<string, unknown>,
+    ): GenerateContentResponse | null => {
+      const sseEvent: ResponsesSSEEvent = { event: eventType, data };
+      return convertResponsesEventToGemini(
+        sseEvent,
+        this.config.model,
+        streamState,
+      );
+    };
+
+    // Shared by both SSE framing styles this method has to accept: an
+    // `event: ` line followed by a blank-line-terminated `data: ` block
+    // (the standard-compliant shape), and a data-only `data: {"type":...}`
+    // line with no `event: ` line (the shape the OpenAI Responses API
+    // actually emits on the wire).
+    const parseSSEFrame = (
+      eventType: ResponsesSSEEventType,
+      dataStr: string,
+    ): GenerateContentResponse | null => {
+      try {
+        const data = JSON.parse(dataStr) as Record<string, unknown>;
+        return convertParsedFrame(eventType, data);
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          debugLogger.debug(
+            `Failed to parse SSE data: ${dataStr.substring(0, 200)}`,
+          );
+          return null;
+        }
+        throw redactProxyError(err);
+      }
+    };
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -259,15 +321,7 @@ export class ResponsesPipeline {
                   | ResponsesSSEEventType
                   | undefined;
                 if (eventType) {
-                  const sseEvent: ResponsesSSEEvent = {
-                    event: eventType,
-                    data,
-                  };
-                  const geminiResp = convertResponsesEventToGemini(
-                    sseEvent,
-                    this.config.model,
-                    streamState,
-                  );
+                  const geminiResp = convertParsedFrame(eventType, data);
                   if (geminiResp) {
                     yield geminiResp;
                   }
@@ -278,7 +332,7 @@ export class ResponsesPipeline {
                     `Failed to parse SSE data: ${dataContent.substring(0, 200)}`,
                   );
                 } else {
-                  throw err;
+                  throw redactProxyError(err);
                 }
               }
             }
@@ -286,31 +340,9 @@ export class ResponsesPipeline {
           }
 
           if (line.trim() === '' && currentEventType && dataAccumulator) {
-            try {
-              const data = JSON.parse(dataAccumulator) as Record<
-                string,
-                unknown
-              >;
-              const sseEvent: ResponsesSSEEvent = {
-                event: currentEventType,
-                data,
-              };
-              const geminiResp = convertResponsesEventToGemini(
-                sseEvent,
-                this.config.model,
-                streamState,
-              );
-              if (geminiResp) {
-                yield geminiResp;
-              }
-            } catch (err) {
-              if (err instanceof SyntaxError) {
-                debugLogger.debug(
-                  `Failed to parse SSE data: ${dataAccumulator.substring(0, 200)}`,
-                );
-              } else {
-                throw err;
-              }
+            const geminiResp = parseSSEFrame(currentEventType, dataAccumulator);
+            if (geminiResp) {
+              yield geminiResp;
             }
             currentEventType = null;
             dataAccumulator = '';
@@ -318,6 +350,17 @@ export class ResponsesPipeline {
             currentEventType = null;
             dataAccumulator = '';
           }
+        }
+      }
+
+      // The stream can close without a trailing blank line (a proxy that
+      // strips trailing whitespace, or an interrupted connection) -- flush
+      // any event still buffered so the final `response.completed` event
+      // (carrying usageMetadata/finishReason) isn't silently dropped.
+      if (currentEventType && dataAccumulator) {
+        const geminiResp = parseSSEFrame(currentEventType, dataAccumulator);
+        if (geminiResp) {
+          yield geminiResp;
         }
       }
     } finally {

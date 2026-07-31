@@ -20,7 +20,11 @@ import type {
 import type OpenAI from 'openai';
 import { ResponsesPipeline } from './responses-pipeline.js';
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
-import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import {
+  buildRuntimeFetchOptions,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
+import { extractTextFromContents } from '../../utils/extract-text-from-contents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('RESPONSES');
@@ -52,9 +56,18 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
       'openai',
       this.cliConfig.getProxy(),
     );
+    // This generator's own baseUrl convention is /v1-less (the streaming
+    // pipeline strips any trailing /v1 and appends /v1/responses itself),
+    // but the OpenAI SDK does not append /v1 to a custom baseURL on its
+    // own -- only to its own built-in default. Normalize the same way the
+    // streaming pipeline does so a bare-origin baseUrl still resolves to
+    // .../v1/embeddings instead of .../embeddings (404).
+    const baseURL = this.contentGeneratorConfig.baseUrl
+      ? `${this.contentGeneratorConfig.baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '')}/v1`
+      : undefined;
     this.openaiClient = new OpenAISDK({
       apiKey,
-      baseURL: this.contentGeneratorConfig.baseUrl,
+      baseURL,
       timeout: this.contentGeneratorConfig.timeout,
       maxRetries: this.contentGeneratorConfig.maxRetries,
       ...(runtimeOptions || {}),
@@ -98,36 +111,7 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    let text = '';
-    if (Array.isArray(request.contents)) {
-      text = request.contents
-        .map((content) => {
-          if (typeof content === 'string') return content;
-          if ('parts' in content && content.parts) {
-            return content.parts
-              .map((part) =>
-                typeof part === 'string'
-                  ? part
-                  : 'text' in part
-                    ? (part as { text?: string }).text || ''
-                    : '',
-              )
-              .join(' ');
-          }
-          return '';
-        })
-        .join(' ');
-    } else if (request.contents) {
-      if (typeof request.contents === 'string') {
-        text = request.contents;
-      } else if ('parts' in request.contents && request.contents.parts) {
-        text = request.contents.parts
-          .map((part) =>
-            typeof part === 'string' ? part : 'text' in part ? part.text : '',
-          )
-          .join(' ');
-      }
-    }
+    const text = extractTextFromContents(request.contents);
 
     const client = await this.getOpenAIClient();
     try {
@@ -145,9 +129,10 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
         embeddings: [{ values: first.embedding }],
       };
     } catch (error) {
-      debugLogger.error('Embedding error:', error);
+      const redactedError = redactProxyError(error);
+      debugLogger.error('Embedding error:', redactedError);
       throw new Error(
-        `Embedding error: ${error instanceof Error ? error.message : String(error)}`,
+        `Embedding error: ${redactedError instanceof Error ? redactedError.message : String(redactedError)}`,
       );
     }
   }
