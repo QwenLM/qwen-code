@@ -811,6 +811,56 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Context Providers', () => {
+    const renderRespondingInput = (
+      slashCommands: Array<{
+        name: string;
+        description: string;
+        kind: 'built-in';
+        canRunDuringStreaming?: boolean;
+      }>,
+    ) => {
+      const handleSlashCommand = vi.fn();
+      const submitQuery = vi.fn();
+      const addMessage = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand,
+        slashCommands,
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      return { handleSlashCommand, submitQuery, addMessage };
+    };
+
     it('provides AppContext with correct values', () => {
       const { unmount } = render(
         <AppContainer
@@ -1391,6 +1441,66 @@ describe('AppContainer State Management', () => {
         { submittedPrompt: '/btw quick side question' },
       );
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('runs opted-in slash commands outside the active turn while responding', () => {
+      const { handleSlashCommand, submitQuery, addMessage } =
+        renderRespondingInput([
+          {
+            name: 'settings',
+            description: 'Open settings',
+            kind: 'built-in',
+            canRunDuringStreaming: true,
+          },
+        ]);
+
+      capturedUIActions.handleFinalSubmit('/settings', {
+        submittedPrompt: '/settings',
+      });
+
+      expect(handleSlashCommand).toHaveBeenCalledWith('/settings');
+      expect(submitQuery).not.toHaveBeenCalled();
+      expect(addMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps opted-in slash commands queued when Ctrl+Q defers them', () => {
+      const { handleSlashCommand, submitQuery, addMessage } =
+        renderRespondingInput([
+          {
+            name: 'settings',
+            description: 'Open settings',
+            kind: 'built-in',
+            canRunDuringStreaming: true,
+          },
+        ]);
+
+      capturedUIActions.handleFinalSubmit('/settings', {
+        deferUntilIdle: true,
+        submittedPrompt: '/settings',
+      });
+
+      expect(addMessage).toHaveBeenCalledWith('/settings', true, '/settings');
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+      expect(submitQuery).not.toHaveBeenCalled();
+    });
+
+    it('keeps turn-dependent slash commands queued while responding', () => {
+      const { handleSlashCommand, submitQuery, addMessage } =
+        renderRespondingInput([
+          {
+            name: 'model',
+            description: 'Change model',
+            kind: 'built-in',
+          },
+        ]);
+
+      capturedUIActions.handleFinalSubmit('/model', {
+        submittedPrompt: '/model',
+      });
+
+      expect(addMessage).toHaveBeenCalledWith('/model', false, '/model');
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+      expect(submitQuery).not.toHaveBeenCalled();
     });
 
     it('submits slash commands immediately instead of queueing while idle', () => {

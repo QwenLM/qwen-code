@@ -255,24 +255,25 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                            | Matcher Target                                                 |
-| :------------------- | :---------------------------------------- | :------------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
-| `PostToolUse`        | After successful tool execution           | Tool id                                                        |
-| `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
-| `UserPromptSubmit`   | Before supported model invocations        | None                                                           |
-| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
-| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
-| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
-| `Stop`               | When Claude prepares to conclude response | None (always fires)                                            |
-| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
-| `SubagentStop`       | When subagent stops                       | Agent type                                                     |
-| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
-| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
-| `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
-| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
-| `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
-| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
+| Event                | Triggered When                                  | Matcher Target                                                 |
+| :------------------- | :---------------------------------------------- | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                           | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution                 | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                      | Tool id                                                        |
+| `UserPromptSubmit`   | Before supported model invocations              | None                                                           |
+| `SessionStart`       | When session starts or resumes                  | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                               | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `SessionDelete`      | After an explicitly selected session is deleted | None                                                           |
+| `MessageDisplay`     | Repeatedly, as the reply streams                | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response       | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                            | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                             | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction                  | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent                     | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown                 | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied                  | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created                 | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed         | None (always fires)                                            |
 
 ### Matcher Patterns
 
@@ -284,6 +285,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
 | Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
 | Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
+| Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                           |
 | Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
 | Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
 | Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
@@ -618,6 +620,20 @@ When sent to the model, injected `additionalContext` is appended as its own mess
 **Output Options**:
 
 - Standard hook output fields (typically not used for blocking)
+
+#### SessionDelete
+
+**Purpose**: Runs after an explicitly selected session has been permanently deleted. This event is fire-and-forget: output and failures cannot undo the deletion.
+
+**Event-specific fields**:
+
+```json
+{
+  "deleted_session_id": "the session that was deleted"
+}
+```
+
+The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it.
 
 #### MessageDisplay
 
