@@ -2362,6 +2362,13 @@ describe('qwen-triage verify hardening round 2', () => {
     // measures the harness, not the PR.
     expect(flat).toContain('Calibrate the replay before believing it');
 
+    // #8147 R6: the verbatim-extraction half of the workflow/CI bullet —
+    // a YAML parser, not retyping; bash --noprofile --norc plus the step's
+    // own set line. Without this the calibration half is pinned but the
+    // extraction discipline that feeds it is not.
+    expect(flat).toContain('a YAML parser, not retyping');
+    expect(flat).toContain('bash --noprofile --norc');
+
     // #8147 R6 §4: round 6 taught the sanitizer that a fence inside a
     // raw-HTML block is not a fence; the backtick code-span door next to
     // it was still open, and a list-nested fold never entered the state at
@@ -2380,6 +2387,13 @@ describe('qwen-triage verify hardening round 2', () => {
     // declined/deferred rows must be re-measured, not carried.
     expect(flat).toContain(
       'fixed / stands / worsened / superseded / declined-with-rationale',
+    );
+
+    // #8147 R6 §5: the enum alone does not pin the re-measurement rule —
+    // deleting "declined and deferred rows are not exempt" would leave
+    // the enum assertion green while the normative sentence is gone.
+    expect(flat).toContain(
+      'Declined and deferred rows are not exempt from re-measurement',
     );
 
     // #8147 R6 §6: the PR named links and images as the accepted rendering

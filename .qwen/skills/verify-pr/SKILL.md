@@ -213,6 +213,9 @@ differs only by the change under test; the verdict is the pair of counts.
   scanner that runs over input an outsider writes — a PR body, a diff, a
   log line, a filename — probe it with a **ladder** rather than a single
   case: the same hostile shape at 2 k, 3 k, 5 k, 20 k characters, timed.
+  Run each rung under `timeout <N>` and record the cap as the result
+  (`>N s`); the rung that hits the cap **is** the finding, and no rung is
+  worth more of the budget than that.
   The superlinear curve is the finding; one fast sample proves nothing.
   Measured example: a line matcher whose three parts could each match a
   space (`\s*`, a lazy `[^*\n]+?`, `\s*`) took 0.96 s, 3.2 s, 14.4 s, then
@@ -225,41 +228,6 @@ differs only by the change under test; the verdict is the pair of counts.
   remote and ran the same command. Then prove the fix behaviour-preserving
   by **enumerating the real inputs** and showing identical output on each,
   not by arguing the two patterns are equivalent.
-- **The bug report is a coverage specification — test its enumeration.**
-  A report usually names more than one case ("the same pattern was
-  observed with `write_file` and `run_shell_command`"), and those names are
-  falsifiable coverage claims the PR inherits. Build one fixture per named
-  case, parameterised by the dimensions the report itself supplies, and say
-  which ones the fix actually reaches. Measured example: a recovery guard
-  keyed on a prose-to-total length ratio was probed by holding the preamble
-  at the 1,898 characters the issue reported and varying only the tool —
-  `read_file` (98 c), `run_shell_command` (106 c) and a small `edit`
-  (196 c) were all declined, while the issue's own `edit` shape (491 c) and
-  `write_file` (1,135 c) recovered, with the threshold bisected at ~473
-  characters. The issue named `run_shell_command` explicitly, so the fix
-  covered half of what it was filed against — a scope finding that testing
-  the PR's own claim could never surface.
-- **Walk the PR's own Reviewer Test Plan step by step and report per
-  step.** It is a list of falsifiable claims the author already wrote down,
-  and the interesting outcome is the step that cannot be performed at all.
-  Measured example: step 3 asked the reviewer to insert real user input
-  into an active turn; no code path does that, and the "not reproducible"
-  cell became the round's sharpest finding — the feature's own completion
-  criterion was structurally unreachable, so an objective of the form
-  "stop once the user sends X" could never complete. A step you cannot run
-  is either a missing code path or a wrong plan; say which, and say the
-  plan needs fixing either way.
-- **Prove a negative by census, not by reading.** When the finding is that
-  something can never happen — a branch nothing reaches, an evidence kind
-  never produced, a request never sent — the static chain through the code
-  is the argument and a count over real runs is the proof. Measured
-  example: a verifier demanded evidence of kind `user_input`, whose only
-  producer sat behind a queue filter admitting slash commands only; the
-  chain said unreachable, and 30 verifier payloads captured from one
-  session carried exactly one kind, `delivered_output`, with zero
-  `user_input` records even though the user typed three messages during
-  that run. Report both, and state the window the census covers — an
-  absence claim is only as strong as the observations behind it.
 - If the changed branch is unreachable in the default setup (a fallback, a
   `dist` path, an error handler), **construct the configuration that
   reaches it** — drop the tsconfig mapping, break the primary path, force
@@ -308,15 +276,6 @@ differs only by the change under test; the verdict is the pair of counts.
   `chown -R` does not follow symlinks. What survived was content and quota
   abuse. A finding that names what it is _not_ is far harder to wave away
   than one that implies everything.
-- **Rank a defect's variants by observability, not by blast radius.** Where
-  one root cause yields both a loud failure and a quiet one, the quiet one
-  is the finding. Measured example: an unescaped non-greedy parser fed a
-  payload containing its own close tag either dropped a required argument —
-  rejected by schema validation, loud, recoverable — or silently truncated
-  the value and wrote a truncated file. Same bug; the second is the one to
-  fix first. This is the same ordering as the concurrency rule below, where
-  a race that fabricates a result outranks one that crashes: a wrong answer
-  nobody is told about outranks a failure that announces itself.
 - **An accepted-tradeoff list is a completeness claim — test its
   boundary.** When the description names the costs it accepts ("links and
   images will render"), enumerate the unnamed siblings of the same
@@ -405,6 +364,53 @@ differs only by the change under test; the verdict is the pair of counts.
   base-side command then returned **empty output** — which reads as "the PR
   changed this behaviour" and is quoted downstream as deterministic
   evidence. A race that fabricates a result outranks a race that crashes.
+
+### Scoping from the report and the plan
+
+- **The bug report is a coverage specification — test its enumeration.**
+  A report usually names more than one case ("the same pattern was
+  observed with `write_file` and `run_shell_command`"), and those names are
+  falsifiable coverage claims the PR inherits. Build one fixture per named
+  case, parameterised by the dimensions the report itself supplies, and say
+  which ones the fix actually reaches. Measured example: a recovery guard
+  keyed on a prose-to-total length ratio was probed by holding the preamble
+  at the 1,898 characters the issue reported and varying only the tool —
+  `read_file` (98 c), `run_shell_command` (106 c) and a small `edit`
+  (196 c) were all declined, while the issue's own `edit` shape (491 c) and
+  `write_file` (1,135 c) recovered, with the threshold bisected at ~473
+  characters. The issue named `run_shell_command` explicitly, so the fix
+  covered half of what it was filed against — a scope finding that testing
+  the PR's own claim could never surface.
+- **Walk the PR's own Reviewer Test Plan step by step and report per
+  step.** It is a list of falsifiable claims the author already wrote down,
+  and the interesting outcome is the step that cannot be performed at all.
+  Measured example: step 3 asked the reviewer to insert real user input
+  into an active turn; no code path does that, and the "not reproducible"
+  cell became the round's sharpest finding — the feature's own completion
+  criterion was structurally unreachable, so an objective of the form
+  "stop once the user sends X" could never complete. A step you cannot run
+  is either a missing code path or a wrong plan; say which, and say the
+  plan needs fixing either way.
+- **Prove a negative by census, not by reading.** When the finding is that
+  something can never happen — a branch nothing reaches, an evidence kind
+  never produced, a request never sent — the static chain through the code
+  is the argument and a count over real runs is the proof. Measured
+  example: a verifier demanded evidence of kind `user_input`, whose only
+  producer sat behind a queue filter admitting slash commands only; the
+  chain said unreachable, and 30 verifier payloads captured from one
+  session carried exactly one kind, `delivered_output`, with zero
+  `user_input` records even though the user typed three messages during
+  that run. Report both, and state the window the census covers — an
+  absence claim is only as strong as the observations behind it.
+- **Rank a defect's variants by observability, not by blast radius.** Where
+  one root cause yields both a loud failure and a quiet one, the quiet one
+  is the finding. Measured example: an unescaped non-greedy parser fed a
+  payload containing its own close tag either dropped a required argument —
+  rejected by schema validation, loud, recoverable — or silently truncated
+  the value and wrote a truncated file. Same bug; the second is the one to
+  fix first. This is the same ordering as the concurrency rule above, where
+  a race that fabricates a result outranks one that crashes: a wrong answer
+  nobody is told about outranks a failure that announces itself.
 
 ### Vacuity check on new/changed tests
 
@@ -656,7 +662,12 @@ since the merge-base, say so and re-measure there.
   it**: run the BASE arm first and require it to reproduce, byte for byte,
   a real artifact the production step already emitted (a posted comment,
   an uploaded file; in a follow-up round `previous-report.md` is exactly
-  this), and name the diffs you allowed (a run id, an assets block). A
+  this), and name the diffs you allowed (a run id, an assets block).
+  When no real emitted artifact is retrievable — a first round, no token,
+  no `previous-report.md`, or a step whose output the snapshot never
+  carries — say the replay is **uncalibrated** in _Not covered_ and name
+  what would have calibrated it. An uncalibrated replay is still worth
+  running; presenting it as calibrated is what is not allowed. A
   replay that cannot reproduce a known real output is measuring your
   harness, not the PR; one that can carries its calibration into every
   downstream cell. Then run whichever repo lint gates the container
