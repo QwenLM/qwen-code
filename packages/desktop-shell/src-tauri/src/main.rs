@@ -475,7 +475,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of, BOOTSTRAP_URL};
+    use super::{
+        is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
+        BOOTSTRAP_URL,
+    };
+    use std::sync::Mutex;
     use url::Url;
 
     #[test]
@@ -535,6 +539,49 @@ mod tests {
         ));
         assert!(!is_safe_external_url(
             &Url::parse("javascript:alert(1)").expect("javascript")
+        ));
+    }
+
+    #[test]
+    fn allows_bootstrap_but_not_a_runtime_url_before_origin_is_set() {
+        let origin = Mutex::new(None);
+        assert!(is_allowed_navigation(
+            &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
+            &origin,
+        ));
+        assert!(!is_allowed_navigation(
+            &Url::parse("http://127.0.0.1:49152/").expect("runtime"),
+            &origin,
+        ));
+    }
+
+    #[test]
+    fn allows_only_the_recorded_origin_once_it_is_set() {
+        let origin = Mutex::new(Some(
+            Url::parse("http://127.0.0.1:49152/").expect("origin"),
+        ));
+        assert!(is_allowed_navigation(
+            &Url::parse("http://127.0.0.1:49152/session/123").expect("same origin"),
+            &origin,
+        ));
+        assert!(!is_allowed_navigation(
+            &Url::parse("http://127.0.0.1:49153/").expect("different port"),
+            &origin,
+        ));
+        assert!(!is_allowed_navigation(
+            &Url::parse("https://example.com/").expect("external"),
+            &origin,
+        ));
+    }
+
+    #[test]
+    fn allows_bootstrap_even_after_origin_is_set() {
+        let origin = Mutex::new(Some(
+            Url::parse("http://127.0.0.1:49152/").expect("origin"),
+        ));
+        assert!(is_allowed_navigation(
+            &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
+            &origin,
         ));
     }
 }

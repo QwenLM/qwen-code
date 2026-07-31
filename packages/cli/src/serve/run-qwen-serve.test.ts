@@ -4729,6 +4729,15 @@ describe('runQwenServe runtime startup failures', () => {
       const getApi = await fetch(`${handle.url}/session`);
       expect(getApi.status).toBe(401);
 
+      // The pre-auth skip is method-scoped: a non-GET/HEAD request to a static
+      // path must still hit the deferred bearer gate while the runtime waits.
+      const postRoot = await fetch(`${handle.url}/`, { method: 'POST' });
+      expect(postRoot.status).toBe(401);
+      const postAsset = await fetch(`${handle.url}/assets/app.js`, {
+        method: 'POST',
+      });
+      expect(postAsset.status).toBe(401);
+
       const shell = await fetch(`${handle.url}/`);
       expect(shell.status).toBe(200);
       expect(await shell.text()).toBe('<html>shell</html>');

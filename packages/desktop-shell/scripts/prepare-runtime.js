@@ -58,7 +58,6 @@ if (!skipBuild) {
   execFileSync(process.execPath, [npm, 'run', 'bundle'], {
     cwd: sourceRoot,
     stdio: 'inherit',
-    env: { ...process.env, DEV: 'true' },
   });
   execFileSync(process.execPath, [npm, 'run', 'prepare:package'], {
     cwd: sourceRoot,
