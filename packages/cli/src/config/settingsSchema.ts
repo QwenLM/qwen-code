@@ -3346,6 +3346,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      SessionDelete: {
+        type: 'array',
+        label: 'Session Delete Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after an explicitly selected session is deleted.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
       PreCompact: {
         type: 'array',
         label: 'Pre Compact Hooks',

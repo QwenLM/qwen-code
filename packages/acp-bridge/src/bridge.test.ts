@@ -86,6 +86,7 @@ import {
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import {
+  REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -1283,6 +1284,27 @@ describe('createAcpSessionBridge', () => {
 
     await bridge.shutdown();
     expect(handles[0]?.killed).toBe(true);
+  });
+
+  it('injects REQUESTED_SESSION_ID_META_KEY into newSession _meta when sessionId is set', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel();
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    });
+
+    expect(handles[0]?.agent.newSessionCalls[0]!._meta).toMatchObject({
+      [REQUESTED_SESSION_ID_META_KEY]: '550e8400-e29b-41d4-a716-446655440000',
+    });
+
+    await bridge.shutdown();
   });
 
   it('reuses the existing session under sessionScope:single', async () => {
