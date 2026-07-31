@@ -3374,9 +3374,13 @@ jobs:
           #      quoted in a code span/fence is inert text and is no longer
           #      counted — surplus closers are dropped (they would otherwise
           #      close the wrapping fold early) and unclosed opens are closed
-          #      at the end; a dangling code fence is closed too, so a
-          #      malformed report can neither swallow the
-          #      footer nor escape its wrapper.
+          #      at the end, so a malformed report can neither swallow the
+          #      footer nor escape its wrapper. A fence still open at EOF is
+          #      a reliable signal the flat scanner diverged from GitHub's
+          #      container-aware parser (which closes a list-nested fence at
+          #      the container's end, not at EOF), so the sanitizer exits
+          #      non-zero and emit_report degrades to the escaped fallback
+          #      rather than guessing.
           # Accepted tradeoff (named, not accidental): rendering promotes the
           # report from inert text to parsed markdown, so [links](…) and
           # ![images](…) now render live where emit_block showed them literal.
@@ -3394,12 +3398,14 @@ jobs:
               emit_block 'Verification report (report.md, truncated)' "$file" "$max"
               return 0
             fi
-            local san_file="${TMPDIR:-/tmp}/verify-report-$$"
+            local san_file
+            san_file="$(mktemp)"
             # Node is present on every runner that runs this job (emit_block
             # already shells out to it for the UTF-8-safe cut). The script
             # rides inside a single-quoted shell string, so it uses double
             # quotes throughout and carries no single quotes of its own.
-            if ! node -e '
+            local node_status=0
+            node -e '
               const fs = require("node:fs");
               const text = fs.readFileSync(process.argv[1], "utf8").replace(/\u0000/g, "");
               function escProse(s) {
@@ -3468,15 +3474,20 @@ jobs:
                   out.push(escCode(line));
                 }
               }
-              if (inFence) out.push(fc.repeat(fl));
+              if (inFence) process.exit(3);
               let result = out.join("\n");
               if (depth > 0) {
                 if (result && !result.endsWith("\n")) result += "\n";
                 result += "</details>\n".repeat(depth);
               }
               process.stdout.write(result);
-            ' "$file" > "$san_file"; then
-              echo "::warning::emit_report fell back to escaped embedding (sanitize failed) for $file" >&2
+            ' "$file" > "$san_file" || node_status=$?
+            if [ "$node_status" -ne 0 ]; then
+              if [ "$node_status" -eq 3 ]; then
+                echo "::warning::emit_report fell back to escaped embedding (report ended inside an open code fence) for $file" >&2
+              else
+                echo "::warning::emit_report fell back to escaped embedding (sanitize failed) for $file" >&2
+              fi
               rm -f "$san_file"
               emit_block 'Verification report (report.md, truncated)' "$file" "$max"
               return 0
@@ -3488,7 +3499,8 @@ jobs:
             # bytes the deficit branch did budget; folding the wrapper into
             # the measured output removes that asymmetry and the separate
             # fold-closer gate (closers now land in san_file before this gate).
-            local out_file="${TMPDIR:-/tmp}/verify-report-out-$$"
+            local out_file
+            out_file="$(mktemp)"
             {
               printf '<details>\n<summary>Verification report</summary>\n\n'
               cat "$san_file"

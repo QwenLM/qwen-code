@@ -1575,13 +1575,16 @@ describe('qwen-triage verify hardening', () => {
     // Each fallback branch announces itself in the Actions log (mirroring
     // emit_block's failure warning) so a degradation to the escaped pre dump
     // is attributable, not silent. The fold-closer overhead is now budgeted
-    // inside the sanitized-size gate (closers land before it), so three
+    // inside the sanitized-size gate (closers land before it), so four
     // warnings cover every degradation.
     expect(helpers).toContain(
       '::warning::emit_report fell back to escaped embedding (report exceeds size cap)',
     );
     expect(helpers).toContain(
       '::warning::emit_report fell back to escaped embedding (sanitize failed)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
     );
     expect(helpers).toContain(
       '::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap)',
@@ -1805,20 +1808,54 @@ describe('qwen-triage verify hardening', () => {
       expect(surplusOut.split('<details>').length - 1).toBe(1);
       expect(surplusOut.split('</details>').length - 1).toBe(1);
 
-      // A report ending inside an open code fence: the sanitizer must
-      // close the fence so the wrapper's </details> and the composer's
-      // footer are not swallowed as inert code text.
+      // A report ending inside an open code fence: a fence still open at
+      // EOF means the flat scanner diverged from GitHub's container-aware
+      // parser (which closes a list-nested fence at the container's end,
+      // not at EOF). Rather than guess and ship prose GitHub parses as
+      // live, emit_report degrades to the escaped-pre fallback through its
+      // non-zero-exit branch, announcing the cause with its own warning.
       const fence = join(dir, 'fence.md');
       writeFileSync(fence, '# Title\n\n```bash\ncode here\n');
-      const fenceOut = emit(fence, 45000);
-      expect(fenceOut).toContain('<summary>Verification report</summary>');
-      expect(fenceOut).toContain('code here');
-      // The wrapper balances: its </details> is outside the fence.
-      expect(fenceOut.split('<details>').length - 1).toBe(1);
-      expect(fenceOut.split('</details>').length - 1).toBe(1);
-      // The prose (outside code) contains the wrapper closer.
-      const fenceProse = stripCode(fenceOut);
-      expect(fenceProse).toContain('</details>');
+      const fenceProc = spawnSync(
+        'bash',
+        ['-c', `${helpers}\nemit_report "$1" 45000`, '_', fence],
+        { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+      );
+      expect(fenceProc.status).toBe(0);
+      expect(fenceProc.stdout).toContain('<pre><code>');
+      expect(fenceProc.stdout).toContain(
+        'Verification report (report.md, truncated)',
+      );
+      expect(fenceProc.stderr).toContain(
+        '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
+      );
+
+      // Container-axis hole the review reproduced: a fence nested in a list
+      // item, never explicitly closed. CommonMark closes it at the
+      // container's end but the flat scanner stays inFence to EOF, so before
+      // the fix the trailing unindented line shipped as prose GitHub parsed
+      // as live (mention, <img>, raw <a href>). The EOF-open fence now
+      // degrades to the escaped fallback. Red before the fix (output was
+      // sanitized markdown carrying a literal <img>/<a>, not the escaped
+      // pre), green after; the @mention is inert under the pre/code ancestor.
+      const listFence = join(dir, 'list-fence.md');
+      writeFileSync(
+        listFence,
+        [
+          '- step one:',
+          '',
+          '  ```bash',
+          '  npm test',
+          '',
+          'Back at top level: @everyone <img src=x onerror=alert(1)> <a href="https://evil.example/phish">click</a>',
+          '',
+        ].join('\n'),
+      );
+      const listOut = emit(listFence, 45000);
+      expect(listOut).toContain('<pre><code>');
+      expect(listOut).toContain('Verification report (report.md, truncated)');
+      expect(listOut).not.toContain('<img');
+      expect(listOut).not.toContain('<a href');
 
       // A NUL byte in the report is stripped (parity with emit_block's
       // tr -d '\000'); it must not reach the comment body.
