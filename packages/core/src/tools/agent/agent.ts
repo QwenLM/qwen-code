@@ -9,7 +9,10 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { extractParentToolNames } from '../../agents/runtime/agent-core.js';
+import {
+  EXCLUDED_TOOLS_FOR_SUBAGENTS,
+  extractParentToolNames,
+} from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -40,6 +43,7 @@ import {
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
+  buildForkExecutionAllowlist,
   buildForkedMessages,
   buildChildMessage,
   buildPinnedWorktreeNotice,
@@ -826,7 +830,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
             minLength: 1,
           },
           description:
-            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Omit for unrestricted execution; use an empty array to reject every tool call.',
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Forks can never execute ask_user_question; omit fork_tools to allow every other inherited tool, or use an empty array to reject every tool call.',
         },
         fork_profile: {
           type: 'string',
@@ -954,7 +958,7 @@ Usage notes:
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`, \`fork_tools\`, and \`fork_profile\`; omit \`fork_turns\` for the full conversation and omit both restriction parameters for unrestricted execution.
+- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`, \`fork_tools\`, and \`fork_profile\`; omit \`fork_turns\` for the full conversation and omit both restriction parameters to allow every inherited tool except \`${ToolNames.ASK_USER_QUESTION}\`. Regular subagents do not receive that tool either.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
@@ -1681,8 +1685,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   }> {
     const geminiClient = this.config.getGeminiClient();
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
-    const executionAllowedTools =
-      this.forkProfile?.tools ?? this.params.fork_tools;
+    const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
+    const requestedExecutionAllowedTools =
+      requestedTools === undefined
+        ? undefined
+        : buildForkExecutionAllowlist(requestedTools, []);
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
     if (geminiClient) {
@@ -1737,7 +1744,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const forkedMessages = buildForkedMessages(
           this.params.prompt,
           lastMessage,
-          executionAllowedTools,
+          requestedExecutionAllowedTools,
           profilePromptHint,
         );
         if (forkedMessages.length > 0) {
@@ -1770,7 +1777,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (!taskPrompt) {
       taskPrompt = buildChildMessage(
         this.params.prompt,
-        executionAllowedTools,
+        requestedExecutionAllowedTools,
         profilePromptHint,
       );
     }
@@ -1791,6 +1798,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
       const parentToolNames = extractParentToolNames(generationConfig);
+      const declaredExecutionToolNames =
+        parentToolNames.length > 0
+          ? parentToolNames
+          : agentConfig
+              .getToolRegistry()
+              .getAllToolNames()
+              .filter(
+                (toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName),
+              );
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -1800,20 +1816,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
       toolConfig = {
         tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
-        ...(executionAllowedTools !== undefined
-          ? { executionAllowedTools: [...executionAllowedTools] }
-          : {}),
+        executionAllowedTools: buildForkExecutionAllowlist(
+          requestedTools,
+          declaredExecutionToolNames,
+        ),
       };
     } else {
+      const registeredToolNames = agentConfig
+        .getToolRegistry()
+        .getAllToolNames()
+        .filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
       };
       toolConfig = {
         tools: ['*'],
-        ...(executionAllowedTools !== undefined
-          ? { executionAllowedTools: [...executionAllowedTools] }
-          : {}),
+        executionAllowedTools: buildForkExecutionAllowlist(
+          requestedTools,
+          registeredToolNames,
+        ),
       };
     }
 
@@ -3238,7 +3260,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork && bgToolConfig?.executionAllowedTools !== undefined
+          ...(isFork &&
+          (this.params.fork_tools !== undefined ||
+            this.forkProfile !== undefined) &&
+          bgToolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
@@ -4033,7 +4058,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork && toolConfig?.executionAllowedTools !== undefined
+          ...(isFork &&
+          (this.params.fork_tools !== undefined ||
+            this.forkProfile !== undefined) &&
+          toolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }

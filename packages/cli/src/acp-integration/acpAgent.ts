@@ -199,6 +199,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
+  SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
@@ -306,7 +307,9 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  WORKTREE_MCP_DEFER_META_KEY,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -324,6 +327,7 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
@@ -655,10 +659,30 @@ export function selectVisibleHistoryRecords(
     : records;
 }
 
-function isChannelSessionRequest(params: { _meta?: unknown }): boolean {
+interface SessionSource {
+  sourceType: string;
+  sourceId?: string;
+}
+
+function getSessionSource(params: {
+  _meta?: unknown;
+}): SessionSource | undefined {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   const value = meta?.[SESSION_SOURCE_META_KEY];
-  return isObjectRecord(value) && value['sourceType'] === 'channel';
+  if (!isObjectRecord(value) || typeof value['sourceType'] !== 'string') {
+    return undefined;
+  }
+  return {
+    sourceType: value['sourceType'],
+    ...(typeof value['sourceId'] === 'string'
+      ? { sourceId: value['sourceId'] }
+      : {}),
+  };
+}
+
+function shouldDeferMcpDiscovery(params: { _meta?: unknown }): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  return meta?.[WORKTREE_MCP_DEFER_META_KEY] === true;
 }
 
 function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
@@ -4401,7 +4425,11 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
-    const isChannelSession = isChannelSessionRequest(params);
+    const requestedSessionId =
+      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
+        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
+        : undefined;
+    const sessionSource = getSessionSource(params);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
       'qwen-code.daemon.session_start',
@@ -4419,7 +4447,17 @@ class QwenAgent implements Agent {
         );
         this.settings = settings;
         const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(cwd, mcpServers, settings, isChannelSession),
+          this.newSessionConfig(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            requestedSessionId,
+            undefined,
+            shouldDeferMcpDiscovery(params)
+              ? { skipMcpDiscovery: true }
+              : undefined,
+          ),
         );
         let session: Session;
         try {
@@ -4452,7 +4490,7 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     // Load per-request settings BEFORE the existence check: the check must
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
@@ -4545,7 +4583,7 @@ class QwenAgent implements Agent {
       // a `null`/`undefined` would otherwise throw `TypeError`.
       params.mcpServers ?? [],
       settings,
-      isChannelSession,
+      sessionSource,
       params.sessionId,
       true,
     );
@@ -4645,7 +4683,7 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    const isChannelSession = isChannelSessionRequest(params);
+    const sessionSource = getSessionSource(params);
     // Same per-request settings discipline as `loadSession`.
     const settings = loadSettingsCached(params.cwd);
     const liveSession = this.sessions.get(params.sessionId);
@@ -4683,7 +4721,7 @@ class QwenAgent implements Agent {
       params.cwd,
       params.mcpServers ?? [],
       settings,
-      isChannelSession,
+      sessionSource,
       params.sessionId,
       true,
     );
@@ -9047,6 +9085,15 @@ class QwenAgent implements Agent {
               }`,
             );
           }
+          if (relocation.mcpRefreshError) {
+            warnings.push(
+              `MCP refresh failed: ${
+                relocation.mcpRefreshError instanceof Error
+                  ? relocation.mcpRefreshError.message
+                  : String(relocation.mcpRefreshError)
+              }`,
+            );
+          }
 
           try {
             await config
@@ -9831,6 +9878,9 @@ class QwenAgent implements Agent {
             return sessionService.removeSession(sessionId);
           },
         );
+        if (success) {
+          fireSessionDeleteHook(this.config, sessionId, debugLogger);
+        }
         return { success };
       }
       case 'renameSession': {
@@ -10835,7 +10885,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
-    isChannelSession?: boolean,
+    sessionSource?: SessionSource,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10852,7 +10902,7 @@ class QwenAgent implements Agent {
           cwd,
           mcpServers,
           settings,
-          isChannelSession,
+          sessionSource,
           sessionId,
           resume,
           initializeOptions,
@@ -10860,6 +10910,9 @@ class QwenAgent implements Agent {
         );
       });
     } catch (error) {
+      if (error instanceof SessionIdConflictError) {
+        throw RequestError.invalidParams(undefined, error.message);
+      }
       const writerError = getSessionWriterError(error);
       if (writerError) {
         throw new RequestError(writerError.rpcCode, writerError.message, {
@@ -10874,7 +10927,7 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     settings: LoadedSettings,
-    isChannelSession?: boolean,
+    sessionSource?: SessionSource,
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
@@ -10898,7 +10951,6 @@ class QwenAgent implements Agent {
           stdioServer.command,
           stdioServer.args,
           env,
-          cwd,
         );
         continue;
       }
@@ -10945,7 +10997,7 @@ class QwenAgent implements Agent {
       experimental: {
         ...settings.merged.experimental,
         sessionWriterLease: this.sessionWriterLeaseEnabledAtStartup,
-        ...(isChannelSession ? { cron: false } : {}),
+        ...(sessionSource?.sourceType === 'channel' ? { cron: false } : {}),
       },
     };
 
@@ -10986,7 +11038,16 @@ class QwenAgent implements Agent {
       // into the first <available_skills> at cold start.
       buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
+      // The daemon owns the settings watcher lifecycle.
+      undefined,
+      // A duplicate caller-supplied session id must fail this one request,
+      // not process.exit(1) the shared ACP child and every session on its
+      // channel. newSessionConfig maps the throw to a RequestError.
+      true,
     );
+    if (sessionSource) {
+      config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }
