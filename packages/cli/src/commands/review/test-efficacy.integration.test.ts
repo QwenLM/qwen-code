@@ -1149,7 +1149,7 @@ process.stdout.write(JSON.stringify({
       existsSync(join(dependencyRoot, 'node_modules', '.vite-probe')),
     ).toBe(false);
     if (process.platform !== 'win32') {
-      expect(existsSync(join(probeModules, 'broken-link'))).toBe(false);
+      expect(() => lstatSync(join(probeModules, 'broken-link'))).toThrow();
     }
 
     expect(result.verdict).toBe('survived');
