@@ -66,6 +66,7 @@ interface MockSession {
     signal?: AbortSignal,
   ) => Promise<NonBlockingPromptAccepted>;
   removePendingPrompt: (promptId: string) => Promise<{ removed: boolean }>;
+  removeMidTurnMessage: (messageId: string) => Promise<{ removed: boolean }>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
@@ -131,6 +132,10 @@ interface MockClient {
     promptId: string,
     opts?: { clientId?: string },
   ) => Promise<{ removed: boolean }>;
+  removeMidTurnMessage: (
+    sessionId: string,
+    messageId: string,
+  ) => Promise<{ removed: boolean }>;
   branchSession: (
     sessionId: string,
     req: { name?: string },
@@ -172,6 +177,7 @@ const sdkMocks = vi.hoisted(() => {
   const deleteWorkspaceAgent = vi.fn();
   const getPendingPrompts = vi.fn();
   const removePendingPrompt = vi.fn();
+  const removeMidTurnMessage = vi.fn();
   const branchSession = vi.fn();
   const getSessionTranscriptPage = vi.fn();
 
@@ -205,6 +211,7 @@ const sdkMocks = vi.hoisted(() => {
     deleteWorkspaceAgent = deleteWorkspaceAgent;
     getPendingPrompts = getPendingPrompts;
     removePendingPrompt = removePendingPrompt;
+    removeMidTurnMessage = removeMidTurnMessage;
     branchSession = branchSession;
     getSessionTranscriptPage = getSessionTranscriptPage;
     dispose = vi.fn();
@@ -246,6 +253,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpTools,
     getPendingPrompts,
     removePendingPrompt,
+    removeMidTurnMessage,
     branchSession,
     getSessionTranscriptPage,
     reset() {
@@ -345,6 +353,8 @@ const sdkMocks = vi.hoisted(() => {
       getPendingPrompts.mockResolvedValue({ pendingPrompts: [] });
       removePendingPrompt.mockReset();
       removePendingPrompt.mockResolvedValue({ removed: true });
+      removeMidTurnMessage.mockReset();
+      removeMidTurnMessage.mockResolvedValue({ removed: true });
       branchSession.mockReset();
       branchSession.mockResolvedValue({
         sessionId: 'branch-session',
@@ -1821,6 +1831,39 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.removePendingPrompt).toHaveBeenCalledWith(
       'session-old',
       'pending-old',
+    );
+  });
+
+  it('routes mid-turn message removal through the matching session owner', async () => {
+    const removeMidTurnMessage = vi.fn(async () => ({ removed: true }));
+    const session = createMockSession({
+      sessionId: 'session-current',
+      removeMidTurnMessage,
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+
+    await expect(
+      providerActions.removeMidTurnMessage('mid-current'),
+    ).resolves.toEqual({ removed: true });
+    await expect(
+      providerActions.removeMidTurnMessage('mid-old', {
+        sessionId: 'session-old',
+      }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(removeMidTurnMessage).toHaveBeenCalledWith('mid-current');
+    expect(sdkMocks.removeMidTurnMessage).toHaveBeenCalledWith(
+      'session-old',
+      'mid-old',
     );
   });
 
@@ -10003,6 +10046,8 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       })),
     removePendingPrompt:
       opts.removePendingPrompt ?? vi.fn(async () => ({ removed: true })),
+    removeMidTurnMessage:
+      opts.removeMidTurnMessage ?? vi.fn(async () => ({ removed: true })),
     cancel: opts.cancel ?? vi.fn(async () => {}),
     setModel:
       opts.setModel ??

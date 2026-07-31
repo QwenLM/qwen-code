@@ -4688,17 +4688,11 @@ export function App({
         );
       });
   }, [reportError, sendPrompt, store, updateFailedPrompt]);
-  const notifySuccess = useCallback(
-    (message: string) => pushToast('success', message),
-    [pushToast],
-  );
-
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -4711,7 +4705,6 @@ export function App({
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -10023,8 +10016,12 @@ export function App({
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
+                          canMutateMidTurn={
+                            connection.capabilities?.features.includes(
+                              'session_mid_turn_message_mutation',
+                            ) === true
+                          }
                           onDelete={removeQueuedPrompt}
-                          onInsert={insertQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />
                         {CustomComposerHeader && (

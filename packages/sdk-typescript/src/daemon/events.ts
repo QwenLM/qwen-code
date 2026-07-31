@@ -313,6 +313,7 @@ export interface DaemonArtifactChangedData {
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
+  messageIds?: string[];
   /**
    * Trusted client id that queued these messages, so a consumer dedupes only its
    * OWN pending queue — a peer attached to the same session must not drop a
@@ -2674,7 +2675,11 @@ function isMidTurnMessageInjectedData(
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     Array.isArray(value['messages']) &&
-    value['messages'].every((message) => typeof message === 'string')
+    value['messages'].every((message) => typeof message === 'string') &&
+    (value['messageIds'] === undefined ||
+      (Array.isArray(value['messageIds']) &&
+        value['messageIds'].length === value['messages'].length &&
+        value['messageIds'].every(isNonEmptyString)))
   );
 }
 

@@ -7,11 +7,14 @@
 export interface MidTurnQueueItem {
   text: string;
   images?: unknown[];
+  midTurnState?: unknown;
+  midTurnMessageId?: string;
 }
 
 export interface MidTurnInjectedBatch {
   sessionId: string;
   messages: readonly string[];
+  messageIds?: readonly string[];
   /** Trusted client id that queued the messages (from the SSE envelope). */
   originatorClientId?: string;
 }
@@ -52,10 +55,17 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
     ) {
       continue;
     }
-    for (const message of batch.messages) {
+    for (const [messageIndex, message] of batch.messages.entries()) {
+      const messageId = batch.messageIds?.[messageIndex];
       const index = remaining.findIndex(
         (prompt) =>
-          prompt.text === message &&
+          prompt.midTurnState !== undefined &&
+          (messageId !== undefined
+            ? prompt.midTurnMessageId === messageId ||
+              (prompt.midTurnState === 'submitting' &&
+                prompt.midTurnMessageId === undefined &&
+                prompt.text === message)
+            : prompt.text === message) &&
           (!prompt.images || prompt.images.length === 0),
       );
       if (index >= 0) {

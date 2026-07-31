@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
@@ -1069,6 +1070,21 @@ export function createDaemonSessionActions({
         }
         return { accepted: false };
       }
+    },
+
+    async removeMidTurnMessage(
+      messageId: string,
+      opts,
+    ): Promise<DaemonRemoveMidTurnMessageResult> {
+      const session = sessionRef.current;
+      if (!session) return { removed: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        return await session.client.removeMidTurnMessage(
+          opts.sessionId,
+          messageId,
+        );
+      }
+      return await session.removeMidTurnMessage(messageId);
     },
 
     async getPendingPrompts(opts) {

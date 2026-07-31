@@ -1028,8 +1028,10 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
   margin-left: 8px;
   color: var(--secondary-foreground);
+  white-space: nowrap;
 }
 
 .queuedPromptSpinner {
@@ -1078,7 +1080,17 @@
   height: 14px;
 }
 
-.queuedPromptAction:hover {
+@container (max-width: 699px) {
+  .queuedPromptStateLabel {
+    display: none;
+  }
+
+  .queuedPromptState:not(.queuedPromptStateLoading) {
+    display: none;
+  }
+}
+
+.queuedPromptAction:not(:disabled):hover {
   background: var(--accent);
   color: var(--foreground);
 }

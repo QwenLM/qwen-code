@@ -7779,8 +7779,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
         return { accepted: false };
       }
-      entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
-      return { accepted: true };
+      const messageId = randomUUID();
+      entry.midTurnMessageQueue.push({
+        messageId,
+        text: trimmed,
+        originatorClientId,
+      });
+      return { accepted: true, messageId };
+    },
+
+    removeMidTurnMessage(sessionId, messageId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      const index = entry.midTurnMessageQueue.findIndex(
+        (message) =>
+          message.messageId === messageId &&
+          message.originatorClientId === originatorClientId,
+      );
+      if (index === -1) return { removed: false };
+      entry.midTurnMessageQueue.splice(index, 1);
+      return { removed: true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {

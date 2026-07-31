@@ -393,7 +393,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 3,
+        id: 2,
         v: 1,
         type: 'permission_request',
         data: {
@@ -406,7 +406,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 4,
+        id: 3,
         v: 1,
         type: 'permission_request',
         data: {
@@ -442,6 +442,18 @@ describe('daemon event schema', () => {
         v: 1,
         type: 'session_died',
         data: { sessionId: 's-1', reason: 'killed', signalCode: 9 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 8,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['a'],
+          messageIds: [''],
+        },
       }),
     ).toBeUndefined();
 
@@ -875,7 +887,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 2,
+        id: 3,
         v: 1,
         type: 'session_closed',
         data: { sessionId: 's-1' },
@@ -884,7 +896,7 @@ describe('daemon event schema', () => {
 
     expect(
       asKnownDaemonEvent({
-        id: 3,
+        id: 4,
         v: 1,
         type: 'session_closed',
         data: { reason: 'client_close' },
@@ -931,6 +943,19 @@ describe('daemon event schema', () => {
       }),
     ).toBeDefined();
 
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['a', 'b'],
+          messageIds: ['mid-a', 'mid-b'],
+        },
+      }),
+    ).toBeDefined();
+
     // Empty array is structurally valid (the guard only requires a string[]).
     expect(
       asKnownDaemonEvent({
@@ -952,7 +977,7 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
     expect(
       asKnownDaemonEvent({
-        id: 4,
+        id: 5,
         v: 1,
         type: 'mid_turn_message_injected',
         data: { sessionId: 's-1', messages: ['ok', 42] },
@@ -960,10 +985,22 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
     expect(
       asKnownDaemonEvent({
-        id: 5,
+        id: 6,
         v: 1,
         type: 'mid_turn_message_injected',
         data: { messages: ['x'] },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['a', 'b'],
+          messageIds: ['mid-a'],
+        },
       }),
     ).toBeUndefined();
   });
