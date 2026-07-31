@@ -1669,6 +1669,8 @@ class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
 export class Config {
   private sessionId: string;
+  private sessionSourceType?: string;
+  private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
@@ -3638,6 +3640,19 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  setSessionSource(sourceType: string, sourceId?: string): void {
+    this.sessionSourceType = sourceType;
+    this.sessionSourceId = sourceId;
+  }
+
+  getSessionSourceType(): string | undefined {
+    return this.sessionSourceType;
+  }
+
+  getSessionSourceId(): string | undefined {
+    return this.sessionSourceId;
   }
 
   /**
