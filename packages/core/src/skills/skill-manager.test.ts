@@ -1173,6 +1173,19 @@ Review content`;
       ).toBe(false);
     });
 
+    it('should not crash when config lacks getDisabledSkillLevels', async () => {
+      const partialConfig = {
+        isSafeMode: () => false,
+        getProjectRoot: () => '/test/project',
+        getBareMode: () => false,
+      } as Config;
+      const partialManager = new SkillManager(partialConfig);
+
+      await expect(
+        partialManager.listSkills({ force: true }),
+      ).resolves.toBeDefined();
+    });
+
     it('should prioritize project-level over bundled skills with same name', async () => {
       mockReaddirForLevels(new Set(['project', 'bundled']));
       setupReviewSkillMocks();
