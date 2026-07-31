@@ -144,7 +144,7 @@ jobs:
             package-lock.json
             packages/desktop-shell/package-lock.json
 
-      - uses: 'dtolnay/rust-toolchain@stable'
+      - uses: 'dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4' # stable
         with:
           targets: '${{ matrix.rust_target }}'
 

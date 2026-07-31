@@ -19701,6 +19701,16 @@ describe('createServeApp', () => {
       expect(res.status).toBe(401);
     });
 
+    it('prefers an explicit Authorization header over the daemon cookie', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Cookie', 'qwen-daemon-token=secret')
+        .set('Authorization', 'Bearer wrong');
+      expect(res.status).toBe(401);
+    });
+
     it('accepts the right token', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' });
       const res = await request(app)

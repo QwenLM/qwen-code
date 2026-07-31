@@ -237,7 +237,14 @@ fn append_failure_output(output: &Mutex<String>, line: &str) {
         return;
     }
     let remaining = FAILURE_OUTPUT_LIMIT - output.len();
-    output.extend(line.chars().take(remaining));
+    let mut end = line.len().min(remaining);
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        return;
+    }
+    output.push_str(&line[..end]);
     if output.len() < FAILURE_OUTPUT_LIMIT {
         output.push('\n');
     }
@@ -451,8 +458,12 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::{authenticated_web_url, parse_listening_url, runtime_arguments};
+    use super::{
+        append_failure_output, authenticated_web_url, parse_listening_url, runtime_arguments,
+        FAILURE_OUTPUT_LIMIT,
+    };
     use std::path::Path;
+    use std::sync::Mutex;
     use url::Url;
 
     #[test]
@@ -503,6 +514,16 @@ mod tests {
                 "/tmp/workspace",
                 "--no-open",
             ]
+        );
+    }
+
+    #[test]
+    fn failure_output_limit_respects_utf8_boundaries() {
+        let output = Mutex::new("a".repeat(FAILURE_OUTPUT_LIMIT - 1));
+        append_failure_output(&output, "中");
+        assert_eq!(
+            output.lock().expect("output").len(),
+            FAILURE_OUTPUT_LIMIT - 1
         );
     }
 }

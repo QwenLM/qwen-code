@@ -36,8 +36,7 @@ impl SettingsStore {
     pub fn load(app: &AppHandle) -> Result<Self, String> {
         let path = settings_path(app)?;
         let settings = match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|error| format!("Failed to parse desktop settings: {error}"))?,
+            Ok(contents) => parse_settings(&contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 DesktopSettings::default()
             }
@@ -72,13 +71,12 @@ impl SettingsStore {
             .is_maximized()
             .map_err(|error| format!("Failed to read window maximized state: {error}"))?;
         self.update(|settings| {
-            settings.window = Some(WindowState {
-                width: size.width.max(MIN_WIDTH),
-                height: size.height.max(MIN_HEIGHT),
-                x: position.x,
-                y: position.y,
+            settings.window = Some(saved_window_state(
+                settings.window.as_ref(),
+                position,
+                size,
                 maximized,
-            });
+            ));
         })
     }
 
@@ -137,6 +135,33 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Failed to resolve desktop settings directory: {error}"))
 }
 
+fn parse_settings(contents: &str) -> DesktopSettings {
+    serde_json::from_str(contents).unwrap_or_default()
+}
+
+fn saved_window_state(
+    previous: Option<&WindowState>,
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+    maximized: bool,
+) -> WindowState {
+    if maximized {
+        if let Some(previous) = previous {
+            return WindowState {
+                maximized: true,
+                ..previous.clone()
+            };
+        }
+    }
+    WindowState {
+        width: size.width.max(MIN_WIDTH),
+        height: size.height.max(MIN_HEIGHT),
+        x: position.x,
+        y: position.y,
+        maximized,
+    }
+}
+
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
@@ -166,12 +191,20 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{write_atomic, DesktopSettings, WindowState};
+    use super::{parse_settings, saved_window_state, write_atomic, DesktopSettings, WindowState};
     use std::fs;
+    use tauri::{PhysicalPosition, PhysicalSize};
 
     #[test]
     fn settings_remain_backward_compatible_when_fields_are_missing() {
         let settings: DesktopSettings = serde_json::from_str("{}").expect("settings");
+        assert!(settings.workspace.is_none());
+        assert!(settings.window.is_none());
+    }
+
+    #[test]
+    fn corrupt_settings_fall_back_to_defaults() {
+        let settings = parse_settings("{");
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
     }
@@ -189,6 +222,28 @@ mod tests {
         let restored: WindowState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.width, 1200);
         assert!(restored.maximized);
+    }
+
+    #[test]
+    fn maximized_save_preserves_previous_normal_bounds() {
+        let previous = WindowState {
+            width: 1000,
+            height: 700,
+            x: 10,
+            y: 20,
+            maximized: false,
+        };
+        let state = saved_window_state(
+            Some(&previous),
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+            true,
+        );
+        assert_eq!(state.width, 1000);
+        assert_eq!(state.height, 700);
+        assert_eq!(state.x, 10);
+        assert_eq!(state.y, 20);
+        assert!(state.maximized);
     }
 
     #[test]
