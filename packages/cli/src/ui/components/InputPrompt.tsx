@@ -133,7 +133,9 @@ export function classifyPastedImagePaths(pasted: string): {
   let allImages = tokens.length > 0;
   for (const token of tokens) {
     const normalized = unescapePath(
-      token.replace(/^["']|["']$/g, ''), // strip surrounding quotes
+      token
+        .replace(/^@(["'])/, '@') // strip a quote after the `@` prefix
+        .replace(/^["']|["']$/g, ''), // strip surrounding quotes
     )
       .replace(/^@/, '') // strip the `@` reference prefix
       .replace(/\\ /g, ' '); // unescape shell-escaped spaces

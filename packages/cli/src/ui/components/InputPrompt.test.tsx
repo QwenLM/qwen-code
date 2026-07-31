@@ -5941,6 +5941,19 @@ describe('classifyPastedImagePaths', () => {
     expect(result.imagePaths).toEqual(['/a/my image.png']);
   });
 
+  it.each([
+    ['@"/var/tmp/screenshot.png"', '/var/tmp/screenshot.png'],
+    ['@"C:/Photos/image\\(1\\).png"', 'C:/Photos/image(1).png'],
+  ])(
+    'unwraps a quoted @-prefixed image reference: %s',
+    (reference, expected) => {
+      expect(classifyPastedImagePaths(reference)).toEqual({
+        imagePaths: [expected],
+        allImages: true,
+      });
+    },
+  );
+
   it('does not treat plain text or non-image paths as image paste', () => {
     expect(classifyPastedImagePaths('just some text').allImages).toBe(false);
     expect(classifyPastedImagePaths('/src/index.ts').imagePaths).toEqual([]);
