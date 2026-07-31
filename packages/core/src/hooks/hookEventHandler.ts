@@ -22,6 +22,7 @@ import type {
   ContextUsageData,
   SessionStartInput,
   SessionEndInput,
+  SessionDeleteInput,
   SessionStartSource,
   SessionEndReason,
   AgentType,
@@ -334,6 +335,26 @@ export class HookEventHandler {
       {
         trigger: reason,
       },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a SessionDelete event after an explicitly selected session is deleted.
+   */
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionDeleteInput = {
+      ...this.createBaseInput(HookEventName.SessionDelete),
+      deleted_session_id: deletedSessionId,
+    };
+
+    return this.executeHooks(
+      HookEventName.SessionDelete,
+      input,
+      undefined,
       signal,
     );
   }

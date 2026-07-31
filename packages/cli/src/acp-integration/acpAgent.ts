@@ -325,6 +325,7 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
@@ -9871,6 +9872,9 @@ class QwenAgent implements Agent {
             return sessionService.removeSession(sessionId);
           },
         );
+        if (success) {
+          fireSessionDeleteHook(this.config, sessionId, debugLogger);
+        }
         return { success };
       }
       case 'renameSession': {
