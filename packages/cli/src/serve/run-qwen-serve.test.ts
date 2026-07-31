@@ -1862,6 +1862,142 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
   });
 });
 
+/**
+ * The budget is resolved at boot and reported; it does not size any child yet.
+ * The only boot-time behavior is rejecting an out-of-range flag value.
+ */
+describe('runQwenServe memory budget', () => {
+  let tmpDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    tmpDirs = [];
+  });
+
+  function makeTmpDir(): string {
+    const dir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-mem-')),
+    );
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  it('reports the resolved budget over HTTP without sizing any child', async () => {
+    const dir = makeTmpDir();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const res = await fetch(`${handle.url}/daemon/status`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          memory: {
+            enforced: false;
+            configuredBudgetMb: number;
+            effectiveBudgetMb: number;
+            budgetSource: string;
+            availableMemoryMb: number;
+            legacyChildCeilingMb: number;
+            insufficientMemory: boolean;
+            modeled: {
+              rootReserveMb: number;
+              childPoolMb: number;
+              minChildHeapMb: number;
+            };
+          } | null;
+        };
+        runtime: {
+          memory?: {
+            registeredWorkspaces: number;
+            activeAcpChildren: number;
+            childRssCoverage: string;
+            modeled: {
+              recommendedShareAtRegisteredMb: number;
+              recommendedShareAtActiveMb: number | null;
+            };
+          };
+        };
+      };
+
+      const memory = body.limits.memory;
+      expect(memory).not.toBeNull();
+      // Nothing in this section is applied, and the wire says so.
+      expect(memory?.enforced).toBe(false);
+      expect(memory?.configuredBudgetMb).toBe(4096);
+      expect(memory?.budgetSource).toBe('flag');
+      // The invariant that motivates separating configured from effective:
+      // whatever is reported must be something the machine can back.
+      expect(memory?.effectiveBudgetMb).toBeLessThanOrEqual(
+        memory?.availableMemoryMb ?? 0,
+      );
+      // Modeled pools stay non-negative and inside the budget they come from.
+      expect(memory?.modeled.rootReserveMb).toBeLessThanOrEqual(
+        memory?.effectiveBudgetMb ?? 0,
+      );
+      expect(memory?.modeled.childPoolMb).toBeGreaterThanOrEqual(0);
+      expect(memory?.modeled.childPoolMb).toBeLessThan(
+        memory?.effectiveBudgetMb ?? 0,
+      );
+      expect(memory?.legacyChildCeilingMb).toBeGreaterThan(0);
+
+      const runtimeMemory = body.runtime.memory;
+      expect(runtimeMemory?.registeredWorkspaces).toBe(1);
+      // Sampling still covers only the primary child; say so rather than let
+      // the section imply process-tree observation.
+      expect(runtimeMemory?.childRssCoverage).toBe('primary_only');
+      expect(
+        runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
+      ).toBeGreaterThan(0);
+    } finally {
+      await handle.close();
+    }
+  }, 30_000);
+
+  it('rejects a budget below the documented minimum', async () => {
+    const dir = makeTmpDir();
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = dir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: dir,
+            maxSessions: 1,
+            memoryBudgetMb: 512,
+          },
+          {
+            bridge: {
+              spawnOrAttach: vi.fn(),
+              shutdown: vi.fn().mockResolvedValue(undefined),
+              killAllSync: vi.fn(),
+            } as unknown as HttpAcpBridge,
+          },
+        ),
+      ).rejects.toThrow(/memoryBudgetMb/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) process.env['QWEN_RUNTIME_DIR'] = origEnv;
+    }
+  });
+});
+
 describe('runQwenServe initializeTimeoutMs validation', () => {
   let tmpDir: string;
 

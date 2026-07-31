@@ -17,6 +17,10 @@ import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
 } from './acp-session-bridge.js';
+import {
+  MIN_CHILD_HEAP_MB,
+  recommendedChildShareMb,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
@@ -169,6 +173,43 @@ interface DaemonStatusLimits {
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
   acpConnectionCap: number | null;
+  /**
+   * The daemon's resolved memory figures. Observed and reported only: nothing
+   * consumes them to size a child. `null` on paths that resolve none, such as
+   * direct-embed bridges.
+   */
+  memory: DaemonStatusMemoryLimits | null;
+}
+
+interface DaemonStatusMemoryLimits {
+  /**
+   * False, and required. Every figure in this section is resolved input or a
+   * model of a policy that does not exist yet; nothing here is applied to a
+   * process. The flag exists so a client can never mistake the `limits`
+   * namespace for enforcement that has not shipped.
+   */
+  enforced: false;
+  /** What was asked for: the flag value, or half of available memory. */
+  configuredBudgetMb: number;
+  /** `configured` capped at resolved cgroup/host memory. */
+  effectiveBudgetMb: number;
+  budgetSource: 'flag' | 'derived';
+  /** Cgroup limit when one applies, otherwise host total. */
+  availableMemoryMb: number;
+  availableMemorySource: 'constrained' | 'host';
+  /** The ceiling an ACP child receives today, with no budget involved. */
+  legacyChildCeilingMb: number;
+  insufficientMemory: boolean;
+  /**
+   * Derived figures for a capacity policy that has not shipped. Grouped, and
+   * named for what they are, so they cannot read as memory already reserved or
+   * limits already applied.
+   */
+  modeled: {
+    rootReserveMb: number;
+    childPoolMb: number;
+    minChildHeapMb: number;
+  };
 }
 
 interface DaemonStatusRuntime {
@@ -203,6 +244,14 @@ interface DaemonStatusRuntime {
     enabled: boolean;
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
+  /**
+   * Live counts against the resolved memory budget, and what a per-child share
+   * would come to at each count. The shares are advisory: nothing applies
+   * them, and the gap between the registered and live figures is the reason a
+   * capacity policy has to key on live children rather than registrations.
+   * Absent when no budget resolved.
+   */
+  memory?: DaemonStatusRuntimeMemory;
   perf?: DaemonPerfSnapshot;
   /**
    * Rolling per-interval activity series backing the Daemon Status charts
@@ -219,6 +268,30 @@ interface DaemonStatusRuntime {
     idleSinceMs: number | null;
   };
   process: NodeJS.MemoryUsage;
+}
+
+interface DaemonStatusRuntimeMemory {
+  registeredWorkspaces: number;
+  /**
+   * Daemon-managed ACP children with a live channel. Deliberately narrow: it
+   * excludes channel workers, MCP descendants, and spawn reservations that
+   * have not attached, so a later admission policy cannot mistake it for a
+   * process-tree count. Such a policy will additionally need an in-flight
+   * spawn count to admit without racing.
+   */
+  activeAcpChildren: number;
+  /**
+   * Which children the daemon's RSS sampling actually covers. Only the primary
+   * ACP child is sampled today, so this section must not be read as
+   * process-tree observation.
+   */
+  childRssCoverage: 'primary_only';
+  /** Modeled per-child shares. Advisory; nothing applies them. */
+  modeled: {
+    recommendedShareAtRegisteredMb: number;
+    /** `null` when no ACP child is active — there is no share to divide. */
+    recommendedShareAtActiveMb: number | null;
+  };
 }
 
 export interface DaemonPipeStatsSnapshot {
@@ -338,6 +411,13 @@ export async function buildDaemonStatusResponse(
   const aggregatedChannelLive = workspaceSnapshots.some(
     (item) => item.snapshot.channelLive,
   );
+  // A live channel is a live ACP child. Registered-but-dormant workspaces have
+  // none, which is precisely why the registered count is unsafe to divide by.
+  const activeAcpChildCount = workspaceSnapshots.filter(
+    (item) => item.snapshot.channelLive,
+  ).length;
+  const registeredWorkspaceCount = workspaceSnapshots.length;
+  const memoryBudget = input.opts.daemonMemoryBudget;
   const aggregatedLastActivity = workspaceSnapshots.reduce<number | null>(
     (latest, item) =>
       item.lastActivity !== null &&
@@ -484,6 +564,23 @@ export async function buildDaemonStatusResponse(
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
+      memory: memoryBudget
+        ? {
+            enforced: false,
+            configuredBudgetMb: memoryBudget.configuredBudgetMb,
+            effectiveBudgetMb: memoryBudget.effectiveBudgetMb,
+            budgetSource: memoryBudget.budgetSource,
+            availableMemoryMb: memoryBudget.availableMemoryMb,
+            availableMemorySource: memoryBudget.availableMemorySource,
+            legacyChildCeilingMb: memoryBudget.legacyChildCeilingMb,
+            insufficientMemory: memoryBudget.insufficientMemory,
+            modeled: {
+              rootReserveMb: memoryBudget.rootReserveMb,
+              childPoolMb: memoryBudget.childPoolMb,
+              minChildHeapMb: MIN_CHILD_HEAP_MB,
+            },
+          }
+        : null,
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
       ? {
@@ -557,6 +654,25 @@ export async function buildDaemonStatusResponse(
             ? Date.now() - aggregatedLastActivity
             : null,
       },
+      ...(memoryBudget
+        ? {
+            memory: {
+              registeredWorkspaces: registeredWorkspaceCount,
+              activeAcpChildren: activeAcpChildCount,
+              childRssCoverage: 'primary_only' as const,
+              modeled: {
+                recommendedShareAtRegisteredMb: recommendedChildShareMb(
+                  memoryBudget,
+                  registeredWorkspaceCount,
+                ),
+                recommendedShareAtActiveMb:
+                  activeAcpChildCount > 0
+                    ? recommendedChildShareMb(memoryBudget, activeAcpChildCount)
+                    : null,
+              },
+            },
+          }
+        : {}),
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),

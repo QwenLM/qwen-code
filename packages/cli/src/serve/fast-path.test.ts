@@ -685,6 +685,7 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
+      ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -746,6 +747,19 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --memory-budget-mb on the fast path in both spellings', () => {
+    for (const argv of [
+      ['serve', '--memory-budget-mb', '8192'],
+      ['serve', '--memory-budget-mb=8192'],
+    ]) {
+      const parsed = parseServeFastPathArgs(argv);
+      expect(parsed).toMatchObject({
+        kind: 'serve',
+        options: { memoryBudgetMb: 8192 },
+      });
+    }
   });
 
   it('parses --compacted-replay-max-bytes on the fast path', () => {

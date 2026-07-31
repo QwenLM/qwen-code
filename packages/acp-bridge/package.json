@@ -95,6 +95,10 @@
       "types": "./dist/mcpTimeouts.d.ts",
       "import": "./dist/mcpTimeouts.js"
     },
+    "./daemonMemoryBudget": {
+      "types": "./dist/daemon-memory-budget.d.ts",
+      "import": "./dist/daemon-memory-budget.js"
+    },
     "./channelControlTimeouts": {
       "types": "./dist/channel-control-timeouts.d.ts",
       "import": "./dist/channel-control-timeouts.js"

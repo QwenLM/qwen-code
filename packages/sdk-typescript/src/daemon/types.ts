@@ -621,6 +621,28 @@ export interface DaemonStatusReport {
     compactedReplayMaxBytes: number;
     maxJournalEvents: number;
     maxJournalBytes: number;
+    /**
+     * The daemon's resolved memory figures, observed and reported only.
+     * Additive — older daemons omit it, and it is `null` on paths that resolve
+     * none.
+     */
+    memory?: {
+      /** Always false: nothing in this section is applied to a process. */
+      enforced: false;
+      configuredBudgetMb: number;
+      effectiveBudgetMb: number;
+      budgetSource: 'flag' | 'derived';
+      availableMemoryMb: number;
+      availableMemorySource: 'constrained' | 'host';
+      legacyChildCeilingMb: number;
+      insufficientMemory: boolean;
+      /** Derived figures for a capacity policy that has not shipped. */
+      modeled: {
+        rootReserveMb: number;
+        childPoolMb: number;
+        minChildHeapMb: number;
+      };
+    } | null;
   };
   capabilities: {
     protocolVersions: DaemonProtocolVersions;
@@ -656,6 +678,21 @@ export interface DaemonStatusReport {
     rateLimit: {
       enabled: boolean;
       rejectedSinceStart: Record<string, number>;
+    };
+    /**
+     * Live counts against the resolved memory budget, with advisory per-child
+     * shares. Additive and observation-only; absent when no budget resolved.
+     */
+    memory?: {
+      registeredWorkspaces: number;
+      /** Daemon-managed ACP children only; not a process-tree count. */
+      activeAcpChildren: number;
+      childRssCoverage: 'primary_only';
+      modeled: {
+        recommendedShareAtRegisteredMb: number;
+        /** `null` when no ACP child is active. */
+        recommendedShareAtActiveMb: number | null;
+      };
     };
     /** Optional daemon-process performance counters. */
     perf?: {

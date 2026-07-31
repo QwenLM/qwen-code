@@ -42,6 +42,10 @@ import {
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
+  MIN_MEMORY_BUDGET_MB,
+  resolveDaemonMemoryBudget,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
@@ -1551,6 +1555,9 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
+        // The memory budget is resolved during workspace input validation,
+        // well after this pre-runtime placeholder is served.
+        memory: null,
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -2345,6 +2352,31 @@ async function runQwenServeImpl(
   if (workspaceInputs.length > MAX_REGISTERED_WORKSPACES) {
     throw new Error(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
+    );
+  }
+  // Resolve the daemon's memory figures once, for reporting only. Nothing
+  // downstream consumes them to size a child: dividing a pool by a workspace
+  // count is unsound while registration does not spawn a child, and bounding
+  // the aggregate needs admission at spawn time keyed on live children. This
+  // establishes the denominator that work will be designed against.
+  opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+    budgetMb: opts.memoryBudgetMb,
+  });
+  if (
+    opts.daemonMemoryBudget.budgetSource === 'flag' ||
+    opts.daemonMemoryBudget.insufficientMemory
+  ) {
+    const budget = opts.daemonMemoryBudget;
+    writeStderrLine(
+      `qwen serve: memory budget ${budget.effectiveBudgetMb} MB ` +
+        `(${budget.budgetSource}, ${budget.availableMemoryMb} MB available ` +
+        `via ${budget.availableMemorySource})` +
+        (budget.effectiveBudgetMb < budget.configuredBudgetMb
+          ? `; capped down from the configured ${budget.configuredBudgetMb} MB`
+          : '') +
+        (budget.insufficientMemory
+          ? `; below the ${MIN_MEMORY_BUDGET_MB} MB minimum this daemon is sized for`
+          : ''),
     );
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
