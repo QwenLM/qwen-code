@@ -516,6 +516,46 @@ describe('keyMatchers', () => {
     });
   });
 
+  // The Ctrl+Tab / Ctrl+Shift+Tab alternatives intentionally diverge from the
+  // original hard-coded matchers (which only knew Ctrl+←/→), so they are
+  // asserted against the data-driven matchers here rather than in the
+  // comparison block above (#8069).
+  describe('Completion tab-switching alternative bindings (#8069)', () => {
+    it('should match Ctrl+Tab as COMPLETION_TAB_RIGHT', () => {
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_RIGHT](
+          createKey('tab', { ctrl: true }),
+        ),
+      ).toBe(true);
+      // Bare Tab accepts the suggestion; Ctrl+Shift+Tab switches left.
+      expect(keyMatchers[Command.COMPLETION_TAB_RIGHT](createKey('tab'))).toBe(
+        false,
+      );
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_RIGHT](
+          createKey('tab', { ctrl: true, shift: true }),
+        ),
+      ).toBe(false);
+    });
+
+    it('should match Ctrl+Shift+Tab as COMPLETION_TAB_LEFT', () => {
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_LEFT](
+          createKey('tab', { ctrl: true, shift: true }),
+        ),
+      ).toBe(true);
+      // Bare Tab accepts the suggestion; Ctrl+Tab switches right.
+      expect(keyMatchers[Command.COMPLETION_TAB_LEFT](createKey('tab'))).toBe(
+        false,
+      );
+      expect(
+        keyMatchers[Command.COMPLETION_TAB_LEFT](
+          createKey('tab', { ctrl: true }),
+        ),
+      ).toBe(false);
+    });
+  });
+
   describe('Custom key bindings', () => {
     it('should work with custom configuration', () => {
       const customConfig: KeyBindingConfig = {

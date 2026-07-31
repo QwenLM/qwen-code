@@ -22,6 +22,7 @@ import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import {
+  localizeAgentTypeName,
   localizeToolDisplayName,
   sanitizeControlChars,
 } from './toolFormatting';
@@ -750,7 +751,7 @@ function detailTitle(
 ): string {
   switch (task.kind) {
     case 'agent':
-      return `${task.subagentType ?? t('common.agent')} › ${task.label}`;
+      return `${task.subagentType ? localizeAgentTypeName(task.subagentType, t) : t('common.agent')} › ${task.label}`;
     case 'shell':
       return `${t('tasks.kind.shell')} › ${task.command}`;
     case 'monitor':
@@ -1234,7 +1235,10 @@ function TaskDetail({
       )}
 
       {task.kind === 'agent' && task.subagentType && (
-        <DetailField label={t('tasks.detail.type')} value={task.subagentType} />
+        <DetailField
+          label={t('tasks.detail.type')}
+          value={localizeAgentTypeName(task.subagentType, t)}
+        />
       )}
 
       {task.kind === 'agent' && (task.depth ?? 0) > 0 && (
