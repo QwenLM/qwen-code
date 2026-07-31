@@ -4971,9 +4971,11 @@ describe('AppContainer State Management', () => {
       // false.  MainContent.test.tsx ("fullDetail wiring") covers the
       // context → HistoryItemDisplay propagation behaviourally, so
       // this source-level guard closes the remaining gap: removing
-      // setThoughtExpanded((prev) => !prev) from AppContainer makes
-      // this assertion fail (mutation M1).
-      expect(handleKeypress!.toString()).toContain('setThoughtExpanded');
+      // or mutating setThoughtExpanded((prev) => !prev) in AppContainer
+      // (e.g. (prev) => true) makes this assertion fail (mutation M1).
+      expect(handleKeypress!.toString()).toMatch(
+        /setThoughtExpanded\(\s*\(prev\)\s*=>\s*!prev/,
+      );
     });
   });
 
