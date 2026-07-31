@@ -1068,6 +1068,34 @@ describe('loggers', () => {
       });
     });
 
+    it('preserves an explicitly classified error type', () => {
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2024-12-31T23:59:59.000Z',
+        function_name: 'test-function',
+        function_args: {},
+        duration_ms: 10,
+        status: 'error',
+        success: false,
+        error: 'classified failure',
+        error_type: ToolErrorType.EXECUTION_FAILED,
+        prompt_id: 'prompt-classified',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      logToolCall(mockConfig, event);
+
+      expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error_type: ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+      expect(mockLogger.emit.mock.calls[0][0].attributes).toMatchObject({
+        error_type: ToolErrorType.EXECUTION_FAILED,
+        'error.type': ToolErrorType.EXECUTION_FAILED,
+      });
+    });
+
     it.each([
       { status: 'success' as const, expectedSuccess: true },
       { status: 'cancelled' as const, expectedSuccess: false },
