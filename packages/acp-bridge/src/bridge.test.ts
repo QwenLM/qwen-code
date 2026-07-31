@@ -1795,7 +1795,8 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'session-1',
       });
       const rejection =
-        await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
+        expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
       await callSeen.promise;
       await vi.advanceTimersByTimeAsync(60_000);
 
@@ -6961,7 +6962,8 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         prompt: [{ type: 'text', text: 'after-branch' }],
       });
-      const promptRejection = await expect(prompt).rejects.toBeDefined();
+      // eslint-disable-next-line vitest/valid-expect -- awaited below after the queued prompt is removed
+      const promptRejection = expect(prompt).rejects.toBeDefined();
 
       await vi.waitFor(() => expect(releaseBranch).toBeDefined());
       const [queued] = bridge.getPendingPrompts(session.sessionId);
