@@ -113,12 +113,12 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
-  # Suggestions may improve a young PR, but continuing to implement them after
-  # five change-producing rounds expands the diff and creates fresh review
-  # churn. From round 6 onward, only Critical findings, formally requested
-  # changes, failed checks, and base conflicts may drive code changes;
-  # lower-severity feedback is recorded and left open.
-  CRITICAL_ONLY_AFTER_ROUND: '5'
+  # Suggestions may improve a PR, but continuing to implement them after ten
+  # change-producing rounds expands the diff and creates fresh review churn.
+  # From round 11 onward, only Critical findings, formally requested changes,
+  # failed checks, and base conflicts may drive code changes; lower-severity
+  # feedback is recorded and left open.
+  CRITICAL_ONLY_AFTER_ROUND: '10'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
   # reviewer loop with the exact regeneration property the review bot has
@@ -2471,10 +2471,10 @@ jobs:
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
             # Per AGENTS.md's review policy, Suggestion-level findings are
-            # actionable during the first five change-producing rounds. The
-            # scan still selects later feedback so prepare can record and
-            # watermark its deferral; only the address job filters what may
-            # drive code changes.
+            # actionable during the initial change-producing rounds; takeover
+            # extends that window. The scan still selects later feedback so
+            # prepare can record and watermark its deferral; only the address
+            # job filters what may drive code changes.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -3048,7 +3048,7 @@ jobs:
             OVER_BUDGET_AUTHORS="$(jq -n \
               --arg key "${LIVE_REARM_KEY}" --arg ab "${AUTOFIX_BOT}" --arg rb "${REVIEW_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" \
-              --argjson r5 "${CRITICAL_ONLY_AFTER_ROUND}" \
+              --argjson critical_after "${CRITICAL_ONLY_AFTER_ROUND}" \
               --argjson k "${CRITICAL_ONLY_HUMAN_BATCHES}" \
               --slurpfile rv "${WORKDIR}/rv.json" --slurpfile rc "${WORKDIR}/rc.json" --slurpfile ic "${WORKDIR}/ic.json" '
               ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -3058,7 +3058,7 @@ jobs:
                | sort_by(.at)) as $ms
               | ([ range(0; ($ms | length)) as $i
                    | ($ms[$i]
-                      | select((.acted == "true" and .round > $r5) or (.acted == "false" and .round >= $r5))
+                      | select((.acted == "true" and .round > $critical_after) or (.acted == "false" and .round >= $critical_after))
                       | {lo: (if $i == 0 then "" else ($ms[$i - 1].ts) end), hi: .ts}) ]) as $spans
               | ($rv | add) as $reviews
               | ($rc | add) as $comments

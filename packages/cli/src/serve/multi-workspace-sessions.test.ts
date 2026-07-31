@@ -840,7 +840,7 @@ describe('multi-workspace session dispatch', () => {
         trusted: true,
       },
     ]);
-    expect(res.body.limits.maxSessionsPerWorkspace).toBe(20);
+    expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);
     expect(res.body.limits.maxTotalSessions).toBeNull();
   });
 
