@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -1202,7 +1203,12 @@ export function createServeApp(
   if (webShellDir && opts.token && desktopShellBootstrap) {
     const token = opts.token;
     app.use((req: Request, res: Response, next: NextFunction) => {
-      if (!isDocumentNavigation(req) || req.query['token'] !== token) {
+      const queryToken = req.query['token'];
+      const tokenMatches =
+        typeof queryToken === 'string' &&
+        queryToken.length === token.length &&
+        timingSafeEqual(Buffer.from(queryToken), Buffer.from(token));
+      if (!isDocumentNavigation(req) || !tokenMatches) {
         next();
         return;
       }
@@ -1269,17 +1275,19 @@ export function createServeApp(
     });
   }
 
-  app.use((req: Request, _res: Response, next: NextFunction) => {
-    const cookieToken = req.headers.cookie
-      ?.split(';')
-      .map((part) => part.trim())
-      .find((part) => part.startsWith('qwen-daemon-token='))
-      ?.slice('qwen-daemon-token='.length);
-    if (!req.headers.authorization && cookieToken) {
-      req.headers.authorization = `Bearer ${cookieToken}`;
-    }
-    next();
-  });
+  if (desktopShellBootstrap) {
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      const cookieToken = req.headers.cookie
+        ?.split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith('qwen-daemon-token='))
+        ?.slice('qwen-daemon-token='.length);
+      if (!req.headers.authorization && cookieToken) {
+        req.headers.authorization = `Bearer ${cookieToken}`;
+      }
+      next();
+    });
+  }
   app.use(bearerAuth(opts.token));
 
   // Rate limiter: after auth (only count authenticated requests), except
