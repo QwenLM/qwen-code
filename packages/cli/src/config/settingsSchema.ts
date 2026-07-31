@@ -1061,12 +1061,12 @@ const SETTINGS_SCHEMA = {
       },
       mouseTracking: {
         type: 'boolean',
-        label: 'Mouse Tracking (Virtualized History)',
+        label: 'Mouse Tracking',
         category: 'UI',
         requiresRestart: false,
         default: true,
         description:
-          'Enable SGR mouse tracking in the virtualized viewport for mouse wheel scrolling and scrollbar dragging. When enabled, the terminal cannot handle right-click context menus or OSC 8 hyperlink clicks natively. Disable if you need right-click or clickable URL links to work in your terminal.',
+          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
