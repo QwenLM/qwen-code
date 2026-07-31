@@ -161,6 +161,9 @@ function getOptionI18nKey(
   return undefined;
 }
 
+// Production producers (toPermissionOptions) emit distinct ids, so this
+// rarely fires; it guards the key={option.id} React duplicate-key warning
+// if a producer ever repeats an id.
 function deduplicateOptions(
   options: PermissionRequest['options'],
 ): PermissionRequest['options'] {
@@ -200,9 +203,26 @@ export function ToolApproval({
     () => prepareDisplayOptions(request.options),
     [request.options],
   );
-  const [selected, setSelected] = useState(() =>
-    getSafeDefaultIndex(displayOptions),
+  const safeDefaultIndex = useMemo(
+    () => getSafeDefaultIndex(displayOptions),
+    [displayOptions],
   );
+  // Prefer the localized label, but when two visible options share a generic
+  // i18n key (plan mode renders restore_previous + proceed_once, both
+  // allow_once) they would become identical buttons — fall back to the
+  // server's distinct labels for those only, keeping everything else localized.
+  const labelForOption = useMemo(() => {
+    const keyCount = new Map<string, number>();
+    for (const option of displayOptions) {
+      const key = getOptionI18nKey(option);
+      if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
+    }
+    return (option: PermissionRequest['options'][number]) => {
+      const key = getOptionI18nKey(option);
+      return key && keyCount.get(key) === 1 ? t(key) : option.label;
+    };
+  }, [displayOptions, t]);
+  const [selected, setSelected] = useState(safeDefaultIndex);
   const requestRef = useRef(request);
   requestRef.current = request;
   const selectedRef = useRef(selected);
@@ -215,13 +235,10 @@ export function ToolApproval({
   const commandId = useId();
 
   useEffect(() => {
-    const safeDefaultIndex = getSafeDefaultIndex(
-      prepareDisplayOptions(requestRef.current.options),
-    );
     submittedRef.current = false;
     selectedRef.current = safeDefaultIndex;
     setSelected(safeDefaultIndex);
-  }, [request.id]);
+  }, [request.id, safeDefaultIndex]);
 
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
@@ -267,12 +284,8 @@ export function ToolApproval({
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
-    focusOption(
-      requestChanged
-        ? getSafeDefaultIndex(prepareDisplayOptions(requestRef.current.options))
-        : selectedRef.current,
-    );
-  }, [keyboardActive, request.id, focusOption]);
+    focusOption(requestChanged ? safeDefaultIndex : selectedRef.current);
+  }, [keyboardActive, request.id, focusOption, safeDefaultIndex]);
 
   const moveSelection = useCallback(
     (delta: number) => {
@@ -403,11 +416,7 @@ export function ToolApproval({
       <div className={styles.options} role="radiogroup">
         {displayOptions.map((option, i) => {
           const isSelected = i === selected;
-          const i18nKey = getOptionI18nKey(option);
-          // Server labels are context-dependent (e.g. `proceed_once` is
-          // "Allow" for tools, "Submit" for questions), so they take
-          // precedence; i18n keys cover the empty-label fallback.
-          const label = option.label || (i18nKey ? t(i18nKey) : option.label);
+          const label = labelForOption(option);
           return (
             <button
               key={option.id}
@@ -436,7 +445,9 @@ export function ToolApproval({
               <span className={styles.num} aria-hidden="true">
                 {i + 1}.
               </span>
-              <span className={styles.label}>{label}</span>
+              <span className={styles.label} data-option-label>
+                {label}
+              </span>
             </button>
           );
         })}

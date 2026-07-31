@@ -92,7 +92,7 @@ function optionButtons(): HTMLButtonElement[] {
 
 function optionLabels(): (string | null | undefined)[] {
   return optionButtons().map(
-    (o) => o.querySelector('span:last-child')?.textContent,
+    (o) => o.querySelector('[data-option-label]')?.textContent,
   );
 }
 
@@ -182,9 +182,12 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
   });
 
-  it.each([['en' as const], ['zh-CN' as const]])(
+  it.each([
+    ['en' as const, 'Yes, allow once', 'Allow once and switch to Default mode'],
+    ['zh-CN' as const, '是，允许一次', '允许一次并切换到默认模式'],
+  ])(
     'distinguishes the switch-to-default approval in %s',
-    (language) => {
+    (language, allowOnceLabel, switchLabel) => {
       render(
         undefined,
         {
@@ -205,11 +208,10 @@ describe('ToolApproval accessibility', () => {
         language,
       );
 
-      const labels = optionLabels();
-      expect(labels).toContain('Allow');
-      expect(labels).toContain(
-        'Switch to Default Mode and allow once (recommended)',
-      );
+      expect(optionLabels()).toEqual([
+        expect.stringContaining(allowOnceLabel),
+        expect.stringContaining(switchLabel),
+      ]);
 
       act(() => {
         optionButtons()[1]!.click();
