@@ -29,9 +29,10 @@ Tool responses and pure system reminders do not count as user turns. Regular nam
 
 Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval.
 
-- Omitting `fork_tools` preserves unrestricted fork execution.
+- Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
+- Omitting `fork_tools` allows every other inherited tool.
 - An empty array rejects every tool call.
-- `*` is not accepted; omit `fork_tools` when unrestricted execution is intended.
+- `*` is not accepted; omit `fork_tools` to allow every otherwise-executable inherited tool.
 - Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
 - `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
 - Shell command argument patterns are not supported. Listing `run_shell_command` allows that tool to proceed through its normal permission checks but does not pre-approve any command.
@@ -40,13 +41,13 @@ This is a per-invocation restriction supplied by the caller. It narrows a child 
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                                                                                       |
-| ------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                             |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                               |
-| Tools         | Configured declaration set                                     | Keeps the parent-derived declaration set; `fork_tools` can independently narrow execution without changing that set |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                       |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                        |
+|               | Named Subagent                                                 | Fork Subagent                                                                                                                              |
+| ------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                    |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                      |
+| Tools         | Configured declaration set without interactive question tools  | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` can narrow it further |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                              |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                               |
 
 ### When Fork is Used
 
