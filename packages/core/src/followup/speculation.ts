@@ -34,6 +34,7 @@ import {
   runForkedAgent,
   runWithForkedChatModel,
 } from '../utils/forkedAgent.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 import {
   finalizeToolResponses,
@@ -43,6 +44,8 @@ import {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+const debugLogger = createDebugLogger('SPECULATION');
 
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
@@ -346,10 +349,14 @@ async function runSpeculativeLoop(
                 signal: state.abortController!.signal,
               },
             );
-            if (
-              state.abortController!.signal.aborted ||
-              !guardDecision.allowed
-            ) {
+            if (state.abortController!.signal.aborted) {
+              hitBoundary = true;
+              break;
+            }
+            if (!guardDecision.allowed) {
+              debugLogger.debug(
+                `Speculative guard denial: ${guardDecision.reason}`,
+              );
               hitBoundary = true;
               break;
             }
