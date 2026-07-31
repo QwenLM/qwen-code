@@ -723,10 +723,12 @@ export function classifyProbeRun(
     // character, so normalising it unconditionally would let
     // `/w/vendor/other\src/a.test.ts` satisfy `src/a.test.ts` — the very false
     // match the boundary exists to prevent.
+    const probe =
+      process.platform === 'win32' ? file.replace(/\\/g, '/') : file;
     const result = byFile.find((r) => {
       const raw = r.name ?? '';
       const name = process.platform === 'win32' ? raw.replace(/\\/g, '/') : raw;
-      return name.endsWith(`/${file}`) || name === file;
+      return name.endsWith(`/${probe}`) || name === probe;
     });
     const assertions = result?.assertionResults ?? [];
     const failed = assertions.filter((a) => a.status === 'failed').length;
@@ -1003,10 +1005,18 @@ function exposeDependencies(probeTree: string, dependencyRoot: string): void {
     if (entry.name.startsWith('@')) {
       mkdirSync(targetEntry);
       for (const pkg of readdirSync(sourceEntry)) {
-        symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
+        try {
+          symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
+        } catch {
+          continue;
+        }
       }
     } else {
-      symlinkSync(sourceEntry, targetEntry, linkType);
+      try {
+        symlinkSync(sourceEntry, targetEntry, linkType);
+      } catch {
+        continue;
+      }
     }
   }
 }
