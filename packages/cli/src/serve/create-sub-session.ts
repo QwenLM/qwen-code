@@ -84,7 +84,7 @@ const MAX_RESULT_CHARS = 32_000;
 const MAX_NAME_LENGTH = 60;
 
 /** How many spawned sub-session ids the depth-1 gate remembers. Far above any
- * plausible live sub-session count (`maxSessions` defaults to 20), so eviction
+ * plausible live sub-session count (`maxSessions` defaults to 32), so eviction
  * only ever discards long-reaped sessions. */
 const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
 
