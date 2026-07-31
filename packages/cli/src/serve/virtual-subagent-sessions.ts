@@ -735,10 +735,8 @@ export class VirtualSubagentSessions {
       };
     }
 
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
+    const projectDir = Storage.runWithResolvedRuntimeBaseDir(
+      runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
     const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
@@ -785,10 +783,8 @@ export class VirtualSubagentSessions {
   ): Promise<ResolvedAgentTask | undefined> {
     // Pre-toolUseId transcripts cannot be linked exactly. This score is only a
     // best-effort compatibility path and identical parallel launches may tie.
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
+    const projectDir = Storage.runWithResolvedRuntimeBaseDir(
+      runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
     const parentRecords = await readJsonl<ChatRecord>(
@@ -882,10 +878,8 @@ export class VirtualSubagentSessions {
     parentSessionId: string,
     toolCallId: string,
   ): Promise<ToolCallMetrics> {
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
+    const projectDir = Storage.runWithResolvedRuntimeBaseDir(
+      runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
     const records = await readJsonl<ChatRecord>(
@@ -903,6 +897,9 @@ export class VirtualSubagentSessions {
       runtime,
       parentSessionId,
       (candidate) =>
+        // /fork has no parent transcript tool call, so its task ID is the
+        // stable reference used by Web Shell.
+        candidate.id === toolCallId ||
         candidate.toolUseId === toolCallId ||
         candidate.id.endsWith(`-${toolCallId}`),
     );

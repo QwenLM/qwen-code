@@ -6173,8 +6173,15 @@ export class Session implements SessionContext {
     }
   }
 
-  async refreshSkillsFromSettings(): Promise<void> {
-    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+  async refreshSkillsFromSettings(
+    options: {
+      reloadSettings?: boolean;
+      notifyConfigChanged?: boolean;
+    } = {},
+  ): Promise<void> {
+    if (options.reloadSettings ?? true) {
+      this.reloadSkillSettings();
+    }
     const skillManager = this.config.getSkillManager();
     let updateFailed = false;
     let updateError: unknown;
@@ -6184,7 +6191,7 @@ export class Session implements SessionContext {
       updateFailed = true;
       updateError = error;
     }
-    if (skillManager) {
+    if (skillManager && (options.notifyConfigChanged ?? true)) {
       try {
         skillManager.suppressNextSlashReload();
         await skillManager.notifyConfigChanged();
@@ -6197,6 +6204,10 @@ export class Session implements SessionContext {
       }
     }
     if (updateFailed) throw updateError;
+  }
+
+  reloadSkillSettings(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
