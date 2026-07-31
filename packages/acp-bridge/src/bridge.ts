@@ -3645,9 +3645,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             (Array.isArray(status.errors) && status.errors.length > 0))
         ) {
           finishWorkspaceMcpDiscovery(info);
-          if (hasNoChannelWork(info)) {
-            await startIdleTimer(info, 'workspace MCP discovery complete');
-          }
         }
         if (status.discoveryState === 'completed') {
           info.workspaceMcpDiscoveryRequested = true;
@@ -8657,10 +8654,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       runtimeOperationReservations++;
       void (async () => {
-        let info: ChannelInfo | undefined;
         try {
           const channelInfo = await ensureChannel();
-          info = channelInfo;
           request.connection = channelInfo.connection;
           await withWorkspaceControl(channelInfo, async () => {
             if (request.settled) return;
@@ -8711,9 +8706,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           request.settled = true;
           signal.removeEventListener('abort', cancel);
           workspaceGenerationRequests.delete(requestId);
-          if (info && hasNoChannelWork(info) && !info.isDying) {
-            await startIdleTimer(info, 'workspace generation');
-          }
           await releaseRuntimeOperationReservation('workspace generation');
         }
       })().catch(() => undefined);
