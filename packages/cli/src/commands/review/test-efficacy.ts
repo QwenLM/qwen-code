@@ -1066,9 +1066,20 @@ export function splitDiffIntoHunks(
     ) {
       j++;
     }
-    const startLine = Number(
+    // Anchor at the first ADDED line, not the hunk header's start: the header
+    // opens up to three context lines above the change, and a finding anchored
+    // on untouched context misleads the reader (and the inline-comment anchor).
+    let startLine = Number(
       /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(header)?.[1] ?? '0',
     );
+    let offset = 0;
+    for (let k = i + 1; k < j; k++) {
+      if (lines[k].startsWith('+')) {
+        startLine += offset;
+        break;
+      }
+      if (!lines[k].startsWith('-')) offset++;
+    }
     out.push({
       header: header.trim(),
       startLine,

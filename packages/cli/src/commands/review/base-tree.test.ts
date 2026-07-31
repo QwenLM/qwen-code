@@ -139,6 +139,38 @@ describe('runBaseTree', () => {
     expect(run({}, build).note).not.toContain('reusing');
   });
 
+  it('returns BUSY instead of sweeping while another probe holds the build lock', () => {
+    // Reviewed live: shard B's opening sweep deleted the tree shard A was
+    // mid-`npm ci` in, and whichever finished stamped the marker for a tree
+    // the other was still mutating.
+    mkdirSync(`${baseWorktreePath(worktree)}.lock`, { recursive: true });
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('another probe is building');
+    expect(builds).toEqual([]); // no sweep, no build under the lock holder
+    rmSync(`${baseWorktreePath(worktree)}.lock`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it('a FAILED build is a settled answer — later shards do not re-pay it', () => {
+    const builds: string[] = [];
+    const build = (w: string) => {
+      builds.push(w);
+      return failedBuild;
+    };
+    expect(run({}, build).available).toBe(false);
+    const second = run({}, build);
+    expect(second.available).toBe(false);
+    expect(second.note).toContain('already failed');
+    expect(builds).toHaveLength(1);
+  });
+
   it('recovers from a stale base tree left by a crashed run', () => {
     const stale = baseWorktreePath(worktree);
     mkdirSync(stale, { recursive: true });

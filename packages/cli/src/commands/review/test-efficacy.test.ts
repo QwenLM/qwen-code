@@ -1216,8 +1216,11 @@ describe('splitDiffIntoHunks', () => {
     expect(hunks[1].patch).not.toContain('const added = 2;');
   });
 
-  it('reads the new-side start line from each header', () => {
-    expect(splitDiffIntoHunks(DIFF).map((h) => h.startLine)).toEqual([1, 21]);
+  it('anchors startLine at the first ADDED line, past the context prefix', () => {
+    // DIFF's first hunk opens with one context line before its `+` (2), the
+    // second with one before its change (22) — anchoring at the header start
+    // pointed findings at untouched context.
+    expect(splitDiffIntoHunks(DIFF).map((h) => h.startLine)).toEqual([2, 22]);
   });
 
   it('does not mistake a removed line whose text begins `@@` for a header', () => {

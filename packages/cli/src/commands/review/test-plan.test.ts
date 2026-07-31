@@ -264,6 +264,24 @@ describe('npmScriptOf', () => {
     expect(npmScriptOf('npm run test:unit')).toBe('test:unit');
   });
 
+  it('is null for every npm builtin outside the run form and script aliases', () => {
+    // The denylist knew four verbs; npm has ~fifty. Each of the rest became a
+    // false `no package defines this script` on a correct Test Plan.
+    for (const c of [
+      'npm audit',
+      'npm ls --workspaces',
+      'npm pack',
+      'npm publish --dry-run',
+      'npm view qwen-code version',
+      'npm outdated',
+      'yarn add left-pad',
+    ]) {
+      expect(npmScriptOf(c)).toBeNull();
+    }
+    expect(npmScriptOf('npm test')).toBe('test'); // the aliases still rule
+    expect(npmScriptOf('npm run test:unit')).toBe('test:unit');
+  });
+
   it('is null when a FLAG precedes the script — never a false script name', () => {
     // `--workspace` used to be the capture, and end-to-end that posted
     // `no package defines this script` on a correct Test Plan.
@@ -384,16 +402,40 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('no such file or directory');
     });
 
-    it('ignores a line suffix and a trailing slash when resolving a path', () => {
+    it('ignores a line suffix when resolving a path', () => {
       mkdirSync(join(dir, 'packages/cli/src'), { recursive: true });
       writeFileSync(join(dir, 'packages/cli/src/a.ts'), '');
-      const r = run(
-        '## Test Plan\n\nSee `packages/cli/src/a.ts:42` and `packages/cli/`',
-      );
+      const r = run('## Test Plan\n\nSee `packages/cli/src/a.ts:42`');
       expect(verdictOf(r.claims, 'packages/cli/src/a.ts:42')).toBe(
         'reproduces',
       );
-      expect(verdictOf(r.claims, 'packages/cli/')).toBe('reproduces');
+    });
+
+    it('claims a slash token as a path only with EVIDENCE it is one', () => {
+      // This PR's own Test Plan produced two false `contradicted` notes before
+      // this bar: `QwenLM/qwen-code` (a --repo slug) and `.qwen/tmp/review-…`
+      // (a path the reader is told to CREATE). A bare two-segment token with
+      // no extension is a slug or a ref far more often than a directory.
+      const r = run(
+        '## Test Plan\n\nRun `gh pr view 1 --repo QwenLM/qwen-code`, ' +
+          'check `origin/main`, create `.qwen/tmp/review-pr-1/x.json`, ' +
+          'then read `packages/cli/` and `./run.sh`',
+      );
+      const texts = r.claims.map((c) => c.text);
+      expect(texts).not.toContain('QwenLM/qwen-code'); // flag value AND slug
+      expect(texts).not.toContain('origin/main'); // ref, no extension
+      expect(texts.some((t) => t.startsWith('.qwen/'))).toBe(false); // temp root
+      expect(texts).not.toContain('packages/cli/'); // bare dir, no evidence
+      expect(texts).toContain('./run.sh'); // explicit ./ prefix qualifies
+    });
+
+    it('does not claim the VALUE of a flag inside a repro command', () => {
+      const r = run(
+        '## Test Plan\n\n`docker compose -f infra/docker-compose.yml up`',
+      );
+      expect(r.claims.map((c) => c.text)).not.toContain(
+        'infra/docker-compose.yml',
+      );
     });
 
     it('does not rule on a path that escapes the repo root', () => {

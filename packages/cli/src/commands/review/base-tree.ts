@@ -43,7 +43,13 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
@@ -154,6 +160,7 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // is a build error, not a wrong verdict. A marker of the wrong SHA — a
   // rebase between runs — falls through to the rebuild below.)
   const marker = () => join(tree, '.qwen-review-base-ok');
+  const failedMarker = () => join(tree, '.qwen-review-base-failed');
   try {
     if (
       existsSync(tree) &&
@@ -171,60 +178,114 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   } catch {
     // No marker, unreadable marker, or a tree git cannot answer for: rebuild.
   }
-  let sweep: SweepResult | undefined;
+  // A base that FAILED to build is a settled answer too. Without this marker,
+  // every shard that asks re-sweeps and re-pays the install+build to relearn
+  // the same "unavailable" — and the sweep destroys the evidence tree the
+  // failure deliberately leaves standing.
   try {
-    // Clear a stale base tree left by a crashed run — it would fail `add`. Its
-    // stderr is kept, because it is usually what explains that failure.
-    sweep = discardWorktree(worktree, tree);
-    git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
-  } catch (e) {
+    if (
+      existsSync(tree) &&
+      readFileSync(failedMarker(), 'utf8').trim() === baseSha
+    ) {
+      return {
+        available: false,
+        path: tree,
+        baseSha,
+        build: null,
+        note:
+          `the base tree at ${baseSha.slice(0, 9)} already failed to build (an earlier probe measured it); ` +
+          'an A/B is not available for this review (infrastructure, never a finding against the PR)',
+      };
+    }
+  } catch {
+    // No failed-marker: proceed to build.
+  }
+  // A real mutual-exclusion lock around sweep+add+build, not just the marker.
+  // The reuse fast path covers the AFTER-build window; this covers the build
+  // itself: measured in review, shard B's opening sweep deleted the tree shard
+  // A was mid-`npm ci` in, both installed into the same directory, and
+  // whichever finished stamped the marker for a tree the other was still
+  // mutating. `mkdirSync` without `recursive` is the atomic test-and-set; the
+  // loser returns busy rather than waiting out a multi-minute build.
+  const lock = `${tree}.lock`;
+  try {
+    mkdirSync(lock);
+  } catch {
     return unavailable(
-      worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),
+      'another probe is building the base tree right now — retry when its ' +
+        'marker appears (the fast path will then reuse it), or settle the ' +
+        'claim by reading; do not sweep the tree out from under the builder',
     );
   }
+  try {
+    return buildBaseTree(baseSha);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
 
-  const build = args.build
-    ? args.build(tree)
-    : runBuildTest({
-        plan: args.plan,
-        worktree: tree,
-        timeout: args.timeout,
-        install: args.install,
-        // The base tree's own suite says nothing about this PR — it was green
-        // before the PR existed. What the A/B needs from here is a compiled
-        // tree to run against.
-        buildOnly: true,
-      });
+  // The parameter re-narrows: TS narrowing does not cross function scopes.
+  function buildBaseTree(baseSha: string): BaseTreeReport {
+    let sweep: SweepResult | undefined;
+    try {
+      // Clear a stale base tree left by a crashed run — it would fail `add`. Its
+      // stderr is kept, because it is usually what explains that failure.
+      sweep = discardWorktree(worktree, tree);
+      git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
+    } catch (e) {
+      return unavailable(
+        worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),
+      );
+    }
 
-  if (!build.ok) {
-    // Leave the tree standing. A base that does not build is a fact worth
-    // looking at by hand, and deleting the evidence to save a directory is a
-    // bad trade — `cleanup` sweeps it at the end of the review either way.
+    const build = args.build
+      ? args.build(tree)
+      : runBuildTest({
+          plan: args.plan,
+          worktree: tree,
+          timeout: args.timeout,
+          install: args.install,
+          // The base tree's own suite says nothing about this PR — it was green
+          // before the PR existed. What the A/B needs from here is a compiled
+          // tree to run against.
+          buildOnly: true,
+        });
+
+    if (!build.ok) {
+      // Leave the tree standing. A base that does not build is a fact worth
+      // looking at by hand, and deleting the evidence to save a directory is a
+      // bad trade — `cleanup` sweeps it at the end of the review either way.
+      // The marker makes the failure a SETTLED answer for every later shard.
+      try {
+        writeFileSync(failedMarker(), `${baseSha}\n`);
+      } catch {
+        // The tree may be too broken to hold a marker; the next shard repays.
+      }
+      return {
+        available: false,
+        path: tree,
+        baseSha,
+        build,
+        note:
+          `the base tree at ${baseSha.slice(0, 9)} did not build, so nothing can be run ` +
+          'against it; an A/B is not available for this review (this is an ' +
+          'infrastructure result, never a finding against the PR)',
+      };
+    }
+
+    // The marker is what the fast path above trusts, so it is written only after
+    // a build that succeeded, and it records the SHA it vouches for.
+    writeFileSync(marker(), `${baseSha}\n`);
     return {
-      available: false,
+      available: true,
       path: tree,
       baseSha,
       build,
       note:
-        `the base tree at ${baseSha.slice(0, 9)} did not build, so nothing can be run ` +
-        'against it; an A/B is not available for this review (this is an ' +
-        'infrastructure result, never a finding against the PR)',
+        `base tree built at ${baseSha.slice(0, 9)} in ${tree}. Run the same input here and in the ` +
+        'PR worktree and compare the observed output; a difference is evidence, a ' +
+        'reading is not.',
     };
   }
-
-  // The marker is what the fast path above trusts, so it is written only after
-  // a build that succeeded, and it records the SHA it vouches for.
-  writeFileSync(marker(), `${baseSha}\n`);
-  return {
-    available: true,
-    path: tree,
-    baseSha,
-    build,
-    note:
-      `base tree built at ${baseSha.slice(0, 9)} in ${tree}. Run the same input here and in the ` +
-      'PR worktree and compare the observed output; a difference is evidence, a ' +
-      'reading is not.',
-  };
 }
 
 export const baseTreeCommand: CommandModule = {

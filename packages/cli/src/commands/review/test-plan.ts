@@ -112,8 +112,13 @@ export interface TestPlanReport {
 const PLAN_NAME_RE =
   /(test\s*plan|\btesting\b|how\s+(?:has\s+this|to)\s+(?:been\s+)?test(?:ed)?|测试计划|测试方案|测试步骤)/i;
 
-/** A `#`-style heading: the level, and the text to match the name against. */
-const HEADING_LINE_RE = /^(#{1,6})\s*(\S.*?)\s*$/;
+/**
+ * A `#`-style heading: the level, and everything after it (trimmed at the use
+ * sites). Zero backtracking by construction — `\s*(\S.*?)\s*$` here was the
+ * same quadratic shape the bold pattern below was rewritten to remove, on the
+ * same untrusted line.
+ */
+const HEADING_LINE_RE = /^(#{1,6})(.*)$/;
 
 /** A standalone bold line: `**Test Plan**`, the same heading in another shape. */
 // No `\s*` on either side of the capture and no lazy quantifier: with all
@@ -154,7 +159,7 @@ export function extractTestPlanSection(
     if (fenced[i]) continue;
     const hash = HEADING_LINE_RE.exec(lines[i]);
     const bold = BOLD_LINE_RE.exec(lines[i]);
-    const name = hash?.[2] ?? bold?.[1]?.trim();
+    const name = (hash?.[2] ?? bold?.[1])?.trim();
     if (!name || !PLAN_NAME_RE.test(name)) continue;
     // The bold form has no level, so nothing deeper can nest under it; `Infinity`
     // makes every `#` heading close it, which is the only sound reading.
@@ -163,6 +168,11 @@ export function extractTestPlanSection(
     for (let j = i + 1; j < lines.length; j++) {
       if (!fenced[j]) {
         const next = HEADING_LINE_RE.exec(lines[j]);
+        // A bare `#` run with no text is not a heading (the old `\s*\S` bar).
+        if (next && !next[2].trim()) {
+          out.push(lines[j]);
+          continue;
+        }
         if (next && next[1].length <= level) break;
         if (!hash && (next || BOLD_LINE_RE.test(lines[j]))) break;
       }
@@ -243,10 +253,23 @@ export function extractClaims(section: string): Array<{
     claims.push({ kind, text });
   };
 
+  // A slash token is claimed as a repo path only with EVIDENCE it is one: a
+  // file extension on its last segment, or an explicit ./ prefix. A bare
+  // `owner/repo` is far more often a slug (`--repo QwenLM/qwen-code`), and
+  // `origin/main` a ref — this PR's own Test Plan produced two false
+  // `contradicted` notes before this bar existed. The review's temp root is
+  // excluded outright: `.qwen/tmp/...` paths are things a Test Plan tells the
+  // reader to CREATE, absent at the reviewed commit by construction.
+  const isPathClaim = (t: string): boolean => {
+    const bare = t.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, '');
+    if (bare.startsWith('.qwen/')) return false;
+    return /\.\w+$/.test(bare) || t.startsWith('./');
+  };
+
   for (const span of codeSpans(section)) {
     if (RUNNER_RE.test(span)) push('command', span);
     if (PATH_RE.test(span)) {
-      push('path', span);
+      if (isPathClaim(span)) push('path', span);
       continue;
     }
     // Paths named as ARGUMENTS of a command line. A Test Plan's most checkable
@@ -264,9 +287,16 @@ export function extractClaims(section: string): Array<{
     if (!cd && /(^|\s)cd\s/.test(span)) continue;
     const base = cd?.[1] ?? '';
     if (base && PATH_RE.test(base)) push('path', base);
-    for (const token of (cd?.[2] ?? span).split(/\s+/)) {
-      const t = token.replace(/[.,;:)'"]+$/, '');
-      if (PATH_RE.test(t)) push('path', base ? `${base}/${t}` : t);
+    const tokens = (cd?.[2] ?? span).split(/\s+/);
+    for (let i = 0; i < tokens.length; i++) {
+      // A token following a flag is that flag's VALUE (`--repo owner/repo`,
+      // `-f infra/compose.yml`) — a claim about the tool's argument space,
+      // not about this tree.
+      if (i > 0 && tokens[i - 1].startsWith('-')) continue;
+      const t = tokens[i].replace(/[.,;:)'"]+$/, '');
+      if (PATH_RE.test(t) && isPathClaim(t)) {
+        push('path', base ? `${base}/${t}` : t);
+      }
     }
   }
 
@@ -370,24 +400,18 @@ function rulePath(
 
 /** `npm run build` / `npm test` / `npm run x --workspace=y` → the script name. */
 export function npmScriptOf(command: string): string | null {
-  const m = /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?([\w:.-]+)/.exec(command);
-  if (!m) return null;
-  const name = m[1];
-  // A leading flag (`npm --workspace=x run build`, `npm -w x run test`) lands
-  // in the capture because `-` is word-adjacent in the class. Biased toward
-  // silence: a claim this cannot parse is `unchecked`, never a false
-  // `no package defines this script` on a correct Test Plan.
-  if (name.startsWith('-')) return null;
-  // `npm test` / `npm start` are npm's own aliases and need no `run`.
-  if (
-    name === 'run' ||
-    name === 'exec' ||
-    name === 'ci' ||
-    name === 'install'
-  ) {
-    return null;
-  }
-  return name;
+  // ALLOWLIST, not denylist: only the `<runner> run <name>` form and npm's own
+  // script aliases are ruled. A denylist of four verbs read every OTHER npm
+  // builtin (`npm audit`, `npm pack`, `npm ls`, ~fifty of them) as a script
+  // name and filed `no package defines this script` on correct Test Plans —
+  // measured on real PR bodies. The true positive this exists for
+  // ("`npm run test:unit` was renamed") lives entirely in the allowed forms.
+  const m = /^(?:npm|pnpm|yarn|bun)\s+run\s+([\w:.-]+)/.exec(command);
+  if (m && !m[1].startsWith('-')) return m[1];
+  const alias = /^(?:npm|pnpm|yarn|bun)\s+(test|start|stop|restart)\b/.exec(
+    command,
+  );
+  return alias ? alias[1] : null;
 }
 
 function ruleCommand(
