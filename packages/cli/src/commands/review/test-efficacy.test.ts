@@ -6,6 +6,9 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  splitDiffIntoHunks,
+  selectHunkProbes,
+  MAX_HUNK_PROBES,
   isWorkspaceMember,
   planTestEfficacy,
   classifyProbeRun,
@@ -1146,5 +1149,138 @@ describe('fitsAnotherMutantRun', () => {
     expect(fitsAnotherMutantRun(60_000, 60_000)).toBe(true);
     expect(fitsAnotherMutantRun(59_999, 60_000)).toBe(false);
     expect(fitsAnotherMutantRun(0, 60_000)).toBe(false);
+  });
+});
+
+describe('splitDiffIntoHunks', () => {
+  const DIFF = [
+    'diff --git a/src/x.ts b/src/x.ts',
+    'index 111..222 100644',
+    '--- a/src/x.ts',
+    '+++ b/src/x.ts',
+    '@@ -1,3 +1,4 @@',
+    ' const a = 1;',
+    '+const added = 2;',
+    ' const b = 3;',
+    ' const c = 4;',
+    '@@ -20,3 +21,3 @@',
+    ' const p = 1;',
+    '-const q = 2;',
+    '+const q = 99;',
+    ' const r = 3;',
+    '',
+  ].join('\n');
+
+  it('returns one self-contained patch per hunk', () => {
+    const hunks = splitDiffIntoHunks(DIFF);
+    expect(hunks.map((h) => h.header)).toEqual([
+      '@@ -1,3 +1,4 @@',
+      '@@ -20,3 +21,3 @@',
+    ]);
+    // Each patch carries the file header, so `git apply` can place it alone.
+    for (const h of hunks) {
+      expect(h.patch).toContain('diff --git a/src/x.ts b/src/x.ts');
+      expect(h.patch).toContain('--- a/src/x.ts');
+      expect(h.patch).toContain('+++ b/src/x.ts');
+      expect(h.patch.endsWith('\n')).toBe(true);
+    }
+    // And ONLY its own hunk — the whole point of splitting.
+    expect(hunks[0].patch).toContain('+const added = 2;');
+    expect(hunks[0].patch).not.toContain('const q = 99;');
+    expect(hunks[1].patch).toContain('+const q = 99;');
+    expect(hunks[1].patch).not.toContain('const added = 2;');
+  });
+
+  it('reads the new-side start line from each header', () => {
+    expect(splitDiffIntoHunks(DIFF).map((h) => h.startLine)).toEqual([1, 21]);
+  });
+
+  it('does not mistake a removed line whose text begins `@@` for a header', () => {
+    // In a unified diff every body line is prefixed, so `-@@ x` is content.
+    const d = [
+      'diff --git a/a.md b/a.md',
+      '--- a/a.md',
+      '+++ b/a.md',
+      '@@ -1,2 +1,2 @@',
+      '-@@ old marker',
+      '+@@ new marker',
+      '',
+    ].join('\n');
+    const hunks = splitDiffIntoHunks(d);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].patch).toContain('-@@ old marker');
+  });
+
+  it('returns nothing for a diff with no hunks (a binary file)', () => {
+    expect(
+      splitDiffIntoHunks(
+        'diff --git a/i.png b/i.png\nBinary files a/i.png and b/i.png differ\n',
+      ),
+    ).toEqual([]);
+    expect(splitDiffIntoHunks('')).toEqual([]);
+  });
+});
+
+describe('selectHunkProbes', () => {
+  const diffOf = (...hunks: Array<[number, number]>) =>
+    [
+      'diff --git a/f b/f',
+      '--- a/f',
+      '+++ b/f',
+      ...hunks.map(
+        ([start, len]) => `@@ -${start},${len} +${start},${len} @@\n x`,
+      ),
+      '',
+    ].join('\n');
+
+  const file = (over: Record<string, unknown> = {}) => ({
+    file: 'src/a.ts',
+    diff: diffOf([1, 3], [20, 3]),
+    hasNewTests: false,
+    mutantLines: [] as number[],
+    ...over,
+  });
+
+  it('produces one candidate per hunk', () => {
+    const { selected } = selectHunkProbes([file()]);
+    expect(selected.map((c) => c.startLine)).toEqual([1, 20]);
+    expect(selected.map((c) => c.index)).toEqual([0, 1]);
+  });
+
+  it('skips a hunk a mutant already covers, and keeps the others', () => {
+    // The mutant ran the finer-grained experiment on those lines; a second run
+    // over the whole hunk buys a coarser answer at the same price.
+    const { selected } = selectHunkProbes([file({ mutantLines: [2] })]);
+    expect(selected.map((c) => c.startLine)).toEqual([20]);
+  });
+
+  it('puts files whose collocated tests the diff also touches first', () => {
+    const { selected } = selectHunkProbes([
+      file({ file: 'src/plain.ts', diff: diffOf([1, 1]) }),
+      file({ file: 'src/tested.ts', diff: diffOf([1, 1]), hasNewTests: true }),
+    ]);
+    expect(selected.map((c) => c.file)).toEqual([
+      'src/tested.ts',
+      'src/plain.ts',
+    ]);
+  });
+
+  it('COUNTS what the cap drops rather than losing it', () => {
+    // A capped `survived: 0` that read as "every change is covered" is exactly
+    // the false assurance the mutant cap already guards against.
+    const many = Array.from({ length: MAX_HUNK_PROBES + 3 }, (_, i) =>
+      file({ file: `src/f${i}.ts`, diff: diffOf([1, 1]) }),
+    );
+    const { selected, skippedForCap } = selectHunkProbes(many);
+    expect(selected).toHaveLength(MAX_HUNK_PROBES);
+    expect(skippedForCap).toBe(3);
+  });
+
+  it('has nothing to probe when every hunk is mutant-covered', () => {
+    const { selected, skippedForCap } = selectHunkProbes([
+      file({ mutantLines: [2, 21] }),
+    ]);
+    expect(selected).toEqual([]);
+    expect(skippedForCap).toBe(0);
   });
 });

@@ -24,6 +24,7 @@ import { refExists, releaseWorktree } from './lib/git.js';
 import {
   worktreePath,
   probeWorktreePath,
+  baseWorktreePath,
   reviewBranch,
   REVIEW_TMP_DIR,
   tmpFile,
@@ -413,6 +414,13 @@ export function runCleanup(target: string): void {
     // next run's `git worktree add` (see #6832 / test-efficacy.ts). Shares the
     // path helper with the probe so the suffix cannot drift between the two.
     report('probe worktree', probeWorktreePath(wt));
+
+    // The A/B base tree is the same story: `base-tree` leaves it standing for
+    // the rest of the review (a verifier may run against it at any point, and a
+    // base that failed to build is kept deliberately, as evidence), so this is
+    // its only removal — not just a crash sweep. Same shared path helper, same
+    // reason: the suffix must not drift between creator and sweeper.
+    report('base worktree', baseWorktreePath(wt));
 
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {

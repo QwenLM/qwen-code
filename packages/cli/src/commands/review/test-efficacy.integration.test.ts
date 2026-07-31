@@ -25,7 +25,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runOneMutant, testEfficacyCommand } from './test-efficacy.js';
+import {
+  runOneMutant,
+  runOneHunkProbe,
+  splitDiffIntoHunks,
+  testEfficacyCommand,
+} from './test-efficacy.js';
 
 type Handler = (args: {
   report: string;
@@ -276,6 +281,75 @@ describe('test-efficacy probe isolation (#6832)', () => {
     // Shared tree untouched, probe tree discarded.
     expect(treeState(wt)).toBe(before);
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+
+  it('probes hunks end-to-end on a diff with NO mutant candidates', async () => {
+    // The gating bug this pins: hunk probes once lived inside the mutant
+    // branch, so they ran only on a diff that already had a safety-verb
+    // candidate — exactly inverting their purpose. This diff changes a return
+    // value and a condition. `SAFETY_VERB_RE` matches neither, so there are
+    // zero mutants, and before the fix there were zero hunk probes too: the
+    // one class of diff per-hunk probing exists for got nothing at all.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/f.ts',
+      'export function price(n: number) {\n' +
+        '  if (n < 0) return 0;\n' +
+        '  return n * 2;\n' +
+        '}\n' +
+        '\n'.repeat(12) +
+        'export function label() {\n' +
+        '  return "old";\n' +
+        '}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export function price(n: number) {\n' +
+        '  if (n <= 0) return 0;\n' +
+        '  return n * 3;\n' +
+        '}\n' +
+        '\n'.repeat(12) +
+        'export function label() {\n' +
+        '  return "new";\n' +
+        '}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { price } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof price).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    const before = treeState(wt);
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.mutants.probed).toEqual([]);
+    // Two well-separated changes, so two hunks — and the fake vitest is green
+    // whatever the tree holds, so both changes ship with nothing gating them.
+    expect(out.hunks.probed).toHaveLength(2);
+    expect(out.hunks.survived).toBe(2);
+    expect(
+      out.findings.filter((f: { kind: string }) => f.kind === 'hunk-survived'),
+    ).toHaveLength(2);
+    // The mutation happened only in the disposable tree.
+    expect(treeState(wt)).toEqual(before);
   });
 
   it('runs a deletion mutant end-to-end and reports the survivor', async () => {
@@ -1105,5 +1179,160 @@ process.stdout.write(JSON.stringify({
       'packages/lib/src/f.test.ts',
     );
     expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+  });
+});
+
+describe('per-hunk probes against real git', () => {
+  // The risky half is the patch, not the verdict: a single-hunk patch has to be
+  // something `git apply --reverse` accepts, and reverse-applying hunk N has to
+  // change hunk N's lines and nothing else. A wrong patch here does not fail
+  // loudly — it neutralises the wrong change and attributes the run's verdict
+  // to code it never touched, which is the exact failure the mutants' own
+  // line-mismatch guard exists to prevent.
+  //
+  // `runProbeSuite` is not the subject. With an empty probe list it collects
+  // nothing and the verdict is `inconclusive` by the third-outcome rule, which
+  // leaves the patch application and the restore as what these assert.
+  const FILE = 'src/x.ts';
+  const BEFORE =
+    Array.from({ length: 30 }, (_, i) => `line${i + 1};`).join('\n') + '\n';
+  let base: string;
+
+  const contents = () => readFileSync(join(repo, FILE), 'utf8');
+
+  const hunkPatches = () => {
+    const diff = git(
+      repo,
+      'diff',
+      '--no-color',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      base,
+      'HEAD',
+      '--',
+      FILE,
+    );
+    return splitDiffIntoHunks(diff);
+  };
+
+  beforeEach(() => {
+    write(FILE, BEFORE);
+    base = commitAll('base');
+    // Two well-separated changes, so they land in two distinct hunks.
+    const after = BEFORE.split('\n');
+    after[1] = 'line2_CHANGED;';
+    after[24] = 'line25_CHANGED;';
+    write(FILE, after.join('\n'));
+    commitAll('head');
+  });
+
+  it('produces two patches git accepts, one per change', () => {
+    const hunks = hunkPatches();
+    expect(hunks).toHaveLength(2);
+    for (const h of hunks) {
+      // `--check` applies nothing; it asks git whether the patch is well-formed
+      // and would apply. A patch this rejects would be `inconclusive` forever.
+      expect(() =>
+        execFileSync('git', ['apply', '--reverse', '--check', '-'], {
+          cwd: repo,
+          input: h.patch,
+          encoding: 'utf8',
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it('reverting ONE hunk restores only that change', () => {
+    const [first, second] = hunkPatches();
+
+    runOneHunkProbe(
+      repo,
+      {
+        file: FILE,
+        index: 0,
+        header: first.header,
+        startLine: first.startLine,
+        patch: first.patch,
+      },
+      [],
+    );
+    // Restored afterwards — the probe must leave the tree as it found it.
+    expect(contents()).toContain('line2_CHANGED;');
+
+    // Apply by hand to observe the mid-probe state the probe itself hides.
+    execFileSync('git', ['apply', '--reverse', '-'], {
+      cwd: repo,
+      input: second.patch,
+      encoding: 'utf8',
+    });
+    const reverted = contents();
+    // The second change is undone…
+    expect(reverted).toContain('line25;');
+    expect(reverted).not.toContain('line25_CHANGED;');
+    // …and the first is untouched. This is what `git checkout base -- <file>`
+    // cannot do, and the whole reason the probe is per-hunk.
+    expect(reverted).toContain('line2_CHANGED;');
+  });
+
+  it('restores the file after the run, verdict notwithstanding', () => {
+    const [first] = hunkPatches();
+    const before = contents();
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: FILE,
+        index: 0,
+        header: first.header,
+        startLine: first.startLine,
+        patch: first.patch,
+      },
+      [],
+    );
+    expect(contents()).toBe(before);
+    // No probe file collected anything, so the honest verdict is the
+    // third outcome — never `killed`.
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.header).toBe(first.header);
+    // …and it is inconclusive because nothing was COLLECTED, not because the
+    // patch bounced. Without this the assertion above passes just as well on a
+    // probe that never applied anything, which is the state it exists to rule
+    // out: a silent no-op reads exactly like a clean restore.
+    expect(got.detail).toContain('no clean verdict');
+    expect(got.detail).not.toContain('could not be reverse-applied');
+  });
+
+  it('is inconclusive and leaves the tree ALONE when the patch will not apply', () => {
+    const before = contents();
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: FILE,
+        index: 0,
+        header: '@@ -1,3 +1,3 @@',
+        startLine: 1,
+        patch:
+          'diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,3 +1,3 @@\n-nope;\n+also nope;\n context;\n',
+      },
+      [],
+    );
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.detail).toContain('could not be reverse-applied');
+    expect(contents()).toBe(before);
+  });
+
+  it('is inconclusive when the probe tree does not hold the file at all', () => {
+    const got = runOneHunkProbe(
+      repo,
+      {
+        file: 'src/gone.ts',
+        index: 0,
+        header: '@@ -1 +1 @@',
+        startLine: 1,
+        patch: 'x',
+      },
+      [],
+    );
+    expect(got.verdict).toBe('inconclusive');
+    expect(got.detail).toContain('does not hold');
   });
 });

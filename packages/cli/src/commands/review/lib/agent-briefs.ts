@@ -483,6 +483,21 @@ For each finding you were given:
 
 **Leave the tree as you found it** — delete any probe file and revert any fix you applied for the self-check, so nothing you wrote reaches the diff or the build. A finding you actually probed carries \`Source: [probe]\` with the observed evidence; never tag one you only reasoned about — that source means "a run produced this", and downstream treats it as deterministic.
 
+**When the claim is about a CHANGE in behaviour, one tree cannot settle it — build the other one.** A probe runs the PR's code, which answers "what does it do now". It cannot answer "and what did it do before", and a whole class of finding is exactly that difference: "this changes the output format", "this only adds a field", "this silently drops the error message", "cancelled and failed used to be indistinguishable". Reading the diff to recover the old behaviour is the step that goes wrong quietly — the new lines are always there and always look right, and whether they change what anyone observes routinely turns on code the diff never touches. So when a finding's claim is comparative, get the *before* and measure it:
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review base-tree --plan <the plan report> --worktree <this worktree> \\
+  --out <the plan report's directory>/qwen-review-pr-<n>-base-tree.json
+\`\`\`
+
+It builds the merge base in a sibling worktree and reports \`available\` and \`path\`. Then run **the same input** in both trees — the same command, the same fixture, the same script — and compare the observed output byte for byte. The three rules that make this evidence:
+
+- **Same input, same procedure, both sides.** A difference produced by running two different things is not a difference between the two programs. If you had to build or install differently on one side, say so and treat the result as inconclusive.
+- **Quote both outputs.** \`BASE: <what it printed>\` / \`PR: <what it printed>\`. The observation is the verdict; a summary of it is a reading again.
+- **A/B is expensive — spend it on a claim that turns on it.** One extra build per review, at most. A finding you can settle by tracing does not need this, and \`available: false\` (no merge base, a stale one, or a base that does not build) is a fact about the harness, never a finding against the PR.
+
+A finding an A/B settled carries \`Source: [probe]\` like any other run-produced evidence, with both sides' output quoted. **Do not remove the base tree** — \`cleanup\` sweeps it at the end of the review, and a later finding may need it.
+
 Return, for each finding, one verdict:
 
 - **confirmed (high confidence)** — the trace works: you can restate the failure scenario against the real code, naming the triggering input/state and quoting the line(s) that produce the wrong outcome. Carry the severity (Critical | Suggestion | Nice to have).

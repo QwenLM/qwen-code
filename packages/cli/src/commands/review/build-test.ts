@@ -250,6 +250,17 @@ interface BuildTestArgs {
   timeout: number;
   install: boolean;
   /**
+   * Build, then stop — do not run the changed workspaces' tests.
+   *
+   * For the merge-base tree an A/B probe compares against. Base's tests were
+   * green before this PR existed and running them measures nothing about it;
+   * what the probe needs from that tree is a compiled `dist/` to run against,
+   * and paying for the suite twice is the difference between an A/B a reviewer
+   * will use and one they will skip. Defaults false, so the PR-side call is
+   * unchanged.
+   */
+  buildOnly?: boolean;
+  /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
    * install that exits non-zero and leaves a working `node_modules` behind.
@@ -626,7 +637,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // parallel and does not finish; the packages the diff did not touch cannot have
   // been broken by it, and their tests were green before this PR and will be green
   // after it.
-  for (const dir of affected) {
+  for (const dir of args.buildOnly ? [] : affected) {
     const pkg = byDir.get(dir);
     if (!pkg?.scripts.includes('test')) continue;
     const r = exec(testCommand(dir), root, perCommandMs);
@@ -653,7 +664,11 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           widened.size
             ? `, plus ${[...widened].join(', ')} the compiler asked for`
             : ''
-        }) and ran the tests of the changed ones. Everything passed.`;
+        })${
+          args.buildOnly
+            ? '. Tests were not run (build-only).'
+            : ' and ran the tests of the changed ones. Everything passed.'
+        }`;
     } else if (realFailures.length === 0) {
       results.note =
         `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
@@ -721,6 +736,14 @@ export const buildTestCommand: CommandModule = {
         type: 'boolean',
         default: true,
         describe: 'Run `npm ci` first when node_modules is absent',
+      })
+      .option('build-only', {
+        type: 'boolean',
+        default: false,
+        describe:
+          "Build, then stop — skip the changed workspaces' tests. For the " +
+          'merge-base tree an A/B probe compares against, whose suite says ' +
+          'nothing about this PR.',
       }),
   handler: (argv) => {
     const args = argv as unknown as BuildTestArgs;

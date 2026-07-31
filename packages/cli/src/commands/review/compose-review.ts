@@ -39,6 +39,7 @@ import {
   type RosterPlan,
 } from './lib/roster.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
+import type { TestPlanReport } from './test-plan.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -321,11 +322,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
   // in the body on every verdict, but never fed into the cap.
   const gateDisclosed: string[] = [];
+  // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
+  // see `testPlanGate` for why this one neither blocks nor caps.
+  const testPlanNotes: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
+    testPlanNotes.push(...testPlanGate(input.planPath).notes);
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -932,6 +937,18 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ]
     : [];
 
+  // The Test Plan's own claims, ruled against the reviewed tree. Rendered on
+  // every verdict — including Approve, which is where most of them land — and
+  // worded so the author can see it is about the description, not the code.
+  const testPlanBlock: Bi[] = testPlanNotes.length
+    ? [
+        {
+          en: `Test Plan (not a blocker): ${testPlanNotes.join('; ')}.`,
+          zh: `Test Plan（非阻断）：${testPlanNotes.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -942,6 +959,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ...cannotTellBlock,
       ...notReviewedParts,
       ...deferredBlock,
+      ...testPlanBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -963,8 +981,9 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         [
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
           ...deferredBlock,
+          ...testPlanBlock,
         ],
-        deferredBlock.length ? '\n\n' : ' ',
+        deferredBlock.length || testPlanBlock.length ? '\n\n' : ' ',
       ),
       baseEvent,
       cappedBy,
@@ -1076,6 +1095,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
   //     shell actionlint would lint but we do not yet trust.
   clauses.push(...deferredBlock);
+
+  // 6c. Test Plan rulings (non-capping) — a claim in the PR description that
+  //     the reviewed tree does not bear out.
+  clauses.push(...testPlanBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
@@ -1342,6 +1365,71 @@ function scriptLintReportName(pr: unknown): string {
   return positive
     ? `qwen-review-pr-${pr}-script-lint.json`
     : 'qwen-review-script-lint.json';
+}
+
+/**
+ * Read the test-plan report and turn its rulings into body notes.
+ *
+ * Unlike `scriptLintGate`, this one **never caps and never blocks**, and every
+ * early return is therefore a plain "nothing to say" rather than a fail-closed
+ * disclosure. That asymmetry is deliberate on both halves:
+ *
+ *   - A Test Plan defect is not a code defect. The author claimed a path that
+ *     is not there, or a count from a different suite; the diff is unaffected.
+ *     Blocking a merge on it would spend the review's one irreversible action
+ *     on a documentation nit, and the skill's design philosophy is that a
+ *     comment not worth the reader's time costs more than it returns.
+ *   - Capping on a MISSING report would cap essentially every PR, because most
+ *     PRs produce no notes at all and a run has no way to prove the difference
+ *     between "checked, nothing to say" and "never checked" that is worth the
+ *     un-Approvability. This is the `deferred`-checker precedent above: a
+ *     limitation the author cannot fix must not become a permanent cap.
+ *
+ * A stale report is dropped in silence for the same reason a stale one is
+ * refused elsewhere — a note about a previous commit's Test Plan is worse than
+ * no note, and here there is no cap to fall back to.
+ */
+export function testPlanGate(planPath: string): { notes: string[] } {
+  const notes: string[] = [];
+  let plan: { prNumber?: unknown; diffPathAbsolute?: unknown };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return { notes };
+  }
+  // A local review has no PR body, so there is no Test Plan to have checked.
+  const pr = plan.prNumber;
+  const isPr =
+    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
+  if (!isPr) return { notes };
+
+  let report: TestPlanReport;
+  try {
+    report = JSON.parse(
+      readFileSync(
+        join(dirname(planPath), `qwen-review-pr-${pr}-test-plan.json`),
+        'utf8',
+      ),
+    ) as TestPlanReport;
+  } catch {
+    return { notes };
+  }
+  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  if (!planDiffHash || report.diffHash !== planDiffHash) return { notes };
+
+  for (const claim of report.claims ?? []) {
+    if (claim.verdict === 'contradicted') {
+      notes.push(
+        `${mdField(claim.text)} — ${mdField(claim.observed ?? 'not reproduced')}`,
+      );
+    } else if (claim.verdict === 'differs') {
+      notes.push(
+        `${mdField(claim.text)} — this review observed ${mdField(claim.observed ?? 'a different result')}`,
+      );
+    }
+  }
+  return { notes };
 }
 
 /**

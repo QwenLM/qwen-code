@@ -21,6 +21,7 @@ import { getGhHost, setGhHost } from './lib/gh.js';
 import {
   composeReview,
   scriptLintGate,
+  testPlanGate,
   composeReviewCommand,
   describeChunkGap,
   verdictLine,
@@ -2988,5 +2989,105 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.body).toContain('source mapping not yet supported');
     // the LGTM copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('LGTM');
+  });
+});
+
+describe('testPlanGate — Test Plan rulings, disclosed but never capping', () => {
+  // The gate's whole contract is that it produces NOTES and nothing else: no
+  // critical, no cap, no unreviewed scope. Every test here is really the same
+  // assertion from a different angle — a Test Plan defect must never be able to
+  // change what the review does to the pull request.
+  let diffPath: string;
+  let diffHash: string;
+
+  beforeEach(() => {
+    diffPath = join(dir, 'pr.diff');
+    writeFileSync(diffPath, 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+added\n');
+    diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+  });
+
+  const writePlan = (over: Record<string, unknown> = {}): string => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({ prNumber: 1, diffPathAbsolute: diffPath, ...over }),
+    );
+    return p;
+  };
+  const writeReport = (
+    claims: Array<Record<string, unknown>>,
+    over: Record<string, unknown> = {},
+    name = 'qwen-review-pr-1-test-plan.json',
+  ) =>
+    writeFileSync(
+      join(dir, name),
+      JSON.stringify({ found: true, claims, diffHash, note: '', ...over }),
+    );
+
+  it('renders a contradicted claim with what was observed', () => {
+    const p = writePlan();
+    writeReport([
+      {
+        kind: 'path',
+        text: 'src/ghost.test.ts',
+        verdict: 'contradicted',
+        observed: 'no such file or directory',
+      },
+    ]);
+    // Both halves go through `mdField`: the claim is the author's text and the
+    // observation is read back off disk, so neither is trusted to be inert
+    // markdown.
+    expect(testPlanGate(p).notes).toEqual([
+      '`src/ghost.test.ts` — `no such file or directory`',
+    ]);
+  });
+
+  it('renders a differing count as an observation, not a contradiction', () => {
+    const p = writePlan();
+    writeReport([
+      {
+        kind: 'count',
+        text: '471 tests passed',
+        verdict: 'differs',
+        observed: '472 passed',
+      },
+    ]);
+    expect(testPlanGate(p).notes).toEqual([
+      '`471 tests passed` — this review observed `472 passed`',
+    ]);
+  });
+
+  it('says nothing about claims that reproduced or could not be checked', () => {
+    const p = writePlan();
+    writeReport([
+      { kind: 'command', text: 'npm run build', verdict: 'reproduces' },
+      { kind: 'count', text: '9 tests passed', verdict: 'unchecked' },
+    ]);
+    expect(testPlanGate(p).notes).toEqual([]);
+  });
+
+  it('stays silent on a local review — there is no PR body to have checked', () => {
+    const p = writePlan({ prNumber: undefined });
+    writeReport([
+      { kind: 'path', text: 'src/ghost.ts', verdict: 'contradicted' },
+    ]);
+    expect(testPlanGate(p).notes).toEqual([]);
+  });
+
+  it('drops a STALE report rather than quoting a previous commit Test Plan', () => {
+    const p = writePlan();
+    writeReport([{ kind: 'path', text: 'src/g.ts', verdict: 'contradicted' }], {
+      diffHash: 'a-different-hash',
+    });
+    expect(testPlanGate(p).notes).toEqual([]);
+  });
+
+  it('does not cap or block when the report is missing or the plan is unreadable', () => {
+    // The `deferred`-checker precedent: a limitation the author cannot fix must
+    // never make a PR un-Approvable. Both paths return notes only.
+    expect(testPlanGate(writePlan()).notes).toEqual([]);
+    expect(testPlanGate(join(dir, 'nope.json')).notes).toEqual([]);
   });
 });

@@ -15,7 +15,9 @@ const mocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
   clearReviewWorktreeLease: vi.fn(),
   refExists: vi.fn(() => true),
-  releaseWorktree: vi.fn(() => ({
+  // The parameter is declared so `mock.calls` is typed `[string][]` rather than
+  // `[][]` — the paths it was asked to free are the assertion in the sweep test.
+  releaseWorktree: vi.fn((_path: string) => ({
     existed: false,
     freed: false,
     reason: undefined,
@@ -77,6 +79,7 @@ vi.mock('./lib/gh.js', () => ({
 vi.mock('./lib/paths.js', () => ({
   worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
   probeWorktreePath: (path: string) => `${path}-probe`,
+  baseWorktreePath: (path: string) => `${path}-base`,
   reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
   REVIEW_TMP_DIR: '/repo/.qwen/tmp',
   tmpFile: (target: string, suffix: string) =>
@@ -131,6 +134,23 @@ describe('runCleanup', () => {
       process.cwd(),
       'pr-123',
     );
+  });
+
+  it('releases the review worktree AND both disposable siblings', () => {
+    // `base-tree` deliberately leaves its tree standing for the whole review
+    // (a later verifier may need it, and a base that failed to build is kept as
+    // evidence), so this is its ONLY removal — not a crash sweep like the
+    // probe's. A missing entry here leaks a full built checkout per review and
+    // blocks the next run's `git worktree add`.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree.mock.calls.map((c) => c[0])).toEqual([
+      '/repo/.qwen/tmp/review-pr-123',
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      '/repo/.qwen/tmp/review-pr-123-base',
+    ]);
   });
 });
 
