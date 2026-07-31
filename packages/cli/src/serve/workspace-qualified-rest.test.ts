@@ -1265,6 +1265,26 @@ describe('workspace-qualified core REST', () => {
         h.secondaryBridge.runWorkspaceMemoryRemember,
       ).not.toHaveBeenCalled();
       expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
+
+      const forget = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ query: 'Do not forget' });
+      expect(forget.status).toBe(403);
+      expect(forget.body.code).toBe('untrusted_workspace');
+      expect(h.secondaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+      expect(h.primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+
+      const dream = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({});
+      expect(dream.status).toBe(403);
+      expect(dream.body.code).toBe('untrusted_workspace');
+      expect(h.secondaryBridge.runWorkspaceMemoryDream).not.toHaveBeenCalled();
+      expect(h.primaryBridge.runWorkspaceMemoryDream).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -1359,6 +1379,47 @@ describe('workspace-qualified core REST', () => {
         .set('Host', host());
       expect(crossRead.status).toBe(404);
       expect(crossRead.body.code).toBe('remember_task_not_found');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 404 when polling a task on a workspace that never enqueued one', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const lateCwd = canonicalizeWorkspace(path.join(h.scratch, 'late'));
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const lateId = hashDaemonWorkspace(lateCwd);
+      const lateBridge = makeBridge();
+      h.workspaceRegistry.add({
+        workspaceId: lateId,
+        workspaceCwd: lateCwd,
+        sessionRuntimeBaseDir: path.join(lateCwd, '.runtime'),
+        primary: false,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: lateBridge,
+        workspaceService: makeWorkspaceService('late'),
+        routeFileSystemFactory: createWorkspaceFileSystemFactory({
+          boundWorkspaces: [lateCwd],
+          trusted: true,
+          emit: () => {},
+        }),
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+        generationGuard: createWorkspaceGenerationGuard(),
+      });
+
+      // No POST first, so the workspace has no lane: the poll must answer a
+      // permanent 404 rather than allocate a mount or report a retryable 503.
+      const res = await request(h.app)
+        .get(
+          `/workspaces/${encodeURIComponent(lateId)}/memory/remember/never-enqueued`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host());
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('remember_task_not_found');
+      expect(lateBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
