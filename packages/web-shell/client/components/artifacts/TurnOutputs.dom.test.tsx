@@ -23,7 +23,10 @@ const { TurnOutputs } = await import('./TurnOutputs');
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
+const createdBlobs: Blob[] = [];
+
 beforeEach(() => {
+  createdBlobs.length = 0;
   stat.mockResolvedValue({ sizeBytes: 3, modifiedMs: 1 });
   readFileBytes.mockResolvedValue({
     contentBase64: btoa('abc'),
@@ -33,7 +36,10 @@ beforeEach(() => {
   });
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
-    value: vi.fn(() => 'blob:artifact'),
+    value: vi.fn((blob: Blob) => {
+      createdBlobs.push(blob);
+      return 'blob:artifact';
+    }),
   });
   Object.defineProperty(URL, 'revokeObjectURL', {
     configurable: true,
@@ -149,6 +155,7 @@ describe('TurnOutputs artifact downloads', () => {
     });
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
+    expect(createdBlobs[0]?.type).toBe('application/pdf');
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:artifact');
 
     act(() => root.unmount());
