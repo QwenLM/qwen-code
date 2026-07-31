@@ -75,11 +75,6 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
-import {
-  AUTOFIX_EXPANSION_FAILED_TEXT,
-  autofixRejectedLabel,
-  resolveAutofixCronPrompt,
-} from './utils/autofix.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -2195,32 +2190,14 @@ export async function runNonInteractive(
                   checkCronDone();
                   return;
                 }
-                void (async () => {
-                  let label = job.prompt.slice(0, 40);
-                  let modelText = job.prompt;
-                  try {
-                    const autofix = await resolveAutofixCronPrompt(config, job);
-                    if (autofix) {
-                      label = autofix.displayText;
-                      modelText = autofix.modelText;
-                    }
-                  } catch (error) {
-                    debugLogger.error(
-                      'Failed to expand scheduled Autofix tick',
-                      error,
-                    );
-                    label = autofixRejectedLabel(job.id);
-                    modelText = AUTOFIX_EXPANSION_FAILED_TEXT;
-                  }
-                  localQueue.push({
-                    displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
-                    modelText,
-                    sendMessageType: SendMessageType.Cron,
-                    todoWorkChainId: job.todoWorkChainId,
-                  });
-                  await drainLocalQueue();
-                  checkCronDone();
-                })().catch(onDrainError);
+                const label = job.prompt.slice(0, 40);
+                localQueue.push({
+                  displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
+                  modelText: job.prompt,
+                  sendMessageType: SendMessageType.Cron,
+                  todoWorkChainId: job.todoWorkChainId,
+                });
+                drainLocalQueue().then(checkCronDone, onDrainError);
               });
 
               // Check immediately in case jobs were already deleted

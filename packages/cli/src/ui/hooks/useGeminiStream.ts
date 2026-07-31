@@ -101,11 +101,6 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
-import {
-  AUTOFIX_EXPANSION_FAILED_TEXT,
-  autofixRejectedLabel,
-  resolveAutofixCronPrompt,
-} from '../../utils/autofix.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -3905,60 +3900,36 @@ export const useGeminiStream = (
           id?: string;
           prompt: string;
           cronExpr?: string;
-          recurring?: boolean;
           missed?: boolean;
           todoWorkChainId?: string;
         }) => {
-          void (async () => {
-            const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
-            const autonomousMode = detectAutonomousSentinel(job.prompt);
-            let label = job.prompt.slice(0, 40);
-            let modelText = job.prompt;
-            if (autonomousMode) {
-              if (job.missed) return;
-              const resolver = getAutonomousLoopTickResolver();
-              const tick = resolver.resolveAutonomous(autonomousMode);
-              label = 'Autonomous loop tick';
-              modelText = tick.modelText;
-              notificationQueueRef.current.push({
-                displayText: `${job.missed ? 'Missed' : source}: ${label}`,
-                modelText,
-                sendMessageType: SendMessageType.Cron,
-                todoWorkChainId: job.todoWorkChainId,
-                onDelivered: () => resolver.markDelivered(),
-              });
-              setNotificationTrigger((n) => n + 1);
-              return;
-            }
-            try {
-              const autofix = await resolveAutofixCronPrompt(config, {
-                id: job.id ?? '',
-                prompt: job.prompt,
-                recurring: job.recurring ?? false,
-                cronExpr: job.cronExpr ?? '',
-              });
-              if (autofix) {
-                label = autofix.displayText;
-                modelText = autofix.modelText;
-              }
-            } catch (error) {
-              debugLogger.error(
-                'Failed to expand scheduled Autofix tick',
-                error,
-              );
-              label = autofixRejectedLabel(job.id);
-              modelText = AUTOFIX_EXPANSION_FAILED_TEXT;
-            }
+          const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
+          const autonomousMode = detectAutonomousSentinel(job.prompt);
+          let label = job.prompt.slice(0, 40);
+          let modelText = job.prompt;
+          if (autonomousMode) {
+            if (job.missed) return;
+            const resolver = getAutonomousLoopTickResolver();
+            const tick = resolver.resolveAutonomous(autonomousMode);
+            label = 'Autonomous loop tick';
+            modelText = tick.modelText;
             notificationQueueRef.current.push({
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
               modelText,
               sendMessageType: SendMessageType.Cron,
               todoWorkChainId: job.todoWorkChainId,
+              onDelivered: () => resolver.markDelivered(),
             });
             setNotificationTrigger((n) => n + 1);
-          })().catch((error) => {
-            debugLogger.error('Failed to enqueue scheduled cron tick', error);
+            return;
+          }
+          notificationQueueRef.current.push({
+            displayText: `${job.missed ? 'Missed' : source}: ${label}`,
+            modelText,
+            sendMessageType: SendMessageType.Cron,
+            todoWorkChainId: job.todoWorkChainId,
           });
+          setNotificationTrigger((n) => n + 1);
         },
       );
     })();

@@ -47,14 +47,6 @@ describe('bundled loop skill', () => {
     expect(body).not.toContain('delayMinutes');
   });
 
-  it('routes Autofix status through the self-paced path', () => {
-    const { body } = loadLoopSkill();
-
-    expect(body).toContain('`/autofix status`');
-    expect(body).toContain('use `/autofix on`');
-    expect(body).toContain('instead of wrapping it in a recurring `/loop`');
-  });
-
   it('teaches the self-paced loop to lean on monitor/background-task notifications', () => {
     const { body } = loadLoopSkill();
 
