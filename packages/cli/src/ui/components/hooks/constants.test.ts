@@ -93,6 +93,14 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(2);
     });
 
+    it('should return fire-and-forget exit codes for SessionDelete event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.SessionDelete);
+      expect(exitCodes).toHaveLength(2);
+      for (const row of exitCodes) {
+        expect(row.description).toContain('fire-and-forget');
+      }
+    });
+
     it('should return exit codes for PreCompact event', () => {
       const exitCodes = getHookExitCodes(HookEventName.PreCompact);
       expect(exitCodes).toHaveLength(3);
@@ -153,6 +161,12 @@ describe('hooks constants', () => {
       expect(desc).toBe('When a new session is started');
     });
 
+    it('should return description for SessionDelete', () => {
+      expect(getHookShortDescription(HookEventName.SessionDelete)).toBe(
+        'After an explicitly selected session is deleted',
+      );
+    });
+
     it('should return description for InstructionsLoaded', () => {
       const desc = getHookShortDescription(HookEventName.InstructionsLoaded);
       expect(desc).toBe('When instruction files are loaded');
@@ -161,6 +175,12 @@ describe('hooks constants', () => {
     it('should return description for PostCompact', () => {
       const desc = getHookShortDescription(HookEventName.PostCompact);
       expect(desc).toBe('After conversation compaction');
+    });
+
+    it('should describe the deleted session id for SessionDelete', () => {
+      expect(getHookDescription(HookEventName.SessionDelete)).toContain(
+        'deleted_session_id',
+      );
     });
 
     it('should return description for StopFailure', () => {
@@ -272,6 +292,7 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptExpansion);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionEnd);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionDelete);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStop);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
@@ -313,6 +334,7 @@ describe('hooks constants', () => {
       expect(supportsMatchers(HookEventName.UserPromptSubmit)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCreated)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCompleted)).toBe(false);
+      expect(supportsMatchers(HookEventName.SessionDelete)).toBe(false);
     });
 
     it('returns false for unknown events', () => {
