@@ -70,6 +70,9 @@ export function decodeProcessOutput(buffer: Buffer): string {
     // that Node's WHATWG TextDecoder rejects with RangeError. Fall back to
     // utf-8 so a throw never escapes into an 'exit'/'data' handler, which
     // would otherwise leave the shell-execution promise unsettled.
+    debugLogger.debug(
+      `TextDecoder rejected encoding label "${encoding}"; falling back to utf-8`,
+    );
     return new TextDecoder('utf-8').decode(buffer);
   }
 }

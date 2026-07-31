@@ -9,9 +9,11 @@ import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  decodeProcessOutput,
+} from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
-import { decodeProcessOutput } from '../../utils/decode-process-output.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 

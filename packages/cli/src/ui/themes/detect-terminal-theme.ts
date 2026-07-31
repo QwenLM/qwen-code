@@ -6,8 +6,10 @@
 
 import { execSync } from 'node:child_process';
 import process from 'node:process';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { decodeProcessOutput } from '../../utils/decode-process-output.js';
+import {
+  createDebugLogger,
+  decodeProcessOutput,
+} from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('THEME_DETECT');
 

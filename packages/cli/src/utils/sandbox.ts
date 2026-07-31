@@ -18,12 +18,12 @@ import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
 import {
   FatalSandboxError,
   Storage,
+  decodeProcessOutput,
   isSubpath,
   resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
-import { decodeProcessOutput } from './decode-process-output.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';

@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { decodeProcessOutput } from '../../utils/decode-process-output.js';
+import { decodeProcessOutput } from '@qwen-code/qwen-code-core';
 
 export type TerminalImageProtocol = 'kitty' | 'iterm2';
 

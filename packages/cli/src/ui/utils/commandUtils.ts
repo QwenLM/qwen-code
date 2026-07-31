@@ -6,8 +6,10 @@
 
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { decodeProcessOutput } from '../../utils/decode-process-output.js';
+import {
+  createDebugLogger,
+  decodeProcessOutput,
+} from '@qwen-code/qwen-code-core';
 import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,

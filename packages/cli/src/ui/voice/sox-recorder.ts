@@ -8,7 +8,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { decodeProcessOutput } from '../../utils/decode-process-output.js';
+import { decodeProcessOutput } from '@qwen-code/qwen-code-core';
 import type {
   RecordedVoiceAudio,
   VoiceRecorder,
