@@ -126,6 +126,7 @@ function streamState(ch: QQChannelClass) {
       chatId: string;
       buffer: string;
       timer: ReturnType<typeof setTimeout> | null;
+      msgId?: string;
     }
   >;
 }
@@ -248,6 +249,18 @@ describe('onResponseChunk', () => {
     expect(clearTimeout).toHaveBeenCalledWith(firstTimer);
   });
 
+  it('captures the current replyMsgId into the streamState entry on creation (per-session anchor)', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+
+    onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
+
+    expect(streamState(ch).get('sess-1')!.msgId).toBe('msg-A');
+  });
+
   it('resets the idle timer on each new chunk', async () => {
     const ch = makeChannel();
     onResponseChunk(ch, 'test-chat', 'part1', 'sess-1');
@@ -332,6 +345,90 @@ describe('idle-flush timer', () => {
     vi.advanceTimersByTime(1500);
     await drain();
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps chunks anchored to the originating msgId when a newer message overwrites replyMsgId mid-stream', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    // User A's message starts a streaming reply.
+    replyMap.set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+    onResponseChunk(ch, 'test-chat', 'chunk1 ', 'sess-A');
+
+    // User B's message arrives mid-stream and overwrites the chat-level entry.
+    replyMap.set('test-chat', { msgId: 'msg-B', timestamp: Date.now() });
+
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    // A's chunk must stay under A's msg_id — not get re-parented onto B.
+    expect(body['msg_id']).toBe('msg-A');
+  });
+
+  it('two sessions on the same chat each anchor their streaming chunks to their own msgId', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    // A triggers a stream.
+    replyMap.set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+    onResponseChunk(ch, 'test-chat', 'part-A ', 'sess-A');
+    // B arrives mid-stream, overwrites the entry, and triggers its own stream.
+    replyMap.set('test-chat', { msgId: 'msg-B', timestamp: Date.now() });
+    onResponseChunk(ch, 'test-chat', 'part-B ', 'sess-B');
+
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    const msgIds = mockSendQQMessage.mock.calls
+      .map((c) => (c[3] as Record<string, unknown>)['msg_id'])
+      .sort();
+    // Each session's chunk goes under the msgId that triggered it.
+    expect(msgIds).toEqual(['msg-A', 'msg-B']);
+  });
+
+  it('a stream anchored to an overwritten msgId keeps its msg_seq counter (not reset by setReplyMsgId)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    replyMap.set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+    onResponseChunk(ch, 'test-chat', 'part1 ', 'sess-A');
+
+    // A's first chunk is sent (seq 1 for msg-A).
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    // B overwrites the chat-level entry while A's stream continues.
+    replyMap.set('test-chat', { msgId: 'msg-B', timestamp: Date.now() });
+    onResponseChunk(ch, 'test-chat', 'part2 ', 'sess-A');
+
+    // A's seq counter must survive the overwrite (setReplyMsgId guard).
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    // Second chunk of msg-A continues at seq 2, anchored to msg-A.
+    expect(seqMap.get('msg-A')).toBe(2);
+    const secondBody = mockSendQQMessage.mock.calls[1][3] as Record<
+      string,
+      unknown
+    >;
+    expect(secondBody['msg_id']).toBe('msg-A');
+    expect(secondBody['msg_seq']).toBe(2);
   });
 });
 
@@ -469,6 +566,28 @@ describe('onResponseComplete', () => {
       'remaining text',
     );
     expect(streamState(ch).has('sess-1')).toBe(false);
+  });
+
+  it('final segment keeps the captured per-session msgId even after replyMsgId is overwritten', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat', { msgId: 'msg-A', timestamp: Date.now() });
+    onResponseChunk(ch, 'test-chat', 'final tail', 'sess-A');
+    // A concurrent message overwrites the chat-level entry mid-stream.
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat', { msgId: 'msg-B', timestamp: Date.now() });
+
+    await onResponseComplete(ch, 'test-chat', 'ignored-fulltext', 'sess-A');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      'final tail',
+    );
+    expect(body['msg_id']).toBe('msg-A');
   });
 
   it('falls back to fullText when no streamState', async () => {

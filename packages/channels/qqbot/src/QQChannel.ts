@@ -201,8 +201,26 @@ export class QQChannel extends ChannelBase {
       buffer: string;
       timer: ReturnType<typeof setTimeout> | null;
       retryCount: number;
+      /**
+       * Per-session reply msgId captured when the stream starts. Anchors every
+       * subsequent chunk/final segment of THIS session to the msgId of the
+       * message that triggered it, so a concurrent message in the same chat
+       * overwriting the chat-level replyMsgId entry cannot re-parent this
+       * session's streaming chunks onto the other message.
+       */
+      msgId?: string;
     }
   > = new Map();
+  /**
+   * Per-session reply msgId anchor, kept across idle-flush buffer windows.
+   * Captured when the session's stream first starts (from the chat-level
+   * replyMsgId entry) and released when the response completes, fails
+   * permanently, or the session dies. Because it outlives individual
+   * streamState entries, a concurrent message in the same chat that
+   * overwrites the chat-level replyMsgId entry mid-stream cannot re-parent
+   * this session's later chunks onto its own msg_id (see PR #6457 review).
+   */
+  private sessionReplyMsgId: Map<string, string> = new Map();
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
@@ -228,18 +246,21 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
-    // groupAllPolicy 'keyword' or 'all' requires 'single' session scope
-    // because all group messages share one conversation context.
+    // groupAllPolicy 'keyword' or 'all' requires 'thread' session scope for
+    // per-group shared context (routing key = channel:chatId, so every group /
+    // private chat gets its own session). We warn but do NOT force the scope:
+    // forcibly flattening the user's multi-level session isolation into a
+    // global single session was incorrect (see PR #6457 review). The user's
+    // sessionScope choice wins; with a non-thread scope, group messages may
+    // fragment per user instead of sharing one context per group.
     const qqCfg = config as unknown as QQChannelConfig;
     if (
       (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
-      config.sessionScope !== 'single'
+      config.sessionScope !== 'thread'
     ) {
-      const originalScope = config.sessionScope;
       process.stderr.write(
-        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${originalScope}' (not 'single'). Forcing sessionScope to 'single' to ensure shared group context.\n`,
+        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'thread'). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context; with the current scope group messages may fragment per user.\n`,
       );
-      config = { ...config, sessionScope: 'single' as const };
     }
 
     const router =
@@ -591,7 +612,11 @@ export class QQChannel extends ChannelBase {
     }
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(
+    chatId: string,
+    text: string,
+    msgIdOverride?: string,
+  ): Promise<void> {
     // <noreply> suppression
     if (text.trim() === '<noreply>') {
       process.stderr.write(
@@ -603,12 +628,17 @@ export class QQChannel extends ChannelBase {
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
-    // Look up reply context with TTL check
-    const entry = this.replyMsgId.get(chatId);
+    // msgIdOverride is the per-session reply anchor captured when a streaming
+    // response started. It takes precedence over the chat-level replyMsgId
+    // entry so a concurrent message (same chat, other user) that overwrote the
+    // entry mid-stream cannot re-parent this session's chunks onto that
+    // message. When absent, fall back to the chat-level entry with TTL check.
+    const entry = msgIdOverride ? undefined : this.replyMsgId.get(chatId);
     const msgId =
-      entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+      msgIdOverride ??
+      (entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
         ? entry.msgId
-        : undefined;
+        : undefined);
     if (entry && !msgId) {
       process.stderr.write(
         `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
@@ -956,6 +986,7 @@ export class QQChannel extends ChannelBase {
       if (state.timer) clearTimeout(state.timer);
     }
     this.streamState.clear();
+    this.sessionReplyMsgId.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
@@ -988,11 +1019,22 @@ export class QQChannel extends ChannelBase {
     if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
-      state = { chatId, buffer: chunk, timer: null, retryCount: 0 } as {
-        chatId: string;
-        buffer: string;
-        timer: ReturnType<typeof setTimeout> | null;
-        retryCount: number;
+      // Reuse the session's reply anchor across buffer windows (a single
+      // response may flush several times, each creating a fresh state entry);
+      // capture from the chat-level entry only on the first window.
+      let anchor = this.sessionReplyMsgId.get(sessionId);
+      if (anchor === undefined) {
+        anchor = this.captureReplyMsgId(chatId);
+        if (anchor !== undefined) {
+          this.sessionReplyMsgId.set(sessionId, anchor);
+        }
+      }
+      state = {
+        chatId,
+        buffer: chunk,
+        timer: null,
+        retryCount: 0,
+        msgId: anchor,
       };
       this.streamState.set(sessionId, state);
     } else {
@@ -1067,6 +1109,7 @@ export class QQChannel extends ChannelBase {
       buffer: string;
       timer: ReturnType<typeof setTimeout> | null;
       retryCount: number;
+      msgId?: string;
     },
     logLabel: string,
   ): void {
@@ -1074,7 +1117,7 @@ export class QQChannel extends ChannelBase {
     // sendMessage throws DeliveryError for delivery failures.
     // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
     // permanent. RATE_LIMITED is transient and falls through to re-buffer/retry.
-    this.sendMessage(state.chatId, buffer)
+    this.sendMessage(state.chatId, buffer, state.msgId)
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
         const current = this.streamState.get(sessionId);
@@ -1085,6 +1128,10 @@ export class QQChannel extends ChannelBase {
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
           // #2: Flush immediately — idle timer would add unnecessary delay
+          // onResponseComplete already fired: release the per-session reply
+          // anchor now. Any later window's chunks still carry state.msgId
+          // (captured in the state object), so this cannot detach them.
+          this.sessionReplyMsgId.delete(sessionId);
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
             // Don't clear buffer or retryCount — idleFlush will pick them up.
@@ -1094,7 +1141,10 @@ export class QQChannel extends ChannelBase {
           }
         }
 
-        // #8: Clean up streamState only if no content arrived during send
+        // #8: Clean up streamState only if no content arrived during send.
+        // NOTE: does NOT release sessionReplyMsgId here — a mid-response
+        // window gap (no onResponseComplete yet) must keep the anchor so the
+        // next window's fresh state entry reuses it.
         const s = this.streamState.get(sessionId);
         if (s === state && !s.buffer) {
           this.streamState.delete(sessionId);
@@ -1115,6 +1165,7 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           if (current === state) {
             this.streamState.delete(sessionId);
+            this.sessionReplyMsgId.delete(sessionId);
           }
           if (this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
@@ -1150,6 +1201,7 @@ export class QQChannel extends ChannelBase {
               current.timer.unref?.();
             } else {
               this.streamState.delete(sessionId);
+              this.sessionReplyMsgId.delete(sessionId);
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
               process.stderr.write(
@@ -1174,6 +1226,7 @@ export class QQChannel extends ChannelBase {
                 current.retryCount >= this.maxFlushRetries
               ) {
                 this.streamState.delete(sessionId);
+                this.sessionReplyMsgId.delete(sessionId);
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
                   `[QQ:${this.name}] ${logLabel} retries exhausted (buffer exceeds limit) for ${sanitizeLogText(sessionId, 64)}\n`,
@@ -1200,6 +1253,7 @@ export class QQChannel extends ChannelBase {
                 }
               } else {
                 this.streamState.delete(sessionId);
+                this.sessionReplyMsgId.delete(sessionId);
                 // #2: Clean up flushedSessions on retry exhaustion
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
@@ -1265,10 +1319,18 @@ export class QQChannel extends ChannelBase {
     }
     const wasFlushed = this.flushedSessions.has(sessionId);
     const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
+    const capturedMsgId = this.sessionReplyMsgId.get(sessionId);
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.sessionReplyMsgId.delete(sessionId);
     if (remaining) {
-      await super.onResponseComplete(chatId, remaining, sessionId);
+      if (capturedMsgId) {
+        // Final segment keeps this session's reply anchor (per-session msgId),
+        // consistent with how idleFlush/flushAndTrack send mid-stream chunks.
+        await this.sendMessage(chatId, remaining, capturedMsgId);
+      } else {
+        await super.onResponseComplete(chatId, remaining, sessionId);
+      }
     }
   }
 
@@ -1281,6 +1343,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.sessionReplyMsgId.delete(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
@@ -1612,7 +1675,58 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  /**
+   * Purge orphaned `:__single__` session mappings left over from the era when
+   * this channel force-forced sessionScope to 'single' (see PR #6457). Under
+   * thread/user scope those keys (`<channel>:__single__`) can never be routed
+   * to again, so they are dead weight in the router maps and in the persisted
+   * sessions file. Removal is best-effort and defensive: no-op when the router
+   * exposes none of the needed APIs (e.g. in tests).
+   */
+  private purgeSingleScopeOrphans(): void {
+    try {
+      const r = this.router as unknown as {
+        getAll?: () => Array<{ key?: unknown; sessionId?: unknown }>;
+        removeSessionId?: (sessionId: string) => boolean;
+      };
+      const all = r.getAll?.() ?? [];
+      let purged = 0;
+      for (const entry of all) {
+        if (
+          typeof entry?.key === 'string' &&
+          entry.key.endsWith(':__single__') &&
+          typeof entry.sessionId === 'string'
+        ) {
+          if (r.removeSessionId?.(entry.sessionId)) purged++;
+        }
+      }
+      if (purged > 0) {
+        process.stderr.write(
+          `[QQ:${this.name}] Purged ${purged} orphaned ':__single__' session mapping(s) from the single-scope era\n`,
+        );
+      }
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] purgeSingleScopeOrphans failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n
+`,
+      );
+    }
+  }
+
   // ── ReplyMsgId helpers ────────────────────────────────────────
+
+  /**
+   * Capture the current reply msgId for a chat (with TTL check), used to
+   * anchor a streaming response per session. Returns undefined when the entry
+   * is missing or expired — sendMessage then falls back to its own lookup.
+   */
+  private captureReplyMsgId(chatId: string): string | undefined {
+    const entry = this.replyMsgId.get(chatId);
+    return entry &&
+      Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+      ? entry.msgId
+      : undefined;
+  }
 
   /**
    * Set replyMsgId for a chat, cleaning up the previous entry's msgSeqMap
@@ -1621,7 +1735,17 @@ export class QQChannel extends ChannelBase {
   private setReplyMsgId(chatId: string, msgId: string): void {
     const oldEntry = this.replyMsgId.get(chatId);
     if (oldEntry && oldEntry.msgId !== msgId) {
-      this.msgSeqMap.delete(oldEntry.msgId);
+      // A streaming reply anchored to the old msgId may still be in flight
+      // (per-session msgId). Keep its msg_seq counter alive so mid-stream
+      // overwrite by a newer message doesn't reset the sequence — the seq
+      // bookkeeping is keyed by msgId, so only delete it when no live session
+      // is still anchored to it.
+      const streamStillAnchored = [...this.sessionReplyMsgId.values()].includes(
+        oldEntry.msgId,
+      );
+      if (!streamStillAnchored) {
+        this.msgSeqMap.delete(oldEntry.msgId);
+      }
     }
     this.replyMsgId.set(chatId, { msgId, timestamp: Date.now() });
     this.saveQQState();
@@ -1956,6 +2080,7 @@ export class QQChannel extends ChannelBase {
               .restoreSessions()
               .then(() => {
                 this.fixRestoredSessions();
+                this.purgeSingleScopeOrphans();
                 const all = (
                   this.router as unknown as {
                     getAll?: () => Array<{
@@ -2712,6 +2837,7 @@ export class QQChannel extends ChannelBase {
         this.pendingStreamDelete.delete(sid);
         this.flushedSessions.delete(sid);
         this.streamState.delete(sid);
+        this.sessionReplyMsgId.delete(sid);
         if (this.config.sessionScope !== 'single') {
           this.onSessionDied(sid);
         }

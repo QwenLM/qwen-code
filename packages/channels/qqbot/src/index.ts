@@ -13,6 +13,13 @@ export const plugin: ChannelPlugin = {
   // before QQChannel is ever constructed — QR-only login would be unreachable
   // through the built-in channel path.
   requiredConfigFields: [],
+  // Per-group/per-chat thread sessions by default: routing key is
+  // channel:chatId, so every group / private chat gets its own shared session.
+  // groupAllPolicy 'keyword'/'all' relies on this for shared group context;
+  // without it, zero-config users would fragment group messages per sender
+  // ('user' scope). Explicit sessionScope in config still wins (see
+  // parseChannelConfig in packages/cli/src/commands/channel/config-utils.ts).
+  defaultSessionScope: 'thread',
   createChannel: (name, config, bridge, options) =>
     new QQChannel(name, config, bridge, options),
 };

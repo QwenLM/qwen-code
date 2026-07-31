@@ -257,6 +257,154 @@ describe('session persistence paths', () => {
   });
 });
 
+describe('groupAllPolicy session-scope warning (no forcing)', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        groupAllPolicy: 'log',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=all and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'user' });
+    // The user's scope choice is preserved — no forced flattening to 'single'.
+    expect(ch.config.sessionScope).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain('WARNING');
+    expect(logged).toContain("needs sessionScope: 'thread'");
+    expect(logged).not.toContain('Forcing');
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=keyword and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    expect(capturedStderr()).toContain('WARNING');
+  });
+
+  it('emits NO warning when groupAllPolicy=all and sessionScope=thread', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'thread' as const,
+    });
+    expect(ch.config.sessionScope).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('emits NO warning for log policy with non-thread scope (baseline)', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('declares thread as defaultSessionScope, so zero-config defaults get per-group shared context', async () => {
+    const { plugin } = await import('./index.js');
+    expect(plugin.defaultSessionScope).toBe('thread');
+  });
+
+  it('emits NO warning for groupAllPolicy=all when sessionScope is the CLI-filled default (thread)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { plugin } = await import('./index.js');
+    // Simulate parseChannelConfig (packages/cli/src/commands/channel/
+    // config-utils.ts): when the config omits sessionScope, the plugin's
+    // defaultSessionScope becomes the effective scope before construction.
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: plugin.defaultSessionScope as 'thread',
+    });
+    expect(ch.config.sessionScope).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+});
+
+describe('purgeSingleScopeOrphans', () => {
+  function makeChannelWithRouter(router: unknown): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+  }
+
+  function callPurge(ch: QQChannelInstance): void {
+    (
+      ch as unknown as Record<string, unknown>
+    )['purgeSingleScopeOrphans']();
+  }
+
+  it('removes only :__single__ orphan mappings, keeping normal ones', () => {
+    const removeSessionId = vi.fn((sid: string) => sid.startsWith('single-era-'));
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
+        { key: 'test-bot:user-1:chat-1', sessionId: 'normal-2' },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router);
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+  });
+
+  it('is a safe no-op when the router exposes no cleanup APIs', () => {
+    const ch = makeChannelWithRouter({ restoreSessions: vi.fn() });
+    expect(() => callPurge(ch)).not.toThrow();
+  });
+
+  it('is a safe no-op when getAll returns nothing', () => {
+    const removeSessionId = vi.fn();
+    const ch = makeChannelWithRouter({ getAll: () => [], removeSessionId });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+});
+
 // Security model for group sender-name sanitization:
 //   QQ group message authors supply their own nickname (username), which is
 //   attacker-controlled. The channel prepends `[sanitizeLogText(name, 64)]:`
