@@ -1551,14 +1551,19 @@ describe('qwen-triage verify hardening', () => {
   // (the cap is applied AFTER escaping for exactly this reason).
   it('renders report.md as sanitized markdown with an escaped-pre fallback', () => {
     // #8140's verify comment displayed the whole curated bilingual report
-    // as a wall of raw markdown source inside <pre><code> — tables, bold
-    // markers, and literal <details> tags all rendered as text. report.md
-    // now renders as MARKDOWN, holding the same security floor: only
-    // structural tags un-escape, the comment-open token is broken so no
-    // forged qwen-triage:* marker can form in the RAW body the upsert
-    // greps, @ cannot fire mentions, and unbalanced folds are closed so a
-    // malformed report cannot swallow the footer. Oversized reports fall
-    // back to the escaped <pre> wholesale (cut markdown dangles fences).
+    // as a wall of raw markdown source inside <pre><code>. report.md now
+    // renders as MARKDOWN, wrapped in a collapsed <details> so it still
+    // costs one line in the conversation. A code-region-aware node sanitizer
+    // holds the security floor: CommonMark does NOT decode entities in code
+    // spans/fences, so escaping there would show &amp;&amp; / &lt;T&gt; in
+    // the very commands and types the report is read to copy — prose is
+    // escaped, code is left alone (inert under a code/pre ancestor), the
+    // comment-open token is broken EVERYWHERE so no forged qwen-triage:*
+    // marker survives in the RAW body the upsert greps, prose @ cannot fire
+    // mentions, and folds are balanced over prose only (a </details> quoted
+    // in code is inert) so a malformed report cannot swallow the footer or
+    // escape its wrapper. Oversized reports fall back to the escaped <pre>
+    // wholesale (cut markdown dangles fences).
     const publishStep = step('Post verification report comment');
     const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
     const script = body.replace(/^ {10}/gm, '');
@@ -1569,7 +1574,9 @@ describe('qwen-triage verify hardening', () => {
     expect(helpers).toContain('emit_report()');
     // Each fallback branch announces itself in the Actions log (mirroring
     // emit_block's failure warning) so a degradation to the escaped pre dump
-    // is attributable, not silent.
+    // is attributable, not silent. The fold-closer overhead is now budgeted
+    // inside the sanitized-size gate (closers land before it), so three
+    // warnings cover every degradation.
     expect(helpers).toContain(
       '::warning::emit_report fell back to escaped embedding (report exceeds size cap)',
     );
@@ -1579,13 +1586,36 @@ describe('qwen-triage verify hardening', () => {
     expect(helpers).toContain(
       '::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap)',
     );
-    expect(helpers).toContain(
-      '::warning::emit_report fell back to escaped embedding (fold-closer overhead exceeds size cap)',
-    );
     // The report call site uses the rendering path; the tmux lane keeps
     // its escaped embedding.
     expect(script).toContain('emit_report "$REPORT" 45000');
     expect(step('Post tmux result comment')).not.toContain('emit_report');
+
+    // Mirror the sanitizer's code-region model so security assertions test
+    // PROSE only: a live-looking tag inside a fence is inert code text, not
+    // a hole, so grepping the raw output would give false positives.
+    const stripCode = (s) => {
+      const kept = [];
+      let inFence = false;
+      let fc = '';
+      let fl = 0;
+      for (const line of s.split('\n')) {
+        if (!inFence) {
+          const m = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+          if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
+            inFence = true;
+            fc = m[1][0];
+            fl = m[1].length;
+            continue;
+          }
+          kept.push(line.replace(/`[^`]*`/g, ''));
+        } else {
+          const cm = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+          if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
+        }
+      }
+      return kept.join('\n');
+    };
 
     const dir = mkdtempSync(join(tmpdir(), 'verify-render-'));
     try {
@@ -1596,6 +1626,17 @@ describe('qwen-triage verify hardening', () => {
           '# Deep Verification — `merge-ready`',
           '',
           '**Verdict:** pass && <T<U>> ok',
+          '',
+          'Run `npm test && Map<string> @pkg` then check `a -> b`.',
+          '',
+          '```bash',
+          'npm run build && node probe.mjs --pkg @qwen-code/core',
+          '<img src=x onerror=alert(1)>',
+          'marker: <!-- qwen-triage:verify-state=running -->',
+          'fold-quote: </details>',
+          '```',
+          '',
+          '> a blockquote && more',
           '',
           '| scenario | match |',
           '| --- | --- |',
@@ -1626,28 +1667,75 @@ describe('qwen-triage verify hardening', () => {
       };
 
       const out = emit(report, 45000);
-      // Markdown structure survives (renders), instead of an escaped dump.
-      expect(out).toContain('### Verification report');
+      // Wrapped in a collapsed <details>; markdown structure survives inside.
+      expect(out).toContain(
+        '<details>\n<summary>Verification report</summary>',
+      );
       expect(out).toContain('| scenario | match |');
       expect(out).toContain('**Verdict:**');
-      expect(out).toContain('<details>');
       expect(out).toContain('<summary>中文摘要</summary>');
       expect(out).not.toContain('<pre><code>');
-      // Security floor: no live marker in the RAW body, no mention, no
-      // non-allowlisted tag, entities escaped.
-      expect(out).not.toContain('<!-- qwen-triage');
-      expect(out).not.toContain('@everyone');
-      expect(out).not.toContain('<img');
-      expect(out).toContain('&#64;everyone');
-      expect(out).toContain('&amp;&amp;');
-      expect(out).toContain('&lt;T&lt;U&gt;&gt;');
-      expect(out.match(/<(?!\/?(details|summary|pre|code|br)\b)[a-z]/g)).toBe(
-        null,
+      // Prose fidelity: && and blockquotes survive; a prose < is escaped
+      // (renders back to <), > is left alone.
+      expect(out).toContain('pass && &lt;T&lt;U>> ok');
+      expect(out).toContain('> a blockquote && more');
+      expect(out).not.toContain('&amp;&amp;');
+      // Code fidelity: spans and fences are untouched — no entity mangling
+      // of the commands/types/paths a reader copies, and a fenced <img> or
+      // </details> stays inert code text.
+      expect(out).toContain('`npm test && Map<string> @pkg`');
+      expect(out).toContain(
+        'npm run build && node probe.mjs --pkg @qwen-code/core',
       );
-      // The unclosed fold is balanced so the footer cannot be swallowed.
-      const opens = out.split('<details>').length - 1;
-      const closes = out.split('</details>').length - 1;
+      expect(out).toContain('<img src=x onerror=alert(1)>');
+      // Security floor over the WHOLE raw body: no live comment-open token
+      // anywhere (broken globally, prose AND code), so the upsert grep for
+      // the running marker cannot be forged from a fenced quote.
+      expect(out).not.toContain('<!--');
+      // Security floor over PROSE: the mention is neutralized, no live
+      // non-allowlisted tag, and prose folds balance (the fenced </details>
+      // is NOT counted, so the genuinely unclosed fold still gets closed).
+      const prose = stripCode(out);
+      expect(prose).not.toContain('@everyone');
+      expect(prose).toContain('&#64;everyone');
+      expect(prose).not.toContain('<img');
+      expect(prose.match(/<(?!\/?(details|summary)\b)[A-Za-z]/g)).toBe(null);
+      const opens = prose.split('<details>').length - 1;
+      const closes = prose.split('</details>').length - 1;
       expect(opens).toBe(closes);
+
+      // Guarantee 4, the hole the review reproduced: one genuinely unclosed
+      // fold plus a fenced block quoting </details>. The fenced closer is
+      // inert code and must NOT balance the live fold — the prose folds
+      // still net to zero only because a closer is appended for the open.
+      const hole = join(dir, 'hole.md');
+      writeFileSync(
+        hole,
+        '<details>\n<summary>fold that never closes</summary>\n\n```html\n</details>\n```\n',
+      );
+      const holeOut = emit(hole, 45000);
+      const holeProse = stripCode(holeOut);
+      expect(holeProse.split('<details>').length).toBe(
+        holeProse.split('</details>').length,
+      );
+
+      // Mirror case: a surplus </details> with no open is dropped so it
+      // cannot close the wrapping fold early — the wrapper stays 1 open /
+      // 1 close even though the report shipped an orphan closer.
+      const surplus = join(dir, 'surplus.md');
+      writeFileSync(surplus, 'text </details> more\n');
+      const surplusOut = emit(surplus, 45000);
+      expect(surplusOut).toContain('text  more');
+      expect(surplusOut.split('<details>').length - 1).toBe(1);
+      expect(surplusOut.split('</details>').length - 1).toBe(1);
+
+      // A NUL byte in the report is stripped (parity with emit_block's
+      // tr -d '\000'); it must not reach the comment body.
+      const nul = join(dir, 'nul.md');
+      writeFileSync(nul, 'before\u0000after\n');
+      const nulOut = emit(nul, 45000);
+      expect(nulOut).toContain('beforeafter');
+      expect(nulOut).not.toContain('\u0000');
 
       // Oversize → wholesale fallback to the escaped pre embedding.
       const big = join(dir, 'big.md');
@@ -1656,18 +1744,18 @@ describe('qwen-triage verify hardening', () => {
       expect(fb).toContain('<pre><code>');
       expect(fb).toContain('Verification report (report.md, truncated)');
 
-      // Inflation: raw under the cap but sanitized over it (& -> &amp;).
+      // Inflation: raw under the cap but sanitized over it. & is no longer
+      // escaped (it is not a security control), so < drives the inflation —
+      // each < becomes the 4-byte &lt;.
       const dense = join(dir, 'dense.md');
-      writeFileSync(dense, '&'.repeat(44000));
+      writeFileSync(dense, '<'.repeat(12000));
       const inflated = emit(dense, 45000);
       expect(inflated).toContain('<pre><code>');
       expect(inflated).toContain('Verification report (report.md, truncated)');
 
-      // The fold-counting greps carry `|| true` because grep exits 1 on zero
-      // matches, which under the step's real `set -euo pipefail` would abort
-      // the whole composer for a fold-free report. `emit` spawns without
-      // pipefail, so exercise that path explicitly: a zero-fold report under
-      // pipefail must still exit 0 and render.
+      // The sanitizer runs under the step's real `set -euo pipefail`; a
+      // fold-free report must still exit 0 and render (no grep whose
+      // zero-match exit could abort the composer).
       const nofolds = join(dir, 'nofolds.md');
       writeFileSync(nofolds, '## heading\nbody text\n');
       const pf = spawnSync(
@@ -1681,15 +1769,15 @@ describe('qwen-triage verify hardening', () => {
         { encoding: 'utf8' },
       );
       expect(pf.status).toBe(0);
-      expect(pf.stdout).toContain('### Verification report');
+      expect(pf.stdout).toContain('<summary>Verification report</summary>');
       expect(pf.stdout).toContain('## heading');
 
-      // The balancing loop appends `opens - closes` closers AFTER the size
-      // gate passes, so a report dense in unbalanced <details> opens must
-      // fall back to the capped pre dump once the closer overhead would
-      // exceed the budget — rather than shipping a section over the cap.
-      // 100 opens: raw ~1000 B and sanitized ~1000 B both clear max=2000,
-      // but 1000 + 100*11 + 30 > 2000 forces the fallback.
+      // Appended fold closers land in the sanitized output BEFORE the size
+      // gate, so a report dense in unbalanced <details> opens falls back to
+      // the capped pre dump once the closers push the wrapped section over
+      // the budget — rather than shipping a section over the cap.
+      // 100 opens: raw ~900 B clears max=2000, but 900 + 100*11 closers +
+      // the ~61 B wrapper > 2000 forces the fallback.
       const folds = join(dir, 'folds.md');
       writeFileSync(folds, '<details>\n'.repeat(100));
       const over = emit(folds, 2000);
@@ -2815,10 +2903,11 @@ describe('qwen-triage verify publish fidelity', () => {
           expect(assertZh).toBeLessThan(detailsEnd);
         }
         // The report section stays outside the Chinese fold — now rendered
-        // as markdown under its own heading, not an escaped <pre> dump.
-        expect(body.indexOf('### Verification report')).toBeGreaterThan(
-          detailsEnd,
-        );
+        // as markdown inside its own collapsed <details>, not an escaped
+        // <pre> dump and not a 45 KB wall in the conversation.
+        expect(
+          body.indexOf('<summary>Verification report</summary>'),
+        ).toBeGreaterThan(detailsEnd);
         expect(body).toContain('## real report');
       } finally {
         rmSync(dir, { recursive: true, force: true });
