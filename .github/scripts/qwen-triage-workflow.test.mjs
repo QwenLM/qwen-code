@@ -43,6 +43,9 @@ const triageJob = doc.jobs.triage;
 const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
+const triageOwnershipStep = steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
 const verifyJob = doc.jobs.verify;
 const verifyOwnershipStep = verifyJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
@@ -420,6 +423,65 @@ describe('qwen-triage: workspace ownership restore', () => {
       verifyOwnershipStep.run,
       /::warning::could not restore \.qwen write permissions/,
       'chmod failure must emit a ::warning::, not be swallowed by || true',
+    );
+  });
+
+  it('verify: a chown failure is visible, not silent', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not restore workspace ownership/,
+      'chown failure must emit a ::warning::, not be swallowed by || true',
+    );
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not determine runner UID/,
+      'a stat failure (UID=0 fallback) must emit a ::warning::, not silently skip the restore',
+    );
+  });
+
+  it('tmux-testing: restores write permission as well as ownership', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'tmux-testing must chmod the workspace so a read-only tree does not survive the restore',
+    );
+  });
+
+  it('tmux-testing: a chown failure is visible, not silent', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /::warning::could not restore workspace ownership/,
+      'chown failure must emit a ::warning::, not be swallowed by || true',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /::warning::could not determine runner UID/,
+      'a stat failure (UID=0 fallback) must emit a ::warning::, not silently skip the restore',
+    );
+  });
+
+  it('triage: restores ownership before checkout on the ECS pool', () => {
+    assert.ok(
+      triageOwnershipStep,
+      'triage job must have a "Restore workspace ownership" step',
+    );
+    assert.match(
+      triageOwnershipStep.run,
+      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+      'triage must restore ownership of the whole workspace',
+    );
+    assert.match(
+      triageOwnershipStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'triage must restore write permission of the whole workspace',
+    );
+    const restoreIdx = steps.indexOf(triageOwnershipStep);
+    const checkoutIdx = steps.findIndex(
+      (s) => s.name === 'Checkout repo',
+    );
+    assert.ok(
+      restoreIdx < checkoutIdx,
+      'ownership restore must run before checkout',
     );
   });
 });

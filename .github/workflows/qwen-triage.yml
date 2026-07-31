@@ -377,6 +377,19 @@ jobs:
             -f content='eyes' > /dev/null ||
             echo "Failed to add triage acknowledgement reaction; continuing." >&2
 
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
       # Self-hosted ECS runners reuse $HOME, /tmp and the workspace between runs,
       # so a prior run can bleed into this one: its agent session/memory (under
       # QWEN_HOME), leftover draft comments (/tmp/stage-*.md, which survive
@@ -1594,10 +1607,13 @@ jobs:
         if: 'always()'
         run: |-
           set -uo pipefail
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions"
           RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+          else
+            echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
@@ -3245,7 +3261,9 @@ jobs:
           RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+          else
+            echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
       - name: 'Wipe workspace after external code'
