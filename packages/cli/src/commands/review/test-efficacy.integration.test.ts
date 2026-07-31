@@ -352,6 +352,86 @@ describe('test-efficacy probe isolation (#6832)', () => {
     expect(treeState(wt)).toEqual(before);
   });
 
+  it('scores a hunk inconclusive when its OWN collocated test dropped out of the baseline', async () => {
+    // The false survivor this exists to remove. The probe tree resolves
+    // `node_modules` by walking up to the repo root, so a probe file that
+    // transitively imports a workspace-NESTED dependency collects nothing in the
+    // probe tree and is dropped from the green baseline set. Before the fix the
+    // hunk probe then ran the OTHER (green) probes, they passed, and the hunk
+    // was scored `survived` — a false finding, since the one test that covers
+    // the hunk never ran. Here `price.test.ts` (collocated with the changed
+    // `price.ts`) collects nothing while an unrelated `other.test.ts` is green.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write(
+      'packages/lib/src/price.ts',
+      'export function price(n: number) {\n  return n * 2;\n}\n',
+    );
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/price.ts',
+      'export function price(n: number) {\n  return n * 3;\n}\n',
+    );
+    write(
+      'packages/lib/src/price.test.ts',
+      'import { price } from "./price.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof price).toBe("function"));\n',
+    );
+    write(
+      'packages/lib/src/other.test.ts',
+      'import { it, expect } from "vitest"; it("t", () => expect(1).toBe(1));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/price.ts', kind: 'source' },
+          { path: 'packages/lib/src/price.test.ts', kind: 'test' },
+          { path: 'packages/lib/src/other.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // The baseline drops the collocated test: `price.test.ts` collects nothing
+    // (the probe-tree import-error shape); every other file passes.
+    const bin = join(repo, 'node_modules', '.bin', 'vitest');
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env node
+const path = require('path');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults:
+      path.basename(f) === 'price.test.ts' ? [] : [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+    chmodSync(bin, 0o755);
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    // The hunk in price.ts is NOT scored survived: its collocated test never ran
+    // green, so the green run of the other probe proves nothing about it.
+    expect(out.hunks.survived).toBe(0);
+    expect(out.hunks.inconclusive).toBe(1);
+    expect(out.hunks.probed[0].verdict).toBe('inconclusive');
+    expect(out.hunks.probed[0].detail).toContain('collocated test');
+    expect(
+      (out.findings as Array<{ kind: string }>).some(
+        (f) => f.kind === 'hunk-survived',
+      ),
+    ).toBe(false);
+  });
+
   it('runs a deletion mutant end-to-end and reports the survivor', async () => {
     // The dogfood shape at full scale: the PR adds a reset function whose one
     // safety statement (`state.clear()`) nothing gates. The fake vitest is

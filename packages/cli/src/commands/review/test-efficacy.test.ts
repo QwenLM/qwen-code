@@ -17,6 +17,7 @@ import {
   selectMutants,
   parseAddedLines,
   hasCollocatedNewTest,
+  collocatedProbe,
   fitsAnotherMutantRun,
   probeCreateFailureDetail,
   probeCleanupFailureDetail,
@@ -1057,6 +1058,30 @@ describe('hasCollocatedNewTest', () => {
         'packages/cli/src/xy.test.ts',
       ]),
     ).toBe(false);
+  });
+});
+
+describe('collocatedProbe', () => {
+  it('returns the collocated test path when one is in the probe set', () => {
+    expect(
+      collocatedProbe('packages/cli/src/x.ts', [
+        'packages/cli/src/other.test.ts',
+        'packages/cli/src/x.test.ts',
+      ]),
+    ).toBe('packages/cli/src/x.test.ts');
+    expect(
+      collocatedProbe('packages/cli/src/x.ts', ['packages/cli/src/x.spec.ts']),
+    ).toBe('packages/cli/src/x.spec.ts');
+  });
+
+  it('returns undefined when no collocated test is probed', () => {
+    // A different directory, or a basename-suffix collision, is not collocated.
+    expect(
+      collocatedProbe('packages/cli/src/x.ts', [
+        'packages/core/src/x.test.ts',
+        'packages/cli/src/xy.test.ts',
+      ]),
+    ).toBeUndefined();
   });
 });
 

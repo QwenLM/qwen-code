@@ -450,6 +450,49 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('exit 1');
     });
 
+    it("rules a clean exit from this review's own run as reproduces", () => {
+      // The exit-1 case above pins one ternary arm; this pins the other, so a
+      // swap of the two arms cannot pass both tests.
+      const bt = {
+        build: [
+          {
+            command: 'npm run build',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+        test: [],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `npm run build`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'npm run build');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.observed).toBe('exit 0');
+    });
+
+    it("matches this review's workspace-scoped run of the plan's bare command", () => {
+      // build-test runs `npm run build --workspace=...`; the plan names the bare
+      // `npm run build`. An exact-string match misses it and falls through to the
+      // manifest, which would report `reproduces` even though the build failed.
+      const bt = {
+        build: [
+          {
+            command: 'npm run build --workspace="packages/cli"',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: 'TS2307',
+          },
+        ],
+        test: [],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `npm run build`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'npm run build');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+    });
+
     it('does not rule on a command killed by the deadline', () => {
       // A timeout is an infrastructure result, never a defect in the PR.
       const bt = {

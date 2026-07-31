@@ -629,6 +629,21 @@ export function parseAddedLines(diffText: string): Map<string, number[]> {
 }
 
 /**
+ * The probe file that is the collocated test of `file` (the repo convention
+ * `file.test.ts` / `file.spec.ts` beside it), if one is in `testPaths`.
+ */
+export function collocatedProbe(
+  file: string,
+  testPaths: string[],
+): string | undefined {
+  const stem = file.replace(/\.[^./]+$/, '');
+  return testPaths.find((t) => {
+    const tstem = t.replace(/\.[^./]+$/, '');
+    return tstem === `${stem}.test` || tstem === `${stem}.spec`;
+  });
+}
+
+/**
  * Does the diff add or change a test collocated with this production file?
  * The repo convention is `file.test.ts` beside `file.ts`. Used only to ORDER
  * candidates under the cap, so a miss costs priority, not selection.
@@ -637,11 +652,7 @@ export function hasCollocatedNewTest(
   file: string,
   testPaths: string[],
 ): boolean {
-  const stem = file.replace(/\.[^./]+$/, '');
-  return testPaths.some((t) => {
-    const tstem = t.replace(/\.[^./]+$/, '');
-    return tstem === `${stem}.test` || tstem === `${stem}.spec`;
-  });
+  return collocatedProbe(file, testPaths) !== undefined;
 }
 
 /**
@@ -1522,6 +1533,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // also means a diff whose mutants consumed the window reports zero
           // hunk probes with `skippedForBudget` set — never a silent zero.
           for (const h of hunkCandidates) {
+            // A hunk whose OWN collocated test the baseline dropped (red, or the
+            // case this exists for: a probe-tree import error that collected
+            // nothing) cannot be scored `survived`: the other probes passing
+            // shows only that THEY do not cover it, not that nothing does, since
+            // the one test that would catch it never ran. Same asymmetry the
+            // mutants hold, pointed the other way: there an inconclusive run is
+            // never `killed`, here an absent covering test is never `survived`.
+            const own = collocatedProbe(h.file, probes);
+            if (own && !greenProbes.includes(own)) {
+              const { patch: _patch, ...meta } = h;
+              hunkResults.push({
+                ...meta,
+                verdict: 'inconclusive' as const,
+                detail: `this hunk's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the hunk is uncovered`,
+              });
+              continue;
+            }
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               hunksSkippedForBudget =
@@ -1638,15 +1666,20 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       })),
     ...hunkResults
       .filter((h) => h.verdict === 'survived')
-      .map((h) => ({
-        file: h.file,
-        kind: 'hunk-survived' as const,
-        message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. Nothing in this diff's tests fails when this particular change is undone, so it ships unprotected — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.${
-          results.some((r) => r.verdict === 'inert')
-            ? ' A file-level revert probe also came back inert, so this restates that gap at hunk granularity — read the two as one finding, not two.'
-            : ''
-        })`,
-      })),
+      .map((h) => {
+        const own = collocatedProbe(h.file, probes);
+        const restatesInert =
+          !!own && results.some((r) => r.verdict === 'inert' && r.file === own);
+        return {
+          file: h.file,
+          kind: 'hunk-survived' as const,
+          message: `\`${h.file}:${h.startLine}\` (\`${h.header}\`): reverting this hunk on its own leaves every affected test green. Nothing in this diff's tests fails when this particular change is undone, so it ships unprotected — confirm an existing test covers it, or add one. (The suite as a whole may still be gated: this says only that THIS change is not what any of it turns on.${
+            restatesInert
+              ? ' A file-level revert probe also came back inert, so this restates that gap at hunk granularity — read the two as one finding, not two.'
+              : ''
+          })`,
+        };
+      }),
   ];
 
   const count = (v: MutantVerdict) =>

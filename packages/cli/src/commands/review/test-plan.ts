@@ -398,7 +398,17 @@ function ruleCommand(
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
   const ran = [...(buildTest?.build ?? []), ...(buildTest?.test ?? [])].find(
-    (c) => c.command.trim() === text.trim(),
+    (c) => {
+      const command = c.command.trim();
+      const claimed = text.trim();
+      // A workspace-scoped run (`npm run build --workspace=...`) still settles
+      // the plan's bare command, so match it plus any extra flags — not only an
+      // exact string. The space guard keeps `build` from matching `build:all`.
+      return (
+        command === claimed ||
+        (command.startsWith(claimed) && command[claimed.length] === ' ')
+      );
+    },
   );
   if (ran && !ran.timedOut) {
     return ran.exitCode === 0
