@@ -27,6 +27,7 @@ import {
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
+  type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -985,6 +986,47 @@ describe('QwenLogger', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('logToolCallEvent', () => {
+    it('records terminal status and tool type without MCP server metadata', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2025-01-01T12:00:00.000Z',
+        function_name: 'remote_tool',
+        function_args: { secret: 'not-forwarded' },
+        duration_ms: 42,
+        status: 'error',
+        success: false,
+        error: 'failed',
+        error_type: 'unknown',
+        prompt_id: 'prompt-tool',
+        tool_type: 'mcp',
+        mcp_server_name: 'private-server',
+      } as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'tool_call#remote_tool',
+          properties: expect.objectContaining({
+            tool_name: 'remote_tool',
+            status: 'error',
+            tool_type: 'mcp',
+            success: 0,
+            duration_ms: 42,
+            error_type: 'unknown',
+            error_message: 'failed',
+          }),
+        }),
+      );
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
+      expect(rumEvent.properties).not.toHaveProperty('function_args');
     });
   });
 });
