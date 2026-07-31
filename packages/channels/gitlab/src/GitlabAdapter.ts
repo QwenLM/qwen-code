@@ -6,7 +6,7 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 import { PollingChannelBase } from '@qwen-code/channel-base';
-import { Gitlab } from '@gitbeaker/rest';
+import { Gitlab, type TodoSchema } from '@gitbeaker/rest';
 import { z } from 'zod';
 import { testBotMention, stripBotMention } from './mention.js';
 
@@ -20,16 +20,10 @@ interface GitlabCursor {
   initialized: boolean;
 }
 
-interface Todo {
-  id: number;
-  action_name: string;
-  target_type: string;
-  body: string;
-  target_url: string;
-  updated_at: string;
-  project: { path_with_namespace: string };
-  author: { username: string };
-  target: { iid: number; title: string };
+interface GitlabTarget {
+  iid: number;
+  title: string;
+  isMr: boolean;
 }
 
 const cursorSchema = z.object({
@@ -42,6 +36,14 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   private apiHost = 'https://gitlab.com';
   private botUsername = '';
   private descriptionCache = new Map<string, string>();
+  private readonly reactions = new Map<
+    string,
+    {
+      target: GitlabTarget;
+      noteId: number;
+      award?: Promise<{ awardId: number }>;
+    }
+  >();
 
   constructor(
     name: string,
@@ -127,6 +129,52 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     await this.createNote(chatId, targetType, Number(match[1]), text);
   }
 
+  protected override onPromptStart(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId) return;
+    const entry = this.reactions.get(messageId);
+    if (!entry || entry.award) return;
+    const api = entry.target.isMr
+      ? this.api.MergeRequestNoteAwardEmojis
+      : this.api.IssueNoteAwardEmojis;
+    entry.award = api
+      .award(chatId, entry.target.iid, entry.noteId, 'eyes')
+      .then((r) => ({ awardId: r.id }));
+    void entry.award.catch((err) => {
+      entry.award = undefined;
+      process.stderr.write(
+        `[Channel:${this.name}] failed to acknowledge note ${entry.noteId}: ${err}\n`,
+      );
+    });
+  }
+
+  protected override onPromptEnd(
+    chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId) return;
+    const entry = this.reactions.get(messageId);
+    if (!entry) return;
+    this.reactions.delete(messageId);
+    if (!entry.award) return;
+    const api = entry.target.isMr
+      ? this.api.MergeRequestNoteAwardEmojis
+      : this.api.IssueNoteAwardEmojis;
+    void entry.award
+      .then(({ awardId }) =>
+        api.remove(chatId, entry.target.iid, entry.noteId, awardId),
+      )
+      .catch((err) => {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to remove acknowledgement from note ${entry.noteId}: ${err}\n`,
+        );
+      });
+  }
+
   protected async pollOnce(): Promise<void> {
     const templates = (this.config as GitlabConfig).action_prompt_template;
     if (!templates || Object.keys(templates).length === 0) return;
@@ -136,7 +184,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
 
     const allTodos = (await this.api.TodoLists.all({
       state: 'pending',
-    })) as unknown as Todo[];
+    })) as TodoSchema[];
 
     // First poll: drain all pre-existing todos without processing them.
     if (!this.cursor.initialized) {
@@ -164,13 +212,21 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     for (const todo of todos) {
       if (
         !todo.project ||
-        !todo.target ||
-        !todo.target.iid ||
         (todo.target_type !== 'Issue' && todo.target_type !== 'MergeRequest')
       ) {
         await this.skipTodo(todo);
         continue;
       }
+      const raw = (todo.target || {}) as { iid?: number; title?: string };
+      if (!raw.iid) {
+        await this.skipTodo(todo);
+        continue;
+      }
+      const target: GitlabTarget = {
+        iid: raw.iid,
+        title: raw.title ?? '',
+        isMr: todo.target_type === 'MergeRequest',
+      };
 
       const template = this.resolveTemplate(templates, todo.action_name);
       if (!template) {
@@ -179,11 +235,9 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       }
 
       const chatId = todo.project.path_with_namespace;
-      const targetType = todo.target_type === 'MergeRequest' ? 'mr' : 'issue';
-      const threadId = `${targetType}:${todo.target.iid}`;
 
       try {
-        await this.processTodo(todo, template, chatId, targetType, threadId);
+        await this.processTodo(todo, target, template, chatId);
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
@@ -191,8 +245,8 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         try {
           await this.createNote(
             chatId,
-            targetType,
-            todo.target.iid,
+            target.isMr ? 'mr' : 'issue',
+            target.iid,
             '⚠️ Failed to process this request. Please re-mention the bot to retry.',
           );
         } catch {
@@ -210,7 +264,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
   }
 
-  private async skipTodo(todo: Todo): Promise<void> {
+  private async skipTodo(todo: TodoSchema): Promise<void> {
     try {
       await this.api.TodoLists.done({ todoId: todo.id });
     } catch {
@@ -229,15 +283,18 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
   }
 
   private async processTodo(
-    todo: Todo,
+    todo: TodoSchema,
+    target: GitlabTarget,
     template: string,
     chatId: string,
-    targetType: string,
-    threadId: string,
   ): Promise<void> {
     if (todo.author.username === this.botUsername) return;
 
-    const isNoteMention = /#note_\d+$/.test(todo.target_url);
+    const targetType = target.isMr ? 'mr' : 'issue';
+    const threadId = `${targetType}:${target.iid}`;
+    const noteMatch = todo.target_url.match(/#note_(\d+)$/);
+    const isNoteMention = noteMatch !== null;
+    const messageId = String(todo.id);
     const needsDescription =
       !isNoteMention || template.includes('%description%');
 
@@ -248,7 +305,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
           description = await this.fetchDescription(
             chatId,
             targetType,
-            todo.target.iid,
+            target.iid,
           );
         } catch (err) {
           process.stderr.write(
@@ -259,7 +316,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         description = await this.fetchDescription(
           chatId,
           targetType,
-          todo.target.iid,
+          target.iid,
         );
       }
     }
@@ -274,10 +331,11 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       todo.author.username,
       chatId,
       threadId,
-      String(todo.id),
+      messageId,
       this.buildMetadata(
         template,
         todo,
+        target,
         chatId,
         todo.author.username,
         String(todo.id),
@@ -286,7 +344,17 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       true,
     );
 
-    await this.handleInbound(envelope);
+    if (isNoteMention) {
+      this.reactions.set(messageId, {
+        target,
+        noteId: Number(noteMatch![1]),
+      });
+    }
+    try {
+      await this.handleInbound(envelope);
+    } finally {
+      this.reactions.delete(messageId);
+    }
   }
 
   private async fetchDescription(
@@ -301,10 +369,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     let description: string;
     if (targetType === 'mr') {
       const mr = await this.api.MergeRequests.show(chatId, iid);
-      description = (mr as { description?: string }).description || '';
+      description = mr.description || '';
     } else {
       const issue = await this.api.Issues.show(iid, { projectId: chatId });
-      description = (issue as { description?: string }).description || '';
+      description = issue.description || '';
     }
     this.descriptionCache.set(cacheKey, description);
     return description;
@@ -338,7 +406,8 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
 
   private buildMetadata(
     template: string,
-    todo: Todo,
+    todo: TodoSchema,
+    target: GitlabTarget,
     chatId: string,
     author: string,
     commentId: string,
@@ -349,8 +418,8 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       project_url: `${this.apiHost}/${chatId}`,
       author,
       target_type: todo.target_type,
-      iid: String(todo.target.iid),
-      title: todo.target.title,
+      iid: String(target.iid),
+      title: target.title,
       description,
       todo_id: commentId,
     };
