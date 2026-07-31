@@ -37,6 +37,8 @@ export type ModelGenerationConfig = Pick<
   | 'retryErrorCodes'
   | 'enableCacheControl'
   | 'forceGlobalCacheScope'
+  | 'cacheRetention'
+  | 'cacheRetentionByBlock'
   | 'schemaCompliance'
   | 'reasoning'
   | 'customHeaders'
