@@ -2967,6 +2967,8 @@ describe('runNonInteractive', () => {
       status: 'skipped',
       convertedCount: 0,
       omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
     });
     mockGeminiClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
@@ -2984,6 +2986,12 @@ describe('runNonInteractive', () => {
       expect.any(AbortSignal),
       'prompt-vision-bridge-skipped',
       { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Vision bridge cancelled.'),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('were sent to vision-bridge'),
     );
   });
 

@@ -443,6 +443,7 @@ describe('readManyFiles', () => {
       const outsidePath = path.join(outsideDir, 'secret.png');
       await fs.writeFile(outsidePath, Buffer.from('outside secret'));
       const readFile = fs.readFile.bind(fs);
+      let swappedAfterSnapshotRead = false;
       const readFileSpy = vi
         .spyOn(fs, 'readFile')
         .mockImplementation(async (file, options) => {
@@ -450,6 +451,7 @@ describe('readManyFiles', () => {
           // The first snapshot read proves the descriptor is already bound to
           // the approved inode before the visible path is swapped.
           if (String(file).includes('qwen-validated-read-')) {
+            swappedAfterSnapshotRead = true;
             await fs.rename(absolutePath, backupPath);
             await fs.symlink(outsidePath, absolutePath);
           }
@@ -468,6 +470,7 @@ describe('readManyFiles', () => {
         const imagePart = findInlineDataPart(result.contentParts);
 
         expect(imagePart).toBeDefined();
+        expect(swappedAfterSnapshotRead).toBe(true);
         expect(contentToString(result.contentParts)).not.toContain(
           'outside secret',
         );
@@ -476,6 +479,84 @@ describe('readManyFiles', () => {
         await fs.rm(absolutePath, { force: true });
         await fs.rename(backupPath, absolutePath).catch(() => undefined);
         await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops a validated directory when its identity changes after reading', async () => {
+      const relativePath = 'approved-dir';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.mkdir(absolutePath);
+      await fs.writeFile(path.join(absolutePath, 'visible.txt'), 'visible');
+      const approvedStats = await fs.stat(absolutePath);
+      const originalStat = fs.stat.bind(fs);
+      let validatedStats = 0;
+      const statSpy = vi.spyOn(fs, 'stat').mockImplementation(async (file) => {
+        const stats = await originalStat(file);
+        if (file === absolutePath && ++validatedStats === 2) {
+          return { ...stats, ino: stats.ino + 1 } as nodeFs.Stats;
+        }
+        return stats;
+      });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+
+        expect(contentToString(result.contentParts)).not.toContain(
+          'visible.txt',
+        );
+        expect(result.files).toHaveLength(0);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('drops a validated snapshot when the source grows during copying', async () => {
+      const relativePath = 'approved.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.alloc(8, 0x01));
+      const approvedStats = await fs.stat(absolutePath);
+      const originalOpen = fs.open.bind(fs);
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args) => {
+          const handle = await originalOpen(...args);
+          if (args[0] === absolutePath) {
+            const originalRead = handle.read.bind(handle);
+            let appended = false;
+            vi.spyOn(handle, 'read').mockImplementation(
+              async (buffer, offset, length, position) => {
+                if (!appended && position === approvedStats.size) {
+                  appended = true;
+                  await fs.appendFile(absolutePath, Buffer.from([0x02]));
+                }
+                return originalRead(buffer, offset, length, position);
+              },
+            );
+          }
+          return handle;
+        });
+      const mockConfig = createMockConfig(tempRootDir);
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+
+        expect(result.files).toHaveLength(0);
+        expect(contentToString(result.contentParts)).not.toContain(
+          'approved.bin',
+        );
+      } finally {
+        openSpy.mockRestore();
       }
     });
 

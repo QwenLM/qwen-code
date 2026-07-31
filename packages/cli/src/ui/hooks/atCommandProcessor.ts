@@ -486,11 +486,7 @@ export async function resolveAtCommandQuery({
         const resolvedSpec = atPathToResolvedSpecMap.get(part.content);
         if (i > 0 && text.length > 0 && !text.endsWith(' ')) {
           const prevPart = commandParts[i - 1];
-          if (
-            prevPart.type === 'text' ||
-            (prevPart.type === 'atPath' &&
-              atPathToResolvedSpecMap.has(prevPart.content))
-          ) {
+          if (prevPart.type === 'text' || prevPart.type === 'atPath') {
             text += ' ';
           }
         }

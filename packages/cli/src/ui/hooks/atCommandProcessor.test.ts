@@ -1747,6 +1747,36 @@ describe('handleAtCommand', () => {
       },
     );
 
+    it('keeps spacing when a deleted file is pruned after async resource resolution', async () => {
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'image.png'),
+        'image bytes',
+      );
+      const readMcpResource = vi.fn(async () => {
+        await fsPromises.unlink(filePath);
+        return {
+          contents: [{ uri: 'res://doc', text: 'resource body' }],
+        };
+      });
+      const query = `inspect @${filePath} @myserver:res://doc now`;
+
+      const result = await handleAtCommand({
+        query,
+        config: makeResourceConfig(readMcpResource),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 6003,
+        signal: abortController.signal,
+      });
+
+      expect((result.processedQuery as Array<{ text?: string }>)[0].text).toBe(
+        query,
+      );
+      expect(result.filesRead).not.toContain(filePath);
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${filePath} changed before it could be read and will be skipped.`,
+      );
+    });
+
     it('preserves @mcp:<uri> as a resource ref when a server is named mcp', async () => {
       const readMcpResource = vi.fn().mockResolvedValue({
         contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],
