@@ -772,6 +772,7 @@ function ToolbarPopover({
               className={`${styles.dropdownItem} ${
                 item.id === activeId ? styles.dropdownItemActive : ''
               }`}
+              title={item.label}
               onClick={() => {
                 selectionRef.current = true;
                 onSelect(item.id);
@@ -2257,7 +2258,8 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={t('model.select')}
+                            aria-label={`${t('model.select')}: ${modelLabel}`}
+                            title={modelLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />

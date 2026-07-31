@@ -14,7 +14,12 @@ import {
   NativeLspService,
   Storage,
 } from '@qwen-code/qwen-code-core';
-import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
+import {
+  loadCliConfig,
+  parseArguments,
+  SessionIdConflictError,
+  type CliArgs,
+} from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -28,6 +33,7 @@ const mockSessionServiceInstance = vi.hoisted(() => ({
   loadSession: vi.fn(),
   forkSession: vi.fn(),
   sessionExists: vi.fn(),
+  sessionExistsInAnyState: vi.fn(),
 }));
 const mockSessionServiceCtor = vi.hoisted(() =>
   vi.fn(() => mockSessionServiceInstance),
@@ -1011,6 +1017,7 @@ describe('loadCliConfig', () => {
       copiedCount: 1,
     });
     mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
+    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(false);
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
@@ -1673,6 +1680,63 @@ describe('loadCliConfig', () => {
       'Cannot use --fork-session with --continue: no saved session found to fork.',
     );
     expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should exit when a caller-supplied sessionId already exists (default CLI behavior)', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(true);
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(loadCliConfig({}, { sessionId } as CliArgs)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should throw SessionIdConflictError instead of exiting when throwOnSessionIdConflict is set', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(true);
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    const promise = loadCliConfig(
+      {},
+      { sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    await expect(promise).rejects.toBeInstanceOf(SessionIdConflictError);
+    await expect(promise).rejects.toMatchObject({ sessionId });
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  it('should not throw for a fresh caller-supplied sessionId when throwOnSessionIdConflict is set', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(false);
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
   });
 
   it('should use internal sandbox session ID without treating it as a new session', async () => {
