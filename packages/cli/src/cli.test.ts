@@ -1021,6 +1021,7 @@ describe('bootstrap import boundaries', () => {
       ['reviewCommand', 'review'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
+      ['fleetCommand', 'fleet'],
       ['updateCommand', 'update'],
     ]);
     const registeredIdentifiers = [

@@ -283,6 +283,19 @@
           "type": "boolean",
           "default": false
         },
+        "leftArrowOpensFleetView": {
+          "description": "When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions.",
+          "type": "boolean",
+          "default": true
+        },
+        "fleetViewGroupMode": {
+          "description": "How to group sessions in Fleet View. \"state\" groups by current/idle status. \"directory\" groups by workspace path. Options: state, directory",
+          "enum": [
+            "state",
+            "directory"
+          ],
+          "default": "state"
+        },
         "history": {
           "description": "History display settings.",
           "type": "object",

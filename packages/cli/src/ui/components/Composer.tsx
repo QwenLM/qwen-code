@@ -127,6 +127,8 @@ export const Composer = () => {
           setShellModeActive={uiActions.setShellModeActive}
           approvalMode={showAutoAcceptIndicator}
           onEscapePromptChange={uiActions.onEscapePromptChange}
+          onOpenFleetView={uiActions.openFleetView}
+          onFleetDoubleTapPendingChange={uiActions.setFleetDoubleTapPending}
           onToggleShortcuts={handleToggleShortcuts}
           showShortcuts={showShortcuts}
           onSuggestionsVisibilityChange={setShowSuggestions}
