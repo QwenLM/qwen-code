@@ -147,7 +147,7 @@ try {
           (server) =>
             server.name === 'chrome-devtools' &&
             server.mcpStatus === 'connected' &&
-            server.config?.args?.some((arg) => /\/cdp(?:$|[?#])/.test(arg)),
+            server.config?.args?.some((arg) => /\/cdp(?:$|[/?#])/.test(arg)),
         ),
       ).catch((error) => {
         throw new Error(`${error.message}\n${getOutput()}`);

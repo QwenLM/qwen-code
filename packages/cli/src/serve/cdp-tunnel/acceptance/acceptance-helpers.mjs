@@ -64,10 +64,14 @@ const waitForExit = (child) => {
 export const stopChild = async (child, { graceMs = 3_000 } = {}) => {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
+  let graceTimer;
   await Promise.race([
     waitForExit(child),
-    new Promise((resolve) => setTimeout(resolve, graceMs)),
+    new Promise((resolve) => {
+      graceTimer = setTimeout(resolve, graceMs);
+    }),
   ]);
+  clearTimeout(graceTimer);
   if (child.exitCode === null && child.signalCode === null) {
     child.kill('SIGKILL');
     await waitForExit(child);

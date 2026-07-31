@@ -80,7 +80,7 @@ export function deriveCapabilityStatus(
       };
     }
     const usesTunnel = server.config?.args?.some((arg) =>
-      /\/cdp(?:$|[?#])/.test(arg),
+      /\/cdp(?:$|[/?#])/.test(arg),
     );
     if (!usesTunnel) {
       return {

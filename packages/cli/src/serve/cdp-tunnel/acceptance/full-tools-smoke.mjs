@@ -70,8 +70,13 @@ const waitUntil = async (read, predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
   let value;
   while (Date.now() < deadline) {
-    value = await read();
-    if (predicate(value)) return value;
+    try {
+      value = await read();
+      if (predicate(value)) return value;
+    } catch {
+      // Transient CDP errors (page navigating, target destroyed) are expected
+      // while polling; retry until the deadline instead of failing the run.
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return value;
@@ -185,6 +190,7 @@ try {
   const freshLinkUid = afterClick.match(
     /uid=([^\s]+).*link "Open fixture target"/,
   )?.[1];
+  checks.linkAppeared = Boolean(freshLinkUid);
   checks.buttonClick = afterClick.includes('clicked');
 
   const consoleMessages = await waitUntil(

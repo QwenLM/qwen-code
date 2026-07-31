@@ -95,6 +95,30 @@ describe('deriveCapabilityStatus', () => {
     });
   });
 
+  it('treats a trailing-slash tunnel endpoint as connected, not shadowed', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'cdp_tunnel_over_ws', 'browser_automation_mcp'],
+        {
+          servers: [
+            {
+              name: 'chrome-devtools',
+              mcpStatus: 'connected',
+              config: {
+                args: ['--wsEndpoint', 'ws://127.0.0.1:4170/cdp/'],
+              },
+            },
+          ],
+        },
+      ),
+    ).toEqual({
+      state: 'automation-connected',
+      shellReady: true,
+      warning: null,
+    });
+  });
+
   it('warns while the configured runtime MCP is not connected', () => {
     expect(
       deriveCapabilityStatus(

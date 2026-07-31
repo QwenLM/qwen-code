@@ -214,4 +214,61 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
       sessionId: 'qwen-cdp-page-session',
     });
   });
+
+  it('broadcasts tab events to attached sessions until they detach', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 12,
+      method: 'Target.attachToTarget',
+      params: { targetId: 'qwen-cdp-page', flatten: true },
+    });
+    const attached = replies.find(
+      (reply) => reply.method === 'Target.attachedToTarget',
+    );
+    const sessionId = (attached?.params as { sessionId?: string })?.sessionId;
+    expect(sessionId).toBeTruthy();
+
+    replies.length = 0;
+    emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r2' });
+    expect(replies).toEqual([
+      {
+        method: 'Network.requestWillBeSent',
+        params: { requestId: 'r2' },
+        sessionId: 'qwen-cdp-page-session',
+      },
+      {
+        method: 'Network.requestWillBeSent',
+        params: { requestId: 'r2' },
+        sessionId,
+      },
+    ]);
+
+    await emu.handleFromClient({
+      id: 13,
+      method: 'Target.detachFromTarget',
+      params: { sessionId },
+    });
+    replies.length = 0;
+    emu.emitTabEvent('Network.requestWillBeSent', { requestId: 'r3' });
+    expect(replies).toEqual([
+      {
+        method: 'Network.requestWillBeSent',
+        params: { requestId: 'r3' },
+        sessionId: 'qwen-cdp-page-session',
+      },
+    ]);
+  });
+
+  it('does not emit detachedFromTarget for a never-attached session', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 14,
+      method: 'Target.detachFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session' },
+    });
+    expect(
+      replies.find((reply) => reply.method === 'Target.detachedFromTarget'),
+    ).toBeUndefined();
+    expect(replies.at(-1)).toEqual({ id: 14, result: {} });
+  });
 });

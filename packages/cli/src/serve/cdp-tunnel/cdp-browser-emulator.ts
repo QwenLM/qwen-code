@@ -196,8 +196,10 @@ export class CdpBrowserEmulator {
         }
         case 'Target.detachFromTarget': {
           const attachedSessionId = params?.['sessionId'];
-          if (typeof attachedSessionId === 'string') {
-            this.attachedPageSessions.delete(attachedSessionId);
+          if (
+            typeof attachedSessionId === 'string' &&
+            this.attachedPageSessions.delete(attachedSessionId)
+          ) {
             this.cb.reply({
               method: 'Target.detachedFromTarget',
               params: {

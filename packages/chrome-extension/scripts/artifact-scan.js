@@ -78,6 +78,7 @@ export async function readZipEntries(zipPath) {
     zip.once('error', fail);
     zip.once('end', () => {
       settled = true;
+      zip.close();
       resolve(entries);
     });
     zip.on('entry', (entry) => {
@@ -166,6 +167,10 @@ async function main() {
       path.join(packageRoot, 'dist/esbuild.json'),
     ];
     zipPath = path.join(packageRoot, 'chrome-extension.zip');
+  } else {
+    console.warn(
+      'artifact-scan: positional roots provided; skipping esbuild metafile and zip scans',
+    );
   }
   for (const root of roots) {
     await access(root).catch(() => {
