@@ -22,6 +22,7 @@ export const aboutCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (context) => {
     const systemInfo = await getExtendedSystemInfo(context);
 
@@ -63,6 +64,7 @@ export const aboutCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      canRunDuringStreaming: true,
       action: async (context) => {
         const info = await collectSessionPathInfo(context);
         const content = formatSessionPathInfo(info);

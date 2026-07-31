@@ -50,6 +50,7 @@ import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
+  buildForkExecutionAllowlist,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
 import {
@@ -1668,9 +1669,10 @@ export class BackgroundAgentResumeService {
     };
     const toolConfig: ToolConfig = {
       tools: [...runtime.toolNames],
-      ...(executionAllowedTools !== undefined
-        ? { executionAllowedTools: structuredClone(executionAllowedTools) }
-        : {}),
+      executionAllowedTools: buildForkExecutionAllowlist(
+        executionAllowedTools,
+        runtime.toolNames,
+      ),
     };
 
     return AgentHeadless.create(
