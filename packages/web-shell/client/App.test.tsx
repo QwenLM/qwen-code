@@ -516,6 +516,12 @@ vi.mock('./components/ChatEditor', async () => {
   };
 });
 
+vi.mock('./components/NewSessionDotField', () => ({
+  NewSessionDotField: () => (
+    <div data-web-shell-new-session-dot-field aria-hidden="true" />
+  ),
+}));
+
 vi.mock('./components/MessageList', async () => {
   const React = await import('react');
   const { useInteractionBlocker } = await import('./interactionBlockContext');
@@ -2312,6 +2318,9 @@ describe('App composer footer renderer', () => {
     expect(composer?.nextElementSibling).toBe(composerFooter);
     expect(composerFooter?.parentElement).toBe(composer?.parentElement);
     expect(composer?.parentElement?.nextElementSibling).toBe(shellFooter);
+    expect(
+      container.querySelector('[data-web-shell-new-session-dot-field]'),
+    ).toBeNull();
   });
 
   it('updates composer footer state and renders it in the empty welcome state', async () => {
@@ -2361,6 +2370,9 @@ describe('App composer footer renderer', () => {
 
     expect(
       container.querySelector('[data-testid="composer-footer"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-new-session-dot-field]'),
     ).not.toBeNull();
     expect(composerFooterProps.at(-1)).toEqual({
       disabled: false,
