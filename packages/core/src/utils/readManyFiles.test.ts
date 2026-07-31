@@ -217,14 +217,14 @@ describe('readManyFiles', () => {
       const outsidePath = path.join(outsideDir, 'secret.txt');
       await fs.writeFile(outsidePath, 'outside secret');
       const fileSystemService = new StandardFileSystemService();
-      const readTextFile =
-        fileSystemService.readTextFile.bind(fileSystemService);
-      vi.spyOn(fileSystemService, 'readTextFile').mockImplementation(
+      const readTextFileFromHandle =
+        fileSystemService.readTextFileFromHandle.bind(fileSystemService);
+      vi.spyOn(fileSystemService, 'readTextFileFromHandle').mockImplementation(
         async (options) => {
           await fs.rename(absolutePath, backupPath);
           await fs.symlink(outsidePath, absolutePath);
           try {
-            return await readTextFile(options);
+            return await readTextFileFromHandle(options);
           } finally {
             await fs.unlink(absolutePath);
             await fs.rename(backupPath, absolutePath);
@@ -249,6 +249,53 @@ describe('readManyFiles', () => {
         expect(content).not.toContain('outside secret');
       } finally {
         await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads validated large text through a bounded handle without snapshotting', async () => {
+      const relativePath = 'large-approved.log';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const line = `${'x'.repeat(20)}\n`;
+      await fs.writeFile(
+        absolutePath,
+        line.repeat(Math.ceil((11 * 1024 * 1024) / line.length)),
+        'utf-8',
+      );
+      const approvedStats = await fs.stat(absolutePath);
+      const fileSystemService = new StandardFileSystemService();
+      const readTextFileSpy = vi.spyOn(fileSystemService, 'readTextFile');
+      const readTextFileFromHandleSpy = vi.spyOn(
+        fileSystemService,
+        'readTextFileFromHandle',
+      );
+      const mkdtempSpy = vi.spyOn(fs, 'mkdtemp');
+      const mockConfig = {
+        ...createMockConfig(tempRootDir),
+        getFileSystemService: () => fileSystemService,
+      } as unknown as Config;
+
+      try {
+        const result = await readManyFiles(mockConfig, {
+          paths: [relativePath],
+          validatedPathIdentities: new Map([
+            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
+          ]),
+        });
+        const content = contentToString(result.contentParts);
+
+        expect(content).toContain('Showing lines 1-');
+        expect(content).toContain('... [truncated]');
+        expect(result.files).toHaveLength(1);
+        expect(result.files[0]!.error).toBeUndefined();
+        expect(readTextFileFromHandleSpy).toHaveBeenCalled();
+        expect(readTextFileSpy).not.toHaveBeenCalled();
+        expect(mkdtempSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen-validated-read-'),
+        );
+      } finally {
+        readTextFileSpy.mockRestore();
+        readTextFileFromHandleSpy.mockRestore();
+        mkdtempSpy.mockRestore();
       }
     });
 

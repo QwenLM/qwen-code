@@ -11,9 +11,13 @@ import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { getErrorMessage, isAbortError } from './errors.js';
-import type { ProcessedFileReadResult } from './fileUtils.js';
+import type {
+  ProcessedFileReadResult,
+  ProcessSingleFileContentOptions,
+} from './fileUtils.js';
 import {
   detectFileType,
+  getRangeReadByteLimit,
   isCacheableReadResult,
   processSingleFileContent,
 } from './fileUtils.js';
@@ -177,30 +181,50 @@ export async function readManyFiles(
         seenFiles.add(fullPath);
         const standardFileSystem =
           config.getFileSystemService() instanceof StandardFileSystemService;
+        const fileType = await detectFileType(fullPath);
+        const textHandleReadByteLimit = getRangeReadByteLimit(config);
+        const shouldUseTextHandle =
+          validatedIdentity &&
+          standardFileSystem &&
+          fileType === 'text' &&
+          Number.isFinite(textHandleReadByteLimit);
         const shouldSnapshot =
           validatedIdentity &&
-          (standardFileSystem || (await detectFileType(fullPath)) !== 'text');
+          !shouldUseTextHandle &&
+          (standardFileSystem || fileType !== 'text');
         const snapshot = shouldSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity, signal)
           : undefined;
         if (shouldSnapshot && !snapshot) continue;
         let readResult;
-        try {
-          const validateAfterRead =
-            validatedIdentity && !snapshot
-              ? () => matchesValidatedPathIdentity(fullPath, validatedIdentity)
-              : undefined;
-          readResult = await readFileContent(
+        const validateAfterRead =
+          validatedIdentity && !snapshot && !shouldUseTextHandle
+            ? () => matchesValidatedPathIdentity(fullPath, validatedIdentity)
+            : undefined;
+        if (shouldUseTextHandle) {
+          readResult = await readValidatedTextFileContent(
             config,
-            snapshot?.filePath ?? fullPath,
+            fullPath,
+            validatedIdentity,
             preserveUnsupportedImageForBridge,
             signal,
             displayPath,
-            snapshot?.stats,
-            validateAfterRead,
+            textHandleReadByteLimit,
           );
-        } finally {
-          await snapshot?.cleanup();
+        } else {
+          try {
+            readResult = await readFileContent(
+              config,
+              snapshot?.filePath ?? fullPath,
+              preserveUnsupportedImageForBridge,
+              signal,
+              displayPath,
+              snapshot?.stats,
+              validateAfterRead,
+            );
+          } finally {
+            await snapshot?.cleanup();
+          }
         }
         if (readResult) {
           contentParts.push(...readResult.contentParts);
@@ -230,6 +254,47 @@ export async function readManyFiles(
   }
 
   return { contentParts: contentParts as PartListUnion, files };
+}
+
+async function readValidatedTextFileContent(
+  config: Config,
+  filePath: string,
+  expected: ReadManyFilesPathIdentity,
+  preserveUnsupportedImage = false,
+  signal: AbortSignal | undefined,
+  displayPath: string,
+  maxScanBytes: number,
+): ReturnType<typeof readFileContent> {
+  const source = await fs.promises.open(
+    filePath,
+    (fs.constants.O_RDONLY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const stats = await source.stat();
+    if (
+      !stats.isFile() ||
+      stats.dev !== expected.dev ||
+      stats.ino !== expected.ino
+    ) {
+      return null;
+    }
+    return await readFileContent(
+      config,
+      filePath,
+      preserveUnsupportedImage,
+      signal,
+      displayPath,
+      stats,
+      undefined,
+      {
+        textFileHandle: source,
+        textFileStats: stats,
+        textFileMaxScanBytes: maxScanBytes,
+      },
+    );
+  } finally {
+    await source.close();
+  }
 }
 
 async function matchesValidatedPathIdentity(
@@ -384,6 +449,10 @@ async function readFileContent(
   displayPath = filePath,
   validatedStats?: fs.Stats,
   validateAfterRead?: () => Promise<boolean>,
+  processOptions?: Pick<
+    ProcessSingleFileContentOptions,
+    'textFileHandle' | 'textFileStats' | 'textFileMaxScanBytes'
+  >,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
@@ -391,6 +460,7 @@ async function readFileContent(
       ...(signal !== undefined ? { signal } : {}),
       largePdfBehavior: 'reference',
       displayPath,
+      ...processOptions,
     });
     if (validatedStats && fileReadResult.stats) {
       fileReadResult.stats = validatedStats;

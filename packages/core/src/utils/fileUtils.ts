@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
@@ -977,6 +978,9 @@ export interface ProcessSingleFileContentOptions {
    */
   largePdfBehavior?: 'error' | 'reference';
   displayPath?: string;
+  textFileHandle?: FileHandle;
+  textFileStats?: import('node:fs').Stats;
+  textFileMaxScanBytes?: number;
 }
 
 /**
@@ -1068,7 +1072,7 @@ export async function processSingleFileContent(
       // Async stat doubles as the existence check — ENOENT is handled below
       // and surfaces the same FILE_NOT_FOUND error type as the old explicit
       // existsSync gate, with one fewer sync syscall on the hot path.
-      stats = await fs.promises.stat(filePath);
+      stats = options.textFileStats ?? (await fs.promises.stat(filePath));
     } catch (error: unknown) {
       if (isNodeError(error) && error.code === 'ENOENT') {
         return {
@@ -1105,7 +1109,9 @@ export async function processSingleFileContent(
       };
     }
 
-    const fileType = await detectFileType(filePath);
+    const fileType = options.textFileHandle
+      ? 'text'
+      : await detectFileType(filePath);
     const mediaMimeType =
       mime.getType(filePath) ??
       MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
@@ -1332,16 +1338,27 @@ export async function processSingleFileContent(
       }
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
-        const { content, _meta } = await config
-          .getFileSystemService()
-          .readTextFile({
-            path: filePath,
-            limit: limit ?? config.getTruncateToolOutputLines(),
-            line: offset,
-            maxOutputBytes: getRangeReadByteLimit(config),
-            stats,
-            ...(signal !== undefined ? { signal } : {}),
-          });
+        const fileSystemService = config.getFileSystemService();
+        const maxOutputBytes = getRangeReadByteLimit(config);
+        const readTextFileFromHandle = fileSystemService.readTextFileFromHandle;
+        const { content, _meta } = options.textFileHandle
+          ? await readTextFileFromHandle!.call(fileSystemService, {
+              fileHandle: options.textFileHandle,
+              fileSize: stats.size,
+              limit: limit ?? config.getTruncateToolOutputLines(),
+              line: offset,
+              maxOutputBytes,
+              maxScanBytes: options.textFileMaxScanBytes ?? maxOutputBytes,
+              ...(signal !== undefined ? { signal } : {}),
+            })
+          : await fileSystemService.readTextFile({
+              path: filePath,
+              limit: limit ?? config.getTruncateToolOutputLines(),
+              line: offset,
+              maxOutputBytes,
+              stats,
+              ...(signal !== undefined ? { signal } : {}),
+            });
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
         const selectedLineCount =
@@ -1881,7 +1898,7 @@ export async function processSingleFileContent(
   }
 }
 
-function getRangeReadByteLimit(config: Config): number {
+export function getRangeReadByteLimit(config: Config): number {
   const charLimit = config.getTruncateToolOutputThreshold();
   if (charLimit === Number.POSITIVE_INFINITY) {
     return Number.POSITIVE_INFINITY;
