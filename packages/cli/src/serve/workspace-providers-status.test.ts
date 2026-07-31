@@ -1025,6 +1025,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('123%abc');
   });
 
+  it('keeps a one-character host when prose after it contains an @', async () => {
+    // The other half of the one-character-host defect, and it needs a different
+    // fix: here `CREDENTIAL_PREFIX_PATTERN` does not decline, it matches at the
+    // *wrong* `@`. A one-char host is invisible to `HOST_AFTER_USERINFO`, so the
+    // lazy tail runs past it to the email's `@` -- the credential is stripped,
+    // but the host becomes `example.com` and the contact prose is deleted. So the
+    // fallback has to be consulted even when the primary pattern succeeds.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://user:pass@h — contact admin@example.com';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://h — contact admin@example.com',
+    );
+    expect(JSON.stringify(result)).not.toContain('pass@');
+  });
+
   it('strips a spaced password whose first word is digits closing a sentence', async () => {
     // `123.` is digits followed by a `PORT_END` character, which is exactly how a
     // port ending a sentence looks (`:8443. See ...`), so the colon was rejected

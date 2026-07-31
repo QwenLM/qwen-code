@@ -494,19 +494,53 @@ function sanitizeProviderWarning(warning: string): string {
  * one-character host — and not for the shapes where a port and a password are
  * genuinely indistinguishable, which stay as `CREDENTIAL_PREFIX_PATTERN`
  * documents them.
+ *
+ * The fallback is also consulted when the primary pattern *succeeds*, because
+ * succeeding is not the same as being right. A one-character host is invisible to
+ * `HOST_AFTER_USERINFO`, so in `user:pass@h — contact admin@example.com` the lazy
+ * tail runs past it and matches at the email's `@` instead: the credential is
+ * still stripped, but the host is rewritten from `h` to `example.com` and the
+ * prose is deleted. The fallback finds the right `@`; it just has to be asked.
+ *
+ * Which of the two to believe is decided by how much whitespace separates them.
+ * Two or more spaces is prose — the primary reached out of the URL to find a host
+ * — so the earlier `@` wins. One space is a one-space password, which this file
+ * already treats as ambiguous and resolves in favour of the better-evidenced
+ * later host (`p@s s@host.example`, pinned by test), so the primary keeps it.
+ * That is the same "a second space means prose" test `PORT_DIGITS` makes, applied
+ * to the other ambiguity.
  */
 function findUrlEnd(segment: string, markerLength: number): number {
   const body = segment.slice(markerLength);
   const credentials = CREDENTIAL_PREFIX_PATTERN.exec(body);
-  if (!credentials) {
-    const fallback = CREDENTIAL_FALLBACK_PATTERN.exec(body);
-    if (fallback) return markerLength + fallback[0].length;
+  const fallback = CREDENTIAL_FALLBACK_PATTERN.exec(body);
+  if (
+    fallback &&
+    (!credentials || prefersFallback(body, credentials, fallback))
+  ) {
+    return markerLength + fallback[0].length;
   }
   const from = credentials
     ? markerLength + credentials[0].length
     : markerLength;
   const space = segment.slice(from).search(/\s/);
   return space === -1 ? segment.length : from + space;
+}
+
+/**
+ * Whether the fallback's earlier `@` is the better of two matches.
+ *
+ * Only when it is genuinely earlier, and only when what lies between the two is
+ * prose rather than a password: two spaces or more. See `findUrlEnd`.
+ */
+function prefersFallback(
+  body: string,
+  credentials: RegExpExecArray,
+  fallback: RegExpExecArray,
+): boolean {
+  if (fallback[0].length >= credentials[0].length) return false;
+  const between = body.slice(fallback[0].length, credentials[0].length);
+  return (between.match(/\s/g) ?? []).length >= 2;
 }
 
 function findNextUrlStart(
