@@ -18,7 +18,11 @@ import {
   ChannelLoopStore,
   SessionRouter,
 } from '@qwen-code/channel-base';
-import type { ChannelBase, ChannelBaseOptions } from '@qwen-code/channel-base';
+import type {
+  AcpBridgeOptions,
+  ChannelBase,
+  ChannelBaseOptions,
+} from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import { resolveProxy } from './proxy.js';
 import {
@@ -148,6 +152,129 @@ function createBridgeReadinessGate(): {
   };
 }
 
+interface BridgeRecoveryOptions {
+  bridgeOpts: AcpBridgeOptions;
+  router: SessionRouter;
+  channels: Map<string, ChannelBase>;
+  scheduler: ChannelLoopScheduler | undefined;
+  bridgeReadiness: ReturnType<typeof createBridgeReadinessGate>;
+  isShuttingDown: () => boolean;
+  getBridge: () => AcpBridge;
+  setBridge: (bridge: AcpBridge) => void;
+}
+
+/**
+ * Rebuild the ACP bridge after a disconnect while keeping channel adapters
+ * connected. Shared by the standalone and all-channel start paths; the only
+ * per-path state comes in through the accessors.
+ */
+function createBridgeRecovery(options: BridgeRecoveryOptions): {
+  attachDisconnectHandler: (bridge: AcpBridge) => void;
+} {
+  const {
+    bridgeOpts,
+    router,
+    channels,
+    scheduler,
+    bridgeReadiness,
+    isShuttingDown,
+    getBridge,
+    setBridge,
+  } = options;
+  const crashTimestamps: number[] = [];
+  let recoveryTask: Promise<void> | undefined;
+  let recoveryRequested = false;
+
+  const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
+    failedBridge.on('disconnected', () => {
+      if (isShuttingDown()) return;
+      if (recoveryTask) {
+        if (failedBridge === getBridge()) recoveryRequested = true;
+        return;
+      }
+      recoverBridge();
+    });
+  };
+
+  const disconnectAllChannels = (): void => {
+    for (const channel of channels.values()) {
+      try {
+        channel.disconnect();
+      } catch {
+        // best-effort
+      }
+    }
+  };
+
+  const recoverBridge = (): void => {
+    bridgeReadiness.block();
+    const task = (async () => {
+      do {
+        recoveryRequested = false;
+        const now = Date.now();
+        crashTimestamps.push(now);
+        // Only count crashes within the recent window
+        const recentCrashes = crashTimestamps.filter(
+          (timestamp) => now - timestamp < CRASH_WINDOW_MS,
+        );
+
+        if (recentCrashes.length > MAX_CRASH_RESTARTS) {
+          writeStderrLine(
+            `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
+          );
+          scheduler?.stop();
+          disconnectAllChannels();
+          router.clearAll();
+          removeServiceInfo();
+          process.exit(1);
+        }
+
+        writeStderrLine(
+          `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
+
+        const bridge = new AcpBridge(bridgeOpts);
+        setBridge(bridge);
+        attachDisconnectHandler(bridge);
+        await bridge.start();
+        router.setBridge(bridge);
+        for (const channel of channels.values()) {
+          channel.setBridge(bridge);
+        }
+        registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
+        registerSessionCleanup(bridge, router, channels);
+
+        const result = await router.restoreSessions();
+        writeStdoutLine(
+          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
+        );
+      } while (recoveryRequested && !isShuttingDown());
+    })()
+      .catch((err) => {
+        writeStderrLine(
+          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        scheduler?.stop();
+        disconnectAllChannels();
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
+      })
+      .finally(() => {
+        if (recoveryTask === task) {
+          recoveryTask = undefined;
+          bridgeReadiness.release();
+        }
+      });
+    recoveryTask = task;
+  };
+
+  return { attachDisconnectHandler };
+}
+
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
@@ -202,9 +329,6 @@ async function startSingle(
 
   const cliEntryPath = findCliEntryPath();
   let shuttingDown = false;
-  const crashTimestamps: number[] = [];
-  let recoveryTask: Promise<void> | undefined;
-  let recoveryRequested = false;
   const bridgeReadiness = createBridgeReadinessGate();
 
   const bridgeOpts = { cliEntryPath, cwd: config.cwd, model: config.model };
@@ -260,79 +384,18 @@ async function startSingle(
   scheduler?.start();
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
-  const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
-    failedBridge.on('disconnected', () => {
-      if (shuttingDown) return;
-      if (recoveryTask) {
-        if (failedBridge === bridge) recoveryRequested = true;
-        return;
-      }
-      recoverBridge();
-    });
-  };
-
-  const recoverBridge = (): void => {
-    bridgeReadiness.block();
-    const task = (async () => {
-      do {
-        recoveryRequested = false;
-        const now = Date.now();
-        crashTimestamps.push(now);
-        // Only count crashes within the recent window
-        const recentCrashes = crashTimestamps.filter(
-          (timestamp) => now - timestamp < CRASH_WINDOW_MS,
-        );
-
-        if (recentCrashes.length > MAX_CRASH_RESTARTS) {
-          writeStderrLine(
-            `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
-          );
-          scheduler?.stop();
-          channel.disconnect();
-          router.clearAll();
-          removeServiceInfo();
-          process.exit(1);
-        }
-
-        writeStderrLine(
-          `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
-
-        bridge = new AcpBridge(bridgeOpts);
-        attachDisconnectHandler(bridge);
-        await bridge.start();
-        router.setBridge(bridge);
-        channel.setBridge(bridge);
-        registerToolCallDispatch(bridge, router, channels);
-        registerBackgroundResponseRelay(bridge, router, channels);
-        registerPermissionRelay(bridge, router, channels);
-        registerSessionCleanup(bridge, router, channels);
-
-        const result = await router.restoreSessions();
-        writeStdoutLine(
-          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
-        );
-      } while (recoveryRequested && !shuttingDown);
-    })()
-      .catch((err) => {
-        writeStderrLine(
-          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        scheduler?.stop();
-        channel.disconnect();
-        router.clearAll();
-        removeServiceInfo();
-        process.exit(1);
-      })
-      .finally(() => {
-        if (recoveryTask === task) {
-          recoveryTask = undefined;
-          bridgeReadiness.release();
-        }
-      });
-    recoveryTask = task;
-  };
+  const { attachDisconnectHandler } = createBridgeRecovery({
+    bridgeOpts,
+    router,
+    channels,
+    scheduler,
+    bridgeReadiness,
+    isShuttingDown: () => shuttingDown,
+    getBridge: () => bridge,
+    setBridge: (next) => {
+      bridge = next;
+    },
+  });
   attachDisconnectHandler(bridge);
 
   const shutdown = () => {
@@ -383,9 +446,6 @@ async function startAll(
   const cliEntryPath = findCliEntryPath();
   const defaultCwd = process.cwd();
   let shuttingDown = false;
-  const crashTimestamps: number[] = [];
-  let recoveryTask: Promise<void> | undefined;
-  let recoveryRequested = false;
   const bridgeReadiness = createBridgeReadinessGate();
 
   const bridgeOpts = {
@@ -467,92 +527,18 @@ async function startAll(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );
 
-  const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
-    failedBridge.on('disconnected', () => {
-      if (shuttingDown) return;
-      if (recoveryTask) {
-        if (failedBridge === bridge) recoveryRequested = true;
-        return;
-      }
-      recoverBridge();
-    });
-  };
-
-  const recoverBridge = (): void => {
-    bridgeReadiness.block();
-    const task = (async () => {
-      do {
-        recoveryRequested = false;
-        const now = Date.now();
-        crashTimestamps.push(now);
-        const recentCrashes = crashTimestamps.filter(
-          (timestamp) => now - timestamp < CRASH_WINDOW_MS,
-        );
-
-        if (recentCrashes.length > MAX_CRASH_RESTARTS) {
-          writeStderrLine(
-            `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
-          );
-          scheduler?.stop();
-          for (const channel of channels.values()) {
-            try {
-              channel.disconnect();
-            } catch {
-              // best-effort
-            }
-          }
-          router.clearAll();
-          removeServiceInfo();
-          process.exit(1);
-        }
-
-        writeStderrLine(
-          `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
-
-        bridge = new AcpBridge(bridgeOpts);
-        attachDisconnectHandler(bridge);
-        await bridge.start();
-        router.setBridge(bridge);
-        for (const channel of channels.values()) {
-          channel.setBridge(bridge);
-        }
-        registerToolCallDispatch(bridge, router, channels);
-        registerBackgroundResponseRelay(bridge, router, channels);
-        registerPermissionRelay(bridge, router, channels);
-        registerSessionCleanup(bridge, router, channels);
-
-        const result = await router.restoreSessions();
-        writeStdoutLine(
-          `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
-        );
-      } while (recoveryRequested && !shuttingDown);
-    })()
-      .catch((err) => {
-        writeStderrLine(
-          `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        scheduler?.stop();
-        for (const channel of channels.values()) {
-          try {
-            channel.disconnect();
-          } catch {
-            // best-effort
-          }
-        }
-        router.clearAll();
-        removeServiceInfo();
-        process.exit(1);
-      })
-      .finally(() => {
-        if (recoveryTask === task) {
-          recoveryTask = undefined;
-          bridgeReadiness.release();
-        }
-      });
-    recoveryTask = task;
-  };
+  const { attachDisconnectHandler } = createBridgeRecovery({
+    bridgeOpts,
+    router,
+    channels,
+    scheduler,
+    bridgeReadiness,
+    isShuttingDown: () => shuttingDown,
+    getBridge: () => bridge,
+    setBridge: (next) => {
+      bridge = next;
+    },
+  });
   attachDisconnectHandler(bridge);
 
   const shutdown = () => {

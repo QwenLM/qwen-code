@@ -204,7 +204,7 @@ describe('startEventLoopLagMonitor', () => {
 
   it('reports a stall just below the default suspend threshold', async () => {
     const onNewMaxStall = vi.fn();
-    histogram.max = 599_000_000_000;
+    histogram.max = 299_000_000_000;
     const monitor = startEventLoopLagMonitor({
       resolutionMs: 10,
       stallThresholdMs: 1_000,
@@ -214,14 +214,14 @@ describe('startEventLoopLagMonitor', () => {
     await vi.advanceTimersByTimeAsync(10);
 
     expect(histogram.reset).not.toHaveBeenCalled();
-    expect(onNewMaxStall).toHaveBeenCalledWith(599_000);
+    expect(onNewMaxStall).toHaveBeenCalledWith(299_000);
 
     monitor.dispose();
   });
 
   it('resets a low-CPU sample at the default suspend threshold', async () => {
     const onNewMaxStall = vi.fn();
-    histogram.max = 600_000_000_000;
+    histogram.max = 300_000_000_000;
     const monitor = startEventLoopLagMonitor({
       resolutionMs: 10,
       stallThresholdMs: 1_000,

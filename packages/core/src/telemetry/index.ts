@@ -225,6 +225,7 @@ export type {
   DaemonPipeDirection,
 } from './daemon-metrics.js';
 export {
+  DEFAULT_EVENT_LOOP_SUSPEND_THRESHOLD_MS,
   startEventLoopLagMonitor,
   type EventLoopLagMonitor,
   type EventLoopLagMonitorOptions,

@@ -33,7 +33,13 @@ export interface EventLoopLagMonitorOptions {
 
 const DEFAULT_RESOLUTION_MS = 20;
 const DEFAULT_STALL_THRESHOLD_MS = 1_000;
-const DEFAULT_SUSPEND_THRESHOLD_MS = 10 * 60 * 1_000;
+/**
+ * Default minimum gap treated as host suspension. Kept at or below the ACP
+ * bridge stall-kill threshold (`ACP_EVENT_LOOP_STALL_RESTART_MS`) so a low-CPU
+ * sleep gap is always filtered before it can be reported as a kill-eligible
+ * stall.
+ */
+export const DEFAULT_EVENT_LOOP_SUSPEND_THRESHOLD_MS = 5 * 60 * 1_000;
 const DEFAULT_SUSPEND_CPU_RATIO = 0.01;
 const NS_PER_MS = 1_000_000;
 
@@ -50,7 +56,7 @@ export function startEventLoopLagMonitor(
   );
   const suspendThresholdMs = positiveFiniteOrDefault(
     options.suspendThresholdMs,
-    DEFAULT_SUSPEND_THRESHOLD_MS,
+    DEFAULT_EVENT_LOOP_SUSPEND_THRESHOLD_MS,
   );
   const suspendCpuRatio = fractionOrDefault(
     options.suspendCpuRatio,
