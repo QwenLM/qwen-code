@@ -243,7 +243,8 @@ jobs:
           [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
           $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          "WINDOWS_CONFIG={\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$($certificate.Thumbprint)\"}}}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
+          "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: 'Prepare bundled runtime'
         working-directory: 'packages/desktop-shell'
@@ -410,7 +411,12 @@ jobs:
           args=("$RELEASE_TAG" release-assets/* --target "$GITHUB_SHA" --title "Qwen Code Desktop v$RELEASE_VERSION" --generate-notes --latest=false)
           if [ "$RELEASE_DRAFT" = 'true' ]; then args+=(--draft); fi
           if [ "$RELEASE_PRERELEASE" = 'true' ]; then args+=(--prerelease); fi
-          release_url="$(gh release create "${args[@]}")"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            release_url="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
+          else
+            release_url="$(gh release create "${args[@]}")"
+          fi
           echo "url=$release_url" >> "$GITHUB_OUTPUT"
 
       - name: 'Update stable updater feed'

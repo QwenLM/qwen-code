@@ -80,7 +80,7 @@ async function verify(baseUrl) {
     return;
   }
   const shell = await fetch(baseUrl, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Accept: 'text/html' },
   });
   const html = await shell.text();
   if (!shell.ok || !html.includes('<div id="root"></div>')) {

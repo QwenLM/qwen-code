@@ -209,7 +209,11 @@ function verifyChecksum(archivePath, archiveName, checksums) {
 }
 
 function extractNodeArchive(archivePath, destination) {
-  execFileSync('tar', ['-xf', archivePath, '-C', destination]);
+  if (archivePath.endsWith('.zip')) {
+    execFileSync('unzip', ['-q', archivePath, '-d', destination]);
+  } else {
+    execFileSync('tar', ['-xf', archivePath, '-C', destination]);
+  }
 }
 
 function writeLaunchers(desktopTarget) {
