@@ -1,0 +1,204 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  MAX_TERMINAL_IMAGE_BYTES,
+  type TerminalImageDisplay,
+} from '@qwen-code/qwen-code-core';
+import {
+  buildKittyPlaceholder,
+  createRendererChildEnv,
+  encodeKittyVirtualImage,
+  readPngSize,
+  type KittyImagePlaceholder,
+} from './mermaidImageRenderer.js';
+
+const CHAFA_TIMEOUT_MS = 8000;
+const CHAFA_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+
+export type TerminalImageRenderResult =
+  | {
+      kind: 'kitty';
+      sequence: string;
+      placeholder: KittyImagePlaceholder;
+    }
+  | { kind: 'ansi'; lines: string[] }
+  | { kind: 'unavailable'; reason: string };
+
+export interface TerminalImageRenderOptions {
+  display: TerminalImageDisplay;
+  contentWidth: number;
+  availableTerminalHeight?: number;
+  env?: NodeJS.ProcessEnv;
+  stdoutIsTTY?: boolean;
+}
+
+export function supportsKittyImageProtocol(
+  env: NodeJS.ProcessEnv = process.env,
+  stdoutIsTTY = process.stdout.isTTY,
+): boolean {
+  if (!stdoutIsTTY || env['TMUX'] || env['SSH_TTY'] || env['SSH_CLIENT']) {
+    return false;
+  }
+
+  const term = env['TERM']?.toLowerCase() ?? '';
+  const termProgram = env['TERM_PROGRAM']?.toLowerCase() ?? '';
+  return Boolean(
+    env['KITTY_WINDOW_ID'] ||
+      term.includes('kitty') ||
+      termProgram.includes('ghostty'),
+  );
+}
+
+export function renderTerminalImage({
+  display,
+  contentWidth,
+  availableTerminalHeight,
+  env = process.env,
+  stdoutIsTTY = process.stdout.isTTY,
+}: TerminalImageRenderOptions): TerminalImageRenderResult {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(display.filePath);
+  } catch (error) {
+    return {
+      kind: 'unavailable',
+      reason: `Image file is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  if (!stat.isFile()) {
+    return {
+      kind: 'unavailable',
+      reason: 'Image path is not a regular file.',
+    };
+  }
+  if (stat.size > MAX_TERMINAL_IMAGE_BYTES) {
+    return {
+      kind: 'unavailable',
+      reason: `Image exceeds the ${MAX_TERMINAL_IMAGE_BYTES} byte display limit.`,
+    };
+  }
+
+  let png: Buffer;
+  try {
+    png = fs.readFileSync(display.filePath);
+  } catch (error) {
+    return {
+      kind: 'unavailable',
+      reason: `Unable to read image: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  if (png.length > MAX_TERMINAL_IMAGE_BYTES) {
+    return {
+      kind: 'unavailable',
+      reason: `Image exceeds the ${MAX_TERMINAL_IMAGE_BYTES} byte display limit.`,
+    };
+  }
+  const size = readPngSize(png);
+  if (!size) {
+    return { kind: 'unavailable', reason: 'Image is not a valid PNG.' };
+  }
+
+  const shape = fitImageToTerminal(size, contentWidth, availableTerminalHeight);
+  if (supportsKittyImageProtocol(env, stdoutIsTTY)) {
+    const imageId = createImageId(png, shape);
+    return {
+      kind: 'kitty',
+      sequence: encodeKittyVirtualImage(
+        png,
+        imageId,
+        shape.widthCells,
+        shape.rows,
+      ),
+      placeholder: buildKittyPlaceholder(imageId, shape.widthCells, shape.rows),
+    };
+  }
+
+  return renderWithChafa(display.filePath, shape, env);
+}
+
+function fitImageToTerminal(
+  size: { width: number; height: number },
+  contentWidth: number,
+  availableTerminalHeight?: number,
+): { widthCells: number; rows: number } {
+  const widthCells = Math.max(4, Math.min(Math.floor(contentWidth), 120));
+  const naturalRows = Math.ceil((size.height / size.width) * widthCells * 0.5);
+  const maxRows = Math.max(
+    4,
+    Math.min(Math.floor(availableTerminalHeight ?? 32), 60),
+  );
+  return {
+    widthCells,
+    rows: Math.max(4, Math.min(naturalRows, maxRows)),
+  };
+}
+
+function createImageId(
+  png: Buffer,
+  shape: { widthCells: number; rows: number },
+): number {
+  const hash = crypto
+    .createHash('sha256')
+    .update(png)
+    .update('\0')
+    .update(String(shape.widthCells))
+    .update('\0')
+    .update(String(shape.rows))
+    .digest();
+  const id = hash.readUIntBE(0, 3);
+  return id === 0 ? 1 : id;
+}
+
+function renderWithChafa(
+  filePath: string,
+  shape: { widthCells: number; rows: number },
+  env: NodeJS.ProcessEnv,
+): TerminalImageRenderResult {
+  try {
+    const stdout = execFileSync(
+      'chafa',
+      [
+        '--animate=off',
+        '--format=symbols',
+        '--symbols=block',
+        `--size=${shape.widthCells}x${shape.rows}`,
+        filePath,
+      ],
+      {
+        encoding: 'utf8',
+        env: createRendererChildEnv(env),
+        maxBuffer: CHAFA_MAX_OUTPUT_BYTES,
+        timeout: CHAFA_TIMEOUT_MS,
+      },
+    );
+    const lines = stdout.split(/\r?\n/).filter((line) => line.length > 0);
+    return lines.length > 0
+      ? { kind: 'ansi', lines }
+      : { kind: 'unavailable', reason: 'chafa produced no output.' };
+  } catch (error) {
+    const execError = error as Error & {
+      code?: string | number;
+      stderr?: Buffer | string;
+    };
+    return {
+      kind: 'unavailable',
+      reason:
+        execError.code === 'ENOENT'
+          ? 'This terminal does not support Kitty images and chafa is not installed.'
+          : String(execError.stderr ?? '').trim() ||
+            execError.message ||
+            'chafa could not render the image.',
+    };
+  }
+}

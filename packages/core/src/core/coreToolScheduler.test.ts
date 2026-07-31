@@ -14834,6 +14834,14 @@ describe('extractToolFilePaths', () => {
     ).toEqual(['/proj/chart.png']);
   });
 
+  it('extracts file_path for display_image', () => {
+    expect(
+      extractToolFilePaths(ToolNames.DISPLAY_IMAGE, {
+        file_path: '/proj/chart.png',
+      }),
+    ).toEqual(['/proj/chart.png']);
+  });
+
   it('extracts notebook_path for notebook_edit', () => {
     expect(
       extractToolFilePaths('notebook_edit', {

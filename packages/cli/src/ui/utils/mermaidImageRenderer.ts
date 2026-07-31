@@ -1069,7 +1069,9 @@ function getMermaidRenderTimeout(env: NodeJS.ProcessEnv): number {
   return DEFAULT_RENDER_TIMEOUT_MS;
 }
 
-function createRendererChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function createRendererChildEnv(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
   const sourceEnv = { ...process.env, ...env };
   const childEnv: NodeJS.ProcessEnv = {};
 

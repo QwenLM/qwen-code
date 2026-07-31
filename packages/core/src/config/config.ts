@@ -7932,6 +7932,17 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    if (
+      resolveInteractionMode(this) === 'interactive' &&
+      !this.sdkMode &&
+      !this.getScreenReader() &&
+      !options?.forSubAgent
+    ) {
+      await registerLazy(ToolNames.DISPLAY_IMAGE, async () => {
+        const { DisplayImageTool } = await import('../tools/display-image.js');
+        return new DisplayImageTool(this);
+      });
+    }
     // WebSearch is opt-in: it registers only when explicitly enabled AND the
     // configured search model resolves to a usable DashScope entry. A failed
     // gate surfaces a one-time startup notice instead of a silently missing
