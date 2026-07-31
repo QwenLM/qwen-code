@@ -1025,6 +1025,89 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).not.toContain('123%abc');
   });
 
+  it('strips a spaced password before a bare one-character host', async () => {
+    // `HOST_AFTER_USERINFO` requires two characters of a bare label, so `@h`
+    // matched no shape, `CREDENTIAL_PREFIX_PATTERN` declined, and the fallback
+    // cut at the first space — inside the password. The slice handed to
+    // `sanitizeProviderBaseUrl` then had no `@` at all, so nothing was stripped
+    // and `user:my pass` was re-appended as prose. One-char hosts are real:
+    // container names and `/etc/hosts` aliases are often a single letter.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:my pass@h retry later';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://h retry later');
+    expect(JSON.stringify(result)).not.toContain('my pass');
+  });
+
+  it('strips a spaced password before a bare one-character host with an empty username', async () => {
+    // `https://:token@host` is a legal URL and appears in configs where only a
+    // token is needed. Pinned alongside the case above because the fallback
+    // pattern allows an empty username for the same reason the primary one does.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage = 'Failed https://:my pass@h retry later';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://h retry later');
+    expect(JSON.stringify(result)).not.toContain('my pass');
+  });
+
+  it('does not let the one-character fallback host swallow a password fragment', async () => {
+    // The boundary of the fallback, and the reason the two-character floor
+    // exists in the primary pattern: in `p@s s@host.example` the `s` after the
+    // first `@` is a single character, so admitting one-char hosts everywhere
+    // would cut there and leave ` s@host.example` as the host. The primary
+    // pattern matches this span, so the fallback is never consulted — this test
+    // fails if that ordering is ever inverted.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Failed https://user:p@s s@host.example/v1';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe('Failed https://host.example/v1');
+    expect(JSON.stringify(result)).not.toContain('p@s s');
+  });
+
+  it('leaves a message with no credentials alone when a one-char word precedes an email', async () => {
+    // The fallback drops the two-character host floor, so it must not turn a
+    // port plus prose into a userinfo. Without the port lookahead being kept in
+    // the fallback, `:8443 — contact a@b` would cut at the email's `@` and
+    // rewrite the host.
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage =
+      'Cannot reach https://api.example:8443 — contact a@b';
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: { openai: [{ id: 'model-a', name: 'Model A' }] },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(
+      'Cannot reach https://api.example:8443 — contact a@b',
+    );
+  });
+
   it('strips credentials before a non-ASCII host', async () => {
     // An internationalized host arrives here un-punycoded when it comes from a
     // config someone typed. The ASCII-only host classes did not recognise it, so

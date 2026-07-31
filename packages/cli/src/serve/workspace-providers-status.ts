@@ -322,6 +322,27 @@ const HOST_AFTER_USERINFO = String.raw`(?:${UNDELIMITED_HOST}|${DELIMITED_HOST})
 const PORT_END = String.raw`[,.;:!?)\]}]`;
 
 /**
+ * Digits after a colon that are a port rather than the start of a password.
+ *
+ * Three shapes qualify, and each is a different kind of evidence: the digits end
+ * the span, a sentence closes on them (`:8443, contact`), or a further space
+ * follows before any `@`, which is prose rather than a one-space password.
+ *
+ * The sentence-closing shape needs the same "and no userinfo follows" test the
+ * space shape makes, because `PORT_END` on its own does not tell `:8443. See
+ * admin@x` from `:123. secret@host.example/v1`. Without it the latter read as a
+ * port, so no credential prefix was found at all and `findUrlEnd` cut at the
+ * first space — inside the password — putting `user:123. secret@` in the
+ * `/status` payload. `CREDENTIAL_FALLBACK_PATTERN` cannot cover this one: its
+ * host is a single character by construction, and the host here is
+ * `host.example`.
+ *
+ * The test is scoped to the rest of the span rather than to the token, since the
+ * `@` that resolves the ambiguity is in the word after the space.
+ */
+const PORT_DIGITS = String.raw`\d+(?:$|${PORT_END}(?![^\s]*\s[^@\s]*@)|\s(?:[^@\s]*\s))`;
+
+/**
  * A `user:password@` prefix, where the password may contain spaces.
  *
  * Two decisions are encoded here, and each is load-bearing on its own.
@@ -364,7 +385,50 @@ const PORT_END = String.raw`[,.;:!?)\]}]`;
 const CREDENTIAL_PREFIX_PATTERN = new RegExp(
   // `\x60` is the backtick, spelled as an escape because a literal one cannot
   // appear in the template and `\`` is not a valid escape under the `u` flag.
-  String.raw`^[^\s/?#'"\x60<>]*:(?!\d+(?:$|${PORT_END}|\s(?:[^@\s]*\s)))[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  String.raw`^[^\s/?#'"\x60<>]*:(?!${PORT_DIGITS})[^/?#]*?@(?=${HOST_AFTER_USERINFO})`,
+  'u',
+);
+
+/**
+ * A bare one-character host, admitted only by the fallback.
+ *
+ * `UNDELIMITED_HOST` requires two characters of a bare label, because at the end
+ * of a span a single letter is indistinguishable from a fragment of a password —
+ * the `s` in `p@s s@host.example`. That floor is right for the primary pattern,
+ * where a wrong guess rewrites a host. It is wrong for the fallback, where the
+ * alternative is not "leave the host alone" but "leave the password in", because
+ * the fallback only runs once the first-space cut is known to land inside a
+ * credential.
+ */
+const FALLBACK_HOST = String.raw`${HOST_CHAR}(?!${LABEL_CHAR})`;
+
+/**
+ * A `user:password@` prefix recognised on weaker evidence, used only when
+ * `CREDENTIAL_PREFIX_PATTERN` has already declined.
+ *
+ * It differs in exactly one place: the `@` may be followed by a *one-character*
+ * bare host. The port lookahead is kept verbatim, because that is what tells a
+ * userinfo from `:8443 — contact admin@example.com`, where there is no credential
+ * to strip and cutting at the email's `@` would rewrite the host.
+ *
+ * Widening the host rule is safe here in a way it is not in the primary pattern,
+ * because the two are consulted in different states. There, a one-character
+ * "host" that is really a password fragment rewrites a host that was fine. Here,
+ * the primary pattern has already declined, so `findUrlEnd`'s other branch is
+ * about to cut at the first space — which, when a colon-then-`@` is present, is
+ * *inside* the password by construction. The slice then reaching
+ * `sanitizeProviderBaseUrl` has no `@` at all, so nothing is stripped and the
+ * credential is re-appended verbatim as prose. Between rewriting a host and
+ * emitting a password, the choice is not close.
+ *
+ * That asymmetry is the general point, and it is why this is a second pattern
+ * rather than a third alternative in `HOST_AFTER_USERINFO`: a sanitizer should
+ * resolve an ambiguity it cannot settle by removing more, not less, but only
+ * where the cost of guessing wrong is a less informative message rather than a
+ * different host.
+ */
+const CREDENTIAL_FALLBACK_PATTERN = new RegExp(
+  String.raw`^[^\s/?#'"\x60<>]*:(?!${PORT_DIGITS})[^/?#]*?@(?=${FALLBACK_HOST})`,
   'u',
 );
 
@@ -419,11 +483,25 @@ function sanitizeProviderWarning(warning: string): string {
  * authority it computes and rewrite the host from the prose — turning
  * `https://user:pass@host.com — contact admin@example.com` into
  * `https://example.com`.
+ *
+ * When the prefix is *not* recognised, cutting at the first space is the unsafe
+ * direction, and that is the route every leak this function has had takes: the
+ * grammar declines a `user:…@` that is really there, the cut lands inside the
+ * password, the slice handed to `sanitizeProviderBaseUrl` contains no `@` at all,
+ * and the credential is re-appended verbatim as prose.
+ *
+ * `CREDENTIAL_FALLBACK_PATTERN` closes that route for one spelling — a bare
+ * one-character host — and not for the shapes where a port and a password are
+ * genuinely indistinguishable, which stay as `CREDENTIAL_PREFIX_PATTERN`
+ * documents them.
  */
 function findUrlEnd(segment: string, markerLength: number): number {
-  const credentials = CREDENTIAL_PREFIX_PATTERN.exec(
-    segment.slice(markerLength),
-  );
+  const body = segment.slice(markerLength);
+  const credentials = CREDENTIAL_PREFIX_PATTERN.exec(body);
+  if (!credentials) {
+    const fallback = CREDENTIAL_FALLBACK_PATTERN.exec(body);
+    if (fallback) return markerLength + fallback[0].length;
+  }
   const from = credentials
     ? markerLength + credentials[0].length
     : markerLength;
