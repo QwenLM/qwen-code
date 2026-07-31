@@ -178,7 +178,7 @@ describe('SessionTranscriptReader', () => {
     expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
   });
 
-  it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
+  it.each([0, -1, NaN, Infinity, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
     'rejects invalid page limit %s',
     async (limit) => {
       await expect(
@@ -291,7 +291,7 @@ describe('SessionTranscriptReader', () => {
       limit: 2,
     });
     const second = await reader.readPage(sessionId, {
-      cursor: encodeCursor(first.nextCursorState!),
+      beforeRecordId: first.records[0]!.uuid,
       limit: 2,
     });
 
@@ -492,6 +492,51 @@ describe('SessionTranscriptReader', () => {
     ]);
     expect(page.hasMore).toBe(false);
     expect(page.nextCursorState).toBeUndefined();
+  });
+
+  it('does not page into inherited side-task context', async () => {
+    const inheritedUser = {
+      ...record('parent-u1', 'source', 'parent prompt'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-u1',
+      },
+    };
+    const inheritedAssistant = {
+      ...record('parent-a1', 'parent-u1', 'parent answer'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-a1',
+      },
+    };
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+      systemPayload: {
+        sourceType: 'side_task',
+        sourceId: 'parent-session',
+      },
+    };
+    await writeRecords([
+      sessionSource,
+      inheritedUser,
+      inheritedAssistant,
+      record('side-u1', 'parent-a1', 'side prompt'),
+      record('side-a1', 'side-u1', 'side answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'side-u1',
+      'side-a1',
+    ]);
+    expect(page.hasMore).toBe(false);
   });
 
   it('keeps backward pages within a normal user turn boundary', async () => {
@@ -1136,5 +1181,62 @@ describe('SessionTranscriptReader', () => {
         (r) => r.uuid,
       ),
     ).toEqual(['33333333', '44444444']);
+  });
+
+  describe('boundary and turn-start edge cases', () => {
+    it('makes exact turn-boundary cuts when limit aligns perfectly', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+      });
+
+      expect(first.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+      expect(first.hasMore).toBe(false);
+      expect(first.nextCursorState).toBeUndefined();
+    });
+
+    it('discovers backward boundary when beforeRecordId is an assistant record', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'a2',
+        limit: 2,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['u2']);
+      expect(page.direction).toBe('backward');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('pages backward through records without a normal user turn start', async () => {
+      await writeRecords([
+        record('a1', null, 'orphan assistant reply'),
+        record('u1', 'a1', 'second prompt'),
+        record('a2', 'u1', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'u1',
+        limit: 5,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['a1']);
+      expect(page.hasMore).toBe(false);
+    });
   });
 });

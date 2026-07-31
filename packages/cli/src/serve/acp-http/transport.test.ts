@@ -53,6 +53,7 @@ import {
 } from '../../services/setup-github.js';
 import {
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
@@ -173,6 +174,7 @@ class FakeBridge {
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
+  spawnSessionId = 'sess-1';
   spawnClientId: string | undefined = 'client-1';
   loadRequests: Array<{
     sessionId: string;
@@ -190,7 +192,7 @@ class FakeBridge {
     this.lastSpawnScope = req?.sessionScope;
     if (this.gate) await this.gate;
     return {
-      sessionId: 'sess-1',
+      sessionId: this.spawnSessionId,
       workspaceCwd: '/ws',
       attached: false,
       clientId: this.spawnClientId,
@@ -838,8 +840,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   let base: string;
   let bridge: FakeBridge;
   let acpHandle: AcpHttpHandle | undefined;
+  let previousRuntimeDir: string | undefined;
+  let runtimeDir: string;
 
   beforeEach(async () => {
+    previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-archive-'));
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     stdioMocks.writeStderrLine.mockClear();
     setupGithubMocks.setupGithub.mockReset();
     setupGithubMocks.setupGithub.mockResolvedValue({
@@ -901,6 +908,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // `server.close()` doesn't hang on them.
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
+    if (previousRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+    }
+    await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
   async function restartServer(opts: {
@@ -922,6 +935,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ? createSingleWorkspaceRegistry({
           workspaceId: 'primary',
           workspaceCwd: boundWorkspace,
+          sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
           primary: true,
           trusted: opts.primaryTrusted ?? true,
           env: { mode: 'parent-process', overlayKeys: [] },
@@ -1018,21 +1032,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function withRuntimeDir<T>(
     fn: (runtimeDir: string) => Promise<T>,
   ): Promise<T> {
-    const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
-    const runtimeDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-acp-archive-'),
-    );
-    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
-    try {
-      return await fn(runtimeDir);
-    } finally {
-      if (previousRuntimeDir === undefined) {
-        delete process.env['QWEN_RUNTIME_DIR'];
-      } else {
-        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-      }
-      await fs.rm(runtimeDir, { recursive: true, force: true });
-    }
+    return fn(runtimeDir);
   }
 
   async function writeStoredSession(
@@ -3737,13 +3737,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   it.each(['session/load', 'session/resume'])(
     '%s rejects archived sessions',
     async (method) => {
-      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
-      const runtimeDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-archive-'),
-      );
-      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
       const sessionId = '550e8400-e29b-41d4-a716-446655440123';
-      try {
+      await withRuntimeDir(async () => {
         const chatsDir = path.join(
           new Storage('/ws').getProjectDir(),
           'chats',
@@ -3782,14 +3777,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(frame.id).toBe(211);
         expect(frame.error.code).toBe(-32603);
         expect(frame.error.data?.errorKind).toBe('session_archived');
-      } finally {
-        if (previousRuntimeDir === undefined) {
-          delete process.env['QWEN_RUNTIME_DIR'];
-        } else {
-          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-        }
-        await fs.rm(runtimeDir, { recursive: true, force: true });
-      }
+      });
     },
   );
 
@@ -3860,7 +3848,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('session/load holds archive gate while restore is in flight', async () => {
+  it('session/load reports an archive conflict while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';
       await writeStoredSession(sessionId);
@@ -3903,9 +3891,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(await reader.next()).toMatchObject({
         id: 213,
-        error: {
-          code: -32603,
-          data: { errorKind: 'session_archiving', sessionId },
+        result: {
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         },
       });
 
@@ -3973,7 +3966,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/prompt holds archive gate while prompt is in flight', async () => {
+  it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440127';
       await writeStoredSession(sessionId);
@@ -4023,9 +4016,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(await connReader.next()).toMatchObject({
         id: 219,
-        error: {
-          code: -32603,
-          data: { errorKind: 'session_archiving', sessionId },
+        result: {
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         },
       });
       expect(bridge.closedSessions).toEqual([]);
@@ -4880,6 +4878,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('session/new orphan: DELETE before spawn resolves removes the persisted session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440126';
+    bridge.spawnSessionId = sessionId;
+    await writeStoredSession(sessionId);
     const removeSession = vi
       .spyOn(SessionService.prototype, 'removeSession')
       .mockResolvedValue(true);
@@ -4899,8 +4900,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     release(); // spawn resolves AFTER destroy
     await new Promise((r) => setTimeout(r, 40));
-    expect(bridge.killed).toContain('sess-1');
-    expect(removeSession).toHaveBeenCalledWith('sess-1');
+    expect(bridge.killed).toContain(sessionId);
+    expect(removeSession).toHaveBeenCalledWith(sessionId);
     removeSession.mockRestore();
   });
 
@@ -6606,7 +6607,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+    it('_qwen/session/artifacts/add reports an archive conflict while mutating', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440131';
         await writeStoredSession(sessionId);
@@ -6656,9 +6657,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         expect(await reader.next()).toMatchObject({
           id: 61,
-          error: {
-            code: -32603,
-            data: { errorKind: 'session_archiving', sessionId },
+          result: {
+            archived: [],
+            errors: [
+              {
+                sessionId,
+                error: expect.stringContaining(
+                  'is being archived or unarchived',
+                ),
+              },
+            ],
           },
         });
 
@@ -6671,7 +6679,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+    it('_qwen/session/artifacts/remove reports an archive conflict while mutating', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440132';
         await writeStoredSession(sessionId);
@@ -6729,9 +6737,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         expect(await reader.next()).toMatchObject({
           id: 63,
-          error: {
-            code: -32603,
-            data: { errorKind: 'session_archiving', sessionId },
+          result: {
+            archived: [],
+            errors: [
+              {
+                sessionId,
+                error: expect.stringContaining(
+                  'is being archived or unarchived',
+                ),
+              },
+            ],
           },
         });
 
@@ -7553,46 +7568,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     it('_qwen/sessions/delete sanitizes stderr remove errors', async () => {
       const lineSep = '\u2028';
       const bidiOverride = '\u202e';
-      const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
+      const sessionId = '550e8400-e29b-41d4-a716-446655440127';
       const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
-      const removeSessionSpy = vi
-        .spyOn(SessionService.prototype, 'removeSession')
-        .mockRejectedValueOnce(new Error(removeError));
+      await withRuntimeDir(async () => {
+        await writeStoredSession(sessionId);
+        const removeSessionSpy = vi
+          .spyOn(SessionService.prototype, 'removeSession')
+          .mockRejectedValueOnce(new Error(removeError));
 
-      try {
-        const connId = await initialize();
-        const streamRes = openStream(connId);
-        await new Promise((r) => setTimeout(r, 30));
-        await post(connId, {
-          jsonrpc: '2.0',
-          id: 68,
-          method: '_qwen/sessions/delete',
-          params: { sessionIds: [sessionId] },
-        });
-        const frames = await takeFrames(await streamRes, 1);
-        expect(frames[0]).toMatchObject({
-          result: {
-            removed: [],
-            notFound: [],
-            errors: [{ sessionId, error: removeError }],
-          },
-        });
-        expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
+        try {
+          const connId = await initialize();
+          const streamRes = openStream(connId);
+          await new Promise((r) => setTimeout(r, 30));
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 68,
+            method: '_qwen/sessions/delete',
+            params: { sessionIds: [sessionId] },
+          });
+          const frames = await takeFrames(await streamRes, 1);
+          expect(frames[0]).toMatchObject({
+            result: {
+              removed: [],
+              notFound: [],
+              errors: [{ sessionId, error: removeError }],
+            },
+          });
+          expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
 
-        const deleteLog = stdioMocks.writeStderrLine.mock.calls
-          .map(([line]) => line)
-          .find((line) => line.includes('sessions/delete'));
-        expect(deleteLog).toContain(
-          'removeSession(sess FAK) failed: remove FAILED  [31m',
-        );
-        expect(deleteLog).not.toContain('\n');
-        expect(deleteLog).not.toContain('\r');
-        expect(deleteLog).not.toContain('\x1b');
-        expect(deleteLog).not.toContain(lineSep);
-        expect(deleteLog).not.toContain(bidiOverride);
-      } finally {
-        removeSessionSpy.mockRestore();
-      }
+          const deleteLog = stdioMocks.writeStderrLine.mock.calls
+            .map(([line]) => line)
+            .find((line) => line.includes('sessions/delete'));
+          expect(deleteLog).toContain('remove FAILED  [31m');
+          expect(deleteLog).not.toContain('\n');
+          expect(deleteLog).not.toContain('\r');
+          expect(deleteLog).not.toContain('\x1b');
+          expect(deleteLog).not.toContain(lineSep);
+          expect(deleteLog).not.toContain(bidiOverride);
+        } finally {
+          removeSessionSpy.mockRestore();
+        }
+      });
     });
 
     it('_qwen/sessions/delete deletes available ids when another id is loading', async () => {
@@ -7659,7 +7675,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/sessions/delete does not make missing archive ids wait on live close', async () => {
+    it('_qwen/sessions/archive returns session_archiving while delete owns the gate', async () => {
       const sessionId = 'delete-archive-race';
       let firstCloseStarted!: () => void;
       let releaseFirstClose!: () => void;
@@ -7720,7 +7736,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             }),
             expect.objectContaining({
               id: 70,
-              result: expect.objectContaining({ notFound: [sessionId] }),
+              error: expect.objectContaining({
+                data: {
+                  errorKind: 'session_archiving',
+                  sessionId,
+                },
+              }),
             }),
           ]),
         );
@@ -8141,6 +8162,41 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         maxBytes: undefined,
         line: undefined,
         limit: undefined,
+        cursor: undefined,
+      });
+    });
+
+    it('_qwen/file/read forwards a valid cursor and returns paged content', async () => {
+      const readText = vi.fn(async () => ({
+        content: 'page-two',
+        meta: { truncated: true, nextCursor: 'cursor-2' },
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readText }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 93,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt', cursor: 'cursor-1' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          path: 'test.txt',
+          content: 'page-two',
+          truncated: true,
+          nextCursor: 'cursor-2',
+        },
+      });
+      expect(readText).toHaveBeenCalledWith(resolvedPath('/ws/test.txt'), {
+        maxBytes: undefined,
+        line: undefined,
+        limit: undefined,
+        cursor: 'cursor-1',
       });
     });
 
@@ -8160,6 +8216,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       { limit: 1.5 },
       { limit: '1' },
       { limit: null },
+      { cursor: '' },
+      { cursor: 123 },
+      { cursor: 'x'.repeat(MAX_TEXT_CURSOR_CHARS + 1) },
     ])('_qwen/file/read rejects invalid window params (%j)', async (params) => {
       const readText = vi.fn(async () => ({
         content: 'hello',

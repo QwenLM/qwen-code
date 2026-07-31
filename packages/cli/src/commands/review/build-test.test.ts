@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,19 @@ import {
   buildRunEnv,
 } from './build-test.js';
 import type { WorkspacePackage } from './lib/workspaces.js';
+
+const statfsSyncMock = vi.hoisted(() => vi.fn());
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = { ...actual, statfsSync: statfsSyncMock };
+  return { ...mock, default: mock };
+});
+
+beforeEach(() => {
+  // Plenty of disk by default, so this suite behaves the same on a nearly-full
+  // machine as on an empty one — the low-disk cases below opt in explicitly.
+  statfsSyncMock.mockReturnValue({ bavail: 16 * 1024 ** 3, bsize: 1 });
+});
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
@@ -915,6 +928,184 @@ describe('runBuildTest', () => {
     expect(calls.some((c) => c.startsWith('npm run build'))).toBe(false);
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
+  });
+
+  it('skips `npm ci` on a low disk, with the deadline-skip shape and disclosure', () => {
+    // The dogfood failure this pins: ~2.7G free, `npm ci` ran 33 seconds, died
+    // on ENOSPC, and the now-full disk failed every agent downstream. The
+    // preflight finds that out before the command runs, and reports it exactly
+    // like a deadline skip: nothing executed, ok:false, and a note that frames
+    // the skip as environment — never a finding against the PR.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    statfsSyncMock.mockReturnValue({ bavail: 2.9e9, bsize: 1 }); // ~2.7G free
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    // Nothing ran: not `npm ci`, and not a build against the absent tree.
+    expect(calls).toEqual([]);
+    expect(rep.install).toBeNull();
+    // The same shape a deadline skip leaves: ok:false, empty build/test, and a
+    // note the agent reports as informational. (`timedOut` stays empty — no
+    // command ran long enough to time out.)
+    expect(rep.ok).toBe(false);
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.timedOut).toEqual([]);
+    expect(rep.note).toContain('Insufficient disk space (2.7G free');
+    expect(rep.note).toContain('skipped `npm ci --no-audit --no-fund`');
+    expect(rep.note).toContain('environment');
+    expect(rep.note).toContain('informational');
+    expect(rep.note).not.toContain('Critical');
+  });
+
+  it('skips the build phase when a warm tree meets a nearly-full disk', () => {
+    // A complete node_modules skips the install (and its 3 GiB gate) entirely,
+    // but a compile that hits ENOSPC mid-write fails with errors that read as
+    // defects in the diff — and leaves the disk full for every later agent.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+    statfsSyncMock.mockReturnValue({ bavail: 5.4e8, bsize: 1 }); // ~0.5G free
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(calls).toEqual([]);
+    expect(rep.ok).toBe(false);
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.note).toContain('Insufficient disk space (0.5G free');
+    expect(rep.note).toContain('informational');
+    expect(rep.note).not.toContain('Critical');
+  });
+
+  it('still builds a warm tree between the build floor and the install floor', () => {
+    // ~2G free fails the 3 GiB install gate but the install is not needed here
+    // (the tree is complete), and it clears the 1 GiB build floor — so the run
+    // proceeds. The two floors exist so a warm tree is not refused an install
+    // it was never going to run.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+    statfsSyncMock.mockReturnValue({ bavail: 2.2e9, bsize: 1 }); // ~2G free
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(calls.some((c) => c.startsWith('npm ci'))).toBe(false);
+    expect(calls).toContain('npm run build --workspace="packages/a"');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('proceeds when statfs itself is unavailable — the preflight must not invent failures', () => {
+    // `statfsSync` does not exist on every platform. An unmeasurable disk lets
+    // the run proceed; the preflight exists to prevent failures, not cause them.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/a/src/x.ts']);
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    statfsSyncMock.mockImplementation(() => {
+      throw new Error('ENOSYS: statfs not supported');
+    });
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command, cwd) => {
+        calls.push(command);
+        if (command.startsWith('npm ci')) {
+          mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+          writeFileSync(join(cwd, 'node_modules', '.package-lock.json'), '{}');
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
+    expect(calls).toContain('npm run build --workspace="packages/a"');
+    expect(rep.ok).toBe(true);
   });
 
   it('frames a TEST timeout as infrastructure, not a defect to correlate', () => {

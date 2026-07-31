@@ -3,6 +3,7 @@ export interface SessionSourceMetadata {
   sourceId?: string;
 }
 
+export const SESSION_SOURCE_META_KEY = 'qwen.session.source';
 export const SESSION_SOURCE_TYPE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 export const MAX_SESSION_SOURCE_ID_LENGTH = 256;
 

@@ -558,6 +558,8 @@ export function ChannelsManagerPage({
           onReload={reload}
           listPairingRequests={pairing.list}
           approvePairingRequest={pairing.approve}
+          listPairingApprovals={pairing.approvals}
+          revokePairingApproval={pairing.revoke}
         />
       ) : null}
 
