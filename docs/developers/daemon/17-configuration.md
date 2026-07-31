@@ -128,7 +128,7 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 | Constant                          | File                    | Value             | Meaning                                                                              |
 | --------------------------------- | ----------------------- | ----------------- | ------------------------------------------------------------------------------------ |
-| `DEFAULT_MAX_SESSIONS`            | `bridge.ts`             | `20`              | Session cap before `SessionLimitExceededError`.                                      |
+| `DEFAULT_MAX_SESSIONS`            | `bridge.ts`             | `32`              | Session cap before `SessionLimitExceededError`.                                      |
 | `MAX_EVENT_RING_SIZE`             | `bridge.ts`             | `1_000_000`       | Soft cap for `BridgeOptions.eventRingSize`; guards against typos.                    |
 | `DEFAULT_RING_SIZE`               | `eventBus.ts`           | `8000`            | Per-session SSE replay ring depth.                                                   |
 | `DEFAULT_MAX_QUEUED`              | `eventBus.ts`           | `256`             | Per-subscriber queue cap.                                                            |
