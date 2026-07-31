@@ -454,7 +454,9 @@ export class PermissionController extends BaseController {
             approval.name,
             payload['updatedInput'],
           )
-        : undefined;
+        : typeof payload['message'] === 'string'
+          ? ({ cancelMessage: payload['message'] } as ToolConfirmationPayload)
+          : undefined;
       await registry.resolvePendingApproval(
         runId,
         approval.approvalId,

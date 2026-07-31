@@ -506,6 +506,10 @@ describe('useBackgroundTaskView', () => {
       [expect.any(Function)],
       [undefined],
     ]);
+    expect(workflowReg.setStatusChangeCallback.mock.calls).toEqual([
+      [expect.any(Function)],
+      [undefined],
+    ]);
     // MemoryManager uses subscribe()/unsubscribe rather than the
     // setCallback pattern; the unsubscribe returned from subscribe must
     // run on cleanup or stale dream listeners leak across remounts.

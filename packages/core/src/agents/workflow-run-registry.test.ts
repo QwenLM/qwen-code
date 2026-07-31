@@ -474,6 +474,81 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get('wf_failed_channel')?.pendingApprovals).toEqual([]);
   });
 
+  it('rejects and clears an approval when the host channel throws synchronously', async () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_sync_failed_channel'));
+    r.setApprovalRequestCallback((): void => {
+      throw new Error('sync failure');
+    });
+    const emitter = new AgentEventEmitter();
+    const respond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_sync_failed_channel', emitter);
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond }),
+    );
+
+    // The sync-throw arm cleans up inside parkPendingApproval and the
+    // bridge rejects the responder directly, so the approval is cancelled
+    // without going through resolvePendingApproval.
+    await vi.waitFor(() => {
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
+    expect(r.get('wf_sync_failed_channel')?.pendingApprovals).toEqual([]);
+  });
+
+  it('fails the run and drains siblings when resolving respond throws', async () => {
+    const abortController = new AbortController();
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_resolve_throws', { abortController }));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const failingRespond = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const siblingRespond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_resolve_throws', emitter);
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        subagentId: 'agent-a',
+        callId: 'call-a',
+        respond: failingRespond,
+      }),
+    );
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        subagentId: 'agent-b',
+        callId: 'call-b',
+        respond: siblingRespond,
+      }),
+    );
+
+    const target = r.get('wf_resolve_throws')!.pendingApprovals[0];
+    const resolved = await r.resolvePendingApproval(
+      'wf_resolve_throws',
+      target.approvalId,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    expect(resolved).toBe(false);
+    const entry = r.get('wf_resolve_throws')!;
+    expect(entry.status).toBe('failed');
+    expect(entry.error).toContain(target.approvalId);
+    // fail() drains the still-pending sibling approval.
+    expect(entry.pendingApprovals).toEqual([]);
+    await vi.waitFor(() => {
+      expect(siblingRespond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+      );
+    });
+    // The run's controller is aborted via the handle fallback.
+    expect(abortController.signal.aborted).toBe(true);
+  });
+
   it('bounds pending approvals per workflow run', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_bounded_approvals'));

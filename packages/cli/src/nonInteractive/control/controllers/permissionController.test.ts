@@ -193,6 +193,48 @@ describe('PermissionController', () => {
     );
   });
 
+  it('forwards the host deny message to the workflow subagent', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-denied-message',
+      response: { behavior: 'deny', message: 'Not allowed by policy' },
+    });
+
+    await controller.handleWorkflowApproval(
+      'wf_deny_msg',
+      {
+        approvalId: 'wfap_deny_msg',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_deny_msg',
+      'wfap_deny_msg',
+      ToolConfirmationOutcome.Cancel,
+      { cancelMessage: 'Not allowed by policy' },
+    );
+  });
+
   it('cancels a pending host request when the workflow approval is cleared', async () => {
     const context = createContext();
     const resolvePendingApproval = vi.fn().mockResolvedValue(false);
