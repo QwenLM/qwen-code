@@ -1558,6 +1558,7 @@ describe('GithubChannel', () => {
           abortableSleep: (ms: number) => Promise<void>;
         }
       ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      channel.sourceMessageId = 'source-message';
       const publish = (
         channel as unknown as {
           publishFinalResponse: (
@@ -1578,6 +1579,45 @@ describe('GithubChannel', () => {
 
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
       expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
+    });
+
+    it('does not collapse same-body pending finals without a source message id', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toThrow('rate limited');
+
+      const records = JSON.parse(
+        readFileSync(pendingPath(), 'utf-8'),
+      ) as Array<{
+        id: string;
+      }>;
+      expect(records).toHaveLength(2);
+      expect(new Set(records.map((record) => record.id)).size).toBe(2);
     });
 
     it('preserves concurrent delivery while recovering a pending final', async () => {

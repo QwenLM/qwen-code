@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
@@ -538,7 +538,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             input.chatId,
             input.threadId,
             input.sessionId,
-            input.sourceMessageId ?? '',
+            input.sourceMessageId ?? randomUUID(),
             input.bodySha256,
           ]),
         )
