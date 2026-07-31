@@ -323,6 +323,7 @@ import {
   formatContextUsageText,
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
+import { fireSessionDeleteHook } from '../ui/hooks/useDeleteCommand.js';
 import {
   collectGoalStatusItemsFromRecords,
   restoreGoalFromHistory,
@@ -9709,14 +9710,7 @@ class QwenAgent implements Agent {
           },
         );
         if (success) {
-          void this.config
-            .getHookSystem()
-            ?.fireSessionDeleteEvent(sessionId)
-            .catch((error) => {
-              debugLogger.warn(
-                `SessionDelete hook failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
+          fireSessionDeleteHook(this.config, sessionId, debugLogger);
         }
         return { success };
       }
