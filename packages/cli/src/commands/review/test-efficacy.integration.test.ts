@@ -291,10 +291,12 @@ describe('test-efficacy probe isolation (#6832)', () => {
     // zero mutants, and before the fix there were zero hunk probes too: the
     // one class of diff per-hunk probing exists for got nothing at all.
     write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    // No safety verb, no `??`, no `+ CONST`, and the condition edit carries no
+    // comparison — zero candidates for EVERY operator, which is the premise.
     write(
       'packages/lib/src/f.ts',
       'export function price(n: number) {\n' +
-        '  if (n < 0) return 0;\n' +
+        '  if (valid(n)) return 0;\n' +
         '  return n * 2;\n' +
         '}\n' +
         '\n'.repeat(12) +
@@ -306,7 +308,7 @@ describe('test-efficacy probe isolation (#6832)', () => {
     write(
       'packages/lib/src/f.ts',
       'export function price(n: number) {\n' +
-        '  if (n <= 0) return 0;\n' +
+        '  if (!valid(n)) return 0;\n' +
         '  return n * 3;\n' +
         '}\n' +
         '\n'.repeat(12) +

@@ -142,6 +142,24 @@ export interface MutantCandidate {
   line: number;
   /** The statement's text, trimmed — quoted back verbatim in the report. */
   statement: string;
+  /**
+   * Which experiment this candidate runs. Absent (legacy) or `'delete'`: the
+   * line is deleted. The other operators REPLACE the line with `mutated`:
+   *
+   *   - `'coalesce'` — drop a `?? fallback`. What survives it: the fallback is
+   *     the only thing standing between a config miss and a worse default (a
+   *     live re-verification found the one guard against a regression's return
+   *     living in a `?? getModel()` nothing tested).
+   *   - `'guard-true'` — replace a comparison-bearing `if` condition with
+   *     `true`. What survives it: no test pins when the guard must NOT fire —
+   *     the same re-verification found a fix's own skip-condition shipping
+   *     untested.
+   *   - `'term-drop'` — drop a `+ UPPER_CONST` term. What survives it: a
+   *     reserve/limit term in an estimate is unpinned.
+   */
+  operator?: 'delete' | 'coalesce' | 'guard-true' | 'term-drop';
+  /** The full replacement LINE (untrimmed), for the replacement operators. */
+  mutated?: string;
 }
 
 export interface MutantResult extends MutantCandidate {
@@ -549,12 +567,92 @@ export interface MutantSourceFile {
  * backtick derails it) has ALL its candidates dropped and is returned in
  * `derailed` — the caller must disclose that zero for the same reason.
  */
+/**
+ * Replacement mutants for one added line. High-precision by construction: each
+ * pattern is anchored to a shape whose survival maps to one crisp sentence,
+ * because a survivor becomes a public Suggestion and a fuzzy operator would
+ * flood the report with "so what" mutations.
+ *
+ * The edit is computed on `codeLine` — the scanner's literal-blanked,
+ * comment-stripped, TRIMMED view — and reattached to the raw line's leading
+ * whitespace. That is only sound when the two views agree, so a line whose
+ * trimmed raw text differs from its code view (it carries a string literal or
+ * a comment) yields NO candidate: an index computed on one view and applied to
+ * the other spliced `iftrue 0)` into a guard the first time this ran, and a
+ * mangled mutant is worse than a skipped one — its compile error reads as
+ * `inconclusive` and quietly eats a cap slot. Conservative silence, as with
+ * every other selector here.
+ *
+ * At most ONE candidate per line, first match wins (coalesce → term-drop →
+ * guard-true, most-specific first): two mutants of the same line would run the
+ * suite twice to say nearly the same thing.
+ */
+export function replacementMutantsOf(
+  raw: string,
+  codeLine: string,
+): {
+  operator: 'coalesce' | 'guard-true' | 'term-drop';
+  mutated: string;
+} | null {
+  if (raw.trim() !== codeLine) return null;
+  const lead = /^\s*/.exec(raw)![0];
+  const done = (
+    operator: 'coalesce' | 'guard-true' | 'term-drop',
+    edited: string,
+  ) => ({ operator, mutated: lead + edited });
+
+  // `a ?? b` with a SIMPLE fallback — an identifier/member/call chain, no
+  // operators — so the drop cannot truncate a larger expression.
+  const coalesce =
+    /\s\?\?\s+[\w$.]+(?:\((?:[^()]|\([^()]*\))*\))?(?=\s*[;,)\]}]|\s*$)/.exec(
+      codeLine,
+    );
+  if (coalesce) {
+    return done(
+      'coalesce',
+      codeLine.slice(0, coalesce.index) +
+        codeLine.slice(coalesce.index + coalesce[0].length),
+    );
+  }
+  // `+ UPPER_CONST` — a constant-looking reserve/limit term in arithmetic.
+  const term = /\s\+\s+[A-Z][A-Z0-9_]{2,}\b/.exec(codeLine);
+  if (term) {
+    return done(
+      'term-drop',
+      codeLine.slice(0, term.index) +
+        codeLine.slice(term.index + term[0].length),
+    );
+  }
+  // A single-line `if (…)` whose condition CONTAINS a comparison — guards, not
+  // every branch: `if (ready)` survivors are noise, `if (a !== b)` survivors
+  // mean nothing pins when the guard must not fire. The condition must close on
+  // this line (balanced parens), or `true` would splice mid-expression.
+  const ifm = /^((?:}\s*else\s+)?if\s*\()(.*)$/.exec(codeLine);
+  if (ifm && /[!=]==|[<>]=?\s/.test(ifm[2])) {
+    let depth = 1;
+    let condEnd = -1;
+    for (let i = 0; i < ifm[2].length; i++) {
+      if (ifm[2][i] === '(') depth++;
+      else if (ifm[2][i] === ')' && --depth === 0) {
+        condEnd = i;
+        break;
+      }
+    }
+    if (condEnd > 0) {
+      return done('guard-true', ifm[1] + 'true' + ifm[2].slice(condEnd));
+    }
+  }
+  return null;
+}
+
 export function selectMutants(
   files: MutantSourceFile[],
   cap: number = MAX_MUTANTS,
 ): { selected: MutantCandidate[]; skippedForCap: number; derailed: string[] } {
   const preferred: MutantCandidate[] = [];
   const rest: MutantCandidate[] = [];
+  const replPreferred: MutantCandidate[] = [];
+  const replRest: MutantCandidate[] = [];
   const derailed: string[] = [];
   for (const f of files) {
     const lines = f.content.split('\n');
@@ -567,17 +665,37 @@ export function selectMutants(
       const raw = lines[n - 1];
       if (raw === undefined) continue;
       const t = raw.trim();
-      if (!SAFETY_VERB_RE.test(codeLines[n - 1] ?? '')) continue;
       if (inLiteral[n - 1]) continue;
-      if (!isRemovableStatement(lines, codeLines, n - 1)) continue;
-      (f.hasNewTests ? preferred : rest).push({
-        file: f.file,
-        line: n,
-        statement: t,
-      });
+      const code = codeLines[n - 1] ?? '';
+      if (
+        SAFETY_VERB_RE.test(code) &&
+        isRemovableStatement(lines, codeLines, n - 1)
+      ) {
+        // No `operator` field: deletion is the legacy shape, and stamping it
+        // would churn every existing report reader for zero information.
+        (f.hasNewTests ? preferred : rest).push({
+          file: f.file,
+          line: n,
+          statement: t,
+        });
+        continue; // one candidate per line — deletion is the sharper experiment
+      }
+      const repl = replacementMutantsOf(raw, code);
+      if (repl) {
+        (f.hasNewTests ? replPreferred : replRest).push({
+          file: f.file,
+          line: n,
+          statement: t,
+          operator: repl.operator,
+          mutated: repl.mutated,
+        });
+      }
     }
   }
-  const eligible = [...preferred, ...rest];
+  // Deletions first, then replacements — the safety-verb set has the track
+  // record, so under the shared cap it spends first; within each kind, files
+  // with new tests first, as before.
+  const eligible = [...preferred, ...rest, ...replPreferred, ...replRest];
   return {
     selected: eligible.slice(0, cap),
     skippedForCap: Math.max(0, eligible.length - cap),
@@ -1240,16 +1358,29 @@ export function runOneMutant(
         'the probe tree does not match the selected statement at this line — nothing was mutated',
     };
   }
-  lines.splice(mutant.line - 1, 1);
+  // A replacement operator edits the line; the legacy shape deletes it.
+  const what =
+    mutant.operator === 'coalesce'
+      ? 'with its `?? fallback` dropped'
+      : mutant.operator === 'guard-true'
+        ? 'with its guard condition replaced by `true`'
+        : mutant.operator === 'term-drop'
+          ? 'with its `+ CONSTANT` term dropped'
+          : 'deleted';
+  if (mutant.mutated !== undefined) {
+    lines[mutant.line - 1] = mutant.mutated;
+  } else {
+    lines.splice(mutant.line - 1, 1);
+  }
   try {
     writeFileSync(abs, lines.join('\n'), 'utf8');
     const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
     const verdict = classifyMutantRun(perFile);
     const detail =
       verdict === 'killed'
-        ? 'the suite went red with this statement deleted — a test catches its removal'
+        ? `the suite went red with this statement ${what} — a test catches it`
         : verdict === 'survived'
-          ? 'every affected test still PASSED with this statement deleted — no test fails when it is removed'
+          ? `every affected test still PASSED with this statement ${what} — no test fails when it changes`
           : 'the mutated tree produced no clean verdict (likely a compile or import error) — not evidence either way';
     return { ...mutant, verdict, detail };
   } finally {
@@ -1673,7 +1804,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       .map((m) => ({
         file: m.file,
         kind: 'mutant-survived' as const,
-        message: `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
+        message:
+          m.operator === 'coalesce'
+            ? `\`${m.file}:${m.line}\`: dropping the \`?? fallback\` from \`${m.statement}\` leaves every affected test green — the fallback is untested, and it is frequently the only thing standing between a miss and a worse default. Add a test that exercises the miss path.`
+            : m.operator === 'guard-true'
+              ? `\`${m.file}:${m.line}\`: forcing this guard's condition to \`true\` leaves every affected test green — no test pins when the guard must NOT fire. Add a case just on the other side of the condition.`
+              : m.operator === 'term-drop'
+                ? `\`${m.file}:${m.line}\`: dropping the \`+ CONSTANT\` term from \`${m.statement}\` leaves every affected test green — the reserve term is unpinned. Add a boundary case where the term decides the outcome.`
+                : `\`${m.file}:${m.line}\`: deleting the added safety statement \`${m.statement}\` leaves every affected test green. No test in this diff fails when it is removed — confirm an existing test covers it, or add one, so a regression that drops or skips this statement is caught.`,
       })),
     ...hunkResults
       .filter((h) => h.verdict === 'survived')

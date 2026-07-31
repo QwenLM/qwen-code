@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  replacementMutantsOf,
   splitDiffIntoHunks,
   selectHunkProbes,
   MAX_HUNK_PROBES,
@@ -1334,5 +1335,118 @@ describe('selectHunkProbes', () => {
     ]);
     expect(selected).toEqual([]);
     expect(skippedForCap).toBe(0);
+  });
+});
+
+describe('selectMutants — replacement operators', () => {
+  const fileOf = (content: string, addedLines: number[]) => ({
+    file: 'src/m.ts',
+    content,
+    addedLines,
+    hasNewTests: false,
+  });
+
+  it('selects a replacement candidate on a diff with no safety verbs', () => {
+    const { selected } = selectMutants([
+      fileOf('const model = pick() ?? config.getModel();\n', [1]),
+    ]);
+    expect(selected).toEqual([
+      {
+        file: 'src/m.ts',
+        line: 1,
+        statement: 'const model = pick() ?? config.getModel();',
+        operator: 'coalesce',
+        mutated: 'const model = pick();',
+      },
+    ]);
+  });
+
+  it('spends the cap on deletion mutants BEFORE replacement ones', () => {
+    const { selected, skippedForCap } = selectMutants(
+      [fileOf('if (a !== b) go();\nstate.clear();\n', [1, 2])],
+      1,
+    );
+    expect(selected).toHaveLength(1);
+    expect(selected[0].statement).toBe('state.clear();');
+    expect(selected[0].operator).toBeUndefined();
+    expect(skippedForCap).toBe(1);
+  });
+
+  it('emits one candidate per line — a safety-verb line is not also mutated by replacement', () => {
+    // `map.delete(k) ?? fallback` matches both; the deletion experiment wins.
+    const { selected } = selectMutants([fileOf('cache.delete(key);\n', [1])]);
+    expect(selected).toHaveLength(1);
+    expect(selected[0].operator).toBeUndefined();
+  });
+});
+
+describe('replacementMutantsOf', () => {
+  const same = (line: string) => replacementMutantsOf(line, line.trim());
+
+  it('drops a simple `?? fallback`', () => {
+    expect(same('  const m = pick() ?? config.getModel();')).toEqual({
+      operator: 'coalesce',
+      mutated: '  const m = pick();',
+    });
+  });
+
+  it('leaves a `??` whose fallback is not a simple chain alone', () => {
+    // Dropping part of `a ?? b + c` would truncate a larger expression.
+    expect(same('const n = x ?? y + z;')).toBeNull();
+  });
+
+  it('drops a `+ UPPER_CONST` reserve term', () => {
+    expect(
+      same('  if (estimate + COMPACT_MAX_OUTPUT_TOKENS > window) {'),
+    ).toEqual({
+      operator: 'term-drop',
+      mutated: '  if (estimate > window) {',
+    });
+  });
+
+  it('replaces a comparison-bearing if condition with true', () => {
+    expect(same('  if (effective !== config.getModel()) {')).toEqual({
+      operator: 'guard-true',
+      mutated: '  if (true) {',
+    });
+  });
+
+  it('PRESERVES leading whitespace when editing a trimmed code view', () => {
+    // The shipped-then-caught bug: codeLines are trimmed, so an index computed
+    // there and applied to the raw line spliced `iftrue 0)` into a guard. The
+    // edit is now computed on the code view and re-indented.
+    const raw = '      if (n <= 0) return 0;';
+    expect(replacementMutantsOf(raw, 'if (n <= 0) return 0;')).toEqual({
+      operator: 'guard-true',
+      mutated: '      if (true) return 0;',
+    });
+  });
+
+  it('yields NOTHING when the raw line and the code view disagree', () => {
+    // A string or comment was blanked out of the code view — indices cannot be
+    // trusted across the two, so the line is conservatively skipped.
+    expect(
+      replacementMutantsOf(
+        "  if (s === ')') { fire(); }",
+        "if (s === '') { fire(); }",
+      ),
+    ).toBeNull();
+  });
+
+  it('handles nested parens in the condition', () => {
+    expect(same('if (a(b) !== c(d, e(f))) return;')).toEqual({
+      operator: 'guard-true',
+      mutated: 'if (true) return;',
+    });
+  });
+
+  it('skips an if with no comparison, and one whose condition spans lines', () => {
+    expect(same('if (ready) go();')).toBeNull();
+    expect(same('if (a !== b &&')).toBeNull();
+  });
+
+  it('emits at most one candidate per line, most-specific first', () => {
+    // Both a `??` and a comparison on one line: coalesce wins.
+    expect(same('if ((x ?? fallback) !== y) go();')?.operator).toBe('coalesce');
   });
 });

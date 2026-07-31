@@ -397,6 +397,35 @@ Three deliberate limits:
 - **It is per-finding, not per-review.** A cold checkout means an install and a build — the honest price, and why the command's idempotent fast path reuses an already-built tree instead of letting concurrent verifiers each pay it (or worse, sweep it out from under each other mid-A/B). Paid on a review with a comparative claim it is cheap for what it settles; paid on every review it is a tax most of them get nothing for. So it lives in the verifier's brief as an option, next to the probe, on the same terms.
 - **Unavailable is never a finding.** No merge base, a merge base that may be stale (`baseFetchFailed` — an A/B against the wrong base attributes the base branch's own commits to this PR, the two-dot-diff error in another shape), or a base tree that will not compile: each is a fact about the harness. The base failing to build says nothing whatsoever about the PR, and a review that filed it as one would be reporting on its own infrastructure.
 
+## Why test failures are attributed by measurement, and why the delta is over file sets
+
+Agent 7's brief has always carried a path rule: a failure in a file the diff changed is a Critical, one in a file it did not touch is pre-existing. It was the best rule available when the review had one tree, and it misclassifies in both directions — an environment-sensitive test failing in a touched file gets filed as a Critical the PR did not cause, and a PR that breaks a test in an untouched file (the exact shape the base-tree section above is about) gets waved through. The first live run of this pipeline hit the benign half: three env-sensitive core failures the model had to _reason_ into "pre-existing, not in diff", correctly but on judgment.
+
+With `base-tree` standing, attribution is decidable: `test-delta` reruns the same failed command in the built merge base and diffs the outcomes. The two design points that matter:
+
+- **File sets, not counts.** Measured on a live re-verification: the same branch's flaky suite failed _different test names_ on two consecutive runs, so counts (and names) are noise. The failing-file set is the stable unit, and an empty net-new set is the strongest "all pre-existing" statement obtainable.
+- **Failures only, and base attributes nothing it did not finish.** A green PR-side suite has nothing to attribute, and base's suite was green before the PR existed — so the base run costs exactly one rerun per PR-side failure. A base rerun that times out attributes _nothing_: promoting PR-side failures to net-new off an unfinished run would manufacture the command's strongest evidence out of an infrastructure timeout (this shipped briefly in review of the command itself, caught because the test that "covered" it asserted only the note text).
+
+## Why the cache carries a findings ledger
+
+A human reviewer's round-2 comment opens with "M1 is fixed"; the pipeline's round-2 opened with a fresh list, because the incremental cache stored a _count_ and a _verdict_ — enough to scope the diff to `lastCommitSha..HEAD`, nothing with which to say what became of round 1's findings. The author was left to diff two reports by hand, which inverts who is doing the review.
+
+So the cache now carries the findings themselves, with round-scoped ids (`R1-2`), and an incremental re-review owes each entry a ruling under the same bar the open-Criticals re-check already enforces — _fixed_ requires tracing that the mechanism can no longer fire, not observing that the diff contains a fix. Two boundaries keep the ledger honest: only **confirmed high-confidence** findings enter (next round re-asserts each entry by id, so the ledger holds claims the review stands behind), and a finding ruled fixed _leaves_ (the cache is what the next round must check, not history — the report already told the story). The fail-closed rules are unchanged: a run that must not advance the cache does not advance the ledger either.
+
+## Why three more mutation operators, and why each is shaped the way it is
+
+Statement deletion with a safety-verb filter was the first operator because it has the cleanest survivor semantics. But a live maintainer re-verification produced a survivor list the deletion operator cannot express — and every entry mapped to one of three shapes, each with equally crisp semantics:
+
+- **`?? fallback` dropped.** The surviving case was the one line preventing a previously-fixed regression from returning through a different path — a coalesce to `getModel()` that nothing tested. A coalesce survivor means the miss path is unexercised, and the miss path is frequently the entire safety property.
+- **Guard condition → `true`.** The surviving case was the round-2 fix _itself_ — a skip-condition shipped in response to review, tested by nothing. Restricted to comparison-bearing `if`s on purpose: forcing `if (ready)` to `true` survives trivially everywhere and means nothing; forcing `a !== b` to `true` surviving means no test pins when the guard must _not_ fire, which is precisely the untested half of any guard.
+- **`+ UPPER_CONST` dropped.** The surviving case was a reserve term in a budget estimate. A term-drop survivor means the constant never decides any test's outcome — the boundary is unpinned.
+
+Mechanically they are **replacements**, not deletions, which bought one bug worth recording: the selector's per-line code view is trimmed and literal-blanked, and an edit index computed there and applied to the raw line spliced `iftrue 0)` into a guard. The fix is the conservative equivalence the selector now enforces — a line whose raw text and code view disagree (it carries a string or comment) yields no candidate at all, because a mangled mutant is worse than a skipped one: its compile error reads as `inconclusive` and quietly spends a cap slot. Deletion mutants keep cap priority (they have the track record); the operators queue behind them and every skip is counted.
+
+## Why the quality brief checks documentation parity, not documentation
+
+"This flag needs docs" is a reviewer's preference; "three of this flag's four siblings have a docs entry and it does not" is the codebase's own convention, broken. The lens is deliberately the second shape: no documented sibling, no finding, and the finding must name the precedent file — so the Suggestion arrives as the house standard rather than taste. The trigger that earns it a place at all is the compounding case from a live review: a surface whose behaviour can _silently change_ (an automatic model swap with a warning) shipping undocumented leaves the user staring at a message with nowhere to look it up.
+
 ## Why the Test Plan is checked — and why a count mismatch is never a contradiction
 
 Every other input this pipeline reads is something the review has to derive: the diff, the linked issue, the existing threads, the build's exit code. A Test Plan is different. It is a list of falsifiable assertions the author **already wrote down** and handed over, and until `test-plan` existed the review read none of them.
